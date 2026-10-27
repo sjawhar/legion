@@ -10,7 +10,7 @@ import {
 import { createDecoder, readVarUint } from "lib0/decoding";
 
 import { readField } from "../web/src/features/doc/sync-frame";
-import { createIssue, createProject, getArtifactText } from "./api";
+import { createIssue, createProject, getArtifactText, getIssue } from "./api";
 import { asUser } from "./users";
 
 export function documentEditor(page: Page): Locator {
@@ -212,6 +212,12 @@ export async function setSheet(page: Page, project: string, open: boolean): Prom
  *  its own card, so a bare `[data-margin-item]` lookup would match both). */
 export function threadCard(page: Page, rootId: string): Locator {
   return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
+}
+
+/** Where a Conversation turn's thread shows once the reader expands it: in place, in the turn,
+ *  above the phone breakpoint; in the full-screen Thread dialog on the phone layout. */
+export function conversationThreadScope(page: Page, project: string, turn: Locator): Locator {
+  return project === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
 }
 
 /** The Conversation's All / Open / Closed control, the one filter over its cards. It starts on
@@ -431,6 +437,22 @@ export async function openIssue(browser: Browser, title: string, spec: string) {
   const page = await alice.newPage();
   await page.goto(`/issues/${issue.key}`);
   return { alice, issue, page };
+}
+
+/** Waits until the issue's spec block has been indexed into an open ask and returns it. */
+export async function indexedBlockAsk(issueKey: string, blockId: string) {
+  await expect
+    .poll(async () =>
+      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId)
+    )
+    .toBe(true);
+  const blockAsk = (await getIssue(issueKey)).open_asks.find(
+    (candidate) => candidate.block_id === blockId
+  );
+  if (blockAsk === undefined) {
+    throw new Error(`the ${blockId} decision was not indexed`);
+  }
+  return blockAsk;
 }
 
 /** Opens `spec` as alice, with the caret collapsed at the start or the end of the text `quote`:

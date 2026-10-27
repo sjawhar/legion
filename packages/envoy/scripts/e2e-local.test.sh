@@ -41,10 +41,12 @@ fi
 }
 printf 'PASS: rejects unsupported arguments and starts no server\n'
 
-# Something else already answers NATS's greeting on the port the driver is told to use: a server
-# left by an earlier run, or a second run of this script at the same time. The driver's own server
-# cannot bind that port and exits at once. The driver must stop there and say why, rather than run
-# the whole acceptance against a server it did not start and report PASS for it.
+# An explicit port is used as given, so one already in use fails the run with "address already in
+# use"; the driver never moves to another port. The port here is held by this test's own greeter
+# for the whole test, so it is in use for every run below. For E2E_NATS_PORT the greeter answers
+# NATS's greeting, as a server left by an earlier run would: the driver's own server cannot bind
+# that port and exits at once, and the driver must stop there and say why, rather than run the
+# whole acceptance against a server it did not start and report PASS for it.
 readonly greeter_port_file="${temporary_dir}/greeter.port"
 GREETER_PORT_FILE="$greeter_port_file" bun -e '
   import { writeFileSync } from "node:fs";
@@ -66,22 +68,36 @@ done
   exit 1
 }
 greeter_port="$(<"$greeter_port_file")"
-if E2E_NATS_PORT="$greeter_port" bash "$driver" >"$output_file" 2>&1; then
-  cat "$output_file" >&2
-  printf 'FAIL: the driver passed against a NATS server it did not start, on port %s\n' "$greeter_port" >&2
-  exit 1
-fi
-[[ "$(<"$output_file")" == *"address already in use"* ]] || {
-  cat "$output_file" >&2
-  printf 'FAIL: the driver did not report that its own NATS server could not bind port %s\n' "$greeter_port" >&2
-  exit 1
+readonly greeter_port
+
+# expect_occupied_refusal VARIABLE ERROR runs the driver with VARIABLE set to the greeter's port, and
+# passes only when the run fails with ERR: ERROR and says "address already in use".
+expect_occupied_refusal() {
+  local variable="$1" error="$2"
+  if env "${variable}=${greeter_port}" bash "$driver" >"$output_file" 2>&1; then
+    cat "$output_file" >&2
+    printf 'FAIL: the driver passed with %s=%s, a port this test holds\n' "$variable" "$greeter_port" >&2
+    exit 1
+  fi
+  [[ "$(<"$output_file")" == *"ERR: ${error}"* && "$(<"$output_file")" == *"address already in use"* ]] || {
+    cat "$output_file" >&2
+    printf 'FAIL: with %s=%s held, the driver did not say "ERR: %s" and "address already in use"\n' \
+      "$variable" "$greeter_port" "$error" >&2
+    exit 1
+  }
 }
-printf 'PASS: refuses to run against a NATS server it did not start\n'
+
+expect_occupied_refusal E2E_NATS_PORT 'the NATS server this script started ended before it was ready.'
+printf 'PASS: refuses to run against a NATS server it did not start (E2E_NATS_PORT in use)\n'
+expect_occupied_refusal E2E_PORT 'the listener this script started ended before it was listening.'
+printf 'PASS: an E2E_PORT already in use fails with address already in use\n'
+expect_occupied_refusal E2E_SESSION_PORT 'the fake session did not report its port.'
+printf 'PASS: an E2E_SESSION_PORT already in use fails with address already in use\n'
 
 # A second run in the same checkout shares the first's out/e2e: its evidence, its logs and its
-# JetStream store. The second run is given ports of its own, so nothing but the claim on out/e2e can
-# refuse it, and it must be refused before it removes anything; the first must then finish as if
-# the second had never started.
+# JetStream store. Only the claim on out/e2e refuses it: the second run is refused on that lock
+# before it starts any server, so it binds no port, and it must be refused before it removes
+# anything; the first must then finish as if the second had never started.
 readonly evidence_dir="${project_root}/packages/envoy/out/e2e"
 # The poll below reads this file, so it exists before the run that fills it is started.
 : >"$first_output_file"
@@ -103,7 +119,7 @@ until grep -q '^building listener and NATS server$' "$first_output_file"; do
   fi
   sleep 0.1
 done
-if E2E_NATS_PORT=14322 E2E_PORT=19120 E2E_SESSION_PORT=19121 bash "$driver" >"$output_file" 2>&1; then
+if bash "$driver" >"$output_file" 2>&1; then
   cat "$output_file" >&2
   printf 'FAIL: a second run in the same checkout passed while the first was still using out/e2e\n' >&2
   exit 1

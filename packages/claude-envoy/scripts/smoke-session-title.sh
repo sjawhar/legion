@@ -22,10 +22,12 @@
 #
 #   bash packages/claude-envoy/scripts/smoke-session-title.sh
 #
-# BASE_REV names the revision the negative control's bundle comes from (default `main@origin`).
+# BASE_REV names the revision the negative control's bundle comes from: by default the parent of
+# 0306bcbe16df (#2154), the last revision without the fallback this smoke checks, since main has
+# carried it from then on.
 set -euo pipefail
 
-readonly base_rev="${BASE_REV:-main@origin}"
+readonly base_rev="${BASE_REV:-0306bcbe16df-}"
 readonly heartbeat_ms="${ENVOY_HEARTBEAT_MS:-1000}"
 readonly chosen_name="eeny meeny"
 readonly renamed="miny moe"
@@ -70,28 +72,38 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-free_port() {
-  bun -e 'const s = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }); console.log(s.port); s.stop(true)'
-}
-
-readonly nats_port="$(free_port)"
-readonly listener_port="$(free_port)"
-# Dispatch is enabled against a port nothing listens on: the session stamps its title for the
-# `dispatch` command without this smoke needing a Dispatch server.
-readonly dispatch_port="$(free_port)"
-readonly envoy_url="http://127.0.0.1:${listener_port}"
-
-printf 'starting nats-server on %s and an Envoy listener built from this tree on %s\n' \
-  "$nats_port" "$listener_port"
-nats-server -js -a 127.0.0.1 -p "$nats_port" -sd "${workdir}/nats" >"${workdir}/nats.log" 2>&1 &
+# Both servers bind port 0, so the kernel chooses each port and nothing can take it before the
+# server serves on it, and each reports the port it got: nats-server (`-p -1`) on its `Listening for
+# client connections on` line, once it logs `Server is ready`, and the listener (PORT=0) as the
+# `addr` of its `envoy-listener listening` JSON line.
+nats-server -js -a 127.0.0.1 -p -1 -sd "${workdir}/nats" >"${workdir}/nats.log" 2>&1 &
 nats_pid=$!
+for _ in $(seq 60); do
+  grep -q 'Server is ready' "${workdir}/nats.log" && break
+  kill -0 "$nats_pid" 2>/dev/null || fail "nats-server exited at startup: $(cat "${workdir}/nats.log")"
+  sleep 0.5
+done
+grep -q 'Server is ready' "${workdir}/nats.log" || fail "nats-server was not ready within 30s: $(cat "${workdir}/nats.log")"
+nats_port="$(awk -F: '/Listening for client connections on/ {print $NF; exit}' "${workdir}/nats.log")"
+readonly nats_port
+[[ -n "$nats_port" ]] || fail "nats-server logged no client port: $(cat "${workdir}/nats.log")"
 
 (cd "${repo_root}/packages/envoy" && go build -o "${workdir}/envoy-listener" ./cmd/listener) ||
   fail "the Envoy listener did not build"
-env PORT="$listener_port" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID=session-title-smoke \
+env PORT=0 ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID=session-title-smoke \
   NATS_URLS="nats://127.0.0.1:${nats_port}" \
   "${workdir}/envoy-listener" >"${workdir}/listener.log" 2>&1 &
 listener_pid=$!
+listener_addr=""
+for _ in $(seq 60); do
+  listener_addr="$(jq -Rr 'fromjson? | select(.msg == "envoy-listener listening") | .addr' "${workdir}/listener.log")"
+  [[ -n "$listener_addr" ]] && break
+  kill -0 "$listener_pid" 2>/dev/null || fail "the listener exited at startup: $(cat "${workdir}/listener.log")"
+  sleep 0.5
+done
+[[ -n "$listener_addr" ]] || fail "the listener reported no address within 30s: $(cat "${workdir}/listener.log")"
+readonly envoy_url="http://${listener_addr}"
+printf 'nats-server on %s and an Envoy listener built from this tree on %s\n' "$nats_port" "$listener_addr"
 for _ in $(seq 60); do
   [[ "$(curl -fsS --max-time 2 "${envoy_url}/healthz" 2>/dev/null)" == *healthy* ]] && break
   sleep 0.5
@@ -108,8 +120,10 @@ readonly plugin_data="${workdir}/plugin-data"
 readonly dispatch_state="${workdir}/dispatch-state"
 readonly project_dir="${workdir}/probe-project"
 mkdir -p "$config_dir" "$plugin_data" "$dispatch_state" "$project_dir"
+# Dispatch is enabled against port 1, where nothing serves: the session stamps its title for the
+# `dispatch` command without this smoke needing a Dispatch server.
 jq -n --arg envoy "$envoy_url" --arg nats "nats://127.0.0.1:${nats_port}" \
-  --arg dispatch "http://127.0.0.1:${dispatch_port}" \
+  --arg dispatch "http://127.0.0.1:1" \
   '{dispatch: {enabled: true, serverUrl: $dispatch, token: "session-title-smoke"},
     envoy: {enabled: true, url: $envoy, natsUrls: [$nats]}}' >"${config_dir}/envoy.json"
 
