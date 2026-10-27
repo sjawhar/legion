@@ -272,7 +272,6 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
 // request reads through.
 const leasePoolSize = 10
-const leasePoolSize = 9
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
