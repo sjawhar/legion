@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -707,6 +708,109 @@ func TestAClosedDocumentsUnsettledEditOfAnUntypedBlockIsDatedToTheVersionThatHol
 		select coalesce(text, ''), text is null from document_block_texts where artifact_id = $1 and block_id = $2 and version = 1
 	`, spec, edited).Scan(&reopenedText, &reopenedDeleted); err != nil || reopenedDeleted || reopenedText != firstText {
 		t.Fatalf("the edited block %s has text %q (deleted %v) at version 1 after the reopen (%v), want version 1's text %q", edited, reopenedText, reopenedDeleted, err, firstText)
+	}
+}
+
+// Identical paragraphs keep their own ids and dates on a closed issue. Version 1 holds three
+// "Same." paragraphs and an "Other." one, indexed while the issue was open. An unsettled edit then
+// inserts a new "Same." paragraph after "Other." (before the third "Same."), the issue closes, and
+// a rebuild-refs marks the document owed. The closed tick indexes version 1's own text: each block
+// version 1 holds keeps its own id, date and text, none is recorded deleted at version 1, and the
+// inserted paragraph, which no version holds, gets no text at version 1. The reopen's settlement
+// writes version 2, which dates the inserted paragraph, and the third "Same." stays dated version 1.
+func TestAClosedDocumentsIdenticalParagraphsKeepTheirOwnHistory(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	spec := createOwedDocument(t, database, service, "", "spec", "Same.\n\nSame.\n\nOther.\n\nSame.\n", "")
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 || tick.OwedDocuments != 0 {
+		t.Fatalf("indexing version 1 while CORE-1 is open: tick = %#v", tick)
+	}
+	_, firstBlocks, err := service.TextWithBlocks(ctx, spec)
+	if err != nil {
+		t.Fatalf("read the live document: %v", err)
+	}
+	var held []string
+	for _, block := range firstBlocks {
+		if block.Type == "paragraph" {
+			held = append(held, block.ID)
+		}
+	}
+	if len(held) != 4 {
+		t.Fatalf("version 1's paragraphs %#v, want 4", firstBlocks)
+	}
+	const inserted = "5a3e0c1d-7b2f-4e6a-9c8d-1f2e3d4c5b6a"
+	editLiveTree(t, service, spec, func(tree *pmdoc.Node) *pmdoc.Node {
+		for index, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id == held[2] {
+				paragraph := &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: inserted}, Children: []*pmdoc.Node{{Type: "text", Text: "Same."}}}
+				tree.Children = slices.Insert(tree.Children, index+1, paragraph)
+				return tree
+			}
+		}
+		t.Fatalf("no paragraph %s in the live tree", held[2])
+		return tree
+	})
+	waitForLandedAppends(t, service, spec)
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	closeDocumentRoom(t, service, spec)
+	if _, err := database.Pool.Exec(ctx, `update document_block_versions set version = null where artifact_id = $1`, spec); err != nil {
+		t.Fatalf("mark the document owed: %v", err)
+	}
+	_, liveBlocks, err := service.TextWithBlocks(ctx, spec)
+	if err != nil {
+		t.Fatalf("read the live document: %v", err)
+	}
+	var order []string
+	for _, block := range liveBlocks {
+		if block.Type == "paragraph" {
+			order = append(order, block.ID)
+		}
+	}
+	if want := []string{held[0], held[1], held[2], inserted, held[3]}; !slices.Equal(order, want) {
+		t.Fatalf("live paragraphs %v, want %v", order, want)
+	}
+
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 || tick.OwedDocuments != 0 {
+		t.Fatalf("tick = %#v, want the closed document indexed and nothing owed", tick)
+	}
+	dated := func(id string, version int) (int, bool, bool) {
+		t.Helper()
+		var changed int
+		var recorded, deleted bool
+		if err := database.Pool.QueryRow(ctx, `
+			select coalesce((select changed_version from document_blocks where artifact_id = $1 and block_id = $2), 0),
+			       exists (select 1 from document_block_texts where artifact_id = $1 and block_id = $2 and version = $3 and text is not null),
+			       exists (select 1 from document_block_texts where artifact_id = $1 and block_id = $2 and version = $3 and text is null)
+		`, spec, id, version).Scan(&changed, &recorded, &deleted); err != nil {
+			t.Fatalf("read block %s at version %d: %v", id, version, err)
+		}
+		return changed, recorded, deleted
+	}
+	for _, id := range held {
+		if changed, recorded, deleted := dated(id, 1); changed != 1 || !recorded || deleted {
+			t.Fatalf("after the closed tick, block %s that version 1 holds is dated %d (text at version 1 %v, deleted at version 1 %v), want dated 1 with its text", id, changed, recorded, deleted)
+		}
+	}
+	if _, recorded, _ := dated(inserted, 1); recorded {
+		t.Fatalf("after the closed tick, the inserted paragraph %s, which no version holds, has a text at version 1", inserted)
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = null where key = 'CORE-1'`); err != nil {
+		t.Fatalf("reopen CORE-1: %v", err)
+	}
+	if err := service.SettleIssueDocuments(ctx, "CORE-1"); err != nil {
+		t.Fatalf("settle the reopened issue's documents: %v", err)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 2 {
+		t.Fatalf("blocks indexed at %v, want version 2", version)
+	}
+	if changed, _, deleted := dated(held[3], 1); changed != 1 || deleted {
+		t.Fatalf("after the reopen, the third \"Same.\" %s is dated %d (deleted at version 1 %v), want version 1, the first that holds it", held[3], changed, deleted)
+	}
+	if changed, recorded, _ := dated(inserted, 1); changed != 2 || recorded {
+		t.Fatalf("after the reopen, the inserted paragraph %s is dated %d (text at version 1 %v), want version 2, the first that holds it", inserted, changed, recorded)
 	}
 }
 
