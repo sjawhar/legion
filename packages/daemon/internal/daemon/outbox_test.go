@@ -94,9 +94,9 @@ func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispat
 func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, d.getErr
 }
-func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.statuses = append(d.statuses, status)
-	return d.statusErr
+	return dispatch.Issue{}, d.statusErr
 }
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
@@ -1741,10 +1741,10 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 
 	engine := workflow.New(records, workflow.Config{Project: issue.Project, Repositories: testRepositories}, quietLogger())
 	restarted := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("replay persisted failure: %v", err)
 	}
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("repeat replay persisted failure: %v", err)
 	}
 
@@ -1825,10 +1825,10 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 		Token: "legion-LEGION-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner, Generation: 4, State: supervise.StateReady,
 	}
 
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("replay persisted ready claim: %v", err)
 	}
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("repeat replay persisted ready claim: %v", err)
 	}
 	if got := handler.facts(); len(got) != 1 || got[0] != (intake.ClaimReady{Issue: persisted.Issue, Role: persisted.Role, Launch: persisted.Generation}) {
@@ -1847,7 +1847,7 @@ func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
 	controller := supervise.Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, Generation: 2}
 	for _, state := range []supervise.ClaimState{supervise.StateReady, supervise.StateFailed} {
 		controller.State = state
-		if err := w.replayTerminal(context.Background(), []supervise.Claim{controller}); err != nil {
+		if err := w.replayTerminal(context.Background(), []supervise.Claim{controller}, bootTimeout); err != nil {
 			t.Fatalf("replay the controller's %s: %v", state, err)
 		}
 		w.terminal(controller, state)
