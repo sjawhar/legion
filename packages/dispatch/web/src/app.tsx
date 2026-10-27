@@ -38,7 +38,11 @@ import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
-import { SignInChannel, type UnsentChange } from "./features/shell/sign-in-channel";
+import {
+  SIGN_OUT_SETTLE_MS,
+  SignInChannel,
+  type UnsentChange,
+} from "./features/shell/sign-in-channel";
 import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
@@ -876,21 +880,32 @@ export function signOutQuestion(unsent: readonly string[], unanswered = false): 
  *  since only it knows whether the sign-out landed. This tab reads who is signed in - its own
  *  cookie is that browser session's - and a `401 NO_IDENTITY` is the sign-out landed, so
  *  `login`'s writes go, as the person chose when they confirmed it (`Writes.dropLogin`), rather
- *  than waiting for a sign-in they already discarded them before. Any other answer is a sign-out
- *  that has not landed - a refusal from in front of Dispatch, a read that could not be made, or
- *  the person still signed in - and their writes go on where they stood. Not for good, though:
- *  the gone tab's own request may still be on its way, and Dispatch may end the session just
- *  after this read answered, so the release is an unsettled one (`Writes.releaseUnsettled`) and
- *  a lapse that follows it closely is that sign-out landing late rather than a lapse. An answer
- *  naming anyone but `login` is the sign-in check's news too, so it is read again here, and the
- *  gate drops their writes as it would any other login's; one that goes out before that read
- *  lands carries their `Dispatch-Login` and is refused `409 LOGIN_CHANGED` before it runs.
+ *  than waiting for a sign-in they already discarded them before.
+ *
+ *  An answer that still names them settles nothing on its own: the gone tab's own request may
+ *  have reached Dispatch as that tab died, and the session ends a moment after this read. So the
+ *  hold stays on - nothing of theirs goes out while the question is open, which is what the hold
+ *  is for - over `SIGN_OUT_SETTLE_MS`, and the check is read again. Only then do their writes go
+ *  on, and as an unsettled release (`Writes.releaseUnsettled`), so a lapse that still follows is
+ *  that sign-out landing late rather than a lapse. A read that cannot be made is no landing
+ *  either, and waits the same way. An answer naming anyone but `login` is the sign-in check's
+ *  news too, so it is read again here, and the gate drops their writes as it would any other
+ *  login's; one that goes out before that read lands carries their `Dispatch-Login` and is
+ *  refused `409 LOGIN_CHANGED` before it runs.
  */
 async function heldWritesOfGoneHolder(queryClient: QueryClient, login: string): Promise<void> {
-  const who = await api.whoAmI().then(
-    (user) => user.login,
-    (error: unknown) => (isNoIdentity(error) ? null : login)
-  );
+  const signedInNow = async () =>
+    api.whoAmI().then(
+      (user) => user.login,
+      (error: unknown) => (isNoIdentity(error) ? null : login)
+    );
+  let who = await signedInNow();
+  if (who === login) {
+    const settled = Promise.withResolvers<void>();
+    setTimeout(settled.resolve, SIGN_OUT_SETTLE_MS);
+    await settled.promise;
+    who = await signedInNow();
+  }
   const writes = writesOf(queryClient);
   if (who === null) writes.dropLogin(login);
   else if (who === login) writes.releaseUnsettled(login);

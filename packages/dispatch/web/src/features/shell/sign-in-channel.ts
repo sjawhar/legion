@@ -15,6 +15,14 @@ export const SIGN_OUT_RENEW_MS = 2_000;
  *  lifts nothing. */
 export const SIGN_OUT_LEASE_MS = 6_000;
 
+/** How long a tab holding a person's writes keeps holding them after the tab whose sign-out it
+ *  held them for went without a word, before it reads who is signed in a second time. The gone
+ *  tab's sign-out may have reached Dispatch just as that tab died, and the session ends moments
+ *  later (Dispatch closes this tab's live socket with it), so a first read that still names the
+ *  person answers nothing on its own - and nothing of theirs may go out while the question is
+ *  open. */
+export const SIGN_OUT_SETTLE_MS = 2_000;
+
 /** The lock a tab takes for as long as its sign-out is out, named for the person it signs out
  *  and for the tab signing them out - the `tab` its `{signingOut}` carries - so each sign-out
  *  has a lock of its own and no tab ever waits on, or holds, another's. The browser releases it

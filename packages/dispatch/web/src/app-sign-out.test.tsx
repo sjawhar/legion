@@ -7,7 +7,7 @@ import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
 import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import { AuthGate } from "./app";
-import type { UnsentChange } from "./features/shell/sign-in-channel";
+import { SIGN_OUT_SETTLE_MS, type UnsentChange } from "./features/shell/sign-in-channel";
 import { plainWrite, writesOf } from "./features/writes/write-store";
 
 /** A message the tabs of this browser post to each other, naming `login`, from whichever tab. */
@@ -426,8 +426,10 @@ test("the writes held for a tab that went are discarded once whoami says the sig
 }, 15_000);
 
 // W57. The same tab going while the person is still signed in - its sign-out was refused, or
-// never answered - leaves their writes exactly where they stood: whoami names them, so the hold
-// lifts and the writes go on.
+// never answered - leaves their writes exactly where they stood. The first read still names
+// them, which settles nothing while that tab's request may still be reaching Dispatch, so the
+// hold stays on and nothing of theirs goes out for `SIGN_OUT_SETTLE_MS`; the read after it still
+// names them, and only then do the writes go on.
 test("the writes held for a tab that went go on once whoami still names the person", async () => {
   const app = renderApp({
     whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
@@ -447,7 +449,14 @@ test("the writes held for a tab that went go on once whoami still names the pers
     const held = attempts.length;
     signer.close();
 
-    await waitFor(() => expect(attempts.length).toBeGreaterThan(held));
+    // Nothing goes out while the question is open, however the first read answered.
+    await sleep(SIGN_OUT_SETTLE_MS - 500);
+    expect(attempts).toHaveLength(held);
+    expect(
+      screen.getByText("CORE-1 set to done — Waiting for a sign-out in another tab")
+    ).toBeTruthy();
+
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(held), { timeout: 5_000 });
     expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
     expect(
       writesOf(app.queryClient)
@@ -456,6 +465,7 @@ test("the writes held for a tab that went go on once whoami still names the pers
     ).toEqual(["CORE-1 set to done"]);
     expect(screen.getByText("Signed in as alice")).toBeTruthy();
   } finally {
+    signer.close();
     app.teardown();
   }
 }, 15_000);
@@ -555,9 +565,10 @@ test("a 401 just after a gone tab's hold was let go discards the writes it held"
   const { app, attempts, signer, state } = await holdingForAnotherTab();
   try {
     signer.close();
-    // The read its going starts still names alice: the hold is let go, and the write goes on.
-    await waitFor(() =>
-      expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull()
+    // Both reads its going makes still name alice, so the hold is let go and the write goes on.
+    await waitFor(
+      () => expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull(),
+      { timeout: 5_000 }
     );
     state.signedIn = false;
     await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
@@ -574,8 +585,9 @@ test("a 401 with no other tab's sign-out holding the writes keeps them", async (
   const { app, signer, state } = await holdingForAnotherTab();
   try {
     signer.say({ stillSignedIn: "alice" });
-    await waitFor(() =>
-      expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull()
+    await waitFor(
+      () => expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull(),
+      { timeout: 5_000 }
     );
     state.signedIn = false;
     await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
@@ -691,9 +703,10 @@ test("the sign-out question names a duplicated tab's copies once, and forgets a 
 
 // W51. Another tab's sign-out holds the person's writes here as a lease, and each held write says
 // what it waits for. A signing-out tab that dies without a word - crashed, killed, frozen - stops
-// saying its sign-out is out, and within 6 s of the last time it did this tab takes it for gone
-// and its writes go on.
-test("a tab holding writes for another tab's sign-out resumes them within 6 s once that tab falls silent", async () => {
+// saying its sign-out is out, and within 6 s of the last time it did this tab takes it for gone;
+// the writes go on once the sign-in check, read twice over `SIGN_OUT_SETTLE_MS`, still names the
+// person both times.
+test("a tab holding writes for another tab's sign-out resumes them once its lease lapses", async () => {
   const app = renderApp({
     whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
   });
@@ -714,10 +727,10 @@ test("a tab holding writes for another tab's sign-out resumes them within 6 s on
     await sleep(4_000);
     expect(attempts).toHaveLength(made);
 
-    await waitFor(() => expect(attempts.length).toBeGreaterThan(made), { timeout: 3_000 });
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(made), { timeout: 6_000 });
     const resumed = Date.now() - said;
-    expect(resumed).toBeGreaterThanOrEqual(5_500);
-    expect(resumed).toBeLessThanOrEqual(6_500);
+    expect(resumed).toBeGreaterThanOrEqual(SIGN_OUT_SETTLE_MS + 5_500);
+    expect(resumed).toBeLessThanOrEqual(SIGN_OUT_SETTLE_MS + 6_500);
     expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
   } finally {
     signer.close();
