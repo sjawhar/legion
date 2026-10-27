@@ -1165,7 +1165,7 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
 // (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
 // test should turn into a flake.
-func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
+func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
 	// refs is where the reference-excerpt reconciliation's first statement writes

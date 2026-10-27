@@ -393,19 +393,24 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Six periodic maintenance loops run once per period across the processes, not once per process.
-  Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
-  process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
-  recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
-  lands between another's passes — the ordinary case, since each ticker draws its phase at boot
-  and a rolling update starts the second process minutes after the first — finds the period
-  already served and logs the same skip. The settlement resumption, the delivery live hub, the
-  event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
-  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
-  claim their own work; the embedding queue's coverage pass runs in every process with no lease,
-  each of its steps safe beside another process's, and drops every vector its own embedder did not
-  make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
-  says at the call site which loop is which and why.
+- No leased background loop runs a pass beside another process's pass of the same loop. Each
+  pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process
+  whose attempt lands inside another's pass finds it held and logs a skip. The four timer loops —
+  the delivery reconcile, the architecture import, the webhook redelivery sweep and the outbox's
+  daily document compaction — also record each pass in `duty_passes` (migration `0115`) with the
+  loop's own period, so a process whose tick lands between another's passes — the ordinary case,
+  since each ticker draws its phase at boot and a rolling update starts the second process minutes
+  after the first — finds the period already served and logs the same skip: each runs once per
+  period across the processes. The two woken loops, the reference excerpts and the suggestion
+  outcomes, take their lease with no period: a process that finds it held tries again until a pass
+  of its own runs, since the other process's pass may have read before the change that woke this
+  one (Background loops, below). The settlement resumption, the delivery live hub, the
+  event-stream relay, the stale-room evictor, the shared wake listener and the document rooms'
+  timers stay per-process by design, and the embedding queue, the task progress reconciliation and
+  the outbox's own scan claim their own work; the embedding queue's coverage pass runs in every
+  process with no lease, each of its steps safe beside another process's, and drops every vector
+  its own embedder did not make, so every process takes the same embedder settings (Search,
+  below); `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
@@ -422,6 +427,118 @@ meets, since the last notification of a burst is one of the refused ones. Either
 reconnects, re-syncs and shows the current text. A reader sees a brief reconnect, never stale
 text they can act on. Cross-process live co-editing of one document — two rooms with text
 streaming between them — is a follow-up issue, out of scope here.
+
+## Background loops
+
+Dispatch's background loops come in three shapes (INFRA-607), so that a database nobody writes
+costs them nothing except where GitHub gives them no change to wake on. `cmd/dispatch/main.go`
+states the classes at the call site.
+
+**Woken loops** run a pass at start and then only when a Postgres notification says their work
+may have changed, or when a due time their last pass asked for comes round. With nothing written
+and nothing due they hold no timer and send no statement. The three that run passes
+(`duty.RunWoken`) start two passes no closer together than the period of the ticker each
+replaced, so under load each runs no more often than that ticker did.
+
+- The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding
+  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0121`) for a new item
+  or a text whose hash changed, and an update that leaves the text as it was notifies nothing. The
+  rows the coverage pass writes wake it in process. Scans start at least 5 s apart. After each
+  scan it reads when the earliest pending row falls due (a failed row's retry, or another
+  process's claim lapsing after its two minutes) and arms one timer for it, never sooner than 5 s
+  away. A throttled batch waits 5 s plus its backoff before the next. It takes no lease: its claim
+  keeps two processes' scans off each other's rows.
+- The reference excerpt reconciliation (`docs.Service.RunReferenceExcerptReconciliation`, lease
+  `reference-excerpts`) is woken by a row trigger on `refs` (`0123`) that notifies
+  `dispatch_excerpts_owed` for each document mention left owed an excerpt, whichever build or
+  command wrote it (`rebuild-refs` included). Batches of 20 documents start at least 2 s apart, the
+  next as soon as that allows while a full batch leaves documents it can still record. A document
+  it cannot read or record is deferred in `reference_excerpt_backoff` (`0122`), keyed by the
+  version that failed: one minute after the first failure, doubling to at most six hours, plus up
+  to a fifth again of jitter; a success deletes the row, and a newer version starts again from
+  one. A deferred document stays out of the batches until it falls due, so documents that keep
+  failing neither hold the loop at 2 s nor keep the ones sorting after them waiting, and the
+  earliest due time is the loop's only timer. Each process's first pass also marks owed the
+  excerpts a pre-`0092` build left stale (`refs.MarkStaleExcerpts`), once.
+- The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`, lease `suggestion-outcomes`) is
+  woken by `dispatch_events` (`0107`), which every event commit notifies whichever process made
+  it. Passes start at least 60 s apart. A pass reads the events after its cursor
+  (`suggestion_outcome_cursor`, `0124`) and the suggestions no pass has judged yet
+  (`write_suggestions.swept`, `0125`), in pages of 1,000, each page in a transaction that holds the
+  cursor row `for update`, and judges only the pending suggestions those can resolve: the newly
+  recorded ones, against all their events, and those whose source issue, source document or
+  suggested issue a page's event names. An event or suggestion less than 60 s old waits for a
+  later pass, which the pass asks for as its due time, so an agent's writes within a minute are
+  judged together. The first pass on a database, whose cursor is null, judges every pending
+  suggestion once, as every pass of the release before it did. A failed pass is retried a minute
+  later.
+- The delivery settings both GitHub intakes route by are one cache per process
+  (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
+  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0126`) for a change to any
+  column but the freshness ones every GitHub event and reconcile pass rewrite. A settings change
+  reaches a running intake without a restart, and neither intake reads the row per message or on
+  a timer; a read that fails is tried again 30 s later. The release before this one polls the row
+  every 30 s and may run beside it during a roll.
+
+The two leased woken loops take their lease with no period. A process that finds it held tries
+again — every 2 s for the excerpts, every minute for the suggestions, plus up to a tenth again —
+until a pass of its own runs, because the other process's pass may have read before the change
+that woke this one.
+
+**Boot passes** run once at start:
+
+- The embedding coverage pass (`embedqueue.Cover`, Search below) runs once, with no lease. After
+  it only its identity steps run again: at once when this process's queue first embeds
+  successfully after the pass skipped them for a canary the embedder did not answer, and every
+  `identityRecheckInterval` (10 minutes, plus up to a tenth again) while a run still finds rows of
+  another identity, so a vector an old-configuration process commits during a roll is dropped.
+  Once a run finds none, the loop holds no timer.
+- The task progress reconciliation (`docs.Service.RunTaskProgressReconciliation`) counts every
+  issue whose stored task count is not its latest version's. Every version write records its count
+  in its own transaction, so nothing makes new drift while the process runs but a row another
+  writer held during the pass: those are retried up to six more passes, the first a second later
+  and doubling to at most a minute, and drift left after them is logged at WARN and left to the
+  next start.
+
+**Timers that stay**, because GitHub has no feed of what they would miss — a webhook that never
+arrived, a delivery that failed, a source's branch head:
+
+- The delivery reconcile (`delivery.ReconcileInterval`) and the architecture import
+  (`architecture.SyncInterval`) run every 5 minutes through `duty.RunJittered`: the first pass
+  after a random delay within one interval, and each later one after the interval plus up to a
+  tenth again, drawn afresh every period, so two processes' passes drift apart rather than ticking
+  in step.
+- The webhook redelivery sweep (Webhook redelivery, above) runs every 2 minutes on a plain ticker.
+
+Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the
+settlement resumption still runs every minute, and the per-feature listeners (the delivery live
+hub, the event stream relay, the stale-room evictor) keep their own connections and keep-alive
+pings.
+
+**One shared listener per process.** Every woken loop waits on one `pglisten.Hub` (owner
+`dispatch background wakes` in its log lines), which holds one connection from the store's
+listener pool and LISTENs on every loop's channel. A channel is registered only for a loop that
+will run: `dispatch_embeddings` only with an embedder, and `dispatch_delivery_settings` only with
+NATS and the GitHub App. No loop waits for the listener: each runs its boot pass whether or not it
+has connected, and keeps its due-time timers while it has no connection. Postgres does not replay
+a notification sent while nothing listened, so the hub signals every loop after each successful
+LISTEN, the first included, and a change made while it was redialing (backing off 1 to 30 s) is
+caught up then.
+
+**The GitHub intake** (`delivery.Intake`) checks each message's subject before it decodes
+anything: only `notifications.github.<owner>.<repo>.pr.<n>`, with nothing after the number, and
+`notifications.github.<owner>.<repo>.workflow.<file>.<action>` can carry a kind it handles, and
+every other subject — checks, comments, issues, pushes, job events, `pr.<n>.review` — is
+acknowledged with no decode. A wanted message runs under its key: a pull request under its
+repository and number, read from the subject, and a workflow run under its payload's `repo` and
+`run_id`. Messages of one key run in delivery order, each after the one before has finished,
+since each fetches its pull request's or run's current state from GitHub and writes it, and run
+at once an older fetch could be written over a newer one; messages of different keys run at
+once, at most 4, the durable's `MaxAckPending`. Its durable's `AckWait`, `MaxAckPending` and
+filter subject are unchanged. `Intake.StopDelivering` hands the durable over: it drains the
+subscription, negatively acknowledges every message waiting behind its key so NATS redelivers it
+at once to the next holder, and lets each message in its handler finish and be acknowledged;
+`Run` calls it when the process stops.
 
 ## Database migrations
 
@@ -801,6 +918,36 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
+Migrations `0121`–`0126` let the background loops wait for a change instead of polling for one
+(Background loops, above). Each is additive: the release before them never reads the new tables
+or column, its writes reach the two replaced functions through the same triggers as before, it
+never listens on the new channels, and it keeps polling beside them during the roll. Every census
+answers `0`.
+
+- `0121_embeddings_notify` and `0126_delivery_settings_notify` each replace a function's body and
+  lock no table. `embeddings_enqueue` (0118's body otherwise unchanged) also notifies
+  `dispatch_embeddings` when its upsert writes a row, and `delivery_settings_changed` (0100's,
+  which 0106's trigger keeps calling by name) also notifies `dispatch_delivery_settings` in the
+  branch that logs a settings change.
+- `0122_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
+  excerpt reconciliation failed on: its version, the failures in a row there, and when it is tried
+  again.
+- `0123_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
+  `excerpt_version` that leaves a document mention owed an excerpt, which notifies
+  `dispatch_excerpts_owed`. It is a trigger rather than a notify in Go so that what the release
+  before it writes, and `rebuild-refs` from either build, wakes the loop too; a migration of its
+  own, so its transaction holds `refs`' lock alone, for milliseconds.
+- `0124_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
+  highest event id the outcome sweep has judged by, inserted null so that the first pass judges
+  every pending suggestion once.
+- `0125_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
+  against all its events, with the constant default `true`, so the column is added without
+  rewriting the table and every existing row counts as swept, and then sets the default to `false`
+  for the rows inserted after it, the release before's included. It also creates two partial
+  indexes: `write_suggestions_unswept`, the pass's read of the rows not yet swept, and
+  `write_suggestions_pending_artifact`, its lookup of the pending suggestions by a new event's
+  document.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1044,8 +1191,8 @@ search answers by keyword alone with `degraded: embedder_unavailable`. Each vect
 embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and
 `azure:<endpoint host>/<deployment>` on Azure, and search compares a query vector only with stored
 vectors of its own identity. A write enqueues its text through its table's trigger (0073–0077) in
-the same transaction. The server also runs a coverage pass (`embedqueue.Cover`) when it starts and
-every 10 minutes, so a deployment runs nothing by hand to embed what it already holds: the pass
+the same transaction. The server also runs a coverage pass (`embedqueue.Cover`) once when it
+starts, so a deployment runs nothing by hand to embed what it already holds: the pass
 adds a row for every searchable item that has none (one written before the triggers existed, or
 with them off, as a restore or a replication writes), points a row whose item's text changed with
 the triggers off at the current text, takes every vector another identity made out of the index and
@@ -1056,10 +1203,16 @@ the configured embedder has answered: an embedding this process's queue made has
 when none has yet and such rows exist, the pass embeds a short fixed canary text and it succeeds.
 Until then the pass leaves those vectors and dead rows as they are and logs one WARN naming the
 identity, the canary's error and how many of each it left, so a misnamed Azure deployment (which
-answers `404 DeploymentNotFound`) or a refused credential drops nothing; a throttled canary waits
-for the next pass too, and a pass with no such rows calls the embedder not at all. Each step is a
-statement of at most 500 rows in its own short transaction, repeated until it changes nothing, and
-is safe beside a live write and beside another process's pass, so the pass takes no lease.
+answers `404 DeploymentNotFound`) or a refused credential drops nothing, and a throttled canary
+waits too; a pass with no such rows calls the embedder not at all. After the boot pass only those
+two steps run again (Background loops, above): at once when this process's queue first embeds
+successfully after the pass skipped them, and every `identityRecheckInterval` (10 minutes, plus up
+to a tenth again) while a run still finds another identity's rows, a canary first when the queue
+has not proved the embedder, until a run finds none. The rest of the pass runs again only at the
+next start: a live write enqueues its own text through its trigger, and what is written with the
+triggers off waits for that start. Each step is a statement of at most 500 rows in its own short
+transaction, repeated until it changes nothing, and is safe beside a live write and beside another
+process's pass, so the pass takes no lease.
 `GET /api/v1/search/coverage` reports what that leaves: the identity, its place and model (all
 three null with no embedder), and in total and per kind the searchable items, how many carry a
 current vector of that identity, how many lack one, how many failed for good, and how long the
@@ -1108,11 +1261,13 @@ everything its owner holds — the new issue and its spec, or the issue or proje
 sits on and everything inside it — so nothing is ever suggested that the writer already has.
 A hit on an issue that is `done` ranks below every hit on an open owner, since keyword search
 otherwise puts an issue already closed as a duplicate above the open issue it was closed into.
-Every suggestion offered is recorded in `write_suggestions`, whose `outcome` the daemon's outcome
-sweep (`api.RunSuggestionOutcomeSweep`, every `SuggestionSweepInterval`) advances from `ignored`
-to `acted_on` (the suggested item was cited from the source, or the suggested issue was updated
-directly) or `overridden` (the source got further activity instead) — a count of how often the
-suggestion was right, without refusing anything on its strength.
+Every suggestion offered is recorded in `write_suggestions`, whose `outcome` the server's outcome
+sweep (`api.RunSuggestionOutcomeSweep`) advances from `ignored` to `acted_on` (the suggested item
+was cited from the source, or the suggested issue was updated directly) or `overridden` (the source
+got further activity instead) — a count of how often the suggestion was right, without refusing
+anything on its strength. The sweep is woken by event commits and judges a suggestion once the
+events that can resolve it are a minute old, reading only the events written since its last pass
+(Background loops, above); a pending suggestion nothing writes to costs it nothing.
 A ranking or latency change is measured on a restored copy of the production corpus:
 `packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher
 sees for a list of queries from any build, and `search-latency-compare.sh` runs

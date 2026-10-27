@@ -1,7 +1,9 @@
 ---
 title: Dispatch server
 parent: envoy
-depends_on: [envoy-listener, dispatch-api, dispatch-architecture, dispatch-auth, dispatch-docs, dispatch-events, dispatch-model, dispatch-outbox, dispatch-refs, dispatch-store]
+depends_on: [envoy-listener, dispatch-api, dispatch-architecture, dispatch-auth, dispatch-delivery, dispatch-docs, dispatch-duty, dispatch-embedqueue, dispatch-events, dispatch-model, dispatch-outbox, dispatch-redeliver, dispatch-refs, dispatch-store]
 paths: [packages/envoy/cmd/dispatch, packages/envoy/internal/dispatch/routes]
 ---
 The composition root of the native Dispatch API: `cmd/dispatch` reads its boot configuration from the environment and assembles the server, and `internal/dispatch/routes` is the route table and the router wiring every handler package together. Each subsystem it composes is a child component below. Its wire types match the language-neutral contracts, which is a compatibility rule rather than a Go source dependency, so no edge is drawn for it.
+
+It also starts the background loops, in three shapes (`cmd/dispatch/README.md`, "Background loops"): woken loops (the embedding queue, the reference excerpts, the suggestion outcomes, the intakes' delivery settings), boot passes (embedding coverage, task progress), and timers that stay because GitHub has no change feed (the delivery reconcile and the architecture import, jittered every period, and the webhook redelivery sweep). Every woken loop waits on one shared listener per process, a `pglisten.Hub` logged as `dispatch background wakes`, on one held connection of the store's listener pool: it LISTENs on `dispatch_embeddings`, `dispatch_excerpts_owed`, `dispatch_events` and `dispatch_delivery_settings` (each only when its loop runs), and signals every loop after each successful LISTEN, since Postgres does not replay a notification sent while it was reconnecting. No loop waits for it: each runs its boot pass whether or not it has connected.

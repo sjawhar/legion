@@ -52,15 +52,17 @@ const (
 // has to be chosen to make that true.
 //
 // The period is stored and compared beside the boundary because a boundary means nothing on
-// another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
-// ticks - two seconds while drift remains, five minutes when none does - and its two-second
-// boundary lies at or after the current five-minute one for all but the first two seconds of
-// every five-minute bucket, so a comparison that ignored the scale would refuse that loop's
-// interval tick about 149 times in 150 (measured; and under the bucket-number form this
-// replaces, which was scale-dependent in the same way, it refused every later tick for ever).
-// A record made on another scale therefore serves nothing: the first tick of a changed period
-// runs, and the loop is on its own scale from then on. That costs one pass at each change, which
-// is the direction to err in - the other direction is a loop that stops.
+// another period's scale: a two-second boundary lies at or after the current five-minute one for
+// all but the first two seconds of every five-minute bucket, so a comparison that ignored the scale
+// would refuse a five-minute tick after a two-second record about 149 times in 150. A lease's
+// period changes when a release changes its loop's interval and runs beside the release before it
+// during a roll. The reference excerpt reconciliation also varied its own period between ticks -
+// two seconds while drift remained, five minutes when none did - until it became a woken loop with
+// no period (RunWoken, INFRA-607); that is where the 149 in 150 was measured, and under the
+// bucket-number form this replaces, which was scale-dependent in the same way, it refused every
+// later tick for ever. A record made on another scale therefore serves nothing: the first tick of
+// a changed period runs, and the loop is on its own scale from then on. That costs one pass at
+// each change, which is the direction to err in - the other direction is a loop that stops.
 //
 // Everything is read in the database because two processes' wall clocks differ by whatever their
 // hosts' do, and the database's is the one clock every pass is judged by. The period crosses as

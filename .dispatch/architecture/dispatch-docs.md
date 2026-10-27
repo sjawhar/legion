@@ -1,7 +1,9 @@
 ---
 title: Proof document service
 parent: dispatch-server
-depends_on: [dispatch-events, dispatch-model, dispatch-pmdoc, dispatch-refs, dispatch-store]
+depends_on: [dispatch-duty, dispatch-events, dispatch-model, dispatch-pmdoc, dispatch-refs, dispatch-store]
 paths: [packages/envoy/internal/dispatch/docs]
 ---
 The live document surface: the collaborative websocket room, two-phase settlement that mints block ids before it persists and compares what it rendered, the agent edit operations (`replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, `delete_column`), block tokens and preconditions, and ask and comment anchor refresh.
+
+It also owns two background loops over what version writes record. The task progress reconciliation runs once at start, counting every issue whose stored task count is not its latest version's, and retries only the rows another writer held, briefly; every version write records its own count, so no timer follows. The reference excerpt reconciliation is a woken loop (`duty.RunWoken`, lease `reference-excerpts`) on the `refs` trigger's `dispatch_excerpts_owed`: batches of 20 documents at least 2 s apart, and a document it cannot read or record deferred in `reference_excerpt_backoff`, one minute after its first failure and doubling to six hours, so failing documents neither hold the loop's pace nor keep the documents after them waiting.

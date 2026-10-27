@@ -246,14 +246,14 @@ func TestExclusiveAPeriodHoldsBackOnlyItsOwnLoop(t *testing.T) {
 	}
 }
 
-// A loop whose period changes between ticks must keep running. The reference-excerpt
-// reconciliation is one: it asks for referenceExcerptStep (2 s) while a full batch says drift
-// remains and for ReferenceExcerptReconcileInterval (5 min) once none does, and it passes that
-// wait as its period (docs.RunReferenceExcerptReconciliation). So a pass recorded under the
-// short period is read back by a tick under the long one, and a record that cannot be compared
-// across the two stops the loop for good: every mention a version write could not cut, and
-// everything rebuild-refs inserts, keeps the document's name instead of an excerpt, with no line
-// saying why.
+// A loop whose period changes between ticks must keep running: a release that lengthens a loop's
+// interval runs beside the release before it during a roll, so a pass recorded under the short
+// period is read back by a tick under the long one, and a record that cannot be compared across
+// the two stops the loop for good, with no line saying why. The lease and periods here are the
+// reference-excerpt reconciliation's before it became a woken loop (RunWoken): two seconds while a
+// full batch said drift remained, five minutes once none did, passed as its period each tick -
+// the case that found this, when a stopped loop left every mention a version write could not cut,
+// and everything rebuild-refs inserted, showing the document's name instead of an excerpt.
 func TestExclusiveDoesNotLockOutALoopWhosePeriodGrows(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)

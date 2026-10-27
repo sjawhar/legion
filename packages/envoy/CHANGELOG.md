@@ -796,6 +796,48 @@
 
 ### Changed
 
+- Dispatch's change-driven background loops send no statement while nothing is written. The
+  embedding queue (which scanned every 5 s), the reference excerpt reconciliation (every five
+  minutes, and every 2 s while a batch came back full), the suggestion outcome sweep (every
+  minute) and both GitHub intakes' delivery settings (read every 30 s, and by the job intake on
+  every message) now run a pass at start and then only when a Postgres notification says their
+  work may have changed or a due time they asked for comes round, never more often than the timer
+  each replaced. Each process holds one more Postgres connection for this, a shared listener
+  logged as `dispatch background wakes`, with its keep-alive ping; it signals every loop after
+  each LISTEN, so a change made while it was reconnecting is caught up then. The embedding
+  coverage pass and the task progress reconciliation run once at start instead of every 10 and 5
+  minutes: coverage repeats only its identity steps, and only while another embedder identity's
+  rows remain, and task progress retries the rows another writer held for about a minute. The
+  delivery reconcile, the architecture import and the webhook redelivery sweep keep their timers;
+  the first two now draw their jitter afresh every period, so two processes' passes drift apart
+  (`cmd/dispatch/README.md`, "Background loops") (INFRA-607).
+- Migrations `0121`–`0126` back those loops: `embeddings_enqueue` and `delivery_settings_changed`
+  notify `dispatch_embeddings` and `dispatch_delivery_settings`, a new row trigger on `refs`
+  notifies `dispatch_excerpts_owed`, and `reference_excerpt_backoff`,
+  `suggestion_outcome_cursor` and `write_suggestions.swept` (with two partial indexes) are new.
+  All are additive, every census answers `0`, and the release before them keeps working beside
+  them during a roll (INFRA-607).
+- A delivery settings change (the deploy repository, the workflow paths) reaches the running
+  intakes as soon as it commits, through the shared listener, instead of within 30 s
+  (INFRA-607).
+- The GitHub intake handles up to four pull requests or workflow runs at once, its consumer's
+  `MaxAckPending`, where it handled one message at a time: messages about one pull request or one
+  run still run in order, one after the other, so an older GitHub fetch is never written over a
+  newer one. A message whose subject cannot carry a pull request or a run (checks, comments,
+  pushes, jobs, `pr.<n>.review`) is acknowledged without decoding it. When the intake stops, the
+  messages queued behind a busy pull request or run are handed back to NATS for the next holder,
+  and those in a handler finish and are acknowledged. The consumer's `AckWait`, `MaxAckPending` and
+  filter subject are unchanged (INFRA-607).
+- A document whose reference excerpts cannot be read or stored is retried one minute after its
+  first failure, doubling to at most six hours, plus up to a fifth again of jitter, instead of on
+  every pass, and is left out of the batches meanwhile, so documents that keep failing no longer
+  hold the reconciliation at its 2 s step nor keep the documents after them waiting. The
+  excerpts a pre-`0092` build left stale are marked owed once per process at its first pass,
+  rather than on every pass for the hour after start (INFRA-607).
+- The suggestion outcome sweep reads only the events written since its last pass and the
+  suggestions recorded since, so its work follows what changed rather than how many suggestions
+  are still pending; it judges a suggestion once the events that resolve it are a minute old, and
+  the first pass on a database judges every pending suggestion once, as before (INFRA-607).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

@@ -582,12 +582,13 @@ env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./
 ```
 
 The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one
-Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
-across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, a live event stream fed from the other process, and a document room closed when
-the other process writes it. They build only under the `multiprocess` tag and run in their own CI
-job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
-and their NATS take minutes rather than seconds:
+Postgres and one NATS and drive the properties a rolling release depends on — no two passes of a
+leased loop at once, one pass per period across a leased timer loop, a woken loop's held lease
+retried until each process has run its own pass, the delivery intake's standby and takeover, each
+outbox row published once, a live event stream fed from the other process, and a document room
+closed when the other process writes it. They build only under the `multiprocess` tag and run in
+their own CI job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because
+two servers and their NATS take minutes rather than seconds:
 
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch
