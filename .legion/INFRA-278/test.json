@@ -2,57 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-27T17:14:00Z",
+  "completed": "2026-10-27T17:50:00Z",
   "generation": 3,
-  "round": 5,
-  "headSha": "75a846bdcad6dea6bb8be734e51850098bd40a99",
-  "codeHeadSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
-  "fingerprint": "Not equal: the merge resolved publisher.go against main's pipelined outbox (#2302), so this is treated as a code change",
+  "round": 6,
+  "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
+  "codeHeadSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
+  "fingerprint": "Code change since the last full pass: main's batched outbox (#2302) came in with b31c73a4, plus the round-6 fixes (6ff13d39, d56b0642, 970b1209)",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
-  "outcome": "Ended early, at the architect's request (Envoy 17:06Z), with request_backward_move to implementing for the reviewer's four pre-review items on b31c73a4. The browser suite was not run this round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at 75a846bd: summary 9 ok, 0 FAIL, PASS in 65s."
+    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at b8afd70b: 9 ok, 0 FAIL. Re-ran the browser suite: 43 passed, 3 skipped. Ran TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere: both subtests pass. One correction: the item-2 negative control says 'settle checking errMentionPending before failures makes both subtests fail'. It does not. b31c73a4's publisher.go with the new test passes both subtests, and so does the head with `errors.Is(err, errMentionPending)`, because attempt.err() (publisher.go:734-742) returns joined denials and failures before errMentionPending. The settle rewrite is a hardening with no change in behaviour. The test does lock attempt.err's precedence: with the deferral checked first there, both subtests fail. The behaviour the criterion asks for holds."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Agent-facing text keeps its meaning after the three-word cut (the architect's check of skills/dispatch/SKILL.md:46)",
-      "evidence": "Line 46 ends '... even when its claim reads `· not running`, as a suspended architect's does: that takes the tree out of the workflow.' Main had 'taking it takes the tree out of the workflow'. The cut 'that' has two antecedents: the act of claiming, which is meant, and 'a suspended architect's [claim reading not running]', which is not meant and reads as if a suspended architect's claim removes the tree. The 'or route it' part and line 48 keep the approved meaning. This is the same as the reviewer's item 4; its replacement, 'taking it removes the tree from the workflow', keeps the word count. No red test: a test of the skill's wording is a source-text test, which the repository's test rules forbid."
-    },
-    {
-      "criterion": "The reviewer's pre-review items 1-3 on b31c73a4 (relayed by the architect, not reproduced by the tester this round)",
-      "evidence": "(1) recipients-claim.e2e.ts 'a follower that holds the claim' sets route role:reviewer and asserts Reaches 2 with no poll, racing routeRosterTTL; (2) a scan-level test is missing for a pending mention plus a denied route, which should end backed_off with attempt_count 1; (3) packages/envoy/AGENTS.md:2632-2633 must say a deferral that meets a lost connection or a stopping process is released, not backed off. The tester's roster-cache probe below confirms the 5 s cache that item 1 races."
-    }
-  ],
-  "failed": 2,
-  "passedChecks": [
-    {
-      "criterion": "Claimant delivery inside main's pipelined outbox: every listed event, mentions delivered, failed and pending, and the retries",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway delay proxy ($TMPDIR/infra278-test/delay-proxy.ts) that holds the mention send; throwaway driver $TMPDIR/infra278-test/adversarial.ts",
+      "criterion": "Claimant delivery inside main's batched outbox, including pending-mention and retry legs",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway delay proxy ($TMPDIR/infra278-test/delay-proxy.ts); throwaway driver $TMPDIR/infra278-test/adversarial.ts",
       "command": "DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash $TMPDIR/infra278-test/adv.sh",
-      "observed": "23 ok, 0 FAIL. Comment, edit, resolve and reopen: {P:1} each. Delivered mention: {}. Mention 404: {P:1}. A follower-claimant's mention 404: {C:1,P:1}. Ask answered and resolved: {C:1,P:1}. Route session:R: {P:1,R:1}. Route session:P: {P:1}. message.answered: {P:1,Q:1}. Targeted message and agent comment: {}. An agent's ask reply with no subscription: {C:1,P:1}. Pending legs: held 3 s then sent gives {} (no copy while pending or after); held 3 s then 404 gives {P:1}, so the deferred outcome is retried and publishes the copy; held 7 s past the 5 s receipt timeout gives {P:1} plus the mention, the documented duplicate; pending while the claim moves P to Q gives {Q:1}, so the retry reads the new claimant. A failed mention followed by a person's successful delivery retry gives 1 retry send and the outbox copy stays {P:1}, with no second copy. Claim moved to Q: {Q:1}. A person's claim: {}",
-      "headSha": "75a846bdcad6dea6bb8be734e51850098bd40a99",
-      "negativeControl": "Main fails 9 of the base cases (generation 3, rounds 1 and 2); main has no claimant route, so the pending legs' {P:1}/{Q:1} copies cannot appear on it"
+      "observed": "23 ok, 0 FAIL. Base cases: a person's comment, edit, resolve and reopen {P:1} each; delivered mention {}; mention 404 {P:1}; follower-claimant mention 404 {C:1,P:1}; ask answered and resolved {C:1,P:1}; route session:R {P:1,R:1}; route session:P {P:1}; message.answered {P:1,Q:1}; targeted message and agent comment {}; agent ask reply with no subscription {C:1,P:1}; claim moved to Q {Q:1}; a person's claim {}. Pending legs: held 3 s then sent {}; held 3 s then 404 {P:1}; held 7 s, past the 5 s receipt timeout, {P:1} plus the mention (documented); pending while the claim moves P to Q {Q:1}; a failed mention then a successful delivery retry gives 1 retry send and the outbox copy stays {P:1}. Every held event ended published with attempt_count 0 (events table): deferred, never backed off",
+      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
+      "negativeControl": "Main fails 9 of the base cases (earlier rounds; main has no claimant route)"
     },
     {
-      "criterion": "The recipients-claim poll answers a real cache, not a hidden defect",
-      "surface": "same rig",
-      "command": "the roster-cache-probe leg: route role:adv-cache, read the ask, make R hold the role, read at once, read again 5.5 s later",
-      "observed": "before: no_holder/null; right after R went live: no_holder/null; 5.5 s later: live/adv-r. This matches main's routeRosterTTL = 5 * time.Second (packages/envoy/internal/dispatch/api/issue_route_status.go:66). Each scenario's patchIssue reads the roster before setLiveSessions, so an immediate read can answer from the stale roster. The poll waits out a real 5 s staleness that main introduced (#2267); it does not hide a defect",
-      "headSha": "75a846bdcad6dea6bb8be734e51850098bd40a99",
-      "negativeControl": "The read 5.5 s later shows the new holder, so the stale answer is the cache, not a wrong reach computation"
+      "criterion": "Reviewer item 2: a held-back copy defers only an attempt that failed nowhere else",
+      "surface": "Go outbox suite on real Postgres, plus mutants in a scratch copy of packages/envoy",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 -v ./internal/dispatch/outbox/; mutants run with -run HeldBack",
+      "observed": "Package ok: 150 PASS, 0 SKIP, TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere included. b31c73a4's publisher.go passes the test too, so the old code already behaved correctly",
+      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
+      "negativeControl": "attempt.err mutated to return errMentionPending before the joined denial and failure errors fails both subtests: 'attempt_count = 0, want the one backed-off attempt' and 'want the claim released: 0 and none'"
     },
     {
-      "criterion": "The outbox and api Go suites, unskipped",
-      "surface": "Go suites on real Postgres (regression lock)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_gosuite?sslmode=disable' go test -count=1 -timeout 30m -v ./internal/dispatch/outbox/; go test -count=1 -timeout 40m -v -run 'Ask|Inbox|RouteStatus|Comment|Mention|Delivery|Claim' ./internal/dispatch/api/",
-      "observed": "outbox ok: 147 PASS, 0 SKIP. api ok: 405 PASS, 2 SKIP (TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt and TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner need BROKER_TEST_DATABASE_URL and are outside this change)",
-      "headSha": "75a846bdcad6dea6bb8be734e51850098bd40a99",
-      "negativeControl": "n/a: these are regression locks; the live cases above carry the proof"
+      "criterion": "Reviewer item 1: the Reaches panel's roster-sensitive scenarios no longer race the 5 s roster",
+      "surface": "Dispatch browser suite (Chromium); the live rig for the cache itself",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts issue.e2e.ts agent-name.e2e.ts --project chromium --retries 0; then --grep 'follower that holds the claim|role route held by the claimant|holder is unknown' --repeat-each 5; the driver's roster-cache-probe leg",
+      "observed": "43 passed, 3 skipped (main's phone-only cases); 15 passed on repeat, none flaky. Probe: no_holder/null right after R took the role, live/adv-r 5.5 s later, which matches routeRosterTTL = 5 * time.Second (issue_route_status.go:66)",
+      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
+      "negativeControl": "The probe's immediate read answers from the stale roster, the race the polls wait out"
+    },
+    {
+      "criterion": "Reviewer item 4: skills/dispatch/SKILL.md:46 keeps its meaning",
+      "surface": "repository text and the skills word budget",
+      "command": "sed -n 46p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w",
+      "observed": "'… as a suspended architect's does: taking it removes the tree from the workflow.'; 1999 words. Line 48 is the approved text",
+      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
+      "negativeControl": "At b31c73a4 the clause read 'that takes the tree out of the workflow', with an ambiguous 'that'"
     }
   ],
-  "notRun": [
-    "The Dispatch browser suite (recipients-claim, followers, issue, agent-name), stopped by the backward move; it runs in the next round."
-  ],
-  "ci": "Not read this round: the round ended early on the architect's request."
+  "ci": "At code head 970b1209, read at 17:45Z: Tests 40551032144, Docs 40551032065 and Legion Envoy and Contracts 40551032514 queued; Worker Image 40551032049 and PR Title 40551032028 pending. Not waited for. GitHub reports MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6449381816"
 }
