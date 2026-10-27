@@ -2,53 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-27T15:06:00Z",
+  "completed": "2026-10-27T16:04:00Z",
   "decision": "changes_requested",
-  "round": 3,
-  "headReviewed": "1988f41c9236d44ed4eb4e7a2eb4169e2f5a0218",
-  "codeHead": "4f84c42bc495",
-  "previousReview": "5667991189 (APPROVE at dec7209ec77f); voided by ce7d869f (the acceptance send-back's proof-editor items) and merge 4f84c42b",
+  "round": 4,
+  "headReviewed": "1c5a0decd10af96f80a6e2c291a7809ee974e1c5",
+  "codeHead": "f5cc766b4a9f",
+  "previousReview": "5669394650 (REQUEST_CHANGES at 21e1c419)",
   "critical": 0,
-  "important": 3,
-  "minor": 3,
-  "ci": "Required set: lint, typecheck, test, pr-title. CI head 645a7712 (compare to 1988f41c: handoffsOnly true, 1 file). At 15:04Z lint, typecheck and pr-title were success and test was in_progress. A request for changes does not wait on CI.",
-  "threads": "Two threads, both the reviewer's, both answered in round 2 and resolved. No new threads.",
-  "census": "Re-ran the ten searches at the head: the same hits as at bca854ba, with line numbers moved by the merges and no new hit. The renumber will move the 0130 references.",
-  "roundDelta": "ce7d869f is behaviour-preserving: setAttributes' held is still the located node's attrs, retype's held is empty when the type changes, the block id from blockIdOf(prior) equals the old argument, and parseBlockPointers takes its split from contracts. The merge 4f84c42b keeps both edit kinds in proof-editor/AGENTS.md (eighteen) and drops nothing else.",
+  "important": 1,
+  "minor": 1,
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head f7e33c2a (compare to 1c5a0dec: handoffsOnly true, 1 file). All required checks were still queued at 16:03Z. A request for changes does not wait on CI.",
+  "threads": "All five threads are answered by the reviewer and resolved: the two from round 1, and the three from round 3, which 071af05a and 0c1ba422 fixed.",
+  "census": "Re-ran the ten searches at the head. One new hit (proof-editor/tests/block-schema-fixture.ts:8, from main 2df3353c) and one gone hit (read-only-directives.test.ts:284). The implementer edited the body; verified.",
+  "roundDelta": "The round-3 findings are all fixed: migration renamed to 0135 with every reference (main's highest is 0134, and no migration 0122-0134 restates graph_edges); the contracts and envoy_go_race filters; the test move (typed_blocks_test.go back to 799 lines); the schema.go comment. The merges conflicted only in docs. Main's node-facts code reads neither block_refs nor graph_edges and adds no edge kind.",
   "thermonuclear": {
-    "deepReview": "Medium 1 (verified): the contracts CI filter misses pmdoc/testdata/block-pointer-values.json, which src/dispatch-block-ref.test.ts reads. Minor 2 (promoted, the filter rule of packages/envoy/AGENTS.md): envoy_go_race misses packages/contracts/src/**, which the editor that pmdoc/gen imports now loads. Minor 3: the body's Size line is stale. Hardening: the schema.go:471-472 comment says 'written as is', yet the value still passes escapeDirectiveAttribute and strconv.Quote.",
-    "codeQuality": "Verdict: CHANGES at 1988f41c. typed_blocks_test.go grows past 1000 lines (799 -> 1036) by appending the pointer suite, which belongs in pointers_test.go. Round delta and merge sound."
+    "deepReview": "Verdict: APPROVE at 1c5a0dec. Its Minor 1 (a pointer written by a later holder of a repeated block id is indexed as an edge from the first holder) is promoted: it writes a wrong edge and miscounts the mention subtraction.",
+    "codeQuality": "Verdict: CHANGES at 1c5a0dec. refuseBlockPointers' resolver reads document_blocks and copies refs.uniqueBlocks' first-holder rule inside docs/mutation.go. That belongs in refs."
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0130_block_pointer_links.up.sql",
-      "description": "Migration number collides with main: sjawhar/legion#2389 (c210f10d) merged 0130-0134. Merge main c210f10d or later forward, renumber to the next number after main's highest (0135 today) with every reference to it, and check main's highest again before each push."
-    },
-    {
-      "severity": "important",
-      "file": ".github/workflows/envoy-and-contracts.yaml",
-      "description": "The contracts filter (:373-388) lacks packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json, which dispatch-block-ref.test.ts:118-129 reads, so a Go-only edit of the table skips the parity test."
-    },
-    {
-      "severity": "important",
-      "file": ".github/workflows/envoy-and-contracts.yaml",
-      "description": "The envoy_go_race filter (:312-326) lacks packages/contracts/src/**. pmdoc tests run pmdoc/gen, which imports the editor, and the editor's block-pointers.ts now imports @legion/contracts. packages/envoy/AGENTS.md's filter rule requires the entry in this PR."
+      "file": "packages/envoy/internal/dispatch/refs/blocks.go",
+      "description": "pointerPairs (:246) accepts a pointer whenever its block id is a node id, but nodes are uniqueBlocks' first holder of each id. So a typed block that is a later holder of a repeated id (which a rendered version can carry, pmdoc/block_ids.go) has its pointers written as edges from the first holder, possibly a paragraph. Its pointed count also subtracts the first holder's real mention of that target. Meanwhile the later holder's own text mention goes to its innermost node and is not subtracted. Mentions never attribute by id this way. Emit pointers only from the first holder of each id, as uniqueBlocks does, or check that the node's type is the pointer's BlockType, and add a test."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/typed_blocks_test.go",
-      "description": "The file passes 1000 lines (799 -> 1036) because the pointer suite (blockPointerTestSchema, useTestBlockSchema and four tests from :688) was appended there. Move it to pointers_test.go."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/schema.go",
-      "description": "The comment at :471-472 says a canonical reference 'is written as is', but the value still passes escapeDirectiveAttribute and strconv.Quote (:481). It is safe, but the comment misdescribes it."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body",
-      "description": "The Size line (50 files, +3042/-119) is stale: the diff against merge base 8ea7d06d is 46 files, +2727/-119."
+      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
+      "description": "refuseBlockPointers (:263-305) queries document_blocks and copies the first-holder rule of refs.uniqueBlocks without its id checks. Every other document_blocks read is in refs. Move the type resolution into refs, reusing uniqueBlocks, so the refusal and the index use one node rule. It is fixed in this push with finding 1, since both are the same rule."
     }
   ]
 }
