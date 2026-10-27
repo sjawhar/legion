@@ -116,7 +116,7 @@ export function useRenderedMarkdown(
     isFallback,
     portals: [
       ...referenceAnchors.map(({ anchor, key, route }) =>
-        createPortal(<RefLink route={route} />, anchor, key)
+        createPortal(<RefLink anchor={anchor} route={route} />, anchor, key)
       ),
       ...pictureAnchors.map(({ anchor, caption, key, route }) =>
         createPortal(

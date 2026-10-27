@@ -31,7 +31,9 @@ func (s *server) replaceReferences(
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes
-// structural edges. Cross-project by design: no project filter.
+// structural edges. Cross-project by design: no project filter. A block reference names a
+// block node carrying its whole current text; one pinned to a version also reads the block as
+// that version recorded it (blockReferenceNode).
 func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -41,24 +43,39 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if query.Direction == "out" && ref.Kind == "artifact" {
-		if err := s.deps.Store.Pool.QueryRow(r.Context(), `select id::text from artifacts where ref_key = $1`, query.ID).Scan(&query.ID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no document at %s", query.ID))
-				return
-			}
+	var node model.GraphNode
+	if ref.Kind == "block" {
+		node, err = s.blockReferenceNode(r.Context(), query, ref)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	node, found, err := refs.Node(r.Context(), s.deps.Store.Pool, query.Kind, query.ID, query.Direction == "in")
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if !found {
-		s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", query.Kind, query.ID))
-		return
+		if node.Pin != nil && node.Pin.State == "removed" {
+			// The graph lists no link to a block no current version holds.
+			WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: []model.GraphEdge{}})
+			return
+		}
+	} else {
+		if query.Direction == "out" && ref.Kind == "artifact" {
+			if err := s.deps.Store.Pool.QueryRow(r.Context(), `select id::text from artifacts where ref_key = $1`, query.ID).Scan(&query.ID); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no document at %s", query.ID))
+					return
+				}
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+		var found bool
+		node, found, err = refs.Node(r.Context(), s.deps.Store.Pool, query.Kind, query.ID, query.Direction == "in")
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if !found {
+			s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", query.Kind, query.ID))
+			return
+		}
 	}
 	edges, err := refs.Edges(r.Context(), s.deps.Store.Pool, query)
 	if err != nil {
@@ -74,9 +91,79 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges})
 }
 
+// blockReferenceNode is the block node ref names (query addresses it), with its whole current
+// text. A block no current version of its document holds answers 404, unless ref is pinned to a
+// version N that held it: the node then carries what N recorded (model.BlockPin), "unchanged"
+// or "changed" by comparing the current text with N's, or "removed" with the version that deleted
+// it, as a node with no text or changed version. A pin to a version the document lacks, to one
+// whose blocks are not on record (an older build wrote it and none indexed it) or to one that
+// did not hold the block answers 404, each saying which.
+func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref text.Ref) (model.GraphNode, error) {
+	pool := s.deps.Store.Pool
+	documentKey, _, _ := strings.Cut(query.ID, "#")
+	document, found, err := refs.Node(ctx, pool, "artifact", documentKey, true)
+	if err != nil {
+		return model.GraphNode{}, err
+	}
+	if !found {
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no document at %s", documentKey)
+	}
+	node, current, err := refs.Node(ctx, pool, "block", query.ID, true)
+	if err != nil {
+		return model.GraphNode{}, err
+	}
+	if ref.Pin == 0 {
+		if !current {
+			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in %s", ref.Block, document.Ref)
+		}
+		node.Text, err = refs.CurrentBlockText(ctx, pool, document.ID, ref.Block)
+		return node, err
+	}
+	at, err := refs.BlockTextAt(ctx, pool, document.ID, ref.Block, ref.Pin)
+	if err != nil {
+		return model.GraphNode{}, err
+	}
+	switch {
+	case !at.Exists:
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no version %d of %s", ref.Pin, document.Ref)
+	case !at.Indexed && at.Earliest == 0:
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "version %d of %s has no record of its blocks; no version of it has one yet", ref.Pin, document.Ref)
+	case !at.Indexed:
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "version %d of %s has no record of its blocks; the earliest is version %d", ref.Pin, document.Ref, at.Earliest)
+	case at.Text == nil:
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in %s at version %d", ref.Block, document.Ref, ref.Pin)
+	}
+	blockRef := refs.BlockRef(document.Ref, ref.Block)
+	pin := &model.BlockPin{Version: ref.Pin, Ref: blockRef + "@v" + strconv.Itoa(ref.Pin), Text: *at.Text}
+	if !current {
+		pin.State, pin.RemovedVersion = "removed", at.RemovedVersion
+		return model.GraphNode{
+			Kind:     "block",
+			ID:       query.ID,
+			BlockID:  ref.Block,
+			IssueKey: document.IssueKey,
+			Project:  document.Project,
+			Ref:      blockRef,
+			Document: document.Ref,
+			Pin:      pin,
+		}, nil
+	}
+	if node.Text, err = refs.CurrentBlockText(ctx, pool, document.ID, ref.Block); err != nil {
+		return model.GraphNode{}, err
+	}
+	pin.State = "unchanged"
+	if node.Text != pin.Text {
+		pin.State = "changed"
+	}
+	node.Pin = pin
+	return node, nil
+}
+
 // parseReferencesQuery turns ?to=|?from=, ?kind=, and ?since= into an edge query addressed the
-// way graph_edges stores the node: ToID for the to side (ref_key for artifacts), the item id
-// for the from side (the caller swaps an artifact's ref_key for its uuid).
+// way graph_edges stores the node: text.TargetID for the to side (ref_key for artifacts), the
+// item id for the from side (the caller swaps an artifact's ref_key for its uuid). The reference
+// is read by text.ParseRef, so a node is read whatever the length of its name: the target bound
+// decides only what text indexes, and a node no index holds an edge to simply has fewer edges.
 func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.Ref, error) {
 	values := r.URL.Query()
 	to, from := strings.TrimSpace(values.Get("to")), strings.TrimSpace(values.Get("from"))
@@ -87,12 +174,11 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	if from != "" {
 		raw, direction = from, "out"
 	}
-	located := text.ExtractAt(raw, serverURL)
-	if len(located) != 1 || located[0].Offset != 0 || located[0].Kind == "url" {
-		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, ask, comment, message, or component", raw)
+	ref, ok := text.ParseRef(raw, serverURL)
+	if !ok {
+		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, block, ask, comment, message, or component", raw)
 	}
-	ref := located[0].Ref
-	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: refs.ToID(ref)}
+	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: text.TargetID(ref)}
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
 		for _, kind := range strings.Split(kinds, ",") {
 			kind = strings.TrimSpace(kind)
@@ -107,6 +193,11 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	// for that kind explicitly still gets it — this is the default, not a hidden rule.
 	if direction == "in" && ref.Kind == "ask" && len(query.Kinds) == 0 {
 		query.ExcludeKinds = refs.AskBacklinkExclusions
+	}
+	// A document's blocks are each part_of it; its links are what a document's read means, so
+	// those edges are listed only when asked for by kind.
+	if ref.Kind == "artifact" && len(query.Kinds) == 0 {
+		query.ExcludeKinds = []string{"part_of"}
 	}
 	if since := strings.TrimSpace(values.Get("since")); since != "" {
 		value, err := strconv.ParseInt(since, 10, 64)

@@ -3,6 +3,7 @@ package api
 import (
 	"maps"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -77,10 +78,21 @@ type Settings struct {
 	WorkerBackends map[string]string `json:"worker_backends"`
 }
 
-// RuntimeSettings is `runtime`: its name, and the kubernetes block under that runtime alone.
+// RuntimeSettings is `runtime`: its name, the kubernetes block under that runtime alone, and the
+// tmux block when the file names one.
 type RuntimeSettings struct {
 	Name       string              `json:"name"`
 	Kubernetes *KubernetesSettings `json:"kubernetes,omitempty"`
+	Tmux       *TmuxSettings       `json:"tmux,omitempty"`
+}
+
+// TmuxSettings is the settled `runtime.tmux` block: its Oh My Pi overlays as resolved, the names
+// alone of its pane variables, whose values are the operator's free text, delivered to every pane,
+// and the runtime whose claims the daemon takes over (`take_over`), empty for none.
+type TmuxSettings struct {
+	PaneEnv       []string `json:"pane_env"`
+	PiConfigFiles []string `json:"pi_config_files"`
+	TakeOver      string   `json:"take_over,omitempty"`
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
@@ -224,7 +236,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Bind:                                    cfg.Bind,
 		AdvertiseHost:                           cfg.AdvertiseHost,
 		StateDir:                                cfg.StateDir,
-		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes)},
+		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes), Tmux: tmuxSettingsOf(cfg.Runtime.Tmux)},
 		AdmissionCap:                            cfg.AdmissionCap,
 		DaemonURL:                               endpointOf(cfg.DaemonURL),
 		WorkerStreamPort:                        cfg.WorkerStreamPort,
@@ -287,6 +299,15 @@ func SettingsOf(cfg config.Config) Settings {
 		settings.WorkerBackends[string(role)] = string(backend)
 	}
 	return settings
+}
+
+// tmuxSettingsOf is block as the state shows it, nil when the file names none: the pane
+// variables' names in name order, never their values.
+func tmuxSettingsOf(block *config.Tmux) *TmuxSettings {
+	if block == nil {
+		return nil
+	}
+	return &TmuxSettings{PaneEnv: stringsOf(slices.Sorted(maps.Keys(block.PaneEnv))), PiConfigFiles: stringsOf(block.PiConfigFiles), TakeOver: block.TakeOver}
 }
 
 // kubernetesSettingsOf is block as the state shows it, nil under another runtime.

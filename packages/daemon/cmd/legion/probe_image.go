@@ -47,7 +47,12 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // with none named, against this binary's own DaemonAPIVersion, which the plugin packed from the
 // same commit must declare. The load probe also holds every task agent the
 // prompts dispatch to its own model; the OK line says so (agent-models=resolved), or that the
-// build's probe, which has no operator model configuration, skipped it (--skip-agent-models). The
+// build's probe, which has no operator model configuration, skipped it (--skip-agent-models).
+// With --skip-browser, the build of an image for a deployment that turns Oh My Pi's browser off
+// (`browser.enabled: false`), which carries no Chromium, the capability check leaves the browser
+// row unchecked, and the OK line's capabilities mark says so (capabilities=browser-skipped, which
+// the daemon's probe Sandbox refuses: it never passes the flag, and passes only an image whose
+// whole capability list was checked). The
 // probe Sandbox starts it on the pod baseline's variables and overlay, with no state home of its
 // own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the turn-scoping
 // overlay named first in PI_CONFIG_FILES, written to a fresh temporary directory since the probe
@@ -78,6 +83,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
+	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
 	roleNamespaces := flags.String("role-namespaces", "", "run one role generation's namespaces (legion launcher role-init) over a layout of its own in this directory, on a volume of its own, and refuse when it fails; its home is an empty directory there, not the image's (the probe Sandbox passes it)")
 	if code, ok := parseFlags(flags, args); !ok {
@@ -188,7 +194,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	// and the provider keys' included — so a PATH or a PUPPETEER_EXECUTABLE_PATH the operator's pod
 	// env sets is checked as a worker's Oh My Pi would honour it. The table is printed whole even
 	// when a row is missing: the operator reads what was checked, then why it failed.
-	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
+	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir, SkipBrowser: *skipBrowser}
 	lines, err := capabilities.CheckImage(ctx, img)
 	for _, line := range lines {
 		fmt.Fprintln(stdout, line)
@@ -220,9 +226,13 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *skipAgentModels {
 		agentModels = bootprobe.AgentModelsSkipped
 	}
+	checked := bootprobe.CapabilitiesAll
+	if *skipBrowser {
+		checked = bootprobe.CapabilitiesBrowserSkipped
+	}
 	if natsUser != "" {
 		fmt.Fprintln(stdout, bootprobe.NATSUserLine(natsUser))
 	}
-	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels, modelFallback))
+	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels, checked, modelFallback))
 	return 0
 }

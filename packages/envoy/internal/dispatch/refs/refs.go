@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,25 +28,6 @@ type Queryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-// ToID returns the durable target identifier for a parsed Dispatch reference: the item id,
-// an artifact's ref_key, or a component's '<project>/<id>' node address.
-func ToID(ref text.Ref) string {
-	switch ref.Kind {
-	case "artifact":
-		if ref.Session != "" {
-			return "agent/" + ref.Session + "/" + ref.ID
-		}
-		key := ref.IssueKey
-		if key == "" {
-			key = ref.Project
-		}
-		return key + "/" + ref.ID
-	case "component":
-		return ref.Project + "/" + ref.ID
-	}
-	return ref.ID
-}
-
 // Target is one end of a reference edge: the kind and durable id `refs` stores.
 type Target struct {
 	Kind string
@@ -53,27 +35,43 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it, so no
-// producer can reconcile the graph without holding what moved: replace itself is unexported.
+// that source appends has to name. Every write that indexes a body goes through it or
+// ReplaceCountedRefs, so no producer can reconcile the graph without holding what moved:
+// replaceRefs itself is unexported.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
+	return ReplaceCountedRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil, nil)
+}
+
+// ReplaceCountedRefs is ReplaceCounted for references a caller has already extracted: a new edge
+// takes insertedAt as its created_at (nil: the transaction's time), and the counted targets it
+// resolves are those replaceRefs moved together with moved, the targets the same write moved
+// elsewhere - a document version's block mentions (IndexBlocks) - so its event names them all.
+func ReplaceCountedRefs(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID string,
+	found []text.Ref,
+	insertedAt *time.Time,
+	moved []Target,
+) (model.ReferenceChanges, error) {
+	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, insertedAt)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return CountedChanges(ctx, tx, changed)
+	return CountedChanges(ctx, tx, append(changed, moved...))
 }
 
-// replace reconciles the Dispatch references written by one source with body: targets no
-// longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
-// created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
-// inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
-// batched backlink count.
-func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
-	kinds, ids := targets(body, serverURL)
+// replaceRefs reconciles the Dispatch references written by one source with found: targets no
+// longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
+// an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
+// edges moved — deleted or inserted, oldest state first — so ReplaceCountedRefs can resolve the
+// ones whose readers carry a batched backlink count.
+func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
+	kinds, ids := refTargets(found)
 	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
@@ -90,11 +88,12 @@ func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL s
 		return changed, nil
 	}
 	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id)
-		select $1, $2, target.kind, target.id from unnest($3::text[], $4::text[]) as target(kind, id)
+		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
 		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
+	`, fromKind, fromID, kinds, ids, insertedAt))
 	if err != nil {
 		return nil, fmt.Errorf("write reference: %w", err)
 	}
@@ -117,34 +116,52 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 	return changed, rows.Err()
 }
 
-// targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays.
-func targets(body, serverURL string) ([]string, []string) {
+// targetOf is the graph target a parsed reference names; an external URL names none.
+func targetOf(ref text.Ref) (Target, bool) {
+	if ref.Kind == "url" {
+		return Target{}, false
+	}
+	return Target{Kind: ref.Kind, ID: text.TargetID(ref)}, true
+}
+
+// refTargets is the deduplicated (to_kind, to_id) set found names, as parallel arrays.
+func refTargets(found []text.Ref) ([]string, []string) {
 	kinds, ids := []string{}, []string{}
-	seen := make(map[[2]string]struct{})
-	for _, ref := range text.Extract(body, serverURL) {
-		if ref.Kind == "url" {
+	seen := make(map[Target]struct{})
+	for _, ref := range found {
+		target, ok := targetOf(ref)
+		if !ok {
 			continue
 		}
-		target := [2]string{ref.Kind, ToID(ref)}
 		if _, dup := seen[target]; dup {
 			continue
 		}
 		seen[target] = struct{}{}
-		kinds = append(kinds, target[0])
-		ids = append(ids, target[1])
+		kinds = append(kinds, target.Kind)
+		ids = append(ids, target.ID)
 	}
 	return kinds, ids
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
-// provenance yet. It runs after the source's event is appended, in the same transaction, and
-// leaves edges that survived a reconcile untouched.
+// provenance yet: the source's own refs and, for a document, the mentions its blocks hold. It runs
+// after the source's event is appended, in the same transaction, and leaves edges that survived a
+// reconcile untouched.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
 	if _, err := tx.Exec(ctx, `
 		update refs set source_seq = $3
 		where from_kind = $1 and from_id = $2 and source_seq is null
 	`, fromKind, fromID, eventID); err != nil {
 		return fmt.Errorf("stamp references: %w", err)
+	}
+	if fromKind != "artifact" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		update block_refs set source_seq = $2
+		where artifact_id = $1 and source_seq is null
+	`, fromID, eventID); err != nil {
+		return fmt.Errorf("stamp block references: %w", err)
 	}
 	return nil
 }
@@ -268,15 +285,24 @@ func resolveAskTargets(ctx context.Context, q Queryer, ids []string) (map[string
 	return found, rows.Err()
 }
 
-// ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key, in
-// the shape the document surfaces read (kind, id order).
+// ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key or one
+// of its current blocks, once per source, in the shape the document surfaces read (kind, id
+// order). A citing document is listed itself, not by the block holding its link.
 func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.ReferencedBy, error) {
-	edges, err := resolveEdges(ctx, q, Query{Direction: "in", Kind: "artifact", ID: refKey, Kinds: []string{"mentions"}})
+	edges, err := resolveEdges(ctx, q, Query{Direction: "in", Kind: "artifact", ID: refKey, Kinds: []string{"mentions"}, WholeDocuments: true})
 	if err != nil {
 		return nil, err
 	}
 	references := make([]model.ReferencedBy, 0, len(edges))
+	// Every edge of one source carries that source's node and excerpt, so the entry kept is
+	// the same whichever of its edges comes first.
+	seen := make(map[[2]string]struct{}, len(edges))
 	for _, edge := range edges {
+		source := [2]string{edge.Node.Kind, edge.Node.ID}
+		if _, listed := seen[source]; listed {
+			continue
+		}
+		seen[source] = struct{}{}
 		reference := model.ReferencedBy{
 			Kind:     edge.Node.Kind,
 			ID:       edge.Node.ID,
@@ -298,8 +324,10 @@ func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.Refere
 	return references, nil
 }
 
-// Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A target
-// of a node kind this build does not know is skipped; any other unresolved target is listed.
+// Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A block
+// target keeps its own kind and id and carries its document as the artifact, while a current
+// version holds the block; a block none holds is omitted, as is a target of a node kind this
+// build does not know. Any other unresolved target is listed.
 func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.OutgoingReference, error) {
 	rows, err := q.Query(ctx, `
 		select e.to_kind, e.to_id,
@@ -307,9 +335,11 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		       coalesce(a.created_by, '{}'::jsonb), coalesce(a.created_at, timestamptz 'epoch'),
 		       coalesce(v.number, 0), coalesce(v.named, false), v.summary, coalesce(v.authors, '[]'::jsonb), coalesce(v.created_at, timestamptz 'epoch'), `+model.VersionSize+`, v.mime, v.sha256
 		from graph_edges e
-		left join artifacts a on e.to_kind = 'artifact' and a.ref_key = e.to_id
+		left join document_blocks d on e.to_kind = 'block' and d.node_id = e.to_id
+		left join artifacts a on a.ref_key = case e.to_kind when 'artifact' then e.to_id when 'block' then split_part(d.node_id, '#', 1) end
 		left join artifact_versions v on v.artifact_id = a.id
 		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions' and e.to_kind = any($2)
+		  and (e.to_kind <> 'block' or d.node_id is not null)
 		order by e.to_kind, e.to_id, v.number
 	`, artifactID, nodeKinds)
 	if err != nil {

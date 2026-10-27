@@ -33,6 +33,16 @@ const (
 	// the store accepts and serves back.
 	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+	// maxNewArtifactKeyBytes bounds, in bytes, a new artifact's name and the reference key
+	// `<owner>/<slug>` that name gives it (newArtifactNameRefusal, newArtifactKeyRefusal).
+	// artifacts_ref_key_key is a B-tree index on ref_key, and a Postgres B-tree entry holds at
+	// most 2704 bytes: an 8-byte tuple header, then the value's 4-byte length word and its bytes,
+	// so incompressible text of 2692 bytes fits and one byte more fails the insert (SQLSTATE
+	// 54000). No index holds the name, but it is held to the same bytes: its slug is the part of
+	// the key a caller writes, so one number names what a new artifact may be called. An artifact
+	// already stored past it, under a key Postgres compressed into the index, keeps its name and
+	// key: an upload naming it stores a version as before.
+	maxNewArtifactKeyBytes = 2692
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads.
@@ -359,9 +369,17 @@ func (s *server) storeArtifact(
 	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
+		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
 		slug, err := s.nextArtifactSlug(r.Context(), tx, target, input.name)
 		if err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+		if refusal := newArtifactKeyRefusal(target, slug); refusal != nil {
+			s.writeHandlerError(w, refusal)
 			return
 		}
 		actorJSON, err := encodeJSON(actor)
@@ -1335,6 +1353,30 @@ func artifactSlug(name string) string {
 		return "artifact"
 	}
 	return result
+}
+
+// newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
+// or nil. An upload naming an artifact that already exists is never held to it.
+func newArtifactNameRefusal(name string) error {
+	if len(name) <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"artifact name is %d bytes, past the %d bytes a new artifact's name may hold; give it a shorter name",
+		len(name), maxNewArtifactKeyBytes)
+}
+
+// newArtifactKeyRefusal is the 400 refusing a new artifact whose reference key, the target's
+// owner, `/` and slug (the one nextArtifactSlug took, suffix and all), is past
+// maxNewArtifactKeyBytes, or nil.
+func newArtifactKeyRefusal(target artifactTarget, slug string) error {
+	key := len(target.refPrefix()) + 1 + len(slug)
+	if key <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
+		target.refPrefix(), key, maxNewArtifactKeyBytes)
 }
 
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
