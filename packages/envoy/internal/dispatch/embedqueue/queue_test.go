@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/embed/embedtest"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -1355,5 +1361,342 @@ func TestMergeBisectResultsCopiesIntoFreshSlicesNotTheSharedBackingArray(t *test
 	wantIDs := []string{"ALIAS-0", "ALIAS-2"}
 	if len(gotIDs) != len(wantIDs) || gotIDs[0] != wantIDs[0] || gotIDs[1] != wantIDs[1] {
 		t.Errorf("merged.permanent ids = %v, want %v", gotIDs, wantIDs)
+	}
+}
+
+// syncEmbedder is a fake embedder safe for Run's two loops to call at once: every call answers
+// vectors unless err is set, and it counts the canary calls it sees.
+type syncEmbedder struct {
+	identity string
+	mu       sync.Mutex
+	err      error
+	canaries int
+}
+
+func newSyncEmbedder(identity string) *syncEmbedder { return &syncEmbedder{identity: identity} }
+
+func (e *syncEmbedder) Identity() string     { return e.identity }
+func (e *syncEmbedder) Limits() embed.Limits { return new(embed.BedrockClient).Limits() }
+
+func (e *syncEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, text := range texts {
+		if text == embedCanary {
+			e.canaries++
+		}
+	}
+	if e.err != nil {
+		return nil, e.err
+	}
+	return fakeVectors(len(texts)), nil
+}
+
+func (e *syncEmbedder) setErr(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.err = err
+}
+
+func (e *syncEmbedder) canaryCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.canaries
+}
+
+// statementCounter counts every statement started on the pool it traces.
+type statementCounter struct{ count atomic.Int64 }
+
+func (c *statementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.count.Add(1)
+	return ctx
+}
+
+func (c *statementCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// countedStore is database through a pool of its own whose every statement the returned counter
+// counts. Only the code under test is given it, so everything it counts is that code's.
+func countedStore(t *testing.T, database *store.Store) (*store.Store, *statementCounter) {
+	t.Helper()
+	config := database.Pool.Config().Copy()
+	counter := &statementCounter{}
+	config.ConnConfig.Tracer = counter
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open a counted pool: %v", err)
+	}
+	pool := store.NewPool(opened)
+	t.Cleanup(pool.Close)
+	return &store.Store{Pool: pool}, counter
+}
+
+// awaitQuiet waits until counter has counted no statement for quiet, failing once within passes.
+func awaitQuiet(t *testing.T, counter *statementCounter, quiet, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	last, since := counter.count.Load(), time.Now()
+	for time.Since(since) < quiet {
+		if time.Now().After(deadline) {
+			t.Fatalf("statements did not stop for %v within %v", quiet, within)
+		}
+		time.Sleep(20 * time.Millisecond)
+		if n := counter.count.Load(); n != last {
+			last, since = n, time.Now()
+		}
+	}
+}
+
+// requireNoStatements fails if counter counts any statement over window.
+func requireNoStatements(t *testing.T, counter *statementCounter, window time.Duration, what string) {
+	t.Helper()
+	before := counter.count.Load()
+	time.Sleep(window)
+	if made := counter.count.Load() - before; made != 0 {
+		t.Errorf("%s: %d statements over %v, want none", what, made, window)
+	}
+}
+
+// eventually polls done until it reports true, failing once within passes.
+func eventually(t *testing.T, within time.Duration, what string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not within %v", what, within)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// runQueue runs Run with deps until the test ends, and fails the test if Run does not return
+// promptly once its context ends.
+func runQueue(t *testing.T, deps Deps) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(ctx, deps)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("Run did not return within 10s of its context ending")
+		}
+	})
+}
+
+// runHub runs hub until the test ends.
+func runHub(t *testing.T, hub *pglisten.Hub) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		hub.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+// insertComment writes a comment on issueKey through its trigger, which enqueues it.
+func insertComment(t *testing.T, q querier, issueKey, body string) {
+	t.Helper()
+	mustExec(t, q, `insert into comments (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', $2)`, issueKey, body)
+}
+
+// Once Run has embedded what was pending at boot and its coverage pass has added and the queue
+// embedded what no trigger saw, nothing changes, so Run makes no statement at all: no scan
+// timer, no due time, no coverage pass. The window is longer than the 5-second period the scan
+// ticker ran at before.
+func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "IDLE", "IDLE-1", "Enqueued by its trigger")
+	withTriggersOff(t, database, func(q querier) { insertComment(t, q, "IDLE-1", "Written with the triggers off") })
+	counted, counter := countedStore(t, database)
+	runQueue(t, Deps{Store: counted, Embedder: newSyncEmbedder(configuredIdentity)})
+	eventually(t, 15*time.Second, "both items current", func() bool {
+		items, current, _, _, _ := coverage(t, database, configuredIdentity)
+		return items == 2 && current == 2
+	})
+	awaitQuiet(t, counter, time.Second, 10*time.Second)
+	requireNoStatements(t, counter, 7*time.Second, "Run with nothing pending and nothing changing")
+}
+
+// A write's notification wakes the idle queue, through a real pglisten.Hub on WakeChannel: a
+// comment written once the queue has drained, and once the scan the hub's catch-up signal after
+// its LISTEN earned has run, is embedded within 6 seconds, and nothing else would have scanned
+// for it.
+func TestAWriteIsEmbeddedOnItsNotification(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "NTFY", "NTFY-1", "Written before the queue started")
+	hub := &pglisten.Hub{Owner: "embedqueue test", Dial: database.Pool.Listener}
+	wake := hub.Wake(WakeChannel)
+	connected := make(chan struct{})
+	hub.OnConnected(sync.OnceFunc(func() { close(connected) }))
+	runHub(t, hub)
+	counted, counter := countedStore(t, database)
+	started := time.Now()
+	runQueue(t, Deps{Store: counted, Embedder: newSyncEmbedder(configuredIdentity), Wake: wake})
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the hub did not connect within 10s")
+	}
+	eventually(t, 10*time.Second, "NTFY-1 embedded at boot", func() bool { return pendingCount(t, database) == 0 })
+	// The catch-up signal earns a scan no sooner than retryInterval after the boot scan began.
+	time.Sleep(time.Until(started.Add(retryInterval + time.Second)))
+	awaitQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
+
+	insertComment(t, database.Pool, "NTFY-1", "Written while the queue is idle")
+	if got := pendingCount(t, database); got != 1 {
+		t.Fatalf("pending after the comment = %d, want 1", got)
+	}
+	eventually(t, 6*time.Second, "the comment embedded after its notification", func() bool { return pendingCount(t, database) == 0 })
+}
+
+// A claim another process left on a row - it crashed before embedding it - is taken once the
+// claim lapses, by the scan the due time the queue read after its last scan arms: no write, no
+// wake and no ticker brings it.
+func TestAClaimLeftByAnotherProcessIsTakenWhenItLapses(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	seedIssue(t, database, "CLAM", "CLAM-1", "Claimed by a process that crashed")
+	claimed, _, err := scanPending(ctx, Deps{Store: storetest.SecondProcess(t, database), Embedder: newPlaceEmbedder(configuredIdentity)})
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("the other process's claim = %v, %v; want CLAM-1", claimed, err)
+	}
+	// As if most of claimWindow had already passed since that claim.
+	var lapses time.Time
+	if err := database.Pool.QueryRow(ctx, `
+		update embeddings set next_attempt_at = now() + interval '6 seconds' where id = 'CLAM-1'
+		returning next_attempt_at`).Scan(&lapses); err != nil {
+		t.Fatalf("move the claim's lapse: %v", err)
+	}
+	runQueue(t, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity)})
+	eventually(t, 15*time.Second, "CLAM-1 embedded", func() bool { return pendingCount(t, database) == 0 })
+	var embeddedAt time.Time
+	if err := database.Pool.QueryRow(ctx, `select embedded_at from embeddings where id = 'CLAM-1'`).Scan(&embeddedAt); err != nil {
+		t.Fatalf("read embedded_at: %v", err)
+	}
+	if embeddedAt.Before(lapses) || embeddedAt.After(lapses.Add(3*time.Second)) {
+		t.Errorf("CLAM-1 embedded at %v, want within 3s after its claim lapsed at %v", embeddedAt, lapses)
+	}
+}
+
+// scanPass returns no due time once nothing is pending; the lapse of another process's claim when
+// one is; and never a time sooner than retryInterval from its end - not for a claim lapsing
+// sooner, and not for a row already due that another process holds under skip locked, which the
+// scan could not claim and an immediate rescan would not either.
+func TestScanPassReturnsWhenThePendingRowsFallDue(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	seedIssue(t, database, "DUE", "DUE-1", "Drained at once")
+	deps := Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)}
+	if next := scanPass(ctx, deps); !next.IsZero() {
+		t.Errorf("after draining every row: due %v, want none", next)
+	}
+
+	seedIssue(t, database, "DUE", "DUE-2", "Claimed elsewhere")
+	if claimed, _, err := scanPending(ctx, Deps{Store: storetest.SecondProcess(t, database), Embedder: newPlaceEmbedder(configuredIdentity)}); err != nil || len(claimed) != 1 {
+		t.Fatalf("the other process's claim = %v, %v; want DUE-2", claimed, err)
+	}
+	var lapses time.Time
+	if err := database.Pool.QueryRow(ctx, `select next_attempt_at from embeddings where id = 'DUE-2'`).Scan(&lapses); err != nil {
+		t.Fatalf("read the claim's lapse: %v", err)
+	}
+	if next := scanPass(ctx, deps); !next.Equal(lapses) {
+		t.Errorf("with DUE-2 claimed elsewhere: due %v, want the claim's lapse %v", next, lapses)
+	}
+
+	requireFloor := func(when string) {
+		t.Helper()
+		before := time.Now()
+		next := scanPass(ctx, deps)
+		if next.Before(before.Add(retryInterval)) || next.After(time.Now().Add(retryInterval)) {
+			t.Errorf("%s: due %v, want retryInterval after the pass, between %v and %v", when, next, before.Add(retryInterval), time.Now().Add(retryInterval))
+		}
+	}
+	mustExec(t, database.Pool, `update embeddings set next_attempt_at = now() + interval '1 second' where id = 'DUE-2'`)
+	requireFloor("a claim lapsing in a second")
+
+	mustExec(t, database.Pool, `update embeddings set next_attempt_at = now() - interval '1 second' where id = 'DUE-2'`)
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the holding transaction: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `select 1 from embeddings where id = 'DUE-2' for update`); err != nil {
+		t.Fatalf("hold DUE-2: %v", err)
+	}
+	requireFloor("a due row another process holds")
+	if got := pendingCount(t, database); got != 1 {
+		t.Errorf("pending = %d, want DUE-2 still pending: the scan skips a held row", got)
+	}
+}
+
+// A throttled batch waits retryInterval plus its backoff before the next one, so a throttle
+// episode never sends calls more often than the scan ticker did.
+func TestAThrottledScanWaitsAtLeastRetryIntervalBeforeItsNextBatch(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "THSC", "THSC-1", "A title")
+	embedder := &fakeEmbedder{err: embedtest.FakeThrottleError{Code: "ThrottlingException"}}
+	ctx, cancel := context.WithTimeout(context.Background(), retryInterval-500*time.Millisecond)
+	defer cancel()
+	scan(ctx, Deps{Store: database, Embedder: embedder})
+	if len(embedder.calls) != 1 {
+		t.Errorf("%d embed calls in %v of throttling, want 1", len(embedder.calls), retryInterval-500*time.Millisecond)
+	}
+}
+
+// embeddings_enqueue announces on WakeChannel when its upsert writes a row - a new item, or a
+// changed text - and not when the text is the one the row already holds.
+func TestEnqueueNotifiesOnlyWhenItWritesARow(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	listener, err := database.Pool.Listener(ctx)
+	if err != nil {
+		t.Fatalf("open a listening connection: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close(context.Background()) })
+	if _, err := listener.Exec(ctx, "listen "+WakeChannel); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	notified := func(within time.Duration) bool {
+		t.Helper()
+		waitCtx, cancel := context.WithTimeout(ctx, within)
+		defer cancel()
+		notification, err := listener.WaitForNotification(waitCtx)
+		if err != nil {
+			if waitCtx.Err() == nil {
+				t.Fatalf("wait for a notification: %v", err)
+			}
+			return false
+		}
+		if notification.Channel != WakeChannel {
+			t.Fatalf("notification on %q, want %q", notification.Channel, WakeChannel)
+		}
+		return true
+	}
+	for _, step := range []struct {
+		text string
+		want bool
+	}{
+		{"First text", true},
+		{"First text", false},
+		{"Changed text", true},
+	} {
+		mustExec(t, database.Pool, `select embeddings_enqueue('issue', 'NOTE-1', $1)`, step.text)
+		within := 5 * time.Second
+		if !step.want {
+			within = 500 * time.Millisecond
+		}
+		if got := notified(within); got != step.want {
+			t.Errorf("enqueue %q: notified %t, want %t", step.text, got, step.want)
+		}
 	}
 }

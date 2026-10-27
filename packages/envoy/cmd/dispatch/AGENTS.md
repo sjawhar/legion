@@ -87,18 +87,22 @@ and its identity (`Identity`): `us.cohere.embed-v4:0` on Bedrock, `azure:<endpoi
 host>/<deployment>` on Azure. `embeddings.model` records the identity of the client that made
 each vector, `api/search.go` compares a query vector only with stored vectors of
 its own identity, and `embedqueue.Run` runs the coverage pass (`embedqueue/coverage.go`, `Cover`)
-at start and every 10 minutes: it embeds what no trigger enqueued, repairs a row whose text changed
-with the triggers off, settles a dead row with nothing to embed, and, once the configured embedder
-has answered, drops every vector another identity made and re-admits a row dead under another
+once at start: it embeds what no trigger enqueued, repairs a row whose text changed with the
+triggers off, settles a dead row with nothing to embed, and, once the configured embedder has
+answered, drops every vector another identity made and re-admits a row dead under another
 identity. Answered means an Embed by this process's queue has succeeded (`Deps.proven`, which
 `Run` shares between its two loops) or, when none has and such rows exist (one `exists` query, so a
 pass with none calls the embedder zero times), an `embedCanary` embed the pass sends succeeds; a
-failed or throttled canary leaves those rows in place for the next pass and logs one WARN with the
-identity, the error and the counts left. `coverageSources` there is the one list of what meaning
+failed or throttled canary leaves those rows in place and logs one WARN with the identity, the
+error and the counts left. After the boot pass only those identity steps run again
+(`runCoverage`): at once when the queue's first embed proves an embedder the pass's canary could
+not, and every `identityRecheckInterval` (10 minutes, jittered) while a run still finds another
+identity's rows, so a vector an old-configuration process commits during a roll is dropped; once a
+run finds none, the loop holds no timer. `coverageSources` there is the one list of what meaning
 search covers, read by the pass and by `GET /api/v1/search/coverage` (`embedqueue.Coverage`); its
 texts are the triggers' (0073-0077) byte for byte, so a kind added to search changes both. There is
-no backfill subcommand: the pass is the only catch-up, and it takes no lease, so every process of a
-deployment takes the same embedder settings (README "Search").
+no backfill subcommand: the boot pass is the only catch-up, and it takes no lease, so every process
+of a deployment takes the same embedder settings (README "Search").
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries (`api.SeedRepoProjects`). Stored dashboard mappings are

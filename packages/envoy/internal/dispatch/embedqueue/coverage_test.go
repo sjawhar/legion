@@ -3,6 +3,7 @@ package embedqueue
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -624,7 +624,7 @@ func TestASuccessfulEmbedProvesTheEmbedderForThePass(t *testing.T) {
 	seedForeignRows(t, database, "PRVN")
 	seedIssue(t, database, "PRVN", "PRVN-3", "Pending here")
 	embedder := newPlaceEmbedder(configuredIdentity)
-	deps := Deps{Store: database, Embedder: embedder, proven: new(atomic.Bool)}
+	deps := Deps{Store: database, Embedder: embedder, proven: newProof()}
 	drain(t, deps)
 	if !deps.embedderProven() {
 		t.Fatal("a drain that embedded PRVN-3 did not record the embedder as proven")
@@ -714,24 +714,119 @@ func TestTwoConcurrentPassesLeaveTheStateOnePassLeaves(t *testing.T) {
 	}
 }
 
-// A rolling deploy that changes the identity converges: a vector the old configuration's process
-// commits after the new one's pass is dropped by its next pass and embedded again under the new.
-func TestTheNextPassDropsAVectorTheOldConfigurationCommittedAfterThePass(t *testing.T) {
-	database := storetest.Open(t)
-	ctx := context.Background()
-	seedIssue(t, database, "ROLL", "ROLL-1", "Rolling title")
-	current := Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)}
-	cover(t, current)
-	drain(t, Deps{Store: storetest.SecondProcess(t, database), Embedder: newPlaceEmbedder(foreignIdentity)})
+// shortenIdentityRecheck sets identityRecheckInterval to d for the test. Register it before
+// runQueue, so the interval is restored only once Run has returned.
+func shortenIdentityRecheck(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := identityRecheckInterval
+	identityRecheckInterval = d
+	t.Cleanup(func() { identityRecheckInterval = old })
+}
+
+// modelOf is the identity of the vector the row holds, empty when it holds none.
+func modelOf(t *testing.T, database *store.Store, id string) string {
+	t.Helper()
 	var model string
-	if err := database.Pool.QueryRow(ctx, `select model from embeddings where kind = 'issue' and id = 'ROLL-1'`).Scan(&model); err != nil || model != foreignIdentity {
-		t.Fatalf("model after the old process's drain = %q, %v; want %q", model, err, foreignIdentity)
+	if err := database.Pool.QueryRow(context.Background(), `
+		select case when embedding is null then '' else coalesce(model, '') end from embeddings where kind = 'issue' and id = $1`, id).Scan(&model); err != nil {
+		t.Fatalf("read %s's model: %v", id, err)
 	}
-	cover(t, current)
-	drain(t, current)
-	if err := database.Pool.QueryRow(ctx, `select model from embeddings where kind = 'issue' and id = 'ROLL-1'`).Scan(&model); err != nil || model != configuredIdentity {
-		t.Fatalf("model after the next pass and a drain = %q, %v; want %q", model, err, configuredIdentity)
+	return model
+}
+
+// commitForeignVector writes id a vector of foreignIdentity at its current text, as an
+// old-configuration process's commitEmbeddings does during a rolling deploy.
+func commitForeignVector(t *testing.T, database *store.Store, id string) {
+	t.Helper()
+	mustExec(t, database.Pool, `
+		update embeddings set embedding = $1::vector, model = $2, embedded_hash = content_hash, embedded_at = now()
+		where kind = 'issue' and id = $3`, embed.Literal(oneVector()), foreignIdentity, id)
+}
+
+// A rolling deploy that changes the identity converges: the boot pass found another identity's
+// rows, so the coverage loop runs the identity steps again after identityRecheckInterval, and a
+// vector the old configuration's process commits after the boot pass is dropped by that run and
+// embedded again under the new identity.
+func TestTheIdentityRecheckDropsAVectorTheOldConfigurationCommitsAfterTheBootPass(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "ROLL", "ROLL-1", "Rolling title")
+	seedIssue(t, database, "ROLL", "ROLL-2", "Embedded before the roll")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(foreignIdentity)})
+	mustExec(t, database.Pool, `update embeddings set embedding = null, model = null, embedded_hash = null, next_attempt_at = now() where id = 'ROLL-1'`)
+	shortenIdentityRecheck(t, 3*time.Second)
+	runQueue(t, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity)})
+	// The boot pass has dropped ROLL-2's vector, and the queue has embedded ROLL-1 here.
+	eventually(t, 10*time.Second, "the boot pass and the boot drain", func() bool {
+		return modelOf(t, database, "ROLL-1") == configuredIdentity && modelOf(t, database, "ROLL-2") != foreignIdentity
+	})
+	commitForeignVector(t, database, "ROLL-1")
+	eventually(t, 15*time.Second, "ROLL-1 dropped by the recheck and embedded again here", func() bool {
+		return modelOf(t, database, "ROLL-1") == configuredIdentity
+	})
+}
+
+// runCoverage holds no timer once a run finds no row of another identity: with none at boot it
+// returns after the boot pass, and with some it returns after the first recheck that finds none
+// left, having dropped and re-admitted them.
+func TestTheCoverageLoopStopsOnceNoForeignRowRemains(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seed    func(t *testing.T, database *store.Store)
+		recheck time.Duration
+	}{
+		// An hour's interval: a loop that armed a recheck would not return within the test.
+		"none at boot": {
+			seed: func(t *testing.T, database *store.Store) {
+				seedIssue(t, database, "NONE", "NONE-1", "Embedded here")
+				drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+			},
+			recheck: time.Hour,
+		},
+		"some at boot": {
+			seed:    func(t *testing.T, database *store.Store) { seedForeignRows(t, database, "SOME") },
+			recheck: 200 * time.Millisecond,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			database := storetest.Open(t)
+			tc.seed(t, database)
+			shortenIdentityRecheck(t, tc.recheck)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			runCoverage(ctx, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity), proven: newProof()})
+			if ctx.Err() != nil {
+				t.Fatal("the coverage loop still waited after 10s, want it returned once no foreign row remained")
+			}
+			var foreign bool
+			if err := database.Pool.QueryRow(context.Background(), foreignRows, coverageKinds, configuredIdentity).Scan(&foreign); err != nil {
+				t.Fatalf("look for foreign rows: %v", err)
+			}
+			if foreign {
+				t.Error("foreign rows remain after the loop returned")
+			}
+		})
 	}
+}
+
+// A boot pass that skipped the identity steps because the embedder had not answered its canary
+// runs them as soon as the queue's first embed succeeds, not identityRecheckInterval later.
+func TestTheIdentityStepsRunOnceTheQueueFirstEmbeds(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "ANSR", "ANSR-1", "Pending here")
+	seedIssue(t, database, "ANSR", "ANSR-2", "Embedded elsewhere")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(foreignIdentity)})
+	mustExec(t, database.Pool, `update embeddings set embedding = null, model = null, embedded_hash = null, next_attempt_at = now() where id = 'ANSR-1'`)
+	embedder := newSyncEmbedder(configuredIdentity)
+	embedder.setErr(errors.New("simulated: the deployment does not answer yet"))
+	runQueue(t, Deps{Store: database, Embedder: embedder})
+	// Two canaries fail: the boot pass's, and the one confirming ANSR-1's own failed embed.
+	eventually(t, 10*time.Second, "the boot pass's canary", func() bool { return embedder.canaryCalls() >= 2 })
+	if got := modelOf(t, database, "ANSR-2"); got != foreignIdentity {
+		t.Fatalf("ANSR-2 holds %q before the embedder answered, want the foreign vector left in place", got)
+	}
+	embedder.setErr(nil)
+	eventually(t, 20*time.Second, "ANSR-2's foreign vector dropped and embedded again here", func() bool {
+		return modelOf(t, database, "ANSR-2") == configuredIdentity
+	})
 }
 
 // Coverage over every state an item can be in: no row (aging from when it was written), stale

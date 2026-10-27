@@ -1,8 +1,9 @@
 // Package embedqueue durably retries the model service's embedding calls for Dispatch's meaning
 // search, on whichever place (Bedrock or Azure AI Foundry) the deployment configures. A write's
 // AFTER INSERT/UPDATE trigger (0073-0077) upserts a pending row into embeddings with the latest
-// text and a hash of it in the same transaction as the write, and this package's poller embeds
-// whatever that enqueue left pending, with the same scan-then-retry shape as the event outbox
+// text and a hash of it in the same transaction as the write, and announces it on
+// dispatch_embeddings (0121); this package's scan loop, woken by that announcement, embeds
+// whatever that enqueue left pending, with the same claim-then-retry shape as the event outbox
 // (internal/dispatch/outbox): a write never fails because the embedder did, since the model
 // service is never called inside the enqueueing transaction. A text with nothing to embed
 // (nothingToEmbed) is settled with no vector and no model call instead. The coverage pass
@@ -18,15 +19,24 @@ import (
 	"math"
 	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// WakeChannel is the Postgres notification channel embeddings_enqueue announces on each time it
+// writes a row (migration 0121): the channel whose pglisten.Hub wake the server passes as
+// Deps.Wake.
+const WakeChannel = "dispatch_embeddings"
+
 const (
+	// retryInterval is the scan loop's pace, the period of the ticker it replaced: scans a wake
+	// asks for start at least this far apart (duty.WokenLoop.MinGap), and a scan's own next due
+	// time is never sooner than this after it ends, so no path scans more often than that ticker
+	// did. A throttled batch waits this long plus its backoff before the next.
 	retryInterval = 5 * time.Second
 	// claimWindow is how long scanPending's claim keeps a row off every other scanner's list.
 	// It is a plain UPDATE ... RETURNING, not a transaction held open across the embed call: this
@@ -60,12 +70,48 @@ var renewClaimInterval = claimWindow / 2
 type Deps struct {
 	Store    *store.Store
 	Embedder embed.Embedder
+	// Wake is signalled when a write may have left a row pending: in the server, the shared
+	// pglisten.Hub's wake on dispatch_embeddings, which embeddings_enqueue notifies each time it
+	// writes a row (0121) and which the hub also signals after every successful LISTEN, so a row
+	// written while the listener had no connection is scanned once it has one again. Run's scan
+	// loop does not wait for it to start: it scans at start whatever the listener's state. Nil
+	// leaves the loop with its start, its own due times and the coverage pass's rows.
+	Wake <-chan struct{}
 	// proven records that an Embed call this process's queue made has succeeded (embedDocuments
-	// sets it), which is what lets Cover act on rows another identity left with no canary of its
-	// own. Run gives its two loops one between them, since each holds a copy of Deps; it is nil
-	// for a caller that builds Deps itself (a test calling ProcessBatch or Cover directly), which
-	// then records nothing, so each such Cover proves the embedder with its own canary.
-	proven *atomic.Bool
+	// records it), which is what lets Cover act on rows another identity left with no canary of
+	// its own, and what wakes Run's coverage loop to run the identity steps a pass skipped. Run
+	// gives its two loops one between them, since each holds a copy of Deps; it is nil for a
+	// caller that builds Deps itself (a test calling ProcessBatch or Cover directly), which then
+	// records nothing, so each such Cover proves the embedder with its own canary.
+	proven *proof
+	// enqueued is signalled, without blocking, each time Cover changes rows: it writes embeddings
+	// itself rather than through embeddings_enqueue, so no notification announces what it makes
+	// pending, and Run's scan loop wakes on this instead. Nil for a caller that builds Deps itself.
+	enqueued chan struct{}
+}
+
+// proof is a record, set once, that an Embed call this process's queue made has succeeded.
+type proof struct {
+	once sync.Once
+	done chan struct{}
+}
+
+func newProof() *proof {
+	return &proof{done: make(chan struct{})}
+}
+
+func (p *proof) record() {
+	if p != nil {
+		p.once.Do(func() { close(p.done) })
+	}
+}
+
+// answered is closed once the embedder has answered; a nil proof's channel is nil, never ready.
+func (p *proof) answered() <-chan struct{} {
+	if p == nil {
+		return nil
+	}
+	return p.done
 }
 
 // embedDocuments embeds texts as documents with the configured embedder and, when the call
@@ -73,35 +119,59 @@ type Deps struct {
 // goes through it, the canaries' included.
 func (d Deps) embedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
 	vectors, err := d.Embedder.Embed(ctx, texts, embed.InputDocument)
-	if err == nil && d.proven != nil {
-		d.proven.Store(true)
+	if err == nil {
+		d.proven.record()
 	}
 	return vectors, err
 }
 
 // embedderProven reports whether an Embed call this process's queue made has succeeded.
 func (d Deps) embedderProven() bool {
-	return d.proven != nil && d.proven.Load()
+	select {
+	case <-d.proven.answered():
+		return true
+	default:
+		return false
+	}
 }
 
-// Run drains pending embeddings at startup and periodically, so a dropped in-process
-// notification cannot strand a row, and beside that loop runs the coverage pass (Cover) at
-// startup and every coverageInterval, so content no trigger saw is embedded with no person-run
-// step. The pass runs on its own goroutine: one over a large database takes a while, and the
-// scan loop keeps draining what the pass has already added meanwhile. Each loop gets a
-// connection mark of its own (store.ForConcurrentRead): the pool refuses a caller a second
-// connection while its mark says it holds one, so loops sharing one mark would refuse each
-// other whenever the other had a cursor open. It returns once ctx is cancelled and both loops
-// have stopped. Both loops share one record of whether the embedder has answered yet
-// (Deps.proven): a batch the scan loop embeds proves it for the pass. Run does nothing when
-// deps.Embedder is nil: Dispatch with no place configured, or one that could not be built at
-// boot, never starts either loop, and the next boot with an embedder covers everything left
-// behind.
+// signalEnqueued wakes Run's scan loop for rows Cover just made pending, without blocking: one
+// signal waiting in the buffer already earns the scan.
+func (d Deps) signalEnqueued() {
+	if d.enqueued == nil {
+		return
+	}
+	select {
+	case d.enqueued <- struct{}{}:
+	default:
+	}
+}
+
+// Run drains pending embeddings at startup and then whenever something may have left a row
+// pending - deps.Wake, a row Cover wrote, or the due time of a row already pending (a failed row's
+// retry, another process's claim lapsing) - and beside that loop runs the coverage pass (Cover)
+// once at startup, so content no trigger saw is embedded with no person-run step (runCoverage
+// says when it runs the identity steps again). With nothing pending and nothing changing, the
+// scan loop holds no timer and makes no statement. The pass runs on its own goroutine: one over a
+// large database takes a while, and the scan loop keeps draining what the pass has already added
+// meanwhile. Each loop gets a connection mark of its own (store.ForConcurrentRead): the pool
+// refuses a caller a second connection while its mark says it holds one, so loops sharing one
+// mark would refuse each other whenever the other had a cursor open. It returns once ctx is
+// cancelled and both loops have stopped. Both loops share one record of whether the embedder has
+// answered yet (Deps.proven): a batch the scan loop embeds proves it for the pass. Run does
+// nothing when deps.Embedder is nil: Dispatch with no place configured, or one that could not be
+// built at boot, never starts either loop, and the next boot with an embedder covers everything
+// left behind.
+//
+// The scan loop takes no lease: scanPending's claim (for update skip locked, then next_attempt_at
+// pushed out by claimWindow) already keeps two processes' scans off each other's rows.
 func Run(ctx context.Context, deps Deps) {
 	if deps.Embedder == nil {
 		return
 	}
-	deps.proven = new(atomic.Bool)
+	deps.proven = newProof()
+	wake := make(chan struct{}, 1)
+	deps.enqueued = wake
 	coverageCtx, err := store.ForConcurrentRead(ctx)
 	if err != nil {
 		slog.Error("dispatch embedqueue: not started: the caller holds a pooled connection", "error", err)
@@ -113,25 +183,73 @@ func Run(ctx context.Context, deps Deps) {
 		return
 	}
 	var wg sync.WaitGroup
-	wg.Go(func() { runCoverage(coverageCtx, deps) })
 	defer wg.Wait()
-	scan(scanCtx, deps)
-	ticker := time.NewTicker(retryInterval)
-	defer ticker.Stop()
+	wg.Go(func() { runCoverage(coverageCtx, deps) })
+	if deps.Wake != nil {
+		wg.Go(func() { relayWakes(ctx, deps.Wake, wake) })
+	}
+	duty.RunWoken(scanCtx, duty.WokenLoop{
+		Wake:   wake,
+		MinGap: retryInterval,
+		Pass:   func(ctx context.Context) time.Time { return scanPass(ctx, deps) },
+	})
+}
+
+// relayWakes copies each signal on from into to, the one channel the scan loop waits on, so a
+// notification and a row Cover wrote wake it alike; a signal already waiting in to absorbs the
+// next.
+func relayWakes(ctx context.Context, from <-chan struct{}, to chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			scan(scanCtx, deps)
+		case <-from:
+			select {
+			case to <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
 
-// scan drains what is immediately eligible right now, backing off the whole batch cadence (not
-// just the rows it just saw) while the model service is throttling - the poller is called again
-// by Run's own ticker in any case, but a sustained throttle episode should not have it hammering
-// the model service every five seconds regardless.
+// nextPendingDue reads when the earliest pending row falls due, through embeddings_pending's
+// leading next_attempt_at (0072): a failed row's retry, or another process's claim that lapses
+// unrenewed. Null when nothing is pending.
+const nextPendingDue = `
+	select min(next_attempt_at) from embeddings
+	where embedded_hash is distinct from content_hash and not dead`
+
+// scanPass is the scan loop's pass: it drains what is eligible now (scan), then returns when the
+// earliest row still pending falls due, and the zero time when none is, so an idle queue holds no
+// timer. The due time is never sooner than retryInterval from now: a row that stays eligible
+// (a blocked batch's, or one another process's scan held under skip locked) would otherwise be
+// scanned again at once, and a retry due sooner than that waited for the old ticker's next tick
+// too. A failed read retries after retryInterval, as the ticker would have.
+func scanPass(ctx context.Context, deps Deps) time.Time {
+	scan(ctx, deps)
+	floor := time.Now().Add(retryInterval)
+	var due *time.Time
+	if err := deps.Store.Pool.QueryRow(ctx, nextPendingDue).Scan(&due); err != nil {
+		if ctx.Err() == nil {
+			slog.Error("dispatch embedqueue: read when the next pending embedding is due", "error", err)
+		}
+		return floor
+	}
+	if due == nil {
+		return time.Time{}
+	}
+	if due.Before(floor) {
+		return floor
+	}
+	return *due
+}
+
+// scan drains what is immediately eligible right now: batch after batch while each comes back
+// full, so a burst (a bulk import, a coverage pass) is drained at batchPause's pace rather than a
+// batch per scan. While the model service is throttling it backs off the whole batch cadence (not
+// just the rows it just saw) by retryInterval plus batchBackoff before each next batch, inside the
+// scan, so wakes arriving meanwhile cannot hurry the next call to a provider that has already
+// said to slow down.
 func scan(ctx context.Context, deps Deps) {
 	consecutiveThrottles := 0
 	for {
@@ -142,7 +260,7 @@ func scan(ctx context.Context, deps Deps) {
 		}
 		if throttled {
 			consecutiveThrottles++
-			if !pauseFor(ctx, batchBackoff(consecutiveThrottles)) {
+			if !pauseFor(ctx, retryInterval+batchBackoff(consecutiveThrottles)) {
 				return
 			}
 			continue
