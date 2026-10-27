@@ -44340,6 +44340,7 @@ var issueKey = string2().regex(DISPATCH_KEY_PATTERN);
 var timestamp = exports_iso.datetime({ offset: true });
 var LEGION_WORKFLOW_PHASES = [
   "admitted",
+  "awaiting_person",
   "planning",
   "implementing",
   "testing",
@@ -44452,6 +44453,32 @@ var legionCheckView = strictObject({
   nextWakeAt: timestamp,
   last: boolean2()
 });
+var LEGION_WAIT_ANSWERS = [
+  "ask",
+  "retracted",
+  "closed",
+  "reply",
+  "turn",
+  "approved",
+  "changes_requested",
+  "version"
+];
+var legionWaitTimes = {
+  since: timestamp.optional(),
+  answeredAt: timestamp.optional(),
+  answeredBy: _enum2(LEGION_WAIT_ANSWERS).optional()
+};
+var legionWaitingOn = discriminatedUnion("kind", [
+  strictObject({ kind: literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
+  strictObject({
+    kind: literal("gate"),
+    gateVersion: number2().int().positive(),
+    artifactId: nonEmptyString,
+    ...legionWaitTimes
+  })
+]).refine((wait) => wait.answeredAt === undefined === (wait.answeredBy === undefined), {
+  message: "answeredAt and answeredBy appear together"
+});
 var legionPendingStatusWrite = strictObject({
   issue: nonEmptyString,
   payload: record(string2(), unknown()),
@@ -44484,6 +44511,7 @@ var legionIssue = strictObject({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
+  waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional()
 });
 var daemonInfo = strictObject({
@@ -44772,6 +44800,71 @@ async function callReadyWithRetry(label, call) {
       const retryDelay = Promise.withResolvers();
       setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
       await retryDelay.promise;
+    }
+  }
+}
+var DAEMON_RESTART_BUDGET_MS = 10 * 60000;
+var DAEMON_RESTART_FIRST_DELAY_MS = 500;
+var DAEMON_RESTART_MAX_DELAY_MS = 30000;
+function daemonUnreachable(error) {
+  if (error instanceof LegionDaemonApiError) {
+    return (error.status === 502 || error.status === 503) && error.code === undefined ? "dropped" : undefined;
+  }
+  if (!(error instanceof Error))
+    return;
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  if (code === "ConnectionRefused" || code === "ECONNREFUSED")
+    return "refused";
+  if (code === "ConnectionClosed" || code === "ECONNRESET" || code === "EPIPE")
+    return "dropped";
+  return error instanceof TypeError && (error.message === "Failed to fetch" || error.message === "fetch failed") ? "dropped" : undefined;
+}
+async function retryWhileDaemonRestarts(label, call, options = {}) {
+  const { signal } = options;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms, abort) => {
+    const wait = Promise.withResolvers();
+    const timer = setTimeout(wait.resolve, ms);
+    abort?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      wait.resolve();
+    }, { once: true });
+    return wait.promise;
+  });
+  const deadline = now() + DAEMON_RESTART_BUDGET_MS;
+  let delay = DAEMON_RESTART_FIRST_DELAY_MS;
+  let told = false;
+  let dropped = false;
+  let lastFailure;
+  for (;; ) {
+    if (signal?.aborted && lastFailure !== undefined) {
+      throw new Error(`${label}: the Legion daemon was unreachable (${messageFor(lastFailure)}) and the call was aborted${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`);
+    }
+    try {
+      return await call();
+    } catch (error) {
+      const unreachable = daemonUnreachable(error);
+      if (unreachable === undefined) {
+        if (dropped && error instanceof LegionDaemonApiError) {
+          error.message += ` (an earlier attempt of ${label} lost its connection before the daemon answered, and may have been applied: read the record before calling again)`;
+        }
+        throw error;
+      }
+      lastFailure = error;
+      dropped ||= unreachable === "dropped";
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        throw new Error(`${label}: the Legion daemon was unreachable (${messageFor(error)}) and stayed so for ${DAEMON_RESTART_BUDGET_MS / 60000} minutes${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`);
+      }
+      if (!told && !signal?.aborted) {
+        told = true;
+        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60000} minutes.`;
+        console.error(`[legion] ${message}`);
+        options.onRetrying?.(message);
+      }
+      if (!signal?.aborted)
+        await sleep(Math.min(delay, remaining), signal);
+      delay = Math.min(delay * 2, DAEMON_RESTART_MAX_DELAY_MS);
     }
   }
 }
@@ -47324,7 +47417,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 39
+  daemonApiVersion: 40
 };
 
 // src/channel-forwarder.ts
@@ -48417,36 +48510,8 @@ async function executePhaseOp(runtime, input) {
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
-    case "handoff_complete": {
-      const record = recordFrom(await daemon.state(), claim.issue);
-      if (claim.role === "implementer" && record.phase === "done") {
-        if (record.check !== undefined) {
-          if (args.verdict === undefined) {
-            throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
-          }
-          if (args.ready === true) {
-            throw new Error("handoff_complete on a production check is no READY: leave ready out");
-          }
-        }
-        return daemon.handoffComplete({
-          grantId: await mintClaimGrant(daemon, claim),
-          summary: args.summary,
-          verdict: args.verdict ?? "",
-          ready: false
-        });
-      }
-      if (args.verdict === "pending") {
-        throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
-      }
-      const commit = await runtime.handoffCommit(record.phase, claim.role);
-      return daemon.handoffComplete({
-        grantId: await mintClaimGrant(daemon, claim),
-        summary: args.summary,
-        verdict: args.verdict ?? "",
-        ready: args.ready ?? false,
-        commit
-      });
-    }
+    case "handoff_complete":
+      return retryWhileDaemonRestarts("handoff_complete", () => completeHandoff(runtime, args), runtime.restart);
     case "request_backward_move": {
       let issue;
       if (claim.role === "architect") {
@@ -48467,6 +48532,37 @@ async function executePhaseOp(runtime, input) {
     }
   }
 }
+async function completeHandoff(runtime, args) {
+  const { daemon, claim } = runtime;
+  const record = recordFrom(await daemon.state(), claim.issue);
+  if (claim.role === "implementer" && record.phase === "done") {
+    if (record.check !== undefined) {
+      if (args.verdict === undefined) {
+        throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
+      }
+      if (args.ready === true) {
+        throw new Error("handoff_complete on a production check is no READY: leave ready out");
+      }
+    }
+    return daemon.handoffComplete({
+      grantId: await mintClaimGrant(daemon, claim),
+      summary: args.summary,
+      verdict: args.verdict ?? "",
+      ready: false
+    });
+  }
+  if (args.verdict === "pending") {
+    throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
+  }
+  const commit = await runtime.handoffCommit(record.phase, claim.role);
+  return daemon.handoffComplete({
+    grantId: await mintClaimGrant(daemon, claim),
+    summary: args.summary,
+    verdict: args.verdict ?? "",
+    ready: args.ready ?? false,
+    commit
+  });
+}
 
 // src/legion-tool.ts
 var LEGION_TOOL_NAME = "legion";
@@ -48481,12 +48577,17 @@ function legionToolDefinition() {
     inputSchema: toJSONSchema(object({ op: _enum2(PHASE_OPS), ...phaseOpParameters(exports_external) }))
   };
 }
-async function executeLegionTool(runtime, input) {
+async function executeLegionTool(runtime, input, signal) {
   const claim = runtime.claim();
   if (claim === undefined) {
     throw new Error("this session has no Legion claim yet: the pane registers with the daemon once its first turn starts");
   }
-  return executePhaseOp({ daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit }, input);
+  return executePhaseOp({
+    daemon: runtime.daemon,
+    claim,
+    handoffCommit: runtime.handoffCommit,
+    ...signal === undefined ? {} : { restart: { signal } }
+  }, input);
 }
 
 // src/session-title.ts
@@ -49259,14 +49360,14 @@ async function runEnvoyChannelServer() {
     ...daemon === undefined ? [] : [legionToolDefinition()]
   ];
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
       };
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments));
+      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments, extra.signal));
     }
     if (runtime === undefined)
       throw new Error("Envoy channel server is still starting");

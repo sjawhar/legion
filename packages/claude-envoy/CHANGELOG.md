@@ -26,6 +26,18 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
+  `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
+  while its architect waits on a person's answer, and the issue field `waitingOn`, naming the
+  question (`kind: "ask"`) or, for the gate waits of a later release, the spec version
+  (`kind: "gate"`), when the wait began, and when and by what act the wait was answered (not always
+  a person's). The MCP server's strict state reader admits both, and nothing this plugin reads or
+  writes moved; `dist/` was rebuilt and a session of it registers with a daemon at 40. The
+  generated `legion-architect` skill opens a question on the root and ends its turn after handing
+  it back, takes a resume task that says "this resume is your design-approved wake" as its
+  `design-approved` wake, and has a waiting root's resume task, not a notice, name a changes
+  request; the generated `legion-controller` skill reads the `awaiting-person` wake and a waiting
+  root as no reason to label or admit anything.
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
@@ -62,6 +74,12 @@
   a topic as before (INFRA-122).
 
 ### Fixed
+
+- The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
+  closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
+  minutes, each attempt with a fresh grant, until the MCP client cancels the request
+  (`notifications/cancelled`), after which nothing more is sent. The retry notice goes to the MCP
+  server's stderr only. Every answer the daemon gives is passed on at once.
 
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
