@@ -57,8 +57,9 @@ trigger goes away. Then look for input that is now lost without any error.
 - Review round 1 found that a block-level `<span data-dispatch>` wraps the following blocks in a
   mark node. The first fit check treated that child as fitting, and the ask still vanished
   (`createNodeInParserFail … heading(dispatchAsk("Heading words"))`). Fixed in `75cd715e`.
-- `packages/proof-editor/tests/read-only-directives.test.ts:282` loads the server schema.
-  `:401-424` stubs `console.error` for the byte-order-mark row.
+- `packages/proof-editor/tests/block-schema-fixture.ts` loads the server schema, which
+  `tests/read-only-directives.test.ts` and `tests/typed-block-drawing.test.ts` both import.
+  `read-only-directives.test.ts:372-398` stubs `console.error` for the byte-order-mark row.
 - Related rules: `docs/solutions/integration-patterns/a-value-a-library-consumes-is-validated-with-that-librarys-own-parser-read-back-whole-INFRA-271.md`
   (check with the library's own rule) and
   `docs/solutions/testing/evidence-can-be-absent-rather-than-wrong-and-absence-reads-exactly-like-success-INFRA-31.md`.
