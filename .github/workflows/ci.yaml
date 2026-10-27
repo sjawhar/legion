@@ -13,12 +13,12 @@ name: CI
 # walks through it.
 #
 # Caches: no pull-request run writes an Actions cache entry. setup-go caches nothing here
-# (`cache: false` on every step). The jobs that cache Go restore one of four families with
+# (`cache: false` on every step). The jobs that cache Go restore one of five families with
 # actions/cache/restore, by its prefix when the exact key misses: go-daemon (typecheck, test,
-# pi-legion), go-envoy (envoy-e2e-local, docs), go-envoy-infra (envoy-infra-go) and go-notices
-# (lint's notices step). Each saves its family with actions/cache/save as its last step, and only
-# on a push to main whose job succeeded and whose restore missed the exact key. setup-bun reads and
-# writes its cache only on main (.github/actions/setup-bun).
+# pi-legion), go-docs (docs), go-envoy (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and
+# go-notices (lint's notices step). Each saves its family with actions/cache/save as its last step,
+# and only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
+# reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -74,7 +74,10 @@ jobs:
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       go_notices: ${{ steps.filter.outputs.go_notices }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # On pull_request dorny/paths-filter reads the file list from the API and never reads the
+      # tree; push and merge_group diff with git and need the clone.
+      - if: github.event_name != 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -265,6 +268,50 @@ jobs:
               - 'packages/daemon/internal/wait/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
+            # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
+            listener_command: &listener_command
+              - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/internal/bus/*'
+              - 'packages/envoy/internal/cistore/*'
+              - 'packages/envoy/internal/config/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dedupe/*'
+              - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
+              - 'packages/envoy/internal/logging/*'
+              - 'packages/envoy/internal/metrics/*'
+              - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
+              - 'packages/envoy/internal/verify/*'
+              - 'packages/envoy/internal/webhook/*'
+            # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
+            # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
+            # .go files cmd/dispatch/settings_test.go:136 walks, and the pod spec
+            # cmd/dispatch/pod_grace_period_test.go:17 reads.
+            dispatch_command_tests: &dispatch_command_tests
+              - 'packages/envoy/cmd/dispatch/**'
+              - 'packages/envoy/internal/dispatch/**'
+              - 'packages/envoy/internal/bus/*'
+              - 'packages/envoy/internal/cmdtest/*'
+              - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/oidc/**'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/testsocks5/*'
+              - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
+            # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
+            # through the mise .github/actions/install-jj leaves.
+            omp_install: &omp_install
+              - '.omp-pin'
+              - '.github/actions/install-omp/**'
+              - '.github/actions/install-jj/**'
+              # install-jj reads the mise version and checksum it installs from here.
+              - 'packages/daemon/docker/worker.Dockerfile'
 
             # `go vet -tags e2e ./...` in packages/daemon.
             typecheck:
@@ -315,13 +362,10 @@ jobs:
               - 'deploy/kubernetes/daemon/legion.yaml.example'
               - 'deploy/kubernetes/operator-route/pod.yml'
               - 'docs/kubernetes.md'
-              # The tools the job installs: jj and mise (install-jj reads worker.Dockerfile's ARGs,
-              # under packages/daemon), Oh My Pi from .omp-pin, uv, and the NATS images.
-              - '.github/actions/install-jj/**'
-              - '.github/actions/install-omp/**'
+              # The tools the job installs: jj, mise and Oh My Pi, uv, and the NATS images.
+              - *omp_install
               - '.github/actions/install-uv/**'
               - '.github/actions/pull-test-images/**'
-              - '.omp-pin'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read.
             docs:
@@ -462,11 +506,7 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - 'scripts/third-party-notices.ts'
               - 'scripts/e2e/lib/pack-plugin.sh'
-              - '.omp-pin'
-              - '.github/actions/install-omp/**'
-              - '.github/actions/install-jj/**'
-              # install-jj reads the mise version and checksum it installs from here.
-              - 'packages/daemon/docker/worker.Dockerfile'
+              - *omp_install
             # The Legion plugin: its sources, the workspace packages its bundle inlines, the Oh My
             # Pi its real-binary tests run (extensions/legion-phase-stall-omp.test.ts), and every
             # file its tests and typecheck read outside the package.
@@ -507,10 +547,7 @@ jobs:
               - 'deploy/kubernetes/daemon/controller.yaml.example'
               # scripts/skill-scenarios/rig.test.ts:13,129,1009 and rig.sh:215.
               - 'scripts/e2e/lib/**'
-              - '.omp-pin'
-              - '.github/actions/install-omp/**'
-              - '.github/actions/install-jj/**'
-              - 'packages/daemon/docker/worker.Dockerfile'
+              - *omp_install
             dispatch:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -592,23 +629,13 @@ jobs:
               - *go_workspace
               - 'packages/envoy/infra/**'
               - *dispatch_server
-              - 'packages/envoy/cmd/listener/*'
+              - *listener_command
               - 'packages/envoy/daemonpermissions/*'
-              - 'packages/envoy/internal/cistore/*'
               - 'packages/envoy/internal/cmdtest/*'
-              - 'packages/envoy/internal/config/*'
               - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/dedupe/*'
               - 'packages/envoy/internal/dispatch/githubapp/**'
-              - 'packages/envoy/internal/kvwatch/*'
-              - 'packages/envoy/internal/logging/*'
-              - 'packages/envoy/internal/metrics/*'
-              - 'packages/envoy/internal/session/*'
-              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
-              - 'packages/envoy/internal/verify/*'
-              - 'packages/envoy/internal/webhook/*'
               # The image pull before its tests, of the consts in testnats/nats.go and
               # testpg/testpg.go.
               - '.github/actions/pull-test-images/**'
@@ -627,26 +654,12 @@ jobs:
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/delivery-live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
-            # `go test -tags memory ./cmd/dispatch`: cmd/dispatch/settings_test.go:136 walks the
-            # .go files of cmd/dispatch and internal/dispatch, and cmd/dispatch/memory_profile_test.go:147-148
+            # `go test -tags memory ./cmd/dispatch`: cmd/dispatch/memory_profile_test.go:147-148
             # reads the guides below.
             dispatch_memory:
               - '.github/workflows/ci.yaml'
               - *go_workspace
-              - 'packages/envoy/cmd/dispatch/**'
-              - 'packages/envoy/internal/dispatch/**'
-              - 'packages/envoy/internal/bus/*'
-              - 'packages/envoy/internal/cmdtest/*'
-              - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/githubappjwt/*'
-              - 'packages/envoy/internal/id/*'
-              - 'packages/envoy/internal/oidc/**'
-              - 'packages/envoy/internal/pglisten/*'
-              - 'packages/envoy/internal/pgmigrate/*'
-              - 'packages/envoy/internal/routing/*'
-              - 'packages/envoy/internal/testsocks5/*'
-              # cmd/dispatch/pod_grace_period_test.go:17.
-              - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
+              - *dispatch_command_tests
               - 'packages/envoy/AGENTS.md'
               - 'packages/envoy/README.md'
               - 'scripts/e2e/README.md'
@@ -656,20 +669,8 @@ jobs:
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
               - *go_workspace
-              - 'packages/envoy/cmd/dispatch/**'
-              - 'packages/envoy/internal/dispatch/**'
-              - 'packages/envoy/internal/bus/*'
-              - 'packages/envoy/internal/cmdtest/*'
-              - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/githubappjwt/*'
-              - 'packages/envoy/internal/id/*'
-              - 'packages/envoy/internal/oidc/**'
-              - 'packages/envoy/internal/pglisten/*'
-              - 'packages/envoy/internal/pgmigrate/*'
-              - 'packages/envoy/internal/routing/*'
+              - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
-              - 'packages/envoy/internal/testsocks5/*'
-              - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # `go test -tags multiprocess ./cmd/broker`.
             broker_multiprocess:
               - '.github/workflows/ci.yaml'
@@ -775,23 +776,8 @@ jobs:
               - 'packages/envoy-client/src/**'
               - 'packages/contracts/src/**'
               # e2e-local.sh:148-149 builds ./cmd/listener and ./internal/testnats/cmd/natsd.
-              - 'packages/envoy/cmd/listener/*'
-              - 'packages/envoy/internal/bus/*'
-              - 'packages/envoy/internal/cistore/*'
-              - 'packages/envoy/internal/config/*'
-              - 'packages/envoy/internal/contracts/*'
-              - 'packages/envoy/internal/dedupe/*'
-              - 'packages/envoy/internal/id/*'
-              - 'packages/envoy/internal/kvwatch/*'
-              - 'packages/envoy/internal/logging/*'
-              - 'packages/envoy/internal/metrics/*'
-              - 'packages/envoy/internal/oidc/*'
-              - 'packages/envoy/internal/routing/*'
-              - 'packages/envoy/internal/session/*'
-              - 'packages/envoy/internal/store/*'
+              - *listener_command
               - 'packages/envoy/internal/testnats/cmd/natsd/*'
-              - 'packages/envoy/internal/verify/*'
-              - 'packages/envoy/internal/webhook/*'
             # Every file packages/daemon/docker/worker.Dockerfile builds from, for the worker-image
             # job (.github/workflows/worker-image.yaml, which the build reads too): the root
             # manifest, lockfile, patches and every workspace manifest the plugin stage's frozen
@@ -853,7 +839,7 @@ jobs:
               - *legion_command
               - 'packages/envoy/cmd/agent-secrets/*'
               - 'packages/envoy/cmd/agent-secrets-helper/*'
-              - 'packages/envoy/cmd/listener/*'
+              - *listener_command
               - 'packages/envoy/daemonpermissions/*'
               - 'packages/envoy/infra/go.mod'
               - 'packages/envoy/infra/go.sum'
@@ -876,22 +862,7 @@ jobs:
               - 'packages/envoy/internal/broker/record/*'
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/buildversion/*'
-              - 'packages/envoy/internal/bus/*'
-              - 'packages/envoy/internal/cistore/*'
-              - 'packages/envoy/internal/config/*'
-              - 'packages/envoy/internal/contracts/*'
-              - 'packages/envoy/internal/dedupe/*'
               - 'packages/envoy/internal/githubappjwt/*'
-              - 'packages/envoy/internal/id/*'
-              - 'packages/envoy/internal/kvwatch/*'
-              - 'packages/envoy/internal/logging/*'
-              - 'packages/envoy/internal/metrics/*'
-              - 'packages/envoy/internal/oidc/*'
-              - 'packages/envoy/internal/routing/*'
-              - 'packages/envoy/internal/session/*'
-              - 'packages/envoy/internal/store/*'
-              - 'packages/envoy/internal/verify/*'
-              - 'packages/envoy/internal/webhook/*'
 
   # Reads the whole tree, so it runs on every non-draft run, also when `changes` failed.
   lint:
@@ -1050,7 +1021,7 @@ jobs:
           done
           wc -l "$notices"/*
 
-      - if: (needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true') && github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
+      - if: github.event_name == 'push' && success() && steps.go-cache.outcome == 'success' && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1325,15 +1296,17 @@ jobs:
         with:
           go-version-file: packages/daemon/go.mod
           cache: false
-      # go-envoy, shared with envoy-e2e-local.
+      # go-docs: docs builds the daemon's legion and envoy's dispatch, broker and agent-secrets
+      # commands, which envoy-e2e-local's go-envoy entry (listener and natsd only) does not hold;
+      # sharing one key let whichever job saved first own it.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-envoy-${{ runner.os }}-${{ hashFiles('packages/envoy/go.sum', 'packages/daemon/go.sum', 'go.work.sum') }}
-          restore-keys: go-envoy-${{ runner.os }}-
+          key: go-docs-${{ runner.os }}-${{ hashFiles('packages/envoy/go.sum', 'packages/daemon/go.sum', 'go.work.sum') }}
+          restore-keys: go-docs-${{ runner.os }}-
       - run: bun install --frozen-lockfile
       - name: Lint the docs site
         run: bun run lint
@@ -1396,7 +1369,7 @@ jobs:
 
   docs-deploy:
     needs: docs
-    if: github.event_name == 'push' && needs.docs.result == 'success'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     # One deployment at a time, and a queued one is never cancelled half-way.
     concurrency:
@@ -2273,7 +2246,7 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      # go-envoy, shared with docs.
+      # go-envoy: the listener and natsd e2e-local.sh builds.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

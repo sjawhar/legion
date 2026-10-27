@@ -843,8 +843,7 @@ def inherited_gates(document: dict, job_name: str) -> list[tuple[str, list[tuple
         job = (document.get("jobs") or {}).get(name) or {}
         condition = str(job.get("if", ""))
         found, admitted = gating_filters(document, f"jobs.{name}", job)
-        if found or admitted != set(PATH_EVENTS):
-            gates.append((f"jobs.{name}.if", found, admitted))
+        gates.append((f"jobs.{name}.if", found, admitted))
         demanded = required_results(condition)
         queue += sorted(demanded)
         if "always()" in condition or "cancelled()" in condition:
@@ -1150,8 +1149,7 @@ for workflow, job_name, step, context, dockerfile in builds:
         where = step.get("name") or "an unnamed step"
         describe = f"jobs.{job_name} step '{where}'"
         found, admitted = gating_filters(document, describe, step)
-        if found or admitted != set(PATH_EVENTS):
-            gates.append((f"{describe} if", found, admitted))
+        gates.append((f"{describe} if", found, admitted))
     triggers = apply_gates(triggers_for(workflow), gates)
     for label, _, filters in triggers:
         for name, files in inputs:

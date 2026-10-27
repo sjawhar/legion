@@ -85,8 +85,9 @@ evict main's entries.
 
 - Give `actions/setup-go` `cache: false`.
 - Restore with `actions/cache/restore`, keyed on the family's sums, with the family's prefix as
-  `restore-keys` (`go-daemon`, `go-envoy`, `go-envoy-infra`, `go-notices`). Share a family with the
-  jobs that compile the same modules.
+  `restore-keys` (`go-daemon`, `go-docs`, `go-envoy`, `go-envoy-infra`, `go-notices`). Share a
+  family only with the jobs that build the same packages, or whichever job saves first owns the
+  entry the others then miss.
 - Save with `actions/cache/save` as the job's last step, with
   `if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'`.
   The workflow's only push trigger is main.

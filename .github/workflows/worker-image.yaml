@@ -162,14 +162,14 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: true
-          # The layer cache is a registry cache, ghcr.io/sjawhar/legion-worker:buildcache: a cache
-          # manifest, not an image, written with the ghcr.io login above (packages: write). A pull
-          # request's build reads the cache main's builds write and writes none: a newer head can
-          # cancel it in the middle of an export, and on 2026-10-27 the Actions cache held 10.80 GB of
-          # pull-request-scope buildkit entries. Only a build on main writes it (a workflow_dispatch on
-          # another branch writes none).
-          cache-from: type=registry,ref=ghcr.io/sjawhar/legion-worker:buildcache
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=registry,ref=ghcr.io/sjawhar/legion-worker:buildcache,mode=max' || '' }}
+          # The layer cache is a registry cache, $IMAGE:buildcache: a cache manifest, not an image,
+          # written with the ghcr.io login above (packages: write). A pull request's build reads the
+          # cache main's builds write and writes none: a newer head can cancel it in the middle of an
+          # export, and on 2026-10-27 the Actions cache held 10.80 GB of pull-request-scope buildkit
+          # entries. Only a build on main writes it (a workflow_dispatch on another branch writes
+          # none).
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |
