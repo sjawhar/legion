@@ -2,33 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T10:39:09Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "bc8cf8ad0a24 (branch head before this handoff: fda95d2d, which adds only .legion/)",
+  "completed": "2026-10-27T17:19:53Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedCodeHead": "7ae2e23e7bb4 (branch head before this handoff: ce0ab537, which adds only .legion/)",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/copied_asks_plan_test.go (main's b69f636f, #2210) via .github/workflows/envoy-and-contracts.yaml:792",
-      "description": "Spec acceptance 2 fails: envoy-go at bc8cf8ad (run 40466398617, job 122094912911, merge ref a7850cfc = this head + main) prints 180006|0.8.7 and fails internal/dispatch/docs: TestCopiedAskQueriesAvoidSequentialScans/the_asks_of_an_issue's_copies and /the_asks_of_a_project's_copies, 'query plan sequentially scans asks; want asks_block_id_unique'. On 18 the planner runs owedCopiesQuery's asks check as a hashed SubPlan over a Seq Scan on asks (Disabled: true under enable_seqscan=off), so every settlement of a copy would scan asks once production is on 18. The subtests came in with main's b69f636f after this branch's forward merge, so the fix needs main's code on the branch. 77 other packages ok."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/scripts/dev-postgres.sh:102,107",
-      "description": "The row-sum check covers only the dispatch database's public tables, but the text says a mismatch means 'a dump that failed or stopped partway' and that 'once the checks match, the dump can go'. pg_dumpall dumps databases in name order, so a dump cut in any database after dispatch (dispatch_local, postgres, other work's databases) passes both checks. Add a printed check that the dump ends with pg_dumpall's '-- PostgreSQL database cluster dump complete' trailer, which it writes only on success, or say the checks cover the dispatch database alone."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verified": [
+    "Forward merge b481cb62 (main 2e8c68cd into 1772ba38) is clean: `jj diff -r b481cb62` against its auto-merge is empty.",
+    "copied_asks.go:211-232: `(select 1 ... limit 1) is null` returns the same rows as the NOT EXISTS it replaces; the saved EXPLAIN after the change reads asks through `Limit -> Index Scan using asks_block_id_unique` on 16 and on 18; before, both planned a hashed SubPlan over Seq Scan on asks (18 with Disabled: true).",
+    "dev-postgres.sh prints `grep -c -x -- '-- PostgreSQL database cluster dump complete' <dump>` before the old container stops; pg_dumpall writes that line last on REL_16 and REL_18 (thermonuclear deep review read pg_dumpall.c).",
+    "CI at 7ae2e23e (merge ref c83b66e5): required lint, typecheck, test and pr-title success; envoy-go attempt 2 (job 122284632205) 180006|0.8.7, 80 packages ok, 0 FAIL, the real-cluster move replay PASS for whole, empty and cut dumps; envoy-go-race success on 18; Dispatch, Broker and Daemon Postgres 16 jobs success, each 160015|0.8.7 (daemon 58 packages ok, 0 FAIL); dispatch, dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local success. Compare 7ae2e23e...ce0ab537: 2 files, all under .legion/.",
+    "Attempt 1 at 7ae2e23e: envoy-go failed on internal/dispatch/api's 10-minute go test deadline (main on Postgres 16 fails the same way: runs 40503757570, 40500675840, 40490045265, 40487532785; tracked as dispatch://INFRA-523), and dispatch failed one Playwright case on the iphone project only (MESSAGE_NOT_FOUND race; the same case passed on chromium). Both passed on the one re-run.",
+    "Both E2E lines in the PR body name 7ae2e23e with negative controls; every review thread carries the reviewer's answer and is resolved."
   ],
-  "verifiedThisRound": [
-    "Required checks lint, typecheck, test: success at bc8cf8ad (Tests run 40466398615).",
-    "daemon-go-postgres-16 (job 122062738226): Initialize containers pulls sha256:7b822b0a, prints 160015|0.8.7, 58 packages ok, 0 FAIL.",
-    "broker-go-postgres-16 (job 122094912982): success.",
-    "envoy-go service: 180006|0.8.7 on sha256:2358fcba.",
-    "dev-postgres.sh keeps the old container (no printed command removes it), waits with pg_isready after starting a stopped one, and compares the listing and dispatch's table and row counts before and after."
-  ],
-  "ciPending": "At 10:37Z dispatch, dispatch-memory, envoy-go-race, broker-multiprocess and dispatch-go-postgres-16 were still in progress in run 40466398617.",
-  "thermonuclear": "deep-review and code-quality ran once at bc8cf8ad: deep-review 1 Medium (the minor finding above, judged Minor because no printed step deletes the old container and pg_dumpall's own error shows at the dump step), 4 Minor; code-quality 4 cleanup-only. The cleanup items are on the Fast-follow line.",
-  "fastFollow": "dev-postgres.test.sh: stale text naming `docker rm -v` as a printed step and the dead `\"docker rm -v \"*) break` branch; `sequence[2]` positional lookups and the never-true `-le` test in in_order; the duplicated empty/cut replay blocks; the real-cluster replay SKIPs under GITHUB_ACTIONS instead of failing, and never asserts a good move's before and after counts are equal. dev-postgres.sh: the pg_isready command written twice (no wait_ready array); the mismatch text blames a failed dump when a write between the count and the dump also changes the counts."
+  "thermonuclear": "deep-review and code-quality ran once at 7ae2e23e: deep-review APPROVE, no critical or important, one minor (PR body staleness, fixed in the brief and named for the implementer); code-quality two minor test cleanups, on the Fast-follow line.",
+  "fastFollow": "dev-postgres.test.sh: lost_move compares against the whole move's .after instead of its own .before (the rule the refusal states); FAKE_DUMP is branched on twice with the :? guard only on the first. PR body: 'Proven by' still says migrations 100-120 where this head applies 100..129."
 }
