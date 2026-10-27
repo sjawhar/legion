@@ -53,7 +53,7 @@ envoy:
 
 It depends on where a session takes its deliveries, not on whether the topic is built in or your own.
 
-- A session that holds its own NATS connection (every Oh My Pi session, and a Claude Code one) receives every message published on a subject it subscribes to, whoever sent it: its own publish included, and a subagent's publish to a topic the parent subscribes to. This holds for a topic the stream keeps and for a live team topic alike.
+- A session that holds its own NATS connection (every Oh My Pi session, and a Claude Code one) receives every message published on a subject it subscribes to, whoever sent it: its own publish included, and a subagent's publish to a topic the parent subscribes to. This holds for a topic the stream keeps and for a live team topic alike while it is connected. After an outage they differ: once its connection or subscription is back, the session recovers from the stream what was published meanwhile on its own inbox and on each kept topic it follows, up to 72 hours back, and is shown each message once, marked as published while its connection was down; what a team topic carried meanwhile is gone.
 - A session the listener delivers to by push, over a serve port (such as the OpenCode plugin), does not receive its own publish, and receives a team topic only through the listener that owns it when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1` (the shared hub's listener does not).
 - A role is not a subject its holder subscribes to: the listener finds the live holder and forwards the message to it, and drops the message when that holder is the message's source session.
 

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -308,6 +309,35 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	}
 }
 
+// A row stored before the listener refused topics reaching a private stream subject keeps them
+// until the session's next registration, which drops them: another session's agent subject, a
+// failed-delivery lane wildcard, a Legion controller lane and notifications.> go, while the
+// session's own agent subject, the issue topic it followed and the topic it registers now stay.
+func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_x",
+		MachineID: "m1",
+		Topics: []string{
+			"notifications.agent.ses_other",
+			"notifications.agent.ses_x",
+			"notifications.dispatch.issue.KEY-1.>",
+			"notifications.envoy.exceptions.>",
+			"notifications.legion.ACME.controller",
+			"notifications.>",
+		},
+	}
+	item := Interest{SessionID: "ses_x", MachineID: "m1"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}, 7)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	want := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
+	if !slices.Equal(result.Topics, want) {
+		t.Fatalf("merged topics = %v, want %v", result.Topics, want)
+	}
+}
+
 // --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
@@ -398,12 +428,12 @@ func TestWatch_PropagatesUpsert(t *testing.T) {
 	}
 
 	// Upsert writes to KV — the watcher should propagate to cache
-	if _, err := reg.Upsert(Interest{SessionID: "ses_new", MachineID: "m1"}, []string{"notifications.>"}); err != nil {
+	if _, err := reg.Upsert(Interest{SessionID: "ses_new", MachineID: "m1"}, []string{"notifications.test.>"}); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
 	// Poll with bounded timeout
-	got = pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
+	got = pollMatch(t, reg, "m1", "notifications.test.x", 1, 5*time.Second)
 	if got[0].SessionID != "ses_new" {
 		t.Fatalf("expected ses_new, got %s", got[0].SessionID)
 	}
@@ -743,6 +773,66 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	}
 	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.c" {
 		t.Fatalf("expected [topic.a topic.c], got %v", item.Topics)
+	}
+}
+
+// An unsubscribe and a role claim rewrite the session's row too, and neither keeps a topic the row
+// stored before the listener refused topics reaching a private stream subject: another session's
+// agent subject and a failed-delivery lane are dropped, so Match stops fanning that lane out to the
+// session, while its own agent subject and the issue topic it follows stay.
+func TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	const lane = "notifications.envoy.exceptions.notifications.agent.ses_other"
+	stale := []string{
+		"notifications.agent.ses_other",
+		"notifications.agent.ses_stale",
+		"notifications.dispatch.issue.KEY-1.>",
+		"notifications.envoy.exceptions.>",
+		"topic.gone",
+	}
+	for name, write := range map[string]func(*Registry) ([]string, error){
+		"unsubscribe": func(reg *Registry) ([]string, error) {
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>"},
+				reg.Remove("ses_stale", []string{"topic.gone"})
+		},
+		"role set": func(reg *Registry) ([]string, error) {
+			_, err := reg.SetRole("ses_stale", "m1", "reviewer", false)
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>", "notifications.role.reviewer", "topic.gone"}, err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			reg, kv := coldRegistry(t, conn)
+			putInterest(t, kv, Interest{SessionID: "ses_stale", MachineID: "m1", Topics: stale})
+			// Get caches the stored row, so Match fans the lane out to the session before the write.
+			if _, err := reg.Get("ses_stale"); err != nil {
+				t.Fatalf("read the seeded row: %v", err)
+			}
+			if matched := reg.Match("m1", lane); len(matched) != 1 {
+				t.Fatalf("Match(%s) before the write = %v, want the seeded session", lane, matched)
+			}
+
+			want, err := write(reg)
+			if err != nil {
+				t.Fatalf("write the row: %v", err)
+			}
+
+			entry, err := kv.Get("ses_stale")
+			if err != nil {
+				t.Fatalf("read the stored row: %v", err)
+			}
+			var item Interest
+			if err := json.Unmarshal(entry.Value(), &item); err != nil {
+				t.Fatalf("decode the stored row: %v", err)
+			}
+			got := slices.Sorted(slices.Values(item.Topics))
+			if !slices.Equal(got, want) {
+				t.Fatalf("stored topics = %v, want %v", got, want)
+			}
+			if matched := reg.Match("m1", lane); len(matched) != 0 {
+				t.Fatalf("Match(%s) = %v, want no session", lane, matched)
+			}
+		})
 	}
 }
 

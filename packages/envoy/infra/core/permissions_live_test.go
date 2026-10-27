@@ -163,7 +163,8 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 // ListenerPermissions, and a session presents no credential and becomes the session user, holding
 // SessionPermissions as the server's no_auth_user. The listener reaches healthy, the session
 // registers through it and receives a send, answers a role message's receipt, receives a publish to
-// an ad-hoc topic it subscribes to on NATS, and is refused a publish its grant does not hold.
+// an ad-hoc topic it subscribes to on NATS, reads back through /v1/replay a send stored while it had
+// no subscription open, and is refused a publish its grant does not hold.
 func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 	listener := buildEnvoyCommand(t, "listener")
 	for _, image := range testnats.Images {
@@ -200,6 +201,27 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 			team, _ := nextEnvelope(t, process, adhoc)
 			require.Equal(t, "notifications.team.deploy-squad", team.Topic)
 			require.Equal(t, "example ad-hoc message", team.PayloadSummary)
+
+			// A send to a registered session with no subscription open is stored, and the listener's
+			// replay reads it back with its grant's stored-message get: a first call without after
+			// starts the cursor at the stream's last sequence, and a call after that cursor returns
+			// the send.
+			const offline = "s3"
+			offlineSubject := contracts.AgentSubject(offline)
+			postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+offline+`","topics":[],"self_subscribed":true}`)
+			cursor := replaySubject(t, process, port, offline, offlineSubject, nil)
+			require.Empty(t, cursor.Refused)
+			require.Empty(t, cursor.Messages)
+			postListener(t, process, port, "/v1/messages/send", `{"target_session":"`+offline+`","message":"example missed message"}`)
+			missed := replaySubject(t, process, port, offline, offlineSubject, &cursor.NextAfter)
+			require.Empty(t, missed.Refused)
+			require.False(t, missed.More)
+			require.Len(t, missed.Messages, 1, "the replay after %d returned another count", cursor.NextAfter)
+			require.Greater(t, missed.Messages[0].Seq, cursor.NextAfter)
+			var replayed contracts.Envelope
+			require.NoError(t, json.Unmarshal([]byte(missed.Messages[0].Data), &replayed))
+			require.Equal(t, offlineSubject, replayed.Topic)
+			require.Equal(t, "example missed message", replayed.PayloadSummary)
 
 			// A session may not publish to another session's inbox directly; only the listener does.
 			other := contracts.AgentSubject("s2")
@@ -244,8 +266,9 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 }
 
 // A user holding SessionPermissions alone, as sessions that share one user hold it, receives its
-// notifications and publishes a reply, and the server refuses it a subscribe to the reply inboxes,
-// on the 2.10 image and on the hub's: request/reply from such a session is refused by design.
+// notifications and publishes a reply, and the server refuses it a subscribe to the reply inboxes
+// and a JetStream API request, on the 2.10 image and on the hub's: request/reply from such a
+// session is refused by design, and it reads missed notifications only through the listener.
 func TestSessionPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
@@ -262,6 +285,15 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 			// came first and were allowed.
 			for _, v := range violationsOnceLogged(t, server, "_INBOX.>") {
 				require.Equal(t, []string{"Subscription", "_INBOX.>"}, v[1:], "the server refused what the set allows: %s", v[0])
+			}
+			// No JetStream API call is the session's: the stored-message get the listener's replay
+			// makes is refused it, so a session reads what it missed only through the listener.
+			const replayRead = "$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS"
+			require.NoError(t, conn.Publish(replayRead, nil))
+			requireViolation(t, conn, errs, `Publish to "`+replayRead+`"`)
+			refused := [][]string{{"Subscription", "_INBOX.>"}, {"Publish", replayRead}}
+			for _, v := range violationsOnceLogged(t, server, replayRead) {
+				require.Contains(t, refused, v[1:], "the server refused what the set allows: %s", v[0])
 			}
 		})
 	}
@@ -446,8 +478,9 @@ func requireNeverHealthy(t *testing.T, port int) {
 	}
 }
 
-// postListener posts body to one of the listener's /v1 routes and requires a 200.
-func postListener(t *testing.T, process *cmdtest.Process, port int, path, body string) {
+// postListener posts body to one of the listener's /v1 routes, requires a 200 and returns the
+// answer.
+func postListener(t *testing.T, process *cmdtest.Process, port int, path, body string) string {
 	t.Helper()
 	resp, err := http.Post("http://127.0.0.1:"+strconv.Itoa(port)+path, "application/json", strings.NewReader(body))
 	require.NoError(t, err)
@@ -455,6 +488,39 @@ func postListener(t *testing.T, process *cmdtest.Process, port int, path, body s
 	answer, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "POST %s: %s\n%s", path, answer, process.Output.String())
+	return string(answer)
+}
+
+// replayResult is the part of one subject's /v1/replay result the live tests read.
+type replayResult struct {
+	Subject  string `json:"subject"`
+	Messages []struct {
+		Seq  uint64 `json:"seq"`
+		Data string `json:"data"`
+	} `json:"messages"`
+	NextAfter uint64 `json:"next_after"`
+	More      bool   `json:"more"`
+	Refused   string `json:"refused"`
+}
+
+// replaySubject asks /v1/replay for one subject of session, after after when it is not nil, and
+// returns that subject's result.
+func replaySubject(t *testing.T, process *cmdtest.Process, port int, session, subject string, after *uint64) replayResult {
+	t.Helper()
+	type request struct {
+		Subject string  `json:"subject"`
+		After   *uint64 `json:"after,omitempty"`
+	}
+	body, err := json.Marshal(map[string]any{"session_id": session, "subjects": []request{{Subject: subject, After: after}}})
+	require.NoError(t, err)
+	answer := postListener(t, process, port, "/v1/replay", string(body))
+	var replay struct {
+		Subjects []replayResult `json:"subjects"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(answer), &replay), answer)
+	require.Len(t, replay.Subjects, 1, answer)
+	require.Equal(t, subject, replay.Subjects[0].Subject, answer)
+	return replay.Subjects[0]
 }
 
 // sendRoleMessage publishes body, a role message, through the listener's publish route and answers

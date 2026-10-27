@@ -39,8 +39,11 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //     lanes, every exception lane, and any other topic a caller of /v1/messages/publish names,
 //     which the listener publishes over core NATS (an ad-hoc topic such as
 //     notifications.team.deploy-squad);
-//   - the stream's info, create and update, its durable's (bus.ListenerDurable) info and create,
-//     the durable's acknowledgements, and JetStream's account info;
+//   - the stream's info, create and update, its stored-message get, its durable's
+//     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
+//     account info. The stored-message get is the read /v1/replay makes to return the retained
+//     notifications a session missed while its subscription was down: it reads one stored message
+//     at a time and can create, change or delete nothing;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
 //     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
 //     create and delete, and their flow-control replies;
@@ -54,6 +57,7 @@ func ListenerPermissions(machineID string) Permissions {
 		jsAPI + "STREAM.INFO." + bus.Stream,
 		jsAPI + "STREAM.CREATE." + bus.Stream,
 		jsAPI + "STREAM.UPDATE." + bus.Stream,
+		jsAPI + "STREAM.MSG.GET." + bus.Stream,
 		jsAPI + "CONSUMER.INFO." + bus.Stream + "." + durable,
 		jsAPI + "CONSUMER.CREATE." + bus.Stream + "." + durable,
 		jsAck + bus.Stream + "." + durable + ".>",

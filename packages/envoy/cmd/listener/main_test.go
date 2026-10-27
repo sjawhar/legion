@@ -1373,14 +1373,31 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 	if err != nil {
 		t.Fatalf("failed to create session registry: %v", err)
 	}
+	// Each session's row is written to the interest bucket as stored, not through Upsert, which
+	// drops a topic reaching a private stream subject: a test seeding one models a row an earlier
+	// build stored.
+	interestKV, err := client.JS().KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("open the interest bucket: %v", err)
+	}
 	for sessionID, topics := range interests {
-		allTopics := append([]string{contracts.AgentSubject(sessionID)}, topics...)
-		if _, err := registry.Upsert(store.Interest{
+		allTopics := slices.Compact(slices.Sorted(slices.Values(append([]string{contracts.AgentSubject(sessionID)}, topics...))))
+		row, err := json.Marshal(store.Interest{
 			SessionID: sessionID,
 			MachineID: "test-machine",
 			Dir:       "/test/" + sessionID,
-		}, allTopics); err != nil {
-			t.Fatalf("failed to upsert interest for %s: %v", sessionID, err)
+			Topics:    allTopics,
+			UpdatedAt: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			t.Fatalf("encode interest for %s: %v", sessionID, err)
+		}
+		if _, err := interestKV.Put(sessionID, row); err != nil {
+			t.Fatalf("failed to store interest for %s: %v", sessionID, err)
+		}
+		// Get reads the row through to the registry's cache, as Upsert's write-through would.
+		if _, err := registry.Get(sessionID); err != nil {
+			t.Fatalf("failed to read back interest for %s: %v", sessionID, err)
 		}
 	}
 	for sessionID, port := range ports {

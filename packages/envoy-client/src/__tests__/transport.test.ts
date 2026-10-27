@@ -737,4 +737,78 @@ describe("EnvoyClient", () => {
       else process.env.ENVOY_TOKEN = previous;
     }
   });
+
+  test("asks for a replay in the listener's request shape and parses its answer", async () => {
+    const answer = {
+      stream: { created: "2026-10-01T00:00:00Z", first_seq: 3, last_seq: 9 },
+      subjects: [
+        {
+          subject: "notifications.agent.ses_a",
+          messages: [
+            {
+              seq: 7,
+              subject: "notifications.agent.ses_a",
+              time: "2026-10-26T12:00:00.5Z",
+              data: "{}",
+            },
+          ],
+          next_after: 9,
+          more: false,
+        },
+        {
+          subject: "notifications.team.deploy",
+          messages: [],
+          next_after: 0,
+          more: false,
+          refused: "not_retained",
+        },
+      ],
+    };
+    const recorded = recordFetch([jsonResponse(answer)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.replay({
+      sessionID: "ses_a",
+      subjects: [
+        { subject: "notifications.agent.ses_a", after: 4 },
+        { subject: "notifications.team.deploy" },
+      ],
+      maxMessages: 50,
+    });
+
+    expect(result).toEqual(answer);
+    expect(recorded.requests[0]?.method).toBe("POST");
+    expect(recorded.requests[0]?.url).toBe("http://listener/v1/replay");
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_a",
+      subjects: [
+        { subject: "notifications.agent.ses_a", after: 4 },
+        { subject: "notifications.team.deploy" },
+      ],
+      max_messages: 50,
+    });
+  });
+
+  // A replay runs again on the session's next trigger, and a listener that cannot replay must be
+  // reported at once, so a 503 is not sent a second time.
+  test("gives up a replay at its first 503, with the listener's status and code", async () => {
+    const recorded = recordFetch([
+      Response.json(
+        { code: "REPLAY_UNAVAILABLE", error: "nats: permissions violation" },
+        { status: 503 }
+      ),
+      Response.json({ error: "unexpected second request" }, { status: 500 }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const failure = await client
+      .replay({ sessionID: "ses_a", subjects: [{ subject: "notifications.agent.ses_a" }] })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(EnvoyApiError);
+    expect((failure as EnvoyApiError).details.status).toBe(503);
+    expect((failure as EnvoyApiError).code).toBe("REPLAY_UNAVAILABLE");
+    expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
+    expect(recorded.requests).toHaveLength(1);
+  });
 });

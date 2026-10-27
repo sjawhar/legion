@@ -14547,6 +14547,7 @@ function dedupeKeyNamesItsEvent(envelope) {
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
+var LEGION_NOTICE_TOPIC_PREFIX = "notifications.legion.";
 var DISPATCH_TOPIC_PREFIX = "notifications.dispatch.";
 var DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.`;
 var DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.`;
