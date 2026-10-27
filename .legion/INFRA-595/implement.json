@@ -2,54 +2,41 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T06:47:59Z",
-  "round": 1,
+  "completed": "2026-10-27T07:23:24Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435639833",
-  "evidenceRound0": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6434786198",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6436150817",
+  "evidenceEarlierRounds": [
+    "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435639833",
+    "https://github.com/sjawhar/legion/pull/2367#issuecomment-6434786198"
+  ],
   "reviewThreads": [
-    "PRRT_kwDORFy7ds6wkuMu: fixed in 46034eb2, TestARecreatedBucketForgetsTheOldBucketsRecords locks the reset branch; resolved",
-    "PRRT_kwDORFy7ds6wkuMz: fixed in 46034eb2, AGENTS.md says 'published again at every attempt'; resolved",
-    "PRRT_kwDORFy7ds6wkuM2: fixed in 46034eb2, dead claimFresh check removed from settle; resolved",
-    "PRRT_kwDORFy7ds6wkuM3: fixed in 46034eb2, heldBack moved into summary_loop_test.go, comments name verdictHeld/legacyBacklog; resolved",
-    "PRRT_kwDORFy7ds6wkuM7: fixed in 46034eb2, openStore registers t.Cleanup -> forgetTestSummarizer; resolved"
+    "PRRT_kwDORFy7ds6wlR7Q: fixed in b1ce6a9d, the recreated-bucket test asserts the pass's empty queue (ok == false) right after the recreate, with no sleep or wall-time guard; resolved"
   ],
   "proof": [
     {
-      "criterion": "The summary is recomputed only when an entry changes or falls due (event-driven, due entries in order); no step copies or sorts the whole cache.",
-      "surface": "the real envoy-listener binary (packages/envoy/cmd/listener) on testnats natsd with 30,000 seeded CI records in envoy_ci_state (99% settled, 1% waiting), ENVOY_CI_DEBOUNCE=5s",
-      "command": "go build -o $TMPDIR/infra595/listener-head2 ./cmd/listener && bash $TMPDIR/infra595/idle.sh $TMPDIR/infra595/listener-head2 $TMPDIR/infra595/idle-after-r1.txt --keep",
-      "observed": "0.0002 cores idle (delta 1 tick in 60.02 s); all 30,000 records settled, including the 300 waiting ones by deadline; envoy_ci_legacy_records_held 0",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
+      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change (and the recreated-bucket reset is locked).",
+      "surface": "internal/cistore tests; the real envoy-listener binary with a signed check_run webhook; packages/envoy/scripts/e2e-local.sh",
+      "command": "go test -count=20 -run TestARecreatedBucketForgetsTheOldBucketsRecords ./internal/cistore/ && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/; $TMPDIR/infra595/settle.sh check-run-proof-r2.json infra595-proof-r2 settle-after-r2.txt; bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "the test passes 20 of 20; cistore ok 15.7 s; race ok 27.6 s; settlement 5,559 ms after the post (base 5,957 ms); e2e-local PASS with four pr.42.checks settlements",
+      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+      "negativeControl": "only the queue reset removed from summarizer.pass: the test FAILS 'left a deadline queued at 1793089135136, want an empty queue'; only the held reset removed: FAILS 'held back 3 records, want 1'; restored, PASS"
+    },
+    {
+      "criterion": "The summary is recomputed only when an entry changes or falls due; no step copies or sorts the whole cache.",
+      "surface": "the real envoy-listener binary (packages/envoy/cmd/listener) on testnats natsd with 30,000 seeded CI records, ENVOY_CI_DEBOUNCE=5s",
+      "command": "go build -o $TMPDIR/infra595/listener-head3 ./cmd/listener && bash $TMPDIR/infra595/idle.sh $TMPDIR/infra595/listener-head3 $TMPDIR/infra595/idle-after-r2.txt --keep",
+      "observed": "0.0003 cores idle (delta 2 ticks in 60.02 s); all 30,000 records settled",
+      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
       "negativeControl": "listener-base (main c3d09eec) on the same seed and machine: 0.4537 and 0.4438 cores idle"
-    },
-    {
-      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change.",
-      "surface": "the real envoy-listener binary with a signed check_run webhook; packages/envoy/scripts/e2e-local.sh; internal/cistore tests",
-      "command": "$TMPDIR/infra595/settle.sh check-run-proof-r1.json infra595-proof-r1 settle-after-r1.txt; bash packages/envoy/scripts/e2e-local.sh; go vet ./internal/cistore/ ./cmd/listener/ && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/",
-      "observed": "settlement 5,578 ms after the post (base 5,957 ms), payload 'checks settled on example-org/example-repo#42 @ 5965965: 1 passed'; e2e-local PASS with four pr.42.checks settlements; vet clean, cistore ok 16.6 s, race ok 29.8 s",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
-      "negativeControl": "reset branch in summarizer.pass disabled: TestARecreatedBucketForgetsTheOldBucketsRecords FAIL 'held back 3 records, want 1'; restored, PASS x3"
-    },
-    {
-      "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
-      "surface": "internal/cistore benchmarks BenchmarkSummaryIdle / BenchmarkSummaryChange",
-      "command": "cd packages/envoy && go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 1 ./internal/cistore/",
-      "observed": "idle 256 ns/op and 284 ns/op, 0 allocs/op; change 2.6 us and 1.6 us, 3 allocs/op at both sizes (round 0 benchstat at e55604e4 in the PR)",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
-      "negativeControl": "the same benchmark at base c3d09eec: idle 155 ms/op at 12,000 and 407 ms/op at 30,000"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/cistore/loop.go",
-    "packages/envoy/internal/cistore/cistore.go",
     "packages/envoy/internal/cistore/summary_loop_test.go",
-    "packages/envoy/internal/cistore/summary_helpers_test.go",
-    "packages/envoy/internal/cistore/cistore_test.go",
-    "packages/envoy/AGENTS.md"
+    "packages/envoy/internal/cistore/summary_helpers_test.go"
   ],
   "trickyParts": [
-    "The recreated-bucket test drives the real reset path: it deletes and recreates envoy_ci_state, then Rewatch makes the watcher call resetCache, as the listener's self-health does."
+    "The test uses a 1 h debounce so the old bucket's waiting record can never fall due; a kept queue entry then shows as pass's ok == true after the recreate, which the reset must clear."
   ],
   "deviations": [],
   "openQuestions": []
