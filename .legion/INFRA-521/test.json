@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-521",
+  "completed": "2026-10-27T05:30:25Z",
+  "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+  "branchHead": "5987d0cdebc8cdfb9427f3510634503af78e77c9 (adds only .legion/INFRA-521/implement.json over 357138e7)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its --list count and exact-set check (my own script over --list --reporter=json against the keep rows of dispatch://INFRA-521/artifact/iphone-selection-md: 222, 0 extra, 0 missing); ran the whole iphone project in the pod alone (222 passed, 0 skipped, 0 failed), which also clears its 5 load-only failures; re-read its CI browser step (dispatch job 121995880276: 04:20:41Z-04:56:26Z, 35.8 min) and all 10 base step times by the actions API (median 45.3 min), and counted [iphone] lines in the job log (222 passed, none without @phone)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "1. iphone runs every test that takes a phone-only path (and the kept phone tests still pass under iphone)",
+      "surface": "Real browser in an issue pod: Go Dispatch server, Postgres 17 with pgvector, Chromium, the five harness fakes (/legion/scratch/harness, lane tester), no other run sharing the CPUs",
+      "command": "cd packages/dispatch && LANE=tester source /legion/scratch/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts --project iphone --reporter=list,json (log $TMPDIR/infra521-test/iphone-whole.log)",
+      "observed": "Running 222 tests using 1 worker; 222 passed, 0 skipped, 0 failed (21.9 min), exit 0; every [iphone] line carries @phone (grep -vc '@phone' = 0).",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "Scratch copy of the head tree: ' @phone' removed from the first test of project.e2e.ts (an assertPageFits caller) -> --project iphone --list prints 'Total: 221 tests in 53 files'; restored -> 222."
+    },
+    {
+      "criterion": "1/2. the selection drops only tests with no phone-only path, and changes no other project",
+      "surface": "Playwright CLI in packages/dispatch (the projects CI's dispatch job runs), base 1357b95c and head trees extracted with git archive into $TMPDIR/infra521-test/{base,head}",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --list --reporter=json at base and at head; bun $TMPDIR/infra521-test/cmp.ts base-list.json head-list.json (sets keyed file > title path, ' @phone' stripped); bun keep.ts (head iphone set vs the table's keep rows); grep of every removed line in the e2e diff",
+      "observed": "chromium 786/786, webkit 53/53, firefox 53/53, webkit-iphone 11/11, firefox-download-navigation 1/1, chromium-plain-http 4/4, each 0 added 0 removed; iphone 786 -> 222, 0 added; head iphone set == the table's 222 keep rows (0 extra, 0 missing); 222 chromium rows carry the tag, none untagged under iphone. All 75 removed test.skip calls have the single condition testInfo.project.name === \"iphone\" (36 'keyboard rows exercise a desktop viewport', 16 multi-line, the rest one-line), so no webkit/firefox/webkit-iphone runtime skip changed; the only other removed/added lines are titles, fixture-parameter lists and 4 comments. No test uses toHaveScreenshot/toMatchSnapshot or reads its own title, so the title suffix renames no baseline.",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "' @phones on iphone phone.e2e.ts x@phone' appended to the untagged activity.e2e.ts title 'the Activity tab lists the event rows the Conversation does not draw' -> iphone --list still 222 (the anchored grep ignores near-miss tags, the project name and file names); restored -> 222."
+    },
+    {
+      "criterion": "2. every dropped test is shown to take no phone-only path",
+      "surface": "Independent syntax-tree scan of the head e2e tree (not the implementer's idiom aid): $TMPDIR/infra521-test/scan.ts and scan2.ts",
+      "command": "bun scan.ts head/packages/dispatch/e2e (project/touch/window-size/overflow/assertPageFits/setSheet tokens) and bun scan2.ts (if-await isVisible/count branches, Thread dialog, Open navigation, review panel, sheet, drawer) over every untagged test call: its body, the hooks of its file and describes, and every file-local and e2e/*.ts helper it reaches transitively",
+      "observed": "454 untagged test calls (loops count once); 96 token hits and 18 DOM-branch hits, each read against the code and the table: screenshot/attachment names (e.g. inbox.e2e.ts:380, agents-search.e2e.ts:70 width only names the shot), fixed viewports set for every project before the check (references.e2e.ts:25, claim.e2e.ts:15, labels.e2e.ts:112, agent-name.e2e.ts:478, attention.e2e.ts:270, ask-blocks.e2e.ts:110/459), skip-unless-chromium or webkit-iphone tests, tests skipped under iphone at base (search.e2e.ts:130/162, margin-thread-reply.e2e.ts:216, layout.e2e.ts, deep-links hold rows, mention-composer.e2e.ts:443), the margin-sheet test id used the same on every project, the Inbox drawer opened by i everywhere, and 4 tagged template titles. No untagged test takes a phone path under iphone.",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "Same scan over a copy with ' @phone' removed from project.e2e.ts's first test -> it is listed: 'project.e2e.ts:30 | ... | direct:project.name; unclipped.ts:assertPageFits(assertPageFits)', so the scan does flag an untagged phone test."
+    },
+    {
+      "criterion": "3. browser step time before and after; every base-passing phone test still passes under iphone",
+      "surface": "GitHub Actions, Legion Envoy and Contracts, job dispatch, step Browser-test dispatch dashboard",
+      "command": "gh api repos/sjawhar/legion/actions/runs/<id>/attempts/1/jobs for run 40441476622 and the 10 base runs; gh run view 40441476622 --job 121995880276 --log, [project] result lines counted; gh api actions/workflows/<id>/runs?branch=main&event=push for the base window",
+      "observed": "Head run 40441476622 (pull_request, 357138e7) dispatch job 121995880276 success, step 04:20:41Z-04:56:26Z = 35.8 min; log: iphone 222 passed, chromium 764 passed 25 skipped, webkit 51+2 skipped, firefox 51+2 skipped, webkit-iphone 11, firefox-download-navigation 1, chromium-plain-http 4; '1104 passed (35.7m)'. Base step times 38.7, 45.7, 38.3, 37.2, 47.9, 45.7, 45, 45.6, 43.5, 46.6 -> median 45.3 min, each a push run on main, attempt 1, dispatch success. Main run 40412038134 (ba9a24e2, created 22:23Z before the base commit, dispatch success, step 48.2 min) finished at 02:02Z, after the implementer read the window; counting it in place of the oldest run gives the same 45.3 median. The after median is the production check's (spec v5).",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "Base run 40400116211's dispatch job (the base 786-test suite) under the same counting ran iphone 654 passed + 132 skipped, so the head's 222 is the grep, not a log the count misses."
+    }
+  ],
+  "ci": {
+    "readAt": "2026-10-27T05:30Z",
+    "head357138e7": "Legion Envoy and Contracts 40441476622 success (dispatch green); Docs 40441476726 success; Tests 40441476636 failure (test: main's daemon Go failure the implementer names, fixed on main by baadccdc; lint: the description as first posted); reopen at 05:00Z: Tests 40452900509 queued (lint, typecheck, test queued), PR Title 40452990853 queued; the reopen's Legion Envoy and Contracts/Docs runs cancelled.",
+    "head5987d0cd": "handoff-only push with skip-checks: no runs, as expected."
+  },
+  "notes": [
+    "Chromium was not re-run whole by the tester: every change chromium executes is a title suffix (no snapshot or title-reading code exists) or a deleted skip whose single condition is false under chromium; CI's dispatch job at this head ran chromium 764 passed.",
+    "Harness hazard found and fixed (scratch only, not the repository): /legion/scratch/harness/setup.sh checked the shared Postgres with pg_ctl status, which cannot see a server started from another role's PID namespace; a second start overwrote and then deleted its postmaster.pid and the running server shut itself down a minute later. My setup run did this to the idle implementer's server at 05:04Z; the database files are intact and the server was restarted. setup.sh now asks pg_isready on the shared port instead, and a re-run with the server up left it accepting connections. The server now runs in the tester container's PID namespace."
+  ]
+}
