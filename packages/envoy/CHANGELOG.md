@@ -837,6 +837,13 @@
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
   body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
   is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
+- An issue read with a route no longer calls the Envoy listener and decodes the whole live-session
+  list each time. Dispatch keeps one copy of that list per process, at most 5 s old, and one
+  listener call refreshes it for every issue read that asks while the call runs. A listener that
+  fails or does not answer is asked again only after 5 s, so the reads in that window read
+  `route_status: unknown` at once instead of each waiting up to 2 s. A `route_status` can
+  therefore be up to 5 s old; its values and the `503 ENVOY_UNAVAILABLE` of a `live` or
+  `no_holder` filter are unchanged.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
