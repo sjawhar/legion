@@ -1288,7 +1288,9 @@ func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 			t.Errorf("host %q port %q: listenAddress = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
 		}
 	}
-	for _, port := range []string{"0", "70000"} {
+	// 2^64+1000 overflows int: a check that ignores overflow accepts it, and only the bind, after
+	// NATS and the migrations, refuses it. It must be refused here, before anything connects.
+	for _, port := range []string{"0", "70000", "18446744073709552616"} {
 		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
 			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
 		}
