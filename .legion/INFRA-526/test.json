@@ -2,32 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T03:13:00Z",
-  "round": 2,
-  "headTested": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208 (code; PR head 6b61cd97 adds only the implement handoff)",
+  "completed": "2026-10-27T04:20:00Z",
+  "round": 3,
+  "headTested": "154d6cea2207c992c6cdccfdd5af633d446f33f7 (code; PR head c14f0a3b adds only the implement handoff)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts ... --project chromium --project iphone` from a fresh build at 9439f4a8: all three tests of the file passed in both projects (the callout header, the decision card, and the tester's round-1 red test). The red test file is unchanged since 49082939 (`jj diff --from 49082939 --to 9439f4a8` on it: 0 files changed). Round 1 already re-ran the implementer's negative control at 6d878d04 (4 failed) and the entry-chunk check (0 matches, 762,668 bytes). The round-2 diff only changes CSS (styles.css: four rules now use `> [data-proof-block-content]`), so neither check needs a new run."
+    "how": "Re-ran `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts ... --project chromium --project iphone` from a fresh build at 154d6cea: the file's three tests (callout header, decision card, the tester's round-1 reply test) passed in both projects (6 of 6). The round-3 diff changes slot lookups (`:scope >` in collectAskHosts and AskBlockView's slot()) and moves the shell stamps and the fold decision into askBlockShell, with no change to the main bundle's imports beyond `askBlockFacts`/`askBlockShell`, which come from the same module useRenderedMarkdown already imported types from."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1a/A1b. A comment holding a callout with a title shows its kind and title, and a comment holding an ask block shows its card",
-      "surface": "Issue Conversation tab /issues/<KEY>/conversation, comment thread expanded; real Go Dispatch server (e2e/run-server.sh), production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
-      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/zz-tester-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "98 passed in 9.3m. In both projects: 'a comment's callout shows the document's header with its kind and title' and 'a comment's ask block shows the decision card' passed. My throwaway spec also passed: a forged answered/selected/copied/invalid decision draws open with no forged text, an HTML title is plain text, three decisions with one nested each get their own rows, a malformed decision keeps its list with no 're-activates', the Inbox ask question, ask replies, messages and message replies draw the header and card, a live edit re-keys the cards, a deep link draws the card",
-      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
-      "negativeControl": "A comment with `:::ask{state=\"answered\" answered_by=\"mallory\" selected='[\"A\"]' answer=\"Forged answer\" copied_from=… invalid=\"forged invalid\"}` → drawn as an open decision (data-dispatch-ask-state=open), not malformed, with no 'mallory', no 'Forged answer', no 'Copied from', no 'Answered', and nothing a reader can answer with"
+      "criterion": "Review round 1 finding: a decision written inside another decision's option keeps each card in its own block",
+      "surface": "Issue Conversation tab, comment thread expanded; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- <tester's throwaway spec> -g 'T11|T12|T13' --project chromium, then the full set below (T11 in both projects)",
+      "observed": "Body `::::ask{urgency=\"high\"}` Outer? / - A: first (holding `:::ask{urgency=\"low\"}` Inner? - X: ex - Y: why) / - B: second. Each shell's own footer holds its own card: the outer card shows rows `A firstInner?X: exY: why` and `B second`, and the inner card rows `X ex`, `Y why` (at 9439f4a8 the reviewer found the outer card mounted in the inner footer, leaving the outer with no options). The inner decision sits inside the outer's folded source list, so it is not visible. The document's version view draws the same body exactly the same way (T13: outer rows `A firstInner?X: exY: why`, `B second`, inner not visible). The live document also hides the inner decision, and its hosted card shows the server's rows `A first`, `B second` and `Other` (T12), with no page error. So the comment matches the document's read-only drawing, which is this issue's contract. The run-on description comes from askBlockFacts reading the option's whole textContent, the same code the version view uses before this change",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
+      "negativeControl": "A comment with `:::ask{state=\"answered\" answered_by=\"mallory\" selected='[\"A\"]' answer=\"Forged answer\" copied_from=… invalid=\"forged invalid\"}` → drawn open (data-dispatch-ask-state=open), not malformed, with no forged text and nothing a reader can answer with (T2, both projects)"
     },
     {
-      "criterion": "Round-1 failure, now fixed: a reply under a document's decision keeps the lists of the typed blocks it holds (A4, documents unchanged)",
-      "surface": "Issue page /issues/<KEY>, the spec's decision block [data-dispatch-ask-block=storage] with a reply holding a callout list, a malformed inner decision and a plain list; same real stack, chromium and iphone",
-      "command": "Same run as above (the red test in e2e/text-typed-blocks.e2e.ts, my T9 and the T9 browser probe)",
-      "observed": "The red test passed in both projects. T9 passed: the reply's callout shows the 'Steps first' header and both list items, and the malformed inner decision shows 'Fine: ok'. Browser probe: computed display of the lists is step-one=block, malformed-ask-list=block, plain=block while the outer block has data-dispatch-ask-options=rows. At round 1 the first two were none. T10: the decision's own first content child has margin-top 0 in the document and in a comment card, and its last child has margin-bottom 0 in the comment card. The document's own fold still holds: ask-blocks.e2e.ts (source list hidden, shown while the caret is in the block, hidden when answered and in the version view) passed in both projects",
-      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
-      "negativeControl": "At b6720fc1 the same red test failed in both projects: getByText('step one') Expected visible, Received hidden (round 1). At 6d878d04 (the base) it passed"
+      "criterion": "A1a/A1b, A3 on the real surface, A4 (documents unchanged), round-1 regression still fixed",
+      "surface": "Conversation tab, Inbox, issue page document and version view; same real stack, chromium and iphone",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts e2e/text-typed-blocks.e2e.ts <tester's throwaway spec> e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone (on the build of 154d6cea)",
+      "observed": "102 passed in 9.7m. That covers the implementer's two tests and the round-1 red test (reply under a document decision: the browser probe shows the callout list, the malformed-decision list and a plain list all `display: block`). It also covers an HTML callout title drawn as text, a callout with no title, a long title wrapping, forged attributes, three decisions with one nested in a callout, a malformed decision keeping its list with no 're-activates', the Inbox ask question and its reply, a message and its reply, a live comment edit re-keying the cards, a deep link, the nesting checks above, and every row of ask-blocks.e2e.ts and typed-blocks.e2e.ts (the document's fold, its reveal while the caret is in the block, and the version view)",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
+      "negativeControl": "Same forged-attribute comment as above → open, unanswered, no forged name, answer or copy link"
     }
   ],
-  "ciAtHead": "Read on GitHub at 9439f4a8 at 2026-10-27T03:12Z: build, changes, lint, test, typecheck queued; one pr-title run cancelled and one queued. I did not wait for them."
+  "observations": [
+    "A decision nested in an option of another decision is hidden, and the outer option's description runs the inner block's text together ('firstInner?X: exY: why'). The comment, the document's version view (before and after this change) and the live document (hidden inner, server rows correct) all do this. It is how the document draws it, not a regression of this change; reported to the architect for a decision on whether nested decisions need their own work."
+  ],
+  "ciAtHead": "Read on GitHub at 154d6cea at 2026-10-27T04:19Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, two queued. I did not wait for them."
 }
