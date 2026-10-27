@@ -14,3 +14,4 @@ export * from "./repo";
 export * from "./slack";
 export * from "./subject";
 export * from "./tool-schema";
+// INFRA-583 production check: a comment in packages/contracts/src only.
