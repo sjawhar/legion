@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-549",
+  "completed": "2026-10-27T06:34:19Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
+  "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
+  "proof": [
+    {
+      "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
+      "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2 (the chart's versions, go-installed), on the nats.conf and auth.conf that helm v3.20.2 renders from the component's registered chart values against the vendored chart nats-2.15.1.tgz (SHA-256 b209c627...58cc1 checked)",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 30m ./gcp/ (log: https://github.com/sjawhar/legion/pull/2371#issuecomment-6435432090)",
+      "observed": "PASS. Rendered kinds exactly StatefulSet, two Services, ConfigMap, PodDisruptionBudget. Cluster envoy-nats formed in 232ms with a JetStream meta leader; a client with no credential became the session user and was refused a publish to notifications.live. SIGKILL of the R3 stream leader envoy-nats-0 after 205 of 1000 acknowledged messages; envoy-nats-1 led 4.815s later; all 1000 acknowledged messages stored exactly once (8 publish attempts retried); the killed server restarted on its store and all three copies were current at sequence 1000 2.066s later. Exporter: 3 nats_stream_last_seq series at rest, 2 with one server down, 1 for an R1 stream. A user added then removed through an atomically renamed auth.conf: each server logged 'Reloaded server configuration', admitted then refused the user; the client kept server_id and cid 20 with 0 reconnects and 0 disconnects; PIDs unchanged. A session-user change: each server logged 'config reload not supported for NoAuthUser', kept the old session user, and a restarted server took the new one.",
+      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
+      "negativeControl": "The chart test with natsBox enabled in the values fails (extra 'Deployment envoy-nats-box', 'Secret envoy-nats-box-contexts', 'Pod envoy-nats-test-request-reply'); with the expected archive checksum changed it fails on the SHA-256 (run with go test -overlay on throwaway copies, 2026-10-27)."
+    },
+    {
+      "criterion": "Unit tests on Pulumi mocks pin each point above (chart, users rendering, session-user roll, Service, NetworkPolicy, tailnet hosts, disruption budgets, priority class, metrics, replica count and byte limit into the listener, sizing, INFRA-546's bucket grant).",
+      "surface": "The component under Pulumi mocks and through the plugin's Construct path (provider.New via pulumitest.Construct), the module's whole unit lane",
+      "command": "cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./...  (with mkfs.ext4 1.47.4 from Debian's e2fsprogs on PATH for the existing data-disk tests)",
+      "observed": "gofmt clean, vet ok, every package ok (aws, aws/rendering, cmd/envoy-infra, core, gcp 109.7s, host, internal/providers, internal/pulumitest, provider, render, seed).",
+      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
+      "negativeControl": "go test -overlay with jsAPI+\"STREAM.UPDATE.\"+stream removed from core's bucketPermissions -> TestClusteredNatsHubUsersHoldTheBucketRaise fails ('the tailnet listener raises envoy_interests'); each refusal row (e.g. natsMemory 4Gi with streamMaxBytes 44023414784, natsReplicas 4, a listener cpu of 100m) is refused naming its input."
+    },
+    {
+      "criterion": "The component is released in an envoy-infra version (pre-merge: the built plugin serves it).",
+      "surface": "The built plugin binary, read by the Pulumi CLI v3.268.0 that .github/actions/install-pulumi pins",
+      "command": "cd packages/envoy/infra && go build -ldflags \"-X main.version=0.0.0-dev\" -o $TMPDIR/infra549/p/pulumi-resource-envoy-infra ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema $TMPDIR/infra549/p/pulumi-resource-envoy-infra | jq '.resources[\"envoy-infra:gcp:ClusteredNatsHub\"]'",
+      "observed": "inputs clientNamespaces, diskSizeGb, exporterImage, kubeconfig, maxFileStoreGb, metricsNamespaces, monitorNamespaces, name, namespace, natsCpu, natsImage, natsMemory, natsReplicas, priorityClassName, reloaderImage, serviceName, sessionUser, storageClassName, streamMaxBytes, tailnet, tailnetAuthKey, users; required kubeconfig, namespace, name, serviceName, natsImage, reloaderImage, exporterImage, clientNamespaces; secret kubeconfig, tailnetAuthKey; outputs podSelector, serviceUrl, statefulSetName, tailnetEnvoyUrl, tailnetNatsUrl; types gcp:ClusteredHubListener and gcp:ClusteredHubTailnet.",
+      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
+      "negativeControl": "The released envoy-infra v2.5.0 plugin (gh release download, SHA256SUMS checked) -> get-schema gives {\"version\":\"2.5.0\",\"hasClustered\":false,\"hasNatsHub\":true}."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/infra/core/listener_env.go, listener_env_test.go: NATSReplicas and StreamMaxBytes render ENVOY_NATS_REPLICAS / ENVOY_STREAM_MAX_BYTES only when set",
+    "packages/envoy/infra/gcp/natshub.go: authorization takes the listener's machine id and key, shared by both hubs",
+    "packages/envoy/infra/gcp/clusteredhub.go: args, resolver, refusals, sizing from streamMaxBytes, outputs",
+    "packages/envoy/infra/gcp/clusteredhub_kube.go: own Kubernetes provider, priority-class read, nats chart 2.15.1 with protected StatefulSet, NetworkPolicy, PodMonitoring",
+    "packages/envoy/infra/gcp/clusteredhub_tailnet.go: tailnet hosts (Secret, ConfigMap, ServiceAccount, Deployment, PDB)",
+    "packages/envoy/infra/gcp/tailnet_service.go, tailnet_service_test.go: byte for byte legion/INFRA-560 commit b1c6c868",
+    "packages/envoy/infra/gcp/dispatch.go, dispatch_kube.go: shared autopilotPodSize, podPriorityClass, NetworkPolicy, objectMeta and envVars helpers (gcp:Dispatch's texts unchanged)",
+    "packages/envoy/infra/gcp/clusteredhub_*_test.go, export_test.go, testdata/clustered-hub-*.golden, testdata/nats-2.15.1.tgz",
+    "packages/envoy/infra/provider/provider.go, provider_test.go: registration and schema test",
+    ".github/workflows/envoy-and-contracts.yaml: natslive step runs ./gcp/ with -timeout 30m; .gitignore: tracks the vendored chart",
+    "packages/envoy/infra/README.md, AGENTS.md, docs/nats-hub.md, .dispatch/architecture/envoy.md, docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
+    "nats-server refuses -sd when the file sets store_dir, so the live test rewrites the rendered store_dir in each server's copy (asserted to occur once); all other per-process overrides are command-line flags.",
+    "pulumi-go-provider keys component outputs by the whole pulumi tag, so tailnetNatsUrl/tailnetEnvoyUrl are StringPtrOutput without ',optional' and are null without tailnet."
+  ],
+  "deviations": [
+    "main@origin (sjawhar/legion#2283 and others) was merged into the branch before the first code commit, as plan task 0 says, because the component reuses #2283's priority-class lookup; the skill otherwise reintegrates the base only on a conflict.",
+    "Per the INFRA-14 architect (Envoy, 2026-10-27 05:42Z, option C), the branch is stacked on legion/INFRA-546 (forward merge of 0681b1218da2) and the PR's base is legion/INFRA-546, so the bucket-grant test passes against #2362's code.",
+    "Plan 1.1's natsMemory floor is divided by 0.8 because nats-server now runs with GOMEMLIMIT at 80% of its memory limit (the chart README's recommendation); without GOMEMLIMIT the heap can grow to about twice its live size and the pod be OOM-killed. INFRA-546's 41 GiB gives 47 / 53 / 5Gi; the architect accepted these.",
+    "Plan 4.3's 10 s new-leader bound is 15 s: nats-server v2.15.1's Raft election timeout is a random 4-9 s (server/raft.go:317-318).",
+    "Plan 1.3 item 6 puts the advertiser and preStop scripts in the ConfigMap; the shared tailnet_service.go renders them inline for /bin/sh -c, so the ConfigMap holds serve.json alone.",
+    "natsReplicas is refused without tailnet (it renders only into the tailnet listener: the owned-input rule); the tailnet pod's total is held to Autopilot's floors like the hub pod's."
+  ],
+  "openQuestions": [
+    "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
+  ]
+}
