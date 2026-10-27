@@ -2,47 +2,40 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-27T07:42:00Z",
-  "round": 8,
-  "testedHead": "52602649ddfa489c41134beab3817596a978f378 (code head; 531018a9 above it changes only .legion/)",
+  "completed": "2026-10-27T14:06:00Z",
+  "round": 9,
+  "testedHead": "3ac0f1f0ca6e7c0e682f246e03f274128c19ce29 (code head: a forward merge of main after #2304; 90f84e6d above it changes only .legion/)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 8 entries: I re-ran `cd scripts/e2e/lib && bun test claude-backend-key-runner.test.ts` at 52602649 -> 1 pass, 0 fail. The CI `test` job at 52602649 (Tests 40453756357 attempt 2) passed, which confirms the #2317 fix the implementer proved with internal/api and internal/store. The 7a93f98f live-proof entries are superseded by the 52602649 devbox runs below, which the architect required."
+    "how": "Round 9 entry: I re-ran `cd scripts/e2e/lib && bun test claude-backend-key-runner.test.ts app-logins.test.ts` at 3ac0f1f0 -> 34 pass, 0 fail. I sourced lib/github-apps.sh and printed app_key_command: with the runner unset, `agent-secrets <KEY> --reason=legion-live-proof-github-app-key -- sh -c …`; with agent-secrets, the same; with secrets, no --reason. Ids are 5341240/5341243 in all three. The live-proof entries are superseded by the 3ac0f1f0 devbox runs below."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "N1/N3 at the final code head: a Claude Code implementer under tmux registers, is reminded by the Stop hook while its phase is open, completes through the legion MCP tool, and resumes the same session after its pane is killed",
-      "surface": "devbox (Proofs220c lane): real Go daemon with the tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, role Apps 5341240/5341243",
-      "command": "agent-secrets register --exec -- env LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<same> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 bash scripts/e2e/claude-backend-tmux.sh (05:11:34-05:23:42Z)",
-      "observed": "exit 0, 'claude backend e2e: PASS', 10/10 checks ok: prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff (handoff 6b86c6e8 authored by legion-implementer[bot]), kill-resumes-the-same-claude-session, every-launch-endpoint-checked. GET /app answered legion-implementer[bot] and legion-reviewer[bot]. legion, envoy-listener and envoy-dispatch stamped 52602649 modified=false. I read the transcript on Dispatch: dispatch://INFRA-220/artifact/infra220-52602649-tmux-transcript-log",
-      "headSha": "52602649ddfa489c41134beab3817596a978f378",
-      "negativeControl": "In the issue pod with stand-in tools at 52602649: LEGION_E2E_APP_KEY_RUNNER=agent-secrets with no agent-secrets on PATH -> 'FAIL prerequisites: agent-secrets, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required'. Runner unset and no secrets on PATH -> the same refusal naming secrets. Runner 'agent-secrets --x' -> 'LEGION_E2E_APP_KEY_RUNNER must be one command…; its value is not printed'"
+      "surface": "devbox (Proofs220d lane): real Go daemon with the tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, role Apps 5341240/5341243",
+      "command": "agent-secrets register --exec -- env LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<same> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 bash scripts/e2e/claude-backend-tmux.sh (08:04:58-08:27:33Z)",
+      "observed": "exit 0, 'claude backend e2e: PASS', 10/10 checks ok (prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session, every-launch-endpoint-checked). GET /app answered legion-implementer[bot] and legion-reviewer[bot]. legion, envoy-listener and envoy-dispatch stamped 3ac0f1f0 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-3ac0f1f0-tmux-transcript-log",
+      "headSha": "3ac0f1f0ca6e7c0e682f246e03f274128c19ce29",
+      "negativeControl": "lib/github-apps.sh at 3ac0f1f0 with LEGION_E2E_APP_KEY_RUNNER=secrets: the key command carries no --reason (the broker-only flag does not reach another store). At 52602649 the script's refusals were checked with stand-ins and that code is unchanged here: a missing runner -> 'FAIL prerequisites: <runner>, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required'"
     },
     {
       "criterion": "N2/N4 at the final code head: a Claude Code implementer under the Kubernetes runtime runs the bridge in its issue pod, is reminded by the Stop hook, completes, and a replacement pod resumes the same Claude Code session from the session table",
-      "surface": "devbox daemon (bridge reachability) against the production GKE cluster namespace legion, worker image ghcr.io/sjawhar/legion-worker@sha256:a7860cfb79dcc0c2a03320e61986a5fefe236b8bed1befd8c5976b031947e5c0 (Worker Image run 40453756325 attempt 2; I read org.opencontainers.image.revision=52602649ddfa489c41134beab3817596a978f378 from its config blob), scratch Postgres session store, no priority class",
-      "command": "agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_RUNTIME_KUBECONFIG=<ADC kubeconfig copy> GOOGLE_APPLICATION_CREDENTIALS=<ADC copy> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) LEGION_E2E_IMAGE=<digest above> ports 13380-13385 bash scripts/e2e/claude-backend-sandbox.sh (06:51:48-07:33:24Z)",
-      "observed": "exit 0, 'claude backend sandbox e2e: PASS', 15/15 ok: prerequisites, rig, snapshot, bridge, operator-route, daemon, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, claude-pod-runs-the-bridge, stop-hook-reminds-the-open-phase, claude-implementer-handoff, pod-deleted-resumes-the-same-claude-session (the old pod gone, the table row 726364 bytes whose first 725494 are the transcript from before the deletion), namespace-clean 0 objects before and after. Binaries stamped 52602649 modified=false. dispatch://INFRA-220/artifact/infra220-52602649-sandbox-transcript-log, -namespace-before-txt, -namespace-after-txt",
-      "headSha": "52602649ddfa489c41134beab3817596a978f378",
-      "negativeControl": "SIGINT after 'ok prerequisites' (set -m, 07:35:48Z), same head and image: exit 130, 'claude backend sandbox e2e: FAIL (check rig)', no 'FAIL cleanup', `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` exit 2, no object of ccs6047012 or ccs4729000 left (dispatch://INFRA-220/artifact/infra220-52602649-sandbox-sigint-transcript-log)"
-    },
-    {
-      "criterion": "Round 7 failure 1 fixed: with LEGION_E2E_APP_KEY_RUNNER set, the tmux proof's prerequisites never ask the box's own secrets store",
-      "surface": "scripts/e2e/claude-backend-tmux.sh run by bash with stand-in tools in this issue pod (the tester's red test, unchanged)",
-      "command": "cd scripts/e2e/lib && bun test claude-backend-key-runner.test.ts",
-      "observed": "1 pass, 0 fail at 52602649. The script no longer contains `secrets get`, and it requires the runner on PATH (line 598).",
-      "headSha": "52602649ddfa489c41134beab3817596a978f378",
-      "negativeControl": "At 036a7ffa the same test failed: 'FAIL prerequisites: secrets get LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 does not resolve'"
+      "surface": "sami-leanperf (operator session 01a16962) daemon with bridge reachability against the production GKE cluster, namespace legion. Worker image ghcr.io/sjawhar/legion-worker@sha256:277e3193629c1c764b1f6894ab9609796a5cc8f7b4d1bc469356115f986654ff (Worker Image run 40470632169; I read org.opencontainers.image.revision=3ac0f1f0ca6e7c0e682f246e03f274128c19ce29 from its config blob). Scratch Postgres session store, no priority class.",
+      "command": "agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_CLAUDE_KEY_FILE=<0600 tmpfs file> LEGION_E2E_RUNTIME_KUBECONFIG=<ADC kubeconfig copy> GOOGLE_APPLICATION_CREDENTIALS=<ADC copy> LEGION_E2E_APP_KEY_RUNNER=<0700 wrapper named agent-secrets adding --ttl 12h> LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_IMAGE=<digest above> ports 18611-18616 bash scripts/e2e/claude-backend-sandbox.sh (13:27:55-14:01:59Z)",
+      "observed": "exit 0, 'claude backend sandbox e2e: PASS', 15/15 ok: prerequisites, rig, snapshot, bridge, operator-route, daemon, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, claude-pod-runs-the-bridge, stop-hook-reminds-the-open-phase, claude-implementer-handoff, pod-deleted-resumes-the-same-claude-session, namespace-clean. legion, envoy-listener and envoy-dispatch stamped 3ac0f1f0 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-3ac0f1f0-sandbox-transcript-log (namespace snapshots -namespace-before-txt and -namespace-after-txt differ only in other projects' objects and ages)",
+      "headSha": "3ac0f1f0ca6e7c0e682f246e03f274128c19ce29",
+      "negativeControl": "SIGINT after 'ok prerequisites' (set -m, 14:02:36Z), same head and image: exit 130, 'claude backend sandbox e2e: FAIL (check rig)', no 'FAIL cleanup', `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` finds nothing, no object with project label ccs5353827 left (dispatch://INFRA-220/artifact/infra220-3ac0f1f0-sandbox-sigint-transcript-log)"
     }
   ],
-  "mergeCheck": "Forward merge 71190310 (main 448a4100, with #2317) brought only main. The branch's own diff (fork point to head, excluding .legion and docs/solutions, @@ and index lines dropped) at 036a7ffa and at 71190310 differs only by the red test file ed9e8789 added. 52602649 then changes only claude-backend-tmux.sh and scripts/e2e/README.md.",
-  "ci": "Read at 07:30Z for 52602649 (attempt 2 after cancellations by the implement App at 05:56:56Z; this session cancelled nothing). Tests 40453756357: lint, typecheck and test success. Docs 40453756385 success. PR Title 40453936597 success. Worker Image 40453756325 success. Legion Envoy and Contracts 40453756428 still queued.",
-  "notTested": [
-    "The sandbox runtime identity is the devbox's own service account through ADC, not the daemon's restricted identity (the implementer's recorded deviation)."
+  "deviations": [
+    "The sandbox and SIGINT runs ran on sami-leanperf (operator session 01a16962), because the INFRA lead's box sami-rocqperf went down after the tmux run. On that lane the key runner is a 0700 wrapper named agent-secrets that adds `--ttl 12h`, so the broker reuses Sami's 13:21Z grant of request 1d4bcb20. The command shape the script builds (`<runner> NAME --reason=… -- sh -c …`) is unchanged. The kubeconfig calls gke-gcloud-auth-plugin by absolute path with --use_application_default_credentials.",
+    "The sandbox runtime identity is ADC (the operator's identity), not the daemon's restricted identity (the implementer's recorded deviation)."
   ],
-  "risks": [
-    "sjawhar/legion#2304 rewrites the same tmux-script lines with a hard-wired agent-secrets. Whichever merges second must keep one mechanism."
-  ]
+  "observations": [
+    "The interrupted run left its scratch directory /tmp/legion-e2eccs.<pid>.<random> on the box, and the transcript names it. claude-backend-sandbox.sh cleanup() removes $work only when the run passed (lines 1114-1117), and the tmux script follows the same rule. It keeps a failed run's directory for diagnosis. Not a defect."
+  ],
+  "ci": "Read at 11:49Z for 3ac0f1f0: Tests 40470632121 (lint, typecheck, test) success, Docs 40470632210 success, PR Title 40470788179 success, Worker Image 40470632169 success, Legion Envoy and Contracts 40470631999 success.",
+  "risks": []
 }
