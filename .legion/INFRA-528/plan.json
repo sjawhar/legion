@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T00:38:38Z",
+  "plan": "dispatch://INFRA-528/artifact/plan-md",
+  "base": "7f7edb8d (main)",
+  "summary": "A new legion-own module @legion/proof-editor/mermaid (packages/proof-editor/src/mermaid-svg.ts) renders a source with upstream renderProofMermaidSvg and an allowlist sanitizer that also strips @import; Dispatch's features/refs/mermaid-diagrams.ts, called last in useRenderedMarkdown's layout effect, lazily imports it (importWhenOnline) only when a painted body holds a pre[data-language] mermaid block, and replaces it with a figure: the SVG in an open shadow root, a dangerText status line on refusal, and a Mermaid source disclosure (closed when drawn, open on refusal). Unclosed trailing fences stay code; results are cached by source (32). Proof: e2e/mermaid.e2e.ts committed alone first (red), then the change (green), in chromium, iphone, webkit and firefox.",
+  "tasks": [
+    "1. Red commit: packages/dispatch/e2e/mermaid.e2e.ts plus 'mermaid' in e2e/playwright.config.ts webkit and firefox testMatch; build web at that commit and run the spec red; quote it.",
+    "2. packages/proof-editor/src/mermaid-svg.ts (renderMermaidSvg, sanitizeMermaidSvg), package.json ./mermaid export, root biome.json '!packages/proof-editor/src/mermaid-svg.ts', tests/upstream-boundary.ts Assert for renderProofMermaidSvg, tests/mermaid-svg.test.ts.",
+    "3. packages/dispatch/web/vite.config.ts alias before @legion/proof-editor and chunk comment; web/src/features/refs/mermaid-diagrams.ts; the call in useRenderedMarkdown.tsx after the picture pass and before onRendered; styles.css .dispatch-mermaid block (vars on the figure, natural width capped at 100%); MarkdownBody.test.tsx cases.",
+    "4. packages/dispatch/AGENTS.md Layout paragraph, packages/proof-editor/AGENTS.md (ten legion-own files, conventions list), packages/envoy/CHANGELOG.md Unreleased Fixed entry.",
+    "5. Rebuild web at head, run the spec green in four projects, run the checks, bundle check, simplify pass, open the PR with 'Dispatch: INFRA-528'."
+  ],
+  "verification": {
+    "lint": "bunx biome check packages/dispatch/ packages/proof-editor/ biome.json",
+    "proofEditor": "cd packages/proof-editor && bun run typecheck && bun run test",
+    "dispatchUnit": "cd packages/dispatch && bunx tsc --noEmit && bun test --parallel web/src e2e/__tests__ && bun run check:classes",
+    "bundle": "cd packages/dispatch && bun run build:web && grep -l 'org.eclipse.elk' web/dist/assets/*.js (only lazy chunks; not the entry named in web/dist/index.html, not lib-headless-*.js or the chunk it imports); baseline 7f7edb8d: only lib-*.js (1,746 kB, 533 kB gzip), entry index-CfCOxHd3.js",
+    "browserSuite": "pod harness per docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md, then cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox, at the red commit and at the head",
+    "throwaway": "a Playwright run that aborts the mermaid chunk request with page.route: the comment's source stays code, no error boundary (not committed)",
+    "production": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merge sha> --page /issues/INFRA-528/conversation --route /api/v1/issues/INFRA-528/comments; output on the PR's Production: line (Dispatch refuses writes on a closed issue)"
+  },
+  "e2eRows": [
+    {"row": "a comment holding a mermaid block draws a diagram (A1)", "surface": "/issues/<KEY>/conversation li[data-turn=comment:<id>]", "redAtBase": true},
+    {"row": "an ask's question draws a diagram", "surface": "Inbox / getByTestId(ask-<id>)", "redAtBase": true},
+    {"row": "an issue message draws a diagram", "surface": "Conversation li[data-turn=message:<id>]", "redAtBase": true},
+    {"row": "a reply to a comment draws a diagram", "surface": "Conversation, createComment with reply_to", "redAtBase": true},
+    {"row": "a refused source shows 'Unable to render Mermaid diagram: Dangling Mermaid edge' and its source", "surface": "Conversation comment", "redAtBase": true},
+    {"row": "a label holding markup draws as text, no img element, no handler run", "surface": "Conversation comment", "redAtBase": true},
+    {"row": "a code block in another language stays code", "surface": "Conversation comment", "redAtBase": false}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: references/pr-body.md for the proof objects, the red-test commit before the change, both browser runs quoted with their commits and the PR body's E2E lines; references/merge-gate.md for the production check after the close",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the head is proven",
+      "dispatch: any Dispatch write, including the production check's record and a finding ask"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md for the proof object shape and for re-running the implementer's browser-suite command at the red commit and at the head it tests, with a negative control per criterion"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for approving the head by SHA and references/review-threads.md for replying to and resolving threads and judging bot findings"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The lazy chunk is larger than 335 KB: beautiful-mermaid statically imports elkjs (~1.6 MB), and upstream mermaid-diagrams.ts pulls Milkdown modules and calls $prose at load.", "answer": "Keep importing from upstream for the editor's exact validation; the chunk is loaded only when a body holds a mermaid block; a bundle check after build:web proves the entry and headless chunks carry no 'org.eclipse.elk' and records chunk sizes (baseline measured); vite.config.ts chunk comment updated."},
+      {"finding": "Drawing right after paint lets linkifyDispatchRefs put HTML <a> inside the SVG and collectReferenceAnchors collect SVG <a>s.", "answer": "The draw runs last in the layout effect, after the reference, decorate and picture passes and before onRendered; a unit test with dispatch://CORE-1 in a label asserts no link and no portal."},
+      {"finding": "Upstream's sanitizer keeps <style>, <image>, <use>, <animate>, <set>, SVG <a>; an inline SVG <style> applies page-wide; the output @imports Google Fonts and Dispatch sends no CSP.", "answer": "Legion's sanitizer is an allowlist of the elements beautiful-mermaid emits (measured over six diagram types), drops on* and href/xlink:href attributes, strips @import from <style>; the SVG sits in an open shadow root so its <style> styles only that diagram; unit tests feed hostile SVG; an e2e row proves a markup label draws as text."},
+      {"finding": "The first diagram per page draws late, and no production onRendered caller compensates the height change; the live view corrects its own scroll.", "answer": "The onRendered claim is dropped; one shift per page load is accepted and documented in packages/dispatch/AGENTS.md; later diagrams draw synchronously in the layout effect."},
+      {"finding": "Streaming live-view turns re-parse every frame; an unclosed fence would re-render every frame (~71 ms for a 30-edge flowchart) and flash errors; a source-keyed cache never hits while the source grows.", "answer": "A mermaid block that is the document's last block while the source's last non-blank line is no closing fence stays code; a bounded (32) source-keyed cache serves re-paints of finished diagrams; a unit test covers unclosed then closed."},
+      {"finding": "'Draws as the editor's plugin does' is ambiguous: the editor shows the source open and a 640 px minimum width in a bordered card.", "answer": "Decided (presentation is the builder's choice): the same renderer, label, refusal wording and Mermaid source disclosure, with the source closed when drawn (as upstream's own read-only share page does) and the SVG at natural width capped at the body's width for narrow cards; recorded as a spec departure with the spec's Summary and Acceptance unchanged."},
+      {"finding": "A1's negative control is not proved by waiting for an svg; the test must find the source as code at base; procedure and phone layout must be stated; guard rows pass at base.", "answer": "Every drawing row asserts the image is visible and the source is hidden until Mermaid source is clicked; the spec is committed alone first and run against a build of that commit; rows are marked red-at-base or guard; the phone project reaches the Conversation as issue.e2e.ts does."},
+      {"finding": "The SVG reads --bg-color/--text-color, defined only on .dispatch-doc .proof-editor.", "answer": "--bg-color: transparent; --text-color: currentColor are set on the .dispatch-mermaid figure, never on .dispatch-markdown (which also sits in documents); custom properties inherit into the shadow root, so dark mode follows the card."},
+      {"finding": "styles-css-pin.test.ts refuses unannotated colour literals; classes.ts already has error tokens.", "answer": "The status line uses dangerText from theme/classes.ts; styles.css gets no colour literal."},
+      {"finding": "Duplicate SVG marker ids across diagrams and cloned copies.", "answer": "Each SVG lives in its own shadow root, a separate id scope, so url(#arrowhead…) resolves within its own diagram."},
+      {"finding": "A failed lazy import must not be cached forever and should reuse importWhenOnline.", "answer": "Loaded through importWhenOnline; on rejection the blocks stay code, console.error logs it, and the rejected promise is forgotten; a throwaway page.route abort checks it."},
+      {"finding": "Which surfaces count: about 13 block surfaces draw; previews and the inline variant keep source.", "answer": "Stated: every block MarkdownBody draws; MarkdownPreview and the inline variant keep the source as inline code; the e2e covers an issue comment, an Inbox ask question, an issue message and a comment reply."},
+      {"finding": "Missing wiring: biome.json lint exclusion, AGENTS.md conventions, Vite alias order, package.json export keys, upstream-boundary assertion.", "answer": "All five are tasks in the plan (§1, §2, task 2 and 3)."},
+      {"finding": "Test isolation: ELK under happy-dom untested; module-level cache needs reset; body textContent assertions may change.", "answer": "Measured: ELK throws under happy-dom ($wnd.Error.stackTraceLimit TypeError), so unit tests use sequence diagrams or build a flowchart before the DOM is installed; module state is reset between cases; only bodies with mermaid blocks change their text."},
+      {"finding": "Accessibility: the editor's aria-label says nothing about content.", "answer": "Kept the editor's label for parity; the Mermaid source disclosure beside it is the text alternative; an aria-describedby cannot cross the shadow boundary."},
+      {"finding": "The production check's page and meaning are unstated; INFRA-64 not found in the repo.", "answer": "Page /issues/INFRA-528/conversation with route /api/v1/issues/INFRA-528/comments; the check proves the running build carries the merge and serves the page and route, not that a diagram drew (the browser suite proves that); INFRA-64 is named by the deployment instructions; a build without the merge is recorded and the look reported pending."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Change: the shared markdown renderer draws mermaid as the editor's plugin does.",
+      "plan": "Same renderer (upstream renderProofMermaidSvg), accessible name and refusal wording, but Dispatch's own block: the source disclosure closed when the diagram draws (open on refusal), the SVG at its natural width capped at the body's width instead of a 640 px minimum, and Dispatch's own class names so lib.css never restyles it.",
+      "evidence": "The editor opens the source unless the path starts /d/ (mermaid-diagrams.ts:153) and lib.css:650-655 sets min-width 640px; margin and Inbox cards are far narrower than a document; lib.css is loaded unscoped once any document opens (features/doc/editor.ts:23).",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "Change: draws mermaid as the editor's plugin does (the plugin's sanitizer and page-wide SVG <style>).",
+      "plan": "A stricter allowlist sanitizer, @import (Google Fonts) stripped, the SVG placed in an open shadow root, and an unclosed trailing fence left as code.",
+      "evidence": "Upstream blocks only five tags (mermaid-diagrams.ts:95); the output carries a page-wide <style> and an @import of fonts.googleapis.com (measured); comment text comes from any person or agent; live-view turns re-parse every frame and a 30-edge flowchart renders in about 71 ms (measured).",
+      "outcome": {"kind": "unchanged"}
+    }
+  ],
+  "reportedToArchitect": [
+    "The document editor's own diagrams (upstream MermaidCodeBlockView via lib.ts:342) still put their <style> on the whole page and fetch Google Fonts; fixing that edits the copied lib.ts beyond its fifteen allowed kinds or moves the fork pin, so it is outside this issue's spec and left for the architect to decide."
+  ]
+}
