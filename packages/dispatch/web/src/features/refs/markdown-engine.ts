@@ -29,13 +29,17 @@ export interface MarkdownEngine {
   readonly serializer: DOMSerializer;
   /**
    * The parsed document, or `undefined` for a source the parser refuses, which the caller shows
-   * as one plain-text node. Proof's schema has no node for CommonMark's raw-HTML spans (a bare
+   * as one plain-text node. The engine parses read-only: a container directive the block schema
+   * refuses (`:::note` … `:::`) is drawn as its literal fence lines around its formatted content,
+   * and a Pandoc `::: warning` fence or a `::leaf` / `:text{` line reads as paragraph text, so
+   * neither throws. Proof's schema has no node for CommonMark's raw-HTML spans (a bare
    * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) or a mark span of a
-   * kind this schema does not carry, so the parser throws for them. HTML-like text inside a code
-   * span or fence parses safely as literal text, so nothing is escaped beforehand: escaping the
-   * whole source regardless of context would print literal backslashes around any code span or
-   * fence containing something tag-shaped. Reference-style links and images (`[text][id]` with
-   * their `[id]: url` definition) resolve to the link or image they name, so they do not throw.
+   * kind this schema does not carry, so the parser still throws for them. HTML-like text inside
+   * a code span or fence parses safely as literal text, so nothing is escaped beforehand:
+   * escaping the whole source regardless of context would print literal backslashes around any
+   * code span or fence containing something tag-shaped. Reference-style links and images
+   * (`[text][id]` with their `[id]: url` definition) resolve to the link or image they name, so
+   * they do not throw.
    *
    * A throw leaves the parser's own stack mid-document, so the headless editor drops that
    * parser and the next parse builds a fresh one (about 0.03 ms): one refused body answers
@@ -117,7 +121,7 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   }
   headlessModule ??= import("@legion/proof-editor/headless");
   const created = headlessModule
-    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema }))
+    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema, readOnly: true }))
     .then((proof) => {
       const engine = buildEngine(proof);
       readyEngine = engine;

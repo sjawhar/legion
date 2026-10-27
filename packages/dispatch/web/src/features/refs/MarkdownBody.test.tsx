@@ -262,6 +262,33 @@ test("renders a typed callout body through the server schema", async () => {
   }
 });
 
+test("a container directive the schema refuses shows its fence lines and the body still formats", async () => {
+  const view = render(
+    <MarkdownBody markdown={"Some **bold** text\n\n:::note\nA note line\n:::\n"} />
+  );
+
+  try {
+    expect(await within(view.container).findByText("bold", { selector: "strong" })).toBeDefined();
+    const paragraphs = Array.from(view.container.querySelectorAll("p"), (p) => p.textContent);
+    expect(paragraphs).toEqual(["Some bold text", ":::note", "A note line", ":::"]);
+    expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a Pandoc fenced div reads as text and the body still formats", async () => {
+  const view = render(<MarkdownBody markdown={"Some **bold** text\n\n::: warning\nBody\n:::\n"} />);
+
+  try {
+    expect(await within(view.container).findByText("bold", { selector: "strong" })).toBeDefined();
+    expect(view.container.textContent).toContain("::: warning");
+    expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("a code span containing tag-shaped text renders the literal characters with no backslashes", async () => {
   const view = render(<MarkdownBody markdown="Use `<img src=x>` here" />);
 
