@@ -187,14 +187,19 @@
 #            or 100755) whose name ends in .yaml: any other entry there, such as
 #            a subdirectory, a symlink, a submodule or a .yml file, would never
 #            be folded, so fold-plan fails with one ::error:: that names every
-#            such entry of every spec, sorted, and prints no plan. With a tag
-#            prefix (a package with releases of its own), a fragment's label
-#            is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag that contains the
-#            commit which added it: the release that first shipped the entry,
-#            whether the tag sits on the bump commit `tag` makes over the built
-#            commit (the npm plugins) or on the built commit itself (the
-#            listener); other names under the prefix are not releases and are
-#            skipped. A fragment no such tag contains waits for a later run,
+#            such entry of every spec, sorted, and tells the author to move or
+#            rename a fragment in one commit with `git mv`, and prints no plan.
+#            With a tag prefix (a package with releases of its own), a
+#            fragment's label is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag
+#            that contains the commit which first added the entry, following
+#            renames: the release that first shipped the entry, whether the tag
+#            sits on the bump commit `tag` makes over the built commit (the npm
+#            plugins) or on the built commit itself (the listener); other names
+#            under the prefix are not releases and are skipped. A commit that
+#            deletes a file and adds one git pairs with it as a rename, as
+#            `git mv` does, renames the entry; a fragment deleted in one commit
+#            and added again in another is a new entry, and a copy is never
+#            followed. A fragment no such tag contains waits for a later run,
 #            unprinted.
 #            The date is the tag's commit's committer date. Without a prefix (a
 #            package with no release of its own), every fragment is folded under
@@ -261,23 +266,22 @@
 #            chore subject bumps no release. The commit lands by land_on_main
 #            (below), which never rebases: a fold is of main's tip, so when main
 #            moved since the build, a new run folds the new tip, fragments and
-#            all, and is the retry. push-fold ends with land_on_main, so it
-#            exits 0 whenever land_on_main returns.
+#            all, and is the retry.
 #
-#            land_on_main <base-sha> <workflow-file>, shared with the other
-#            commands that land one commit built from a base, never forces and
-#            never rebases. It refuses a <base-sha> that is not 40 lower-case
-#            hex and a HEAD that is not exactly one commit whose one parent is
-#            <base-sha>, then fetches main with the deploy key (deploy_key_env,
-#            as push-tag does). When main's tip is <base-sha> it pushes HEAD
-#            there and appends pushed=true to $GITHUB_OUTPUT when that is set.
-#            When main's tip is another commit, before the push or after a
-#            rejected push, it pushes nothing: it starts a fresh run of
-#            <workflow-file> on main (`gh workflow run`, with $GH_TOKEN), which
-#            builds main's tip, and a ::notice names both commits. In both
-#            cases it returns 0. A failed fetch, a push rejected while main's
-#            tip is still <base-sha>, or a failed `gh workflow run` is an
-#            ::error:: and exit 1.
+#            push-fold ends with land_on_main <base-sha> <workflow-file>, so
+#            push-fold exits 0 whenever land_on_main returns. land_on_main never
+#            forces and never rebases. It refuses a <base-sha> that is not 40
+#            lower-case hex and a HEAD that is not exactly one commit whose one
+#            parent is <base-sha>, then fetches main with the deploy key
+#            (deploy_key_env, as push-tag does). When main's tip is <base-sha>
+#            it pushes HEAD there and appends pushed=true to $GITHUB_OUTPUT
+#            when that is set. When main's tip is another commit, before the
+#            push or after a rejected push, it pushes nothing: it starts a
+#            fresh run of <workflow-file> on main (`gh workflow run`, with
+#            $GH_TOKEN), which builds main's tip, and a ::notice names both
+#            commits. In both cases it returns 0. A failed fetch, a push
+#            rejected while main's tip is still <base-sha>, or a failed
+#            `gh workflow run` is an ::error:: and exit 1.
 set -euo pipefail
 
 command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
@@ -442,6 +446,34 @@ check_hand_over() {
 # commit_date <rev>: the UTC date, YYYY-MM-DD, of <rev>'s commit.
 commit_date() { TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd "$1"; }
 
+# first_added <path>: print the commit that first added <path>, a file HEAD
+# holds, following renames. The commit that gave the file its name is the one
+# that added <path>; when that commit also deleted a file git pairs with it as a
+# rename (diff-tree -M, a deleted file and an added one alike enough), the file
+# had another name before, and the search goes on for that name from the
+# commit's parent. A copy is not followed: `git log --follow` follows copies too
+# (it finds them among every file the parent holds), and fragments are alike
+# enough that a new one reads as a copy of an older one, so it would give the
+# new one the older one's commit. Every name is read literally.
+first_added() {
+  local path=$1 rev=HEAD commit status from to renamed
+  while :; do
+    commit=$(git --literal-pathspecs log -1 --diff-filter=A --format=%H "$rev" -- "$path")
+    renamed=''
+    while IFS= read -r -d '' status; do
+      if [[ $status == R* ]]; then
+        IFS= read -r -d '' from && IFS= read -r -d '' to
+        [[ $to != "$path" ]] || renamed=$from
+      else
+        IFS= read -r -d '' to
+      fi
+    done < <(git diff-tree -r -z -M --root --no-commit-id --name-status "$commit")
+    [ -n "$renamed" ] || break
+    path=$renamed rev=$commit^
+  done
+  printf '%s\n' "$commit"
+}
+
 # fold_plan <spec>...: set plan to the fold's plan, the lines fold-plan prints
 # (the header's fold-plan paragraph), each ending in a newline; empty when there
 # is nothing to fold. Sets groups to its distinct <package-dir><TAB><label>
@@ -482,7 +514,7 @@ fold_plan() {
       if [ -z "$prefix" ]; then
         label=$head_label date=$head_date
       else
-        commit=$(git --literal-pathspecs log -1 --diff-filter=A --format=%H HEAD -- "$path")
+        commit=$(first_added "$path")
         label='' tag=''
         for candidate in $(git tag --list "$prefix*" --contains "$commit"); do
           version=${candidate#"$prefix"}
@@ -499,7 +531,7 @@ fold_plan() {
   done
   if [ ${#unexpected[@]} -gt 0 ]; then
     mapfile -d '' -t unexpected < <(printf '%s\0' "${unexpected[@]}" | LC_ALL=C sort -z)
-    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or the fold never folds it; move it, rename it or remove it"
+    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or the fold never folds it; move it, rename it or remove it. Move or rename a fragment in one commit, with git mv: a fragment removed in one commit and added again in another is a new entry, which the release after it labels"
   fi
   set_plan "$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)"
 }

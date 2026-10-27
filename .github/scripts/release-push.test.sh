@@ -1542,6 +1542,40 @@ check "fold-plan: a fragment whose name holds a glob character gets the release 
   "$(is "$rc|$out" "0|packages/glob	1.0.0	2026-05-01	packages/glob/$u/INFRA-7-[a].yaml
 packages/glob	1.1.0	2026-05-02	packages/glob/$u/INFRA-7-a.yaml")"
 
+# A fragment renamed with git mv keeps the release of the commit that first added it. Here
+# sjawhar/fix.yaml, in a subdirectory fold-plan refuses, ships in ren-v1.0.0; a later commit moves
+# it to sjawhar-fix.yaml, and INFRA-8-later.yaml, alike enough to read to git as a copy of it, is
+# added after that and ships in ren-v1.1.0 (`git log --follow` would follow that copy).
+nt="$work/fold-rename"
+mkdir -p "$nt/packages/ren/$u/sjawhar"
+git init -q -b main "$nt"
+identity "$nt"
+printf '# Changelog\n' > "$nt/packages/ren/CHANGELOG.md"
+printf 'component: ren\nkind: Fixed\nbody: a nested fix\n' > "$nt/packages/ren/$u/sjawhar/fix.yaml"
+git -C "$nt" add -A
+GIT_COMMITTER_DATE=2026-06-01T12:00:00+00:00 git -C "$nt" commit -q -m "fix: nested"
+git -C "$nt" tag ren-v1.0.0
+set +e
+out=$(cd "$nt" && "$release_push" fold-plan packages/ren=ren-v 2>"$work/fold-rename.err")
+rc=$?
+set -e
+err=$(<"$work/fold-rename.err")
+check "fold-plan: the refusal of a misplaced entry says to move or rename a fragment in one commit with git mv" \
+  "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/ren/$u/sjawhar $refused.* in one commit, with git mv")" "1||true")"
+git -C "$nt" mv "packages/ren/$u/sjawhar/fix.yaml" "packages/ren/$u/sjawhar-fix.yaml"
+GIT_COMMITTER_DATE=2026-06-02T12:00:00+00:00 git -C "$nt" commit -q -m "chore: move the fragment"
+printf 'component: ren\nkind: Fixed\nbody: a later fix\n' > "$nt/packages/ren/$u/INFRA-8-later.yaml"
+git -C "$nt" add -A
+GIT_COMMITTER_DATE=2026-06-03T12:00:00+00:00 git -C "$nt" commit -q -m "fix: later"
+git -C "$nt" tag ren-v1.1.0
+set +e
+out=$(cd "$nt" && "$release_push" fold-plan packages/ren=ren-v 2>/dev/null)
+rc=$?
+set -e
+check "fold-plan: a fragment renamed with git mv gets the release of the commit that first added it, and one alike enough to read as its copy its own" \
+  "$(is "$rc|$out" "0|packages/ren	1.0.0	2026-06-01	packages/ren/$u/sjawhar-fix.yaml
+packages/ren	1.1.0	2026-06-03	packages/ren/$u/INFRA-8-later.yaml")"
+
 # The stub gh, first on PATH in a directory of its own. It logs each call to $GH_TEST_DIR/calls as
 # one line, each argument in brackets; `gh workflow run` fails when $GH_TEST_FAIL is set, and any
 # other call fails as unexpected.

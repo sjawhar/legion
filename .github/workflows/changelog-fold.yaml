@@ -5,10 +5,10 @@ name: Fold Changelog Fragments
 # over the top of the same file. This workflow folds the fragments into each package's
 # CHANGELOG.md on main and removes them, in one commit, "chore: fold changelog fragments [skip
 # ci]". A fragment's entry lands under the version of the release that first shipped it: the
-# lowest <tag-prefix>X.Y.Z tag that contains the commit which added it, so a fragment no release
-# has shipped yet waits for a later run. claude-envoy, contracts and envoy-client have no release
-# of their own, so their fragments land under main@<the first 12 hex digits of main's tip>
-# (`release-push.sh fold-plan`'s header paragraph).
+# lowest <tag-prefix>X.Y.Z tag that contains the commit which first added it, following renames,
+# so a fragment no release has shipped yet waits for a later run. claude-envoy, contracts and
+# envoy-client have no release of their own, so their fragments land under main@<the first 12 hex
+# digits of main's tip> (`release-push.sh fold-plan`'s header paragraph).
 #
 # It is a workflow of its own, and the release workflows are untouched: it runs after each run of
 # either release workflow on main (a new tag is what makes a fragment foldable), once a day, and by
@@ -21,12 +21,14 @@ name: Fold Changelog Fragments
 # fragments with changie, which is dependency code, and so holds no write scope and no secret and
 # ends in the tripwire. fold_publish holds the deploy key and runs no dependency code: only
 # release-push.sh push-fold, which writes the build's notes into the CHANGELOG.md files and lands
-# the commit with git and gh and the base text tools (coreutils, find, awk, sed and grep). Both
-# jobs check out github.sha, which the event fixes, so fold_build never chooses the commit whose
-# code fold_publish runs.
-# check-release-credentials.sh pins this shape. A pull request that changes the fold runs
-# fold_build on its own merge commit, so changie, the plan and the notes run on GitHub before the
-# merge; fold_publish runs on main alone, so nothing lands from a pull request.
+# the commit with git and gh and the base text tools (coreutils, find, awk, sed and grep).
+# check-release-credentials.sh pins this split: no dependency code and no cache in the job that
+# holds the credential, the deploy key in the env of the push step alone, and the tripwire last in
+# fold_build. It does not read which commit a job checks out: this workflow keeps both jobs on
+# github.sha, which the event fixes, so fold_build never chooses the commit whose code
+# fold_publish runs. A pull request that changes the fold runs fold_build on its own merge commit,
+# so changie, the plan and the notes run on GitHub before the merge; fold_publish runs on main
+# alone, so nothing lands from a pull request.
 on:
   workflow_run:
     workflows: ["Release Packages", "Release Envoy Listener"]
