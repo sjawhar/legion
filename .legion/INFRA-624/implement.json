@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-624",
+  "completed": "2026-10-27T19:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
+  "proof": [
+    {
+      "criterion": "A1. Two editors whose concurrent edits leave an ask holding two lists keep the question and both options in both editors and the stored document; the ask stays open, is marked malformed, and joining the lists clears that",
+      "surface": "Dispatch document editor in headless Chromium (chromium and iphone projects) against the real Go Dispatch server and Postgres 17 in the issue pod",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts --project chromium --project iphone",
+      "observed": "312 passed (17.9m), 0 failed. Both ask-concurrent-edit tests pass in both projects: words Which one?/Option A/Option B in both pages and the stored markdown, data-dispatch-ask-malformed=true on both pages, open_asks still holds a1, Backspace at the start of the second list clears the mark and the ask's options become both; Enter in the malformed ask's question keeps every word; no page error. ask-concurrent-edit alone: 16/16 with --repeat-each 4. Run record: https://github.com/sjawhar/legion/pull/2433#issuecomment-6450418428",
+      "headSha": "49f31821af11bdd831a21a22d07b204a666eab07",
+      "negativeControl": "Same spec file at the base 2df3353c: both tests fail, toContainText \"Option A\" -> element(s) not found and toHaveAttribute data-dispatch-ask-malformed \"true\" -> element(s) not found (the ask and its words deleted; settlement then retracted a1 as system/document-settlement, recorded at dispatch://INFRA-624/comment/3cb60eb2-b4c2-4e0c-883d-f9de8cd7e7fa)"
+    },
+    {
+      "criterion": "P. A pasted unknown typed block keeps every word, drawn as its lines",
+      "surface": "Dispatch document editor in headless Chromium, a real paste (navigator.clipboard.writeText + ControlOrMeta+V, one paste event counted)",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- typed-block-content-rule.e2e.ts --project chromium --project iphone (within the run above)",
+      "observed": "the row 'an unknown typed block pasted as plain text keeps every word as its lines' passes in both projects: paragraphs :::note / hello world / :::, stored markdown exactly \"Intro text.\\n\\n\\\\:::note\\n\\nhello world\\n\\n:::\\n\", no page error; INFRA-565's two rows and INFRA-529's four unknown-directive rows pass",
+      "headSha": "49f31821af11bdd831a21a22d07b204a666eab07",
+      "negativeControl": "Same row at the base 2df3353c: fails at p /^:::note$/ -> element(s) not found; the editor showed one paragraph ':::note hello world :::' and the page error 'unknown typed block \"note\" (known types: ask, callout)'"
+    },
+    {
+      "criterion": "Settlement marks a content-rule break invalid, keeps the ask open, clears it on repair",
+      "surface": "Go document service settlement against Postgres (packages/envoy/internal/dispatch/docs)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run 'Invalid|AskReadab|AskBlock|Settlement' -timeout 30m",
+      "observed": "ok; TestSettlementMarksAnAskWithASecondBulletListInvalid and TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid pass: invalid names the content-rule reason, block.invalid emitted, row open with its original question and options, cleared on repair",
+      "headSha": "49f31821af11bdd831a21a22d07b204a666eab07",
+      "negativeControl": "with the reconcile change disabled both rows fail: ask invalid = <nil>, want \"ask block \\\"ask-lists\\\" ... holds a second bullet list ...\""
+    }
+  ],
+  "filesChanged": [
+    "packages/proof-editor/src/ask-content.ts (new): SERVER_BLOCK_TYPES and relaxAskContentCheck, the ask node's validContent accepting what pmdoc.Validate accepts",
+    "packages/proof-editor/src/lib.ts: relaxAskContentCheck before bindDoc; liveTypedBlocksRemarkPlugin after the mark plugins in place of typedBlockRemarkPlugin and unfitTypedBlocksRemarkPlugin",
+    "packages/proof-editor/src/lib-headless.ts: relaxAskContentCheck after new Schema; parseMarkdown/readOnly comments",
+    "packages/proof-editor/src/read-only-directives.ts: liveTypedBlocksRemarkPlugin",
+    "packages/proof-editor/src/typed-block-drawing.ts: unfitTypedBlocksRemarkPlugin removed",
+    "packages/proof-editor/src/lib-remark-directive-plugin.ts: typedBlockRemarkPlugin removed",
+    "biome.json: ask-content.ts checked",
+    "packages/envoy/internal/dispatch/docs/ask_blocks.go: reconcileAskBlocks marks a parsed ask that breaks pmdoc.AskContentError invalid; readAskBlockStrictly for askReadability",
+    "packages/envoy/internal/dispatch/pmdoc/node.go, docs/websocket.go: comments",
+    "tests: packages/proof-editor/tests/ask-concurrent-edit.test.ts (new), typed-block-drawing.test.ts, marks-editor.ts; packages/envoy/internal/dispatch/docs/service_test.go; packages/dispatch/e2e/ask-concurrent-edit.e2e.ts (new), typed-block-content-rule.e2e.ts; packages/dispatch/web/src/features/doc/VersionView.test.tsx",
+    "docs: packages/envoy/CHANGELOG.md, packages/envoy/AGENTS.md, packages/proof-editor/AGENTS.md, three docs/solutions learnings (evidence lines)"
+  ],
+  "trickyParts": [
+    "Which of the two crossed option lists comes first is decided by the two editors' Yjs client ids, so the browser test reads the second list from the page before Backspace; Backspace at the start of the first list lifts its item into the question (a valid ask with one option), which made the first version of the test flaky (2 of 3 runs).",
+    "Typing '- Option A' into a fresh ask lands the text in the question: the malformed content class hides an empty option item. Out of scope (INFRA-612 owns that class; the architect routed it to #2405); the test types the option first, then '- '."
+  ],
+  "deviations": [
+    "relaxAskContentCheck takes (schema, blockSchema): the typed block names come from the block schema rather than from node specs.",
+    "reconcileAskBlocks calls pmdoc.AskContentError directly (the collector already parsed each block) and readAskBlockStrictly returns only an error, used by askReadability; the plan named one helper used by both. Same rule, one parse per settlement (simplify pass).",
+    "The census read every live document through the API (2,520 issues unpaged, 6,029 documents, 636 ask blocks, 19 open): 0 newly marked, so the mark was implemented without waiting, as the architect's condition allows."
+  ],
+  "openQuestions": []
+}
