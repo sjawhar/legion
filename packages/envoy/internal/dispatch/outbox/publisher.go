@@ -812,12 +812,12 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 	return publishSessionRoutes(deps, eventID, item, a, sessionIDs, "publish follower route to")
 }
 
-// publishAuthorRoutes delivers a human comment-thread action directly to the involved
-// sessions' own topics, regardless of the issue's route (which may point at an entirely
-// different reviewer) and regardless of whether the event's owner is an issue or a project
-// document (which has no route at all). Without this, the sessions in a thread never learn of
-// the human's reply, resolution, reopening, or edit, and the agent that wrote a document never
-// learns of a new comment on it.
+// publishAuthorRoutes delivers a human comment-thread action, or a person's settled edit of a
+// document, directly to the involved sessions' own topics, regardless of the issue's route (which
+// may point at an entirely different reviewer) and regardless of whether the event's owner is an
+// issue or a project document (which has no route at all). Without this, the sessions in a thread
+// never learn of the human's reply, resolution, reopening, or edit, and the agent that wrote a
+// document never learns of a new comment on it or of a person's edit to it.
 //
 // A reply (reply_to set), and its edit, reach threadSessions, which resolveCommentRecipients read
 // for the batch (loadCommentRecipients): every session that wrote a comment in the thread, its root
@@ -825,10 +825,13 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 // error ends the attempt here. A new comment on a document (no reply_to and no ask_id), and its
 // edit, reach every session that document credits (loadDocumentSessionAuthors); a new comment on an
 // issue's conversation names no document and reaches no author. A resolution or a reopening reaches
-// the thread root's author only, so the reopening a reply makes tells no session twice. Ask threads
-// are not walked here: their asker and repliers are the ask's followers (publishFollowerRoutes).
-// The event's own actor is skipped, and so is a session the comment's mentions already reach
-// (suppressed_authors), by the filter the claim recipients go through (recipientFilter).
+// the thread root's author only, so the reopening a reply makes tells no new session twice.
+// artifact.human_edited, which the notice sweep appends once a person's quiet window on a document
+// ends (docs.sendEditNotice), reaches every session the document its payload's artifact_id names
+// credits. Ask threads are not walked here: their asker and repliers are the ask's followers
+// (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
+// mentions already reach (suppressed_authors), by the filter the claim recipients go through
+// (recipientFilter).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, threadSessions recipientList, a *attempt) error {
 	filter := newRecipientFilter(event)
 	var targets []string
@@ -888,6 +891,16 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
 			consider(model.Actor{Kind: "session", ID: sessionID}, true)
 		}
+	case "artifact.human_edited":
+		if document := editedDocument(event); document != "" {
+			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
+			if err != nil {
+				return err
+			}
+			for _, author := range authors {
+				consider(model.Actor{Kind: "session", ID: author}, true)
+			}
+		}
 	default:
 		return nil
 	}
@@ -918,6 +931,15 @@ func commentedDocument(event model.Event) string {
 		document = *event.ArtifactID
 	}
 	return document
+}
+
+// editedDocument names the document a person's artifact.human_edited is about, its payload's
+// artifact_id, or "" for every other event.
+func editedDocument(event model.Event) string {
+	if event.Type != "artifact.human_edited" {
+		return ""
+	}
+	return payloadString(event.Payload, "artifact_id")
 }
 
 // loadDocumentSessionAuthors lists, in one query, the sessions a document credits
