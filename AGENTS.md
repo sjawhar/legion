@@ -294,8 +294,12 @@ re-admission or a resume sets the cursor to 0, so the next catch-up reads from t
 catches it up: a catch-up of a root with no cursor replays nothing and only sets the cursor, so the
 first boot on this release replays nothing, and the events of the deploy's own downtime reach a
 root that has no cursor yet one at a time from the durable consumer, unheld, as before this
-release. A re-admission sets the cursor back to 0, so a new generation never replays the old
-one's tail. A gate whose document
+release. A boot whose read of such a root Dispatch refused leaves it with no cursor, so its next
+catch-up replays nothing too. A re-admission sets the cursor back to 0, so a new generation never
+replays the old one's tail. A daemon of an earlier release ignores the cursor, so a return to this
+release after one ran would replay, from the cursor this release left, events that daemon already
+applied live; before such a return, set every cursor to null (`update issues set caught_up_seq =
+null`), so each root's next catch-up replays nothing again. A gate whose document
 has no approval request in the mirror (one an earlier release registered before the mirror
 existed) has the request Dispatch shows open on that document mirrored at boot, and when that
 request waits on the person the boot declares the hand-back as a registration would, so a root already waiting on its approval at the deploy returns its slot. A root Dispatch

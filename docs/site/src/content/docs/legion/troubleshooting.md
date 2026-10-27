@@ -289,11 +289,15 @@ start it by hand. Without `answeredAt`, check, in order:
 4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
    answered after `since` and none of the above holds, the answer's event never reached the
    daemon, and nothing re-reads a waiting root's asks until the next boot. Restarting the daemon
-   (`legion restart`) catches the root up: the boot applies the root's Dispatch event log after
-   its catch-up cursor, with the root held until the whole window is in, then decides it once.
-   Without a restart, have the person (or anyone acting as them) add a reply in the thread of any
-   ask of the root, one that leaves the turn with the agent: that new act wakes the root on its
-   own event.
+   (`legion restart`) catches the root up from its catch-up cursor: the boot applies the root's
+   Dispatch event log after the cursor, with the root held until the whole window is in, then
+   decides it once. A restart does not read an answer recorded before the root's first catch-up
+   on this release, for a root recorded before the catch-up cursor existed and given no work
+   since: that first catch-up only sets the cursor to the issue's latest sequence and replays
+   nothing, and a boot whose read of the root Dispatch refused leaves it with no cursor, so the
+   next boot's catch-up is that first one. In that case, or without a restart, have the person (or
+   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
+   turn with the agent: that new act wakes the root on its own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
 `awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still

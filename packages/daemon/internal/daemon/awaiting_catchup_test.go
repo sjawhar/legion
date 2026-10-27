@@ -1079,6 +1079,52 @@ func TestAReadmittedRootsCatchUpReadsFromItsReadmission(t *testing.T) {
 	}
 }
 
+// A handout keeps a cursor it finds (a resume after the root's last catch-up), and the next boot
+// reads from that cursor, not from the later handout: the handout is the highest sequence the
+// record held, not proof that every event below it arrived, so an event below the handout the
+// durable stream had not delivered (ask-late at 7) is applied at the boot, with the root held.
+func TestACatchUpReadsFromACursorBelowTheLastHandout(t *testing.T) {
+	const cursor, handout int64 = 4, 8
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
+		events: []json.RawMessage{askOpened(7, "ask-late"), askReplied(9, "ask-late", "agent", alice)}}
+	pool, w := catchUpRig(t, client, 1)
+	c := cursor
+	slottedCapture(t, pool, nil, &c)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		// The root's record reaches the handout's sequence, then the daemon hands it work again.
+		if _, err := tx.Exec(ctx, `update issues set last_dispatch_seq = $1 where key = 'CAPTURE-100'`, handout); err != nil {
+			return err
+		}
+		if err := records.StartHandout(ctx, tx, "CAPTURE-100"); err != nil {
+			return err
+		}
+		got, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100")
+		if err != nil || !set || got != cursor {
+			t.Fatalf("catch-up cursor after the handout = %d (set %t, %v), want %d kept", got, set, err, cursor)
+		}
+		return nil
+	})
+	if got := readIssue(t, pool, "CAPTURE-100"); got.HandoutSeq != handout {
+		t.Fatalf("handout_seq = %d, want %d", got.HandoutSeq, handout)
+	}
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if !slices.Equal(client.afters, []int64{cursor}) {
+		t.Fatalf("event log read after %v, want one read after the cursor %d, below the handout %d", client.afters, cursor, handout)
+	}
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		ask, err := records.RootAsk(ctx, tx, "CAPTURE-100", "ask-late")
+		if err != nil {
+			return err
+		}
+		if ask == nil || ask.WaitingOn != "agent" {
+			t.Errorf("ask-late after the catch-up = %#v, want it mirrored on the architect's turn", ask)
+		}
+		return nil
+	})
+}
+
 // failingFact fails the ask opening at seq, as a handler that refuses one event would.
 type failingFact struct{ seq int64 }
 

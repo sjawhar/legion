@@ -28,8 +28,10 @@ import (
 // what it missed.
 //
 // Each root keeps a cursor (record.Store.CaughtUpSeq): the boot reads only the events after it,
-// and raises it to the issue's latest sequence it read. A root recorded before the cursor existed,
-// and given no work by this release since, has none: its first catch-up replays nothing and only
+// and raises it to the issue's latest sequence it read, or to just below the first event whose
+// fact failed to apply, so the next boot reads that event again (catchUpWindow). A root recorded
+// before the cursor existed, and given no work by this release since, has none: its first catch-up
+// replays nothing and only
 // sets the cursor, since a daemon of an earlier release applied everything before it live, and a
 // replay of that history through this release's handlers would read old hand-backs as new. A root
 // recorded since, or handed work by this release since (an admission, a re-admission, a resume:
@@ -296,8 +298,8 @@ func (w *workflowRuntime) catchUpRoot(ctx context.Context, root catchUpRoot) err
 }
 
 // catchUpFrom is the sequence a root's event log is read after, and whether it is read at all: its
-// cursor; for a cursor of 0, its last handout, as the record already holds everything before it;
-// and no read for a root with no cursor, whose first catch-up after the deploy replays nothing.
+// cursor; for a cursor of 0, its last handout; and no read for a root with no cursor, whose first
+// catch-up after the deploy replays nothing.
 //
 // A cursor below the root's last handout (a resume after its last catch-up) is read from the
 // cursor, not from the handout: the handout is the highest sequence the record held, not proof
@@ -305,6 +307,14 @@ func (w *workflowRuntime) catchUpRoot(ctx context.Context, root catchUpRoot) err
 // the events between the two is safe: a hand-back at or below the handout declares nothing, a
 // review placed before the wait began answers nothing, and a changes request already told is not
 // told again (its processed key is per generation, and a re-admission restarts the cursor).
+//
+// A cursor of 0 has no such bound of the root's own: below its handout lie the events of an
+// earlier generation (a re-admission) or of the time before the root was handed its tree (an
+// admission), which a replay would read as this generation's. So it reads from the handout, and
+// accepts that an event below the handout the stream has not yet delivered reaches the root from
+// the durable consumer, unheld, as every event did before the catch-up existed. The first catch-up
+// then raises the cursor (to the issue's latest sequence, or to just below an event that failed),
+// so each later boot reads from the cursor.
 func catchUpFrom(root catchUpRoot) (int64, bool) {
 	switch {
 	case !root.hasCursor:
