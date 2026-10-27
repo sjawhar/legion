@@ -301,6 +301,18 @@ const ClaimIdentitySchema = DedupeIdentitySchema.extend({
  */
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
+/**
+ * Transcript entry recording a topic this session subscribed to through `envoy_subscribe`
+ * (`{ topic, active: true }`) or dropped through `envoy_unsubscribe` or a human removal
+ * (`{ topic, active: false }`). A topic subscription is per-connection state the listener holds in
+ * its interest registry; that registry is lost when Envoy is rebuilt, and a resumed session reads
+ * an empty one (`recoverRegisteredInterests`'s only source), so this is their durable record — the
+ * home the role claim already has — read last-wins on resume to re-subscribe them
+ * (`transcriptSubscribedTopics`). Role topics and the agent subject are never recorded: a role is
+ * reclaimed by `settleRole`, and the agent subject is reopened by the establish pass.
+ */
+const SUBSCRIPTION_ENTRY = "envoy-subscription";
+
 const OPEN_ASKS_TIMEOUT_MS = 3_000;
 
 /**
@@ -516,6 +528,36 @@ function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
   if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
   if (!("role" in entry.data)) return false;
   return entry.data.role === null || typeof entry.data.role === "string";
+}
+
+interface SubscriptionEntry {
+  readonly type: "custom";
+  readonly customType: typeof SUBSCRIPTION_ENTRY;
+  readonly data: { readonly topic: string; readonly active: boolean };
+}
+
+function isSubscriptionEntry(entry: unknown): entry is SubscriptionEntry {
+  if (typeof entry !== "object" || entry === null) return false;
+  if (!("type" in entry) || entry.type !== "custom") return false;
+  if (!("customType" in entry) || entry.customType !== SUBSCRIPTION_ENTRY) return false;
+  if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
+  if (!("topic" in entry.data) || typeof entry.data.topic !== "string") return false;
+  return "active" in entry.data && typeof entry.data.active === "boolean";
+}
+
+// The topics this session subscribed to through `envoy_subscribe` and has not since dropped, read
+// from the transcript last-wins (a later unsubscribe or a human removal tombstones a topic). Role
+// topics are never recorded here — a role claim is its own durable record — so a defensive filter
+// drops any that slipped in.
+function transcriptSubscribedTopics(branch: readonly unknown[]): readonly string[] {
+  const active = new Map<string, boolean>();
+  for (const entry of branch) {
+    if (!isSubscriptionEntry(entry)) continue;
+    active.set(entry.data.topic, entry.data.active);
+  }
+  return [...active]
+    .filter(([topic, on]) => on && !topic.startsWith(ROLE_TOPIC_PREFIX))
+    .map(([topic]) => topic);
 }
 
 function resolveSkillsDirectory(): string {
@@ -1134,7 +1176,10 @@ export default function envoyExtension(pi: PiApi): void {
     // below does not undo the human's action a few seconds later. The event
     // also reaches the issue's own topic (every subscriber, not just the
     // removed session), so this only fires for a removal naming us.
-    for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
+    for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) {
+      closeIntentionally(topic);
+      recordSubscriptionDurably(topic, false);
+    }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
@@ -1937,6 +1982,31 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
+  // Records, in the transcript, that this session subscribed to `topic` (`active`) or dropped it,
+  // so a resume re-establishes it even after an Envoy rebuild wiped the listener's interest
+  // registry (`recoverRegisteredInterests`'s only source). Role topics and the session's own agent
+  // subject are never durable subscriptions: a role is reclaimed by `settleRole`, and the agent
+  // subject is reopened by the establish pass.
+  const recordSubscriptionDurably = (topic: string, active: boolean): void => {
+    if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) return;
+    pi.appendEntry(SUBSCRIPTION_ENTRY, { topic, active });
+  };
+
+  // Re-subscribes the topics the transcript records this session still holds, after the listener
+  // registry `recoverRegisteredInterests` read. The registry is empty once Envoy is rebuilt, so the
+  // transcript is the only source that survives a reset; `subscribe` skips a topic already open, so
+  // one both sources name is subscribed once. Quiet like the registry recovery: a listener outage
+  // must not fail session start.
+  const recoverTranscriptSubscriptions = async (
+    branch: readonly unknown[],
+    live: Fence
+  ): Promise<void> => {
+    for (const topic of transcriptSubscribedTopics(branch)) {
+      if (!live()) return;
+      await subscribe(topic, live);
+    }
+  };
+
   // Reads the listener's `last_seen` for the session a refused claim of `role` names when that
   // session holds this process's own abandoned hold of `topic` (`abandonedHolds`), and answers
   // whether the claim waits on it. The first read is recorded on the hold; one that differs from
@@ -2309,8 +2379,11 @@ export default function envoyExtension(pi: PiApi): void {
         // one core subscription and publishes nothing: a session nobody opens stays silent.
         await watchAgentStream(host, live);
         if (!owns()) return false;
-        if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
+        const branch = context.sessionManager.getBranch?.() ?? [];
+        if (branch.length > 0) {
           await recoverRegisteredInterests(live);
+          if (!owns()) return false;
+          await recoverTranscriptSubscriptions(branch, live);
           if (!owns()) return false;
         }
         inboundOpenFor = host;
@@ -3175,6 +3248,9 @@ export default function envoyExtension(pi: PiApi): void {
           for (const topic of topicsFor(parameters)) {
             ((await subscribe(topic)) ? added : already).push(topic);
           }
+          // Durable record for a resume: a topic newly subscribed here survives an Envoy rebuild
+          // that wipes the listener registry (`recoverTranscriptSubscriptions`).
+          for (const topic of added) recordSubscriptionDurably(topic, true);
           let warnings: readonly string[] | undefined;
           let registrationError: string | undefined;
           if (added.length > 0) {
@@ -3214,6 +3290,8 @@ export default function envoyExtension(pi: PiApi): void {
             .filter((subject) => !isRoleBound(subject))
             .filter(closeIntentionally);
           const registryRemoved = removed.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX));
+          // Tombstone the durable record so a resume does not re-subscribe a topic the agent dropped.
+          for (const topic of registryRemoved) recordSubscriptionDurably(topic, false);
           const registrationError =
             registryRemoved.length === 0
               ? undefined

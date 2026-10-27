@@ -4,6 +4,13 @@
 
 ### Added
 
+- A topic subscribed through `envoy_subscribe` is now recorded durably in the session transcript
+  (`envoy-subscription`), so a resumed session re-establishes its team and ad-hoc topic
+  subscriptions even after Envoy is rebuilt and the listener's interest registry is empty — the
+  one source that survived a reset before was that registry. `envoy_unsubscribe` and a human
+  removal tombstone the topic, so a dropped subscription is not resurrected. This is the
+  subscription counterpart of the role claim's existing `envoy-role-claim` durability; role topics
+  and the agent subject are never recorded.
 - A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
   seconds after the person stops editing: the card names the document, the two versions and each
   editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
