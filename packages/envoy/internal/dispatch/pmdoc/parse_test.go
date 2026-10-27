@@ -94,6 +94,34 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 	}
 }
 
+// Since the browser editor reads a `:::` block as a container like a quote (INFRA-581), a footnote
+// definition inside a typed block defines its footnote for a call anywhere in the text: before the
+// block, inside it and after it, as a definition inside a quote does. A document write reads such
+// a definition as the browser editor does and keeps it where it was written; refusing it, or
+// giving as its reason that the editor refers to it only from inside the block or after it, would
+// tell the writer something the editor does not do.
+func TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes(t *testing.T) {
+	for _, markdown := range []string{
+		"Ref[^1].\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n[^1]: x\n:::\n",
+		":::callout{#c1 kind=\"note\" title=\"T\"}\n> [^1]: x\n:::\n\nRef[^1].\n",
+	} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Errorf("Parse(%q) = %v, want it read as the browser editor reads it", markdown, err)
+			continue
+		}
+		if firstNodeOfType(doc, "footnote_reference") == nil {
+			t.Errorf("Parse(%q) read no footnote reference; the browser editor reads Ref[^1] as one", markdown)
+		}
+		if callout := firstNodeOfType(doc, "callout"); callout == nil || firstNodeOfType(callout, "footnote_definition") == nil {
+			t.Errorf("Parse(%q) holds no footnote definition inside its callout", markdown)
+		}
+		if rendered, err := Render(doc); err != nil || rendered != markdown {
+			t.Errorf("Render(Parse(%q)) = %q, %v, want the markdown as written", markdown, rendered, err)
+		}
+	}
+}
+
 // A linked image is read as the browser editor stores it: the image without the link, which the
 // editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
 // holds unsavable, so the link's text around the image keeps its link and the write is taken.
