@@ -46,8 +46,10 @@ const strandedRoleRunBatchSize = 200
 // It names no other claim: a worker whose phase is not its own is started again when its phase
 // comes, and a tree whose root holds no slot runs nothing yet. That is a lingering tree — a root
 // that leaves the workflow, closed or moved out by a person, always lingers first (leave) — whose
-// members its re-admission starts again; and a root re-admitted and waiting for a slot, whose
-// architect admission starts once one frees (resumed sooner, it would run outside the cap). claims
+// members its re-admission starts again; a root re-admitted and waiting for a slot, whose
+// architect admission starts once one frees (resumed sooner, it would run outside the cap); and a
+// root in awaiting_person, which gave its slot back while its architect waits on a person, whose
+// architect admission resumes at the next free slot once the wait is answered (promote). claims
 // are the caller's transaction snapshot, as are the slots read here; the daemon's boot logs what
 // this returns, and the state route serves it as strandedClaims.
 //

@@ -2,8 +2,9 @@
 
 Tracked Oh My Pi extension package `@sjawhar/pi-legion`: the Legion entry (`extensions/legion.ts`),
 the Legion lifecycle modules (`src/`), the task agents Legion's prompts dispatch (`agents/`), and
-the eight Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `ce-simplify-code`, `thermonuclear-code-quality`, `thermonuclear-deep-review`),
+the nine Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
+`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`,
+`thermonuclear-deep-review`),
 staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. It is installed
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and
 the Dispatch tools; the Legion daemon installs both into its Oh My Pi profile and a worker image
@@ -89,13 +90,15 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 39's one-container issue pod
-(INFRA-208: a sandbox locator of an issue pod's role names container `roles`, and `settings` on
-`GET /legion/v1/state` gives `runtime.kubernetes.resources` as `{issue, controller}`), after
-contract 38's blocked issues on `GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every
-root and child Legion is waiting to start behind an unfinished Dispatch issue, and
-`release_children` answers `started` and `held` beside `released`), after contract 37's pod-owned
-issue disk
+number is the one `DaemonAPIVersion` declares, last bumped by contract 40's `awaiting_person`
+phase and strict `waitingOn` issue view on `GET /legion/v1/state` (a root that gave its admission
+slot up while its architect waits on a person, and what it waits on; a 39 plugin rejects both),
+after contract 39's one-container issue pod (INFRA-208: a sandbox locator of an issue pod's role
+names container `roles`, and `settings` on `GET /legion/v1/state` gives
+`runtime.kubernetes.resources` as `{issue, controller}`), after contract 38's blocked issues on
+`GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every root and child Legion is waiting
+to start behind an unfinished Dispatch issue, and `release_children` answers `started` and `held`
+beside `released`), after contract 37's pod-owned issue disk
 (INFRA-80: an issue's disk is a generic ephemeral volume its pod owns, created with the pod and
 deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
 lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the
@@ -195,8 +198,13 @@ steps — the task whose turn is running; or, once that turn ends and retires it
 is left serving, which is what answers for a worker woken by a notice; or, for a claim that has
 served no run at all, a task it holds that the agent may have read. A task the agent refused is
 not one it read, so it answers for none of them. `POST /legion/v1/handoff/complete` answers 409
-`HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
-`HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
+`HANDOFF_NO_RUN` to a claim that has taken no task at all, and `HANDOFF_STALE_GENERATION` to a
+completion of a run the issue has left, naming the current run's queued task when the claim holds
+one. Both are refused before the fact is applied, so neither is recorded: the same call in that
+task's turn is applied. The workflow's own stale refusal, for an issue that moves between the
+route's read and the fact's transaction, is still recorded, and blocks no later call: its key
+carries the issue generation the route read, which the issue has left, so a retry is refused at the
+route and the new run's completion has another key. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
 Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
 architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
@@ -448,7 +456,7 @@ which hands both plugin entries to the Oh My Pi child by path.
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`) and the stale git lock note (`git-lock`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
-| Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
+| Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |

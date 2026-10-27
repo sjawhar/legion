@@ -21,7 +21,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
@@ -51,7 +51,7 @@ function AskReply({
         <MarkdownBody markdown={comment.body} />
       </div>
       <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
-        {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
+        <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
       </p>
     </li>
   );

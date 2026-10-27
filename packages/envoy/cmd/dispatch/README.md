@@ -340,6 +340,28 @@ with or without brackets (`::1` or `[::1]`). A bad `DISPATCH_PORT` refuses the
 boot before anything connects, and an address the server cannot bind ends the
 process with exit status 1.
 
+### Profiling
+
+Set `DISPATCH_PPROF_PORT` to a port to serve the Go profiler (`net/http/pprof`) on
+`127.0.0.1:<port>`, on a mux of its own, apart from the server's routes. It binds the loopback
+address only, so nothing outside the pod reaches it; unset or empty, nothing listens. A value
+that is not a port 1-65535, or a port already taken, refuses startup naming the variable. The
+profiler binds before anything connects, so a slow boot can be profiled too. The listener closes
+at once when the process is told to stop, cutting off a profile in flight, so it never delays the
+shutdown (and the shutdown's own drain cannot be profiled). A `gcp:Dispatch` deployment turns it
+on with the component's `pprofPort` input (`packages/envoy/infra/README.md`), which sets the
+variable on the `envoy-dispatch` container; setting it by hand on the Deployment rolls the pods
+and is reverted by the next update. To take a 30-second CPU profile of a pod:
+
+```sh
+kubectl port-forward <pod> <port>:<port>
+go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
+```
+
+`/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`).
+`mutex` and `block` are listed too but record nothing: Dispatch sets no mutex or block sampling
+rate.
+
 ## Running more than one process
 
 Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of
@@ -728,6 +750,57 @@ read or wrote this one, only that person-run subcommand did, so the drop breaks 
 serving through the roll. Both censuses answer `0`: `0118`'s updates write only the columns it
 adds, and `0119` drops nothing a running build still reads.
 
+Migration `0120_artifact_reviews_event_seq` adds `artifact_reviews.event_seq`, the sequence of the
+`artifact.*` event each review appended on its document's owner, which `docs.WriteReview` writes in
+the transaction that appends the event and the approval read returns as `seq`
+(`packages/envoy/AGENTS.md`). It is nullable, so a review recorded before it reads with no `seq`,
+and the release before it, which names no `event_seq` in its insert, rolls beside it. Adding a
+nullable column with no default writes the catalog alone, under `artifact_reviews`'
+`ACCESS EXCLUSIVE` lock for milliseconds; it refuses and rewrites no row, and its census answers `0`.
+Its `event_seq > 0` check is a second statement, added `not valid` as the rule below requires: an
+inline check would read every row of the table while it held that lock, and `not valid` still
+refuses every row written or updated after it. Nothing validates it later — every row below the
+migration carries no sequence at all — so the constraint stays `not valid` for good.
+
+`0120` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
+last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads
+(`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review
+of the document. It is a plain `create index`, not `concurrently`: the runner applies a migration
+inside one transaction (`internal/dispatch/store/store.go`, `pgmigrate.Exec`), where `concurrently`
+cannot run, and no migration of the set uses it. The build takes no lock the migration does not
+already hold — its `alter table` statements hold `artifact_reviews`' `ACCESS EXCLUSIVE` — and holds
+it while it reads the table's rows, which the census bounds by its 1 GiB limit; the census still
+answers `0`, since the build refuses and rewrites no row. `artifact_reviews_by_artifact` (`0014`,
+`created_at desc, id desc`) stays, because the release before `0120` orders by it while it serves.
+
+The release before `0120` keeps serving beside it while the app Deployment rolls (below), and again
+for as long as a rollback lasts, and it inserts every review naming no `event_seq`. Left null, such
+a review — newer than every sequenced one — would rank below them all in `docs.ReviewOrder`
+(`event_seq desc nulls last`): a person's approval an old pod wrote would read back as the changes
+requested before it, and a changes request an old pod wrote would be overridden by the approval
+before it. So `0120` also adds a trigger, which the rule below allows a migration to add:
+`artifact_reviews_event_seq`, a constraint trigger on `artifact_reviews` deferred to the commit, gives
+every review inserted without a sequence, by either release, the sequence of the `artifact.*` event
+its own transaction appended for it (its type, document and version, among the events on the
+owner that its transaction wrote, which the owner's row lock keeps the newest there until the
+commit). An event is the transaction's own when it carries the transaction's `now()` and its row's
+`xmin` is the transaction or one of its subtransactions (`artifact_reviews_own_row`, which reads it
+through `pg_xact_status`, so a savepoint's event counts and another transaction's does not, even
+one that started in the same microsecond and so shares `now()`). It is deferred because every
+release inserts a review before it appends the event.
+Every row that carries no sequence was therefore committed before `0120`, whose `ACCESS EXCLUSIVE`
+lock waits out every transaction that has inserted a review, and every sequenced row is newer.
+The trigger is on `artifact_reviews`, the table `0120` already locks, so the migration holds no
+second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE` while holding
+`artifact_reviews`, against a transaction that appended an event and then waits to insert a
+review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
+
+`0120` is additive — a nullable column, a `not valid` check, an index and a trigger — so rolling Dispatch
+back past it is an image rollback alone, with no schema to restore and no backup to take for it:
+the release before it runs over the new schema unchanged, and the trigger gives every review that
+release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
+schema has moved it refuses to start the previous tag, and recovery there is forward.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1046,6 +1119,50 @@ sees for a list of queries from any build, and `search-latency-compare.sh` runs
 `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the
 difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
 
+## Access log
+
+Dispatch writes one line per served request, always, with no setting to turn it off. It is
+written at INFO when the request ends, through the process's own logger:
+
+```
+time=2026-10-25T05:55:15.446Z level=INFO msg="dispatch: request" method=POST route=/api/v1/issues path=/api/v1/issues caller_kind=session caller=session-0123456789abcdef address=203.0.113.9 user_agent=dispatch-cli/1.0 status=201 elapsed_ms=10 bytes=412 credential=shared-token
+```
+
+| Field | What it holds |
+| --- | --- |
+| `method` | The request's HTTP method. |
+| `route` | The route's own pattern (`/api/v1/issues/{key}`), so one route's requests group together whatever ids their paths carry; `unmatched` for a path under `/api`, `/v1`, `/auth`, `/ws` or `/healthz` that no route answers. |
+| `path` | The request path as it was sent, still escaped (`a%2Fb` stays `a%2Fb`), without its query string. |
+| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path). |
+| `caller` | Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject. `shared-token` and `anonymous` name nobody. |
+| `address` | The rightmost `X-Forwarded-For` entry, the address the load balancer in front of Dispatch saw, or the connection's own address when there is none. |
+| `peer` | The connection's own address without its port: the hop that reached Dispatch. Unlike `address`, a caller cannot forge it, so a caller that reaches Dispatch directly is still named. |
+| `user_agent` | The request's `User-Agent`. With `address`, it tells apart callers that share one credential. |
+| `status` | The response status. A handler that panicked before writing is logged as `500`; the client gets a closed connection, not a status. |
+| `elapsed_ms` | How long the request took, in milliseconds. A websocket's line is written when its connection ends, so it carries the connection's whole life. |
+| `bytes` | The response body the handler wrote. A websocket upgrade is `101` with `0` bytes: its frames are written on the connection it took. |
+| `credential` | Only on a `session` line: the credential that named the session, since the session id is the caller's own text. `token:<owner>`, `service:<subject>` or `shared-token`. |
+| `aborted` | Only when the handler panicked (an artifact download whose store fails mid-stream aborts this way): `true`. The line is still written, and the panic still reaches the server. |
+
+The line never carries a token, a cookie, a query string, a request body or a response body. The
+text in it a caller wrote, `method`, `path`, a session's `caller`, `address` and `user_agent`, is
+each cut to 256 bytes.
+
+A websocket or event stream resolves its caller again on every heartbeat, and that resolution
+does not change the line: it names the caller the connection was admitted as.
+
+Every route the server answers writes one: every `/api/v1` route, the document and delivery
+websockets, `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an `unmatched` path gets
+(a known path called with a method its route does not serve is one too). The dashboard's own
+pages and assets write none, so a browser's page loads do not bury the callers. `/healthz`, which
+a load balancer calls every few seconds, writes none either. Three answers are given before any
+route runs and write none: the `403` a cookie request from another origin gets, the `421` a
+request for another host gets on a server with local sign-in, and the `307` redirect Go's router
+gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash
+(`/api/github/rest`). Match the line as `msg="dispatch: request"`: the previous-shared-token
+warning's message starts with the same words. The line is one synchronous write to stderr per
+request, so a log pipe that blocks stalls requests.
+
 ## Routes
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its
@@ -1075,7 +1192,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/auth/logout` | POST | cookie or trusted header | End the person's Dispatch sessions, forget their refresh token, and clear the session cookie. |
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in issuer: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
-| `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`) or a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`), the only reads the web app makes. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`, any other path `404 GITHUB_PATH_REFUSED`, and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
+| `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
@@ -1098,7 +1215,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
-| `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
+| `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` against the process's one copy of the listener's `GET /v1/sessions`, stored in no table: that copy is at most 5 s old, one listener call refreshes it for every read that asks while it runs, and a listener that fails or does not answer within 2 s is asked again only after 5 s, every read in that window reading `unknown` at once. The status is `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |

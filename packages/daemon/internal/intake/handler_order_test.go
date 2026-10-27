@@ -88,6 +88,71 @@ func TestABlockedByOnlyEditIsMirroredAheadOfTheEngineThatSkipsIt(t *testing.T) {
 	}
 }
 
+// A claim event says nothing the engine reacts to, and the engine records no claim: the mirror
+// ahead of it writes the claim, and a handler standing where admission stands already reads it in
+// the event's own transaction. The same event through the engine alone leaves the row's claim
+// unseen.
+func TestAClaimEventIsMirroredAheadOfTheEngine(t *testing.T) {
+	const issue = "LEGION-208"
+	claimEvent := intake.DispatchClaim{Key: issue, Seq: 6, ClaimedBy: "user:alice"}
+	seed := func(pool *pgxpool.Pool, records record.Store) {
+		seedOrderedIssue(t, pool, records, record.Issue{
+			Key: issue, Tree: issue, Project: orderProject, Title: "a root in the waiting line",
+			Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+			Phase: phase.Admitted, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "U",
+			HandedOver: true, LastDispatchSeq: 5,
+		})
+		if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+			return records.PutDispatchIssue(context.Background(), tx, record.DispatchIssueRow{Key: issue, Project: orderProject, Status: "todo", Seq: 5})
+		}); err != nil {
+			t.Fatalf("seed the mirror row: %v", err)
+		}
+	}
+	records := record.NewStore()
+	pool := orderedPool(t)
+	seed(pool, records)
+	reader := &claimReader{records: records}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "claimed", claimEvent,
+		blockers.NewMirror(records, orderProject), workflow.New(records, workflow.Config{Project: orderProject}, slog.New(slog.NewTextHandler(io.Discard, nil))), reader); err != nil {
+		t.Fatalf("apply the claim event: %v", err)
+	}
+	if reader.holder != "user:alice" || reader.seq != 6 {
+		t.Fatalf("the handler behind the engine read the claim as %q at %d in the event's own transaction, want user:alice at 6", reader.holder, reader.seq)
+	}
+
+	alone := orderedPool(t)
+	seed(alone, records)
+	aloneReader := &claimReader{records: records}
+	if _, err := intake.ApplyFact(context.Background(), alone, "dispatch", "claimed", claimEvent,
+		workflow.New(records, workflow.Config{Project: orderProject}, slog.New(slog.NewTextHandler(io.Discard, nil))), aloneReader); err != nil {
+		t.Fatalf("apply the claim event to the engine alone: %v", err)
+	}
+	if aloneReader.holder != "" || aloneReader.seq != 0 {
+		t.Fatalf("the engine alone recorded the claim %q at %d; it writes no mirror row, which is why the mirror handler writes the claim", aloneReader.holder, aloneReader.seq)
+	}
+}
+
+// claimReader stands where admission stands and reads the mirrored claim of LEGION-208 inside
+// the fact's transaction.
+type claimReader struct {
+	records record.Store
+	holder  string
+	seq     int64
+}
+
+func (c *claimReader) Apply(ctx context.Context, tx pgx.Tx, _ intake.Fact) (intake.Result, error) {
+	rows, err := c.records.DispatchIssues(ctx, tx, orderProject)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	for _, row := range rows {
+		if row.Key == "LEGION-208" {
+			c.holder, c.seq = row.ClaimedBy, row.ClaimSeq
+		}
+	}
+	return intake.Result{}, nil
+}
+
 // mirrorReader is a handler standing where admission stands, last in the daemon's chain: it reads
 // the project's whole mirror exactly as admission and the engine's own held-child pass do
 // (record.Store.DispatchIssues), inside the transaction the fact is applied in, and keeps what it

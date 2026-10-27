@@ -6,13 +6,13 @@ edit to an approved root spec, and on `design-approved`, `design-changes-request
 
 ## Writing the root spec
 
-Specifications written into Dispatch follow `skill://dispatch`'s
-[Writing a spec](skill://dispatch/SKILL.md#writing-a-spec). Wave releases, child closures and your
+Specifications written into Dispatch follow
+[`dispatch-writing-specs`](skill://dispatch-writing-specs/SKILL.md#the-outline). Wave releases, child closures and your
 own status are visible from the issue tree and the handoffs; do not narrate them into the spec or a
 `dispatch message`.
 
 Extend the primary document in place: a new version adds only the evidence each decision needs and
-what the human decides, each as a [decision block](skill://dispatch/SKILL.md#decision-blocks).
+what the human decides, each as a [decision block](skill://dispatch/SKILL.md#asks-and-ask-blocks).
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
@@ -37,22 +37,27 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    ```
 
 2. Settle every decision block as
-   [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec) says;
+   [Approval](skill://dispatch-writing-specs/SKILL.md#approval) says;
    `dispatch request-approval` refuses while one is open. Each answer reaches you, since you follow
    every ask you open.
-3. Run `task(agent="plan-gap-analyst")` with the current root spec, the code and command output it
-   relies on, and the human's words; resolve every finding in the root spec.
+3. Before every approval request, give two fresh reviewers the current root spec, the code and
+   command output it relies on, and the human's words: `task(agent="plan-gap-analyst")` finds its
+   gaps, and `task(agent="plan-reviewer")`, told the document is a spec, checks each factual claim
+   against the code, the docs or a read-only command it runs. Resolve every finding in the root
+   spec. Check with a command each claim either reviewer marks unverified: fix it when it is
+   false, or take it out.
 4. Request approval only once the human has agreed to every point in the spec, because the human
    approves what they already agreed to and a point new in the request has no decision block for
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving>'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>.'
    ```
 
-   `--summary` says in one to three sentences what the human is approving and nothing else: no
-   commentary and no open question. The primary document is the default; the command prints
-   `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
+   `--summary` says in one to three sentences what the human is approving and nothing else (no
+   commentary and no open question), then one sentence with both reviews' results, for example
+   `Reviews: no open gap, 14 of 14 claims verified.` The primary document is the default; the
+   command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
 5. Register that document version with the daemon:
 
    ```ts
@@ -81,13 +86,28 @@ Facts about the request:
   again to hand the same request back at the latest version.
 - If the output reads `spec.md (document id <UUID>) is already approved at version <N>`, still call
   `register_gate` with that id and version: the daemon reads the approval from Dispatch as it
-  registers, opens the gate and delivers `design-approved` at once. The same read covers a human
-  who answers between your two calls. You never approve anything yourself.
+  registers, opens the gate and delivers `design-approved` at once, and only once even when the
+  approval's own event opened the gate first. The same read covers a human who answers between
+  your two calls: a changes request on that version arrives as `design-changes-requested`, once.
+  You never approve anything yourself.
+- `register_gate` refused 409 `VERSION_NOT_IN_DISPATCH` means the version you named is above the
+  latest version Dispatch holds for that document (the message names both), and a version Dispatch
+  never wrote is no registration: the gate is as it was. Read the document's latest version, check
+  it is the spec the human is asked to approve, and `register_gate` that version.
 
-Then end your turn. Release no wave until a delivered wake shows `design-approved` on the root. On
-`design-changes-requested`: revise the spec as the human's reason asks, run
-`task(agent="plan-gap-analyst")` on the new version with the code, command output and the human's
-words, resolve every finding, request approval again and end your turn.
+Then end your turn. A root waiting on its approval request keeps its admission slot; only a root
+question handed to the human returns it ("Every turn" in `skill://legion-architect/SKILL.md`).
+While the root waits on such a question, the human's approval or changes request of the spec
+answers that wait too, and the resume task says how the spec stands. Release no wave until a
+delivered wake shows `design-approved` on the root, or, for a root that waited on a question, a
+resume task says its design gate is open: the daemon sends that root no `design-approved` notice,
+and "this resume is your design-approved wake" is that wake. On
+`design-changes-requested`: revise the spec as the human's reason asks, run step 3's two reviews on
+the new version, resolve every finding, request approval again and end your turn. A
+`design-changes-requested` may name a version below the latest, or arrive after another for the
+same version: it is a request the human made that reached the daemon late, and no approval came
+after it. Each request arrives once. The gate is as the newest review left it; still read the
+reason, and answer it in the spec if the latest version does not already.
 
 ## After approval
 
@@ -110,8 +130,9 @@ to the version it writes. Once they have answered:
   daemon sent opens nothing new. Carry on, and release no wave because of it.
 - When the answer changes the Summary, the Acceptance or the tree's scope, rewrite that text and
   repeat steps 3 to 5 on the new version, with a one-sentence `--summary` naming what changed since
-  the earlier approval (the card shows that approval, `Approved at version N on <date> by <who>.`,
-  and its `Show diff` control carries the detail). The rewrite closes the gate until they approve;
+  the earlier approval, then the reviews' sentence (the card shows that approval, `Approved at
+  version N on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite
+  closes the gate until they approve;
   work the daemon started at the answer keeps running. Release no new wave until the `design-approved`
   after the rewrite; work already in flight continues. Every merger's `READY` in the tree is
   refused until a human approves the latest version.
