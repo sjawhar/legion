@@ -121,6 +121,41 @@ func StreamCaptures(topic string) bool {
 	return false
 }
 
+// ReadStreamSubjects reads the subjects ENVOY_NOTIFICATIONS carries now from the server, which may
+// hold more than this binary compiles in (streamSubjects): a start of another build keeps every
+// subject the deployed stream carries and adds its own (reconcileSubjects).
+func ReadStreamSubjects(js nats.JetStreamContext) ([]string, error) {
+	info, err := js.StreamInfo(Stream)
+	if err != nil {
+		return nil, err
+	}
+	return info.Config.Subjects, nil
+}
+
+// SubjectsCapture reports whether some subject of subjects matches topic by NATS's rules: a `*`
+// token matches any one token, a last `>` token matches one or more tokens, and any other token
+// matches itself. topic is read literally, as nats.go publishes it.
+func SubjectsCapture(subjects []string, topic string) bool {
+	return slices.ContainsFunc(subjects, func(subject string) bool { return subjectMatches(subject, topic) })
+}
+
+func subjectMatches(subject, topic string) bool {
+	for {
+		subjectToken, subjectRest, subjectMore := strings.Cut(subject, ".")
+		topicToken, topicRest, topicMore := strings.Cut(topic, ".")
+		if subjectToken == ">" {
+			return true
+		}
+		if subjectToken != "*" && subjectToken != topicToken {
+			return false
+		}
+		if !subjectMore || !topicMore {
+			return subjectMore == topicMore
+		}
+		subject, topic = subjectRest, topicRest
+	}
+}
+
 var streamCfg = &nats.StreamConfig{
 	Name:      Stream,
 	Subjects:  streamSubjects,

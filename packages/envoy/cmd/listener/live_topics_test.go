@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -24,7 +28,8 @@ import (
 // TestAServingPortReceivesATopicTheStreamDoesNotStore and
 // TestAListenerReachesASessionAtTheHostItRecorded fail, each with no prompt arriving; at the
 // change's head both pass. The rest hold what the live topics lane (ENVOY_SUBSCRIBE_ALL_TOPICS=1)
-// must leave as it was, and how it ends a start whose grant refuses it.
+// must leave as it was, and how it ends a start whose grant refuses it. The last tests, on how the
+// lane splits the topics with the stream, drive the lane in process instead (INFRA-557).
 
 // servingPort is a session's fake serve process: an httptest server on 127.0.0.1 that records the
 // text of every prompt the listener POSTs to /session/<id>/prompt_async and answers with status.
@@ -688,5 +693,152 @@ func (p *listenerProcess) awaitSessionMachine(t *testing.T, sessionID, machineID
 			t.Fatalf("the listener on port %d does not list %s as registered through %s within 10s: %d %s", p.port, sessionID, machineID, status, body)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// A subject another build added to the stream after this listener started belongs to the durable:
+// the live lane reads the stream's subjects from the server every refresh and stops delivering
+// that subject within one, while the durable, which filters nothing, delivers it, and a topic the
+// stream does not store still goes through the live lane. With the subjects this build compiles in
+// (bus.StreamCaptures) the live lane went on delivering the added subject beside the durable, and
+// this test fails there with the probe still reaching the live lane after 3 s.
+func TestTheLiveLaneLeavesASubjectAddedToTheStreamAtRuntimeToTheDurable(t *testing.T) {
+	const (
+		added      = "notifications.twobuild.>"
+		addedTopic = "notifications.twobuild.box-a.1"
+		liveTopic  = "notifications.team.box-a"
+	)
+	var prompts atomic.Int32
+	harness := newListenerDeliveryHarness(t, countingPrompts(&prompts))
+	harness.registerFanoutTarget(t, "ses_twobuild", addedTopic, nil)
+	durable, err := subscribeListenerDurable(harness.client, bus.ListenerDurable("test-machine"), harness.handler)
+	if err != nil {
+		t.Fatalf("subscribe the durable: %v", err)
+	}
+	t.Cleanup(func() { _ = durable.Unsubscribe() })
+
+	lane := liveDeliveryHandler(harness.config)
+	lane.refreshEvery = 100 * time.Millisecond
+	// The live lane hands what it delivers to the test rather than prompting, so every prompt
+	// counted is the durable's.
+	liveSubjects := make(chan string, 64)
+	lane.deliver = func(message deliveryMessage) { liveSubjects <- message.msg.Subject }
+	live, err := openLiveTopics([]string{testnats.URL(t)}, "test-machine", "box-a", lane)
+	if err != nil {
+		t.Fatalf("open the live lane: %v", err)
+	}
+	t.Cleanup(func() { _ = live.Drain(time.Second) })
+
+	// liveTakes publishes a probe on addedTopic and then one on liveTopic, and reports whether the
+	// live lane delivered the probe: core NATS keeps one publisher's order, so the probe arrives
+	// before the second publish or not at all.
+	liveTakes := func() bool {
+		t.Helper()
+		publish(t, harness.client, newEnvelope("agent", addedTopic, "probe"))
+		publish(t, harness.client, newEnvelope("agent", liveTopic, "marker"))
+		took := false
+		for {
+			select {
+			case subject := <-liveSubjects:
+				switch subject {
+				case addedTopic:
+					took = true
+				case liveTopic:
+					return took
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the live lane did not deliver %s, a topic the stream does not store, within 5s", liveTopic)
+			}
+		}
+	}
+	if !liveTakes() {
+		t.Fatalf("before the stream stores %s, the live lane left %s alone", added, addedTopic)
+	}
+	if got := prompts.Load(); got != 0 {
+		t.Fatalf("the durable prompted %d times for a topic the stream does not store, want 0", got)
+	}
+
+	info, err := harness.client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	extended := info.Config
+	extended.Subjects = append(slices.Clone(extended.Subjects), added)
+	if _, err := harness.client.JS().UpdateStream(&extended); err != nil {
+		t.Fatalf("add %s to the stream: %v", added, err)
+	}
+
+	stored := int32(0)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		took := liveTakes()
+		stored++
+		if !took {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the live lane still delivers %s 3s after the stream took up %s (refresh every %s)", addedTopic, added, lane.refreshEvery)
+		}
+		time.Sleep(lane.refreshEvery)
+	}
+	waitFor(t, 10*time.Second, "the durable to deliver every probe the stream stored", func() bool {
+		return prompts.Load() == stored
+	})
+}
+
+// streamInfoAnswers answers StreamInfo with subjects, or with err when it is set.
+type streamInfoAnswers struct {
+	natsgo.JetStreamContext
+	subjects []string
+	err      error
+}
+
+func (s *streamInfoAnswers) StreamInfo(string, ...natsgo.JSOpt) (*natsgo.StreamInfo, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &natsgo.StreamInfo{Config: natsgo.StreamConfig{Subjects: s.subjects}}, nil
+}
+
+// Until a read of the stream's subjects succeeds, the live lane leaves to the durable what this
+// build compiles into the stream, so nothing is delivered twice at start. A failed read keeps the
+// list the lane holds, and a run of failures logs one WARN.
+func TestTheLiveLaneKeepsItsLastListOfStreamSubjectsWhenAReadFails(t *testing.T) {
+	logs := &cmdtest.LockedBuffer{}
+	lane := &liveLane{logger: logging.NewWithWriter("test", logs), stop: make(chan struct{})}
+	const (
+		compiledTopic = "notifications.github.owner.repo.pull.1.checks"
+		addedTopic    = "notifications.twobuild.box-a.1"
+	)
+	requireCaptures := func(step string, compiled, added bool) {
+		t.Helper()
+		if got := lane.streamCaptures(compiledTopic); got != compiled {
+			t.Fatalf("%s: streamCaptures(%q) = %t, want %t", step, compiledTopic, got, compiled)
+		}
+		if got := lane.streamCaptures(addedTopic); got != added {
+			t.Fatalf("%s: streamCaptures(%q) = %t, want %t", step, addedTopic, got, added)
+		}
+	}
+	warnings := func() int { return strings.Count(logs.String(), `"msg":"`+streamSubjectsReadFailedLine+`"`) }
+	server := &streamInfoAnswers{err: errors.New("nats: timeout")}
+
+	requireCaptures("before any read", true, false)
+	lane.refresh(server)
+	lane.refresh(server)
+	requireCaptures("after failed first reads", true, false)
+	if got := warnings(); got != 1 {
+		t.Fatalf("logged %d WARNs for one run of failed reads, want 1:\n%s", got, logs.String())
+	}
+
+	server.err, server.subjects = nil, []string{"notifications.twobuild.>"}
+	lane.refresh(server)
+	requireCaptures("after a read", false, true)
+
+	server.err = errors.New("nats: timeout")
+	lane.refresh(server)
+	lane.refresh(server)
+	requireCaptures("after failed reads following a read", false, true)
+	if got := warnings(); got != 2 {
+		t.Fatalf("logged %d WARNs for two runs of failed reads, want 2:\n%s", got, logs.String())
 	}
 }
