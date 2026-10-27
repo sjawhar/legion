@@ -34,3 +34,5 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 - Slack: `notifications.slack.<team_id>.<channel_id>.<message|mention>`
 
 If you are unsure what a session is subscribed to, use `envoy_list()`.
+
+<!-- scratch INFRA-520 envoy-plugin -->
