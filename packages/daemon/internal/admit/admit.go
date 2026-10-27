@@ -1144,6 +1144,10 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if writeInProgress {
 			candidate.Status = "in_progress"
 		}
+		// A root that takes a slot runs as a tree of its own, which no ancestry hold holds
+		// (workflow's Ancestry), so the chain it queued under goes now: an answered root coming back
+		// to the line later is never held by a chain left from before it ran.
+		candidate.Ancestry = nil
 		if err := a.store.PutIssue(ctx, tx, candidate); err != nil {
 			return admitted, returned, fmt.Errorf("record admitted issue %s: %w", candidate.Key, err)
 		}

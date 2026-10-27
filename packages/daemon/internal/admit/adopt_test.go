@@ -566,3 +566,37 @@ func TestARootThatRanKeepsQueueingUnderAnUnreleasedChild(t *testing.T) {
 		})
 	}
 }
+
+// A root that takes a slot leaves the chain it queued under behind: it runs as a tree of its own,
+// which no ancestry hold holds. So when it later waits on a person and is answered, it comes back to
+// the line on its answer alone, even with a live root on the chain it once queued under, rather than
+// being held until its next observation reads that chain again.
+func TestAnAnsweredRootIsNotHeldByTheChainItQueuedUnder(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const root, ancestor = "LEGION-214", "LEGION-168"
+	queued := queuedRoot(root, "LEGION-169", "B", 2)
+	queued.Ancestry = []string{"LEGION-169", ancestor}
+	putIssue(t, pool, queued)
+
+	tick(t, pool, admission, "tick-promote")
+	promoted := issue(t, pool, root)
+	if promoted.Status != "in_progress" || promoted.Ancestry != nil {
+		t.Fatalf("%s = %#v, want it promoted with no chain left", root, promoted)
+	}
+
+	// The root waits on a person, gives its slot back, and is answered; meanwhile the ancestor on
+	// its old chain is a live root holding the slot.
+	at := fixedNow
+	promoted.Phase = phase.AwaitingPerson
+	promoted.Awaiting = &record.Awaiting{Ask: "ask-q", AnsweredAt: &at, AnsweredBy: record.AnsweredByAsk, AnsweredDetail: "ask-q"}
+	putIssue(t, pool, promoted)
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().ReleaseSlot(context.Background(), tx, root); err != nil {
+			t.Fatalf("give the slot back: %v", err)
+		}
+	})
+	seedSlotted(t, pool, ancestor, "A")
+
+	assertWaiting(t, pool, []string{root})
+}
