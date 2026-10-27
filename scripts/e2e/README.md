@@ -40,6 +40,7 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
 | `merged-root-waits.sh` | the daemon keeps a tree's order at the close, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow lands, the child untouched; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
 | `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
+| `envoy-session-delivery.sh` | every Envoy event reaches a real Oh My Pi session and a real Claude Code session under `legion claude-bridge` exactly once — agent sends and Dispatch messages, comments on a followed Dispatch issue (in their publish order), role publishes through the listener and core role publishes through the role lane — also when it was published while the session was killed and resumed, its NATS connection was cut, either of two listeners was killed, or Dispatch was SIGKILLed right after its writes, all built from the checkout and run in an issue pod; with `--build-from` an earlier revision's listener and plugins show the losses under a session restart. Manual, never CI |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
@@ -2337,6 +2338,115 @@ each seed is printed as one. The configuration, the store and its migrations, th
 real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and
 printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
 writes through `LEGION_E2E_DAEMON_LOG`.
+
+## envoy-session-delivery.sh
+
+INFRA-594's live proof: every Envoy event reaches a real Oh My Pi session and a real Claude Code
+session exactly once, also when it was published while the session, its NATS connection, either
+listener or Dispatch was down. Manual, like `packages/pi-envoy/scripts/smoke-replay.sh`, whose
+cuttable proxy it reuses: it needs a model provider and is never wired into CI.
+
+```bash
+LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable' \
+  ANTHROPIC_API_KEY=… bash scripts/e2e/envoy-session-delivery.sh     # → "ENVOY SESSION DELIVERY: PASS …", exit 0
+
+# Negative controls: the listener and both plugins of an earlier revision.
+… bash scripts/e2e/envoy-session-delivery.sh --build-from c3d09eec --expect-lost agent,issue,role
+… bash scripts/e2e/envoy-session-delivery.sh --build-from 926040d9048572765639e56d516226b822288b46 --expect-lost role
+```
+
+It runs in an issue pod: no Docker, tmux or root. It needs `go`, `bun`, `jq`, `curl`, `socat`,
+`setsid`, `psql`, `git`, `tar`, `pgrep` and `mkfifo`, and the checkout's `node_modules`
+(`bun install`). Everything is built from the checkout:
+
+- `natsd` (`packages/envoy/internal/testnats/cmd/natsd`) with JetStream on a store directory of the
+  run's own;
+- two listeners, machine id `shared`, where both sessions register, and machine id `dispatch`,
+  the one Dispatch sends through;
+- Dispatch (`envoy-dispatch`), on a database the run creates in the Postgres
+  `LEGION_TEST_PG_DSN` names and drops on exit. The script starts no Postgres; in a pod, start one
+  as `docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md`
+  says (Dispatch needs pgvector);
+- an Oh My Pi session, `omp --mode rpc --no-extensions -e <pi-envoy>`, the plugin packed by
+  [`lib/pack-plugin.sh`](#libpack-pluginsh);
+- a Claude Code session, `legion claude-bridge -- claude -p --input-format stream-json
+  --output-format stream-json --verbose --replay-user-messages …`, configured as
+  `packages/daemon/internal/runtime/tmux/claude.go` configures a Legion pane: an MCP config that
+  runs claude-envoy's `dist/envoy-channel.js`, both plugin directories, `LEGION_CLAUDE_INBOX` from
+  the bridge. Claude Code is `bunx --package @anthropic-ai/claude-code@<version> claude`.
+
+Each session reads an `envoy.json` naming listener `shared` and, as its only NATS server, a
+`socat` proxy of its own, which the script can cut, with Dispatch off. Each session gets one setup
+prompt, which makes it follow `notifications.dispatch.issue.<KEY>.>` and hold a role of its own;
+the listener's registry is then read to show both. Then six windows run, each with one
+disruption, and every event of the window is published while the disruption holds:
+
+| window | disruption |
+| :--- | :--- |
+| a | both sessions SIGKILLed (their whole process groups) and resumed under the same id: `omp --resume <session file>`; the bridge again, with `claude --resume <id>` |
+| b | both proxies cut, until natsd's `/connz` shows neither session's agent or relay subscription, then restored |
+| c | listener `shared` SIGKILLed and restarted |
+| d | listener `dispatch` SIGKILLed and restarted |
+| e | Dispatch's own NATS connection cut at its proxy, so its outbox cannot publish what the writes commit; Dispatch's writes made and Dispatch SIGKILLed right after they return; the proxy restored and Dispatch restarted, so events committed before the kill are published after the restart. The run prints the stream's stored time of each comment of the window beside the restart time |
+| f | none (the control) |
+
+Every window publishes these events. Each event carries a marker of its own in its text:
+
+| kind | events |
+| :--- | :--- |
+| agent | `POST /v1/messages/send` to each session; a Dispatch message to each session (an aside from a session actor, on a second issue the sessions do not follow) |
+| issue | two Dispatch comments on the followed issue |
+| role | `POST /v1/messages/publish` to each session's role; a core NATS publish of an Envoy envelope on `notifications.role.<role>`, which the role lane forwards |
+
+The listener sends go to listener `dispatch`, and to listener `shared` in window d. In window d,
+Dispatch cannot reach its listener, so it records its two messages as failed attempts with no
+envelope. Nothing was published for them, and they are expected 0 times (`/0` in the table).
+
+After each window, the script waits up to `SESSION_DELIVERY_SETTLE_S` for every marker to reach
+its session, then `SESSION_DELIVERY_HOLD_S` more for a repeat. At the end it counts each marker in
+each transcript the event was meant for. In the Oh My Pi session file it counts `envoy-message`
+cards and user messages. In the Claude Code transcript `<CLAUDE_CONFIG_DIR>/projects/*/<id>.jsonl`
+it counts user messages (no tool results, no meta lines) and the `queued_command` attachments of
+prompts Claude Code took during a turn. It does not count the assistant's replies, Claude Code's
+`queue-operation` and `api-request-blob` lines, or the plugins' own ledger entries. The script
+prints one row per event, with its marker and one count per session. It then reads the followed
+issue's comments back from the stream and checks that both transcripts show them in the order the
+stream stored them, their publish order. Dispatch's outbox decides that order. When it differs from
+the order the comments were written in, the run prints a `note:` line and does not judge it: after
+a Dispatch process dies holding an outbox claim, the claimed event waits out the outbox's
+one-minute claim window while later events of the issue are published
+(`packages/envoy/internal/dispatch/outbox/publisher.go`, `claimWindow`), and window e shows this.
+The run exits 0 only when every count is the expected one and the order holds. For each wrong
+count, `wrong-counts.txt` lists every transcript line that carries the marker.
+
+`--build-from <rev>` builds the listener, pi-envoy (packed by that revision's own
+`lib/pack-plugin.sh`), claude-envoy (its committed `dist/`) and the `legion` bridge from `<rev>`,
+extracted with `git archive <rev> | tar -x` into the run's directory. natsd and Dispatch stay this
+checkout's. The bridge's argv carries `--replay-user-messages` only when that revision's
+`claude.go` does. `--expect-lost <kinds>` turns the run into a negative control: it exits 0 only
+when every event of those kinds in window a counted 0 in both sessions. It prints the rest of the
+table and does not judge it. Main before sjawhar/legion#2228 (`c3d09eec`) loses agent, issue and
+role events under a session restart. #2228's merge-forward head (`926040d9`) recovers agent and
+issue events through `POST /v1/replay` and still loses role forwards. `--disruptions a,c` runs only
+the windows named.
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `LEGION_TEST_PG_DSN` | required | a loopback Postgres with pgvector; the run creates and drops a database of its own |
+| `ANTHROPIC_API_KEY` | required | passed to Oh My Pi and Claude Code only, never printed |
+| `SESSION_DELIVERY_OMP` | `omp` on `PATH`, else `/opt/omp/bin/omp` | the Oh My Pi to run |
+| `SESSION_DELIVERY_MODEL` | `claude-haiku-4-5` | both sessions' model (Oh My Pi gets `anthropic/<model>`) |
+| `SESSION_DELIVERY_CLAUDE_CODE` | `2.1.311` | the Claude Code version `bunx` runs |
+| `SESSION_DELIVERY_HEARTBEAT_MS` | `10000` | the sessions' `ENVOY_HEARTBEAT_MS` |
+| `SESSION_DELIVERY_SETTLE_S`, `SESSION_DELIVERY_HOLD_S` | `60`, `15` | the per-window waits above; window e waits 60 s longer, the outbox's claim window |
+| `SESSION_DELIVERY_EVIDENCE_DIR` | a fresh directory under `TMPDIR` | kept and printed: `table.txt`, `events.jsonl` (each event's marker, window, kind, the publisher's answer and the expected count), `logs/` (the builds, natsd, both listeners, Dispatch, the proxies) and `sessions/<pi\|cc>/` (each launch's RPC output and stderr, and the transcripts) |
+
+No `DISPATCH_*`, `ENVOY_*`, `NATS_*`, `OMP*`, `PI_*`, `LEGION_*` or `CLAUDE_*` variable of the
+caller reaches anything the run starts. `BUN_INSTALL_CACHE_DIR`, when the caller sets it, reaches
+`bunx`. On any exit the run stops everything it started by the pid it was started as (a session or
+proxy by its process group) and drops its database. Exit status: 0 pass, or the negative control
+holds; 1 a wrong count, an order break or a failed step (`FAIL <step>: …`); 2 refused (an input
+or tool is missing). Do not edit the script while a run is going: bash reads it as it runs.
 
 ## lib/free-port.sh
 
