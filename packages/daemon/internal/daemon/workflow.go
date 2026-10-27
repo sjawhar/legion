@@ -113,9 +113,10 @@ type workflowRuntime struct {
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
 	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
 	// and then the sequence it was delivered at, under awaitingMu. heldForRead is each unrecorded
-	// issue that came up for admission on a repository a failed installation read leaves out
+	// issue whose admission found its repository left out by a failed installation read
 	// (holdForRead), by key, under awaitingMu: its event is acknowledged, and admitHeldForRead
-	// admits it once a read of the mapping serves the repository.
+	// admits it once a read of the mapping serves the repository. holdVersion numbers the holds, so
+	// a hold made again while a drain reads the issue outlives that drain's stale read.
 	repositories     *repositories
 	installs         appauth.Installations
 	mappingMu        sync.Mutex
@@ -124,7 +125,8 @@ type workflowRuntime struct {
 	mappingApplied   atomic.Uint64
 	awaitingMu       sync.Mutex
 	awaiting         map[string]map[int64]uint64
-	heldForRead      map[string]struct{}
+	heldForRead      map[string]heldIssue
+	holdVersion      uint64
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -292,7 +294,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
-	engineCfg.Repositories = w
+	engineCfg.Repositories, engineCfg.HoldUnread = w, w.holdForRead
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides

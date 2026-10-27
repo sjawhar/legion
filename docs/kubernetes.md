@@ -5360,8 +5360,8 @@ issue's pod (every role of it alike) and the image probe's.
   held in the daemon rather than refused, its event acknowledged, nothing said on it, and
   admitted, parents first, once the repository is served, and the mapping is read again, 30 s
   doubling to 10 min, until GitHub answers, then the repository is served with no restart (a
-  served repository whose read fails stays served on its last answer, with the name GitHub last
-  gave it, and is read again the same way); a project
+  served repository whose read fails stays served on its last answer, with the name and default
+  branch GitHub last gave it and no further read of GitHub, and is read again the same way); a project
   with no repository mapped does not boot, one whose every repository lacks an App boots serving
   none, admitting nothing until an App is installed, and one whose every repository's
   installation read fails boots serving none and logs so at ERROR (the boot's own reads of the

@@ -94,13 +94,15 @@ func (i *installations) reads(key string) int {
 
 // mappingDispatch is a Dispatch whose repository mapping is mappings, whose project listing is
 // listed, and whose issue detail is issues' entry for a key it names, the embedded issue for any
-// other.
+// other. reading, when set, answers the next read of its key in issues' place, once, run with no
+// lock held: what a read sees while something else happens during it.
 type mappingDispatch struct {
 	outboxDispatch
 	mu       sync.Mutex
 	mappings []dispatch.RepoProject
 	listed   []dispatch.IssueSummary
 	issues   map[string]dispatch.Issue
+	reading  map[string]func() dispatch.Issue
 	err      error
 }
 
@@ -118,8 +120,13 @@ func (d *mappingDispatch) ListIssues(context.Context, string, []string) ([]dispa
 
 func (d *mappingDispatch) GetIssue(ctx context.Context, key string) (dispatch.Issue, error) {
 	d.mu.Lock()
+	read, hooked := d.reading[key]
+	delete(d.reading, key)
 	issue, named := d.issues[key]
 	d.mu.Unlock()
+	if hooked {
+		return read(), nil
+	}
 	if named {
 		return issue, nil
 	}
@@ -225,9 +232,12 @@ func TestTheMappingNamesEveryMissingAppAndLeavesOutOnlyARepositoryWhoseReadFaile
 	}
 }
 
-// Each installation read is bounded by installReadAttempt alone: twenty slow reads, more than two
-// rounds of mappingReads, are each answered and every repository served, however long the whole
-// check takes, and a read longer than installReadAttempt is a failed read, refused for now.
+// checkMapping bounds each installation read by installReadAttempt and nothing else: twenty slow
+// reads, more than two rounds of mappingReads, are each answered and every repository served,
+// however long the whole check takes, and a read longer than installReadAttempt is a failed read,
+// refused for now. This guards checkMapping's own bound, which the code before this check already
+// had; the removed bound on a refresh as a whole, which cut such a check off, is
+// TestASlowButAnsweringGitHubIsServedOnARefresh's.
 func TestEachInstallationReadIsBoundedOnItsOwn(t *testing.T) {
 	read := installReadAttempt
 	t.Cleanup(func() { installReadAttempt = read })
@@ -245,6 +255,22 @@ func TestEachInstallationReadIsBoundedOnItsOwn(t *testing.T) {
 	accepted, refused, err = checkMapping(context.Background(), mappings[:1], "LEGION", &installations{delay: 150 * time.Millisecond})
 	if err != nil || len(accepted) != 0 || len(refused) != 1 || !errors.Is(refused[0].readErr, context.DeadlineExceeded) {
 		t.Fatalf("checkMapping of a read longer than installReadAttempt = %#v, %#v, %v; want it refused for now as a failed read", accepted, refused, err)
+	}
+}
+
+// release_children's answer for a child the daemon holds (repositoryHeld) is held only while the
+// hold's repository is still unread: once a read of the mapping serves it, the hold is no answer,
+// and the release records the child itself rather than leave it to the next drain.
+func TestAHoldIsAnAnswerOnlyWhileItsRepositoryIsUnread(t *testing.T) {
+	w := &workflowRuntime{repositories: newRepositories("LEGION"), log: quietLogger()}
+	w.repositories.set(nil, []refusedRepository{{Repo: "zeta/tools", Reason: "could not be read", readErr: errors.New("GitHub answered 502")}})
+	w.holdForRead("LEGION-209", "zeta/tools")
+	if !w.repositoryHeld("LEGION-209") {
+		t.Fatal("LEGION-209 not held while zeta/tools is unread")
+	}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, nil)
+	if w.repositoryHeld("LEGION-209") {
+		t.Fatal("LEGION-209 answered held once zeta/tools is served, want the release to record it")
 	}
 }
 

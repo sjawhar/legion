@@ -407,9 +407,11 @@ const (
 // answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
 // retry applies the observation again once the parent is recorded. Its durable retry record bounds
 // attempts with exponential backoff; after the limit, it queues one notice to the tree architect
-// instead of asking an architect to retry forever. A child on a repository whose GitHub App
-// installation read failed is held by the daemon (Options.RepositoryHeld), which records it once
-// GitHub answers: the release answers it released, neither started nor held, with nothing to retry.
+// instead of asking an architect to retry forever. A child the apply did not record because its
+// repository's GitHub App installation read failed is held by the daemon (Options.RepositoryHeld,
+// asked only after the apply, and only while that repository is still unread), which records it
+// once GitHub answers: the release answers it released, neither started nor held, with nothing to
+// retry.
 func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree string, child dispatch.Issue) bool {
 	recorded, err := s.recordedIssue(r.Context(), child.Key)
 	if err != nil {
@@ -438,12 +440,6 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 		}
 		observed = prepared
 	}
-	if s.held != nil && s.held(child.Key) {
-		// Its repository's installation read failed: the daemon holds the child and records it
-		// under the tree once GitHub answers, so the release stands with nothing to retry.
-		s.log.Info("api: release_children's todo child is held until GitHub answers its repository's installation read", "issue", child.Key, "tree", tree)
-		return s.clearChildReleaseRetry(w, r, child.Key)
-	}
 	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("waves/release"), observed, s.handlers...); err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("could not record %s", child.Key))
 		return false
@@ -453,6 +449,12 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 		return false
 	}
 	if recorded != nil {
+		return s.clearChildReleaseRetry(w, r, child.Key)
+	}
+	if s.held != nil && s.held(child.Key) {
+		// Its repository's installation read failed: the daemon holds the child and records it
+		// under the tree once GitHub answers, so the release stands with nothing to retry.
+		s.log.Info("api: release_children's todo child is held until GitHub answers its repository's installation read", "issue", child.Key, "tree", tree)
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
 	return s.scheduleChildReleaseRetry(w, r, tree, child, intake.ObservedIssue(child).Parent)

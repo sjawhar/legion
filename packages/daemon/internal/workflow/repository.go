@@ -77,10 +77,16 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // resolved, resolves to none or to one Legion does not serve (refused). It says it once per
 // resolution (record.RepoNote), so a repeated event of the issue says nothing again, and reports
 // whether it said it now. A child's refusal is also told to its tree's architect (refuseChild). An
-// Unread resolution says nothing, to the issue or to an architect: the daemon holds the issue and
-// admits it once GitHub answers for its repository, with nothing for anyone to move.
+// Unread resolution says nothing, to the issue or to an architect: it hands the issue to the
+// daemon's hold (Config.HoldUnread) once the fact commits, and the daemon admits it once GitHub
+// answers for its repository, with nothing for anyone to move. The hold is made here, where the
+// fact applies, rather than where it was prepared, so every apply that finds the repository unread
+// leaves the issue held, whatever the mapping was when the event was prepared.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
 	if refused.Unread {
+		if hold := e.cfg.HoldUnread; hold != nil {
+			intake.OnCommit(ctx, func() { hold(key, resolved) })
+		}
 		return false, nil
 	}
 	note := "Legion did not admit this issue: " + refused.Refusal + ". Set its repository (" + setRepositoryHint + ") and move it to todo again."

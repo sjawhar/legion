@@ -111,10 +111,10 @@ type Options struct {
 	// before release_children applies its view of a child (the daemon's prepareObserved, handed the
 	// child as Dispatch's detail shows it, intake.ObservedIssue). Nil prepares nothing.
 	PrepareRepository func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	// RepositoryHeld says whether the daemon holds an issue its preparation found up for admission
-	// on a repository whose GitHub App installation read failed: the daemon records it itself once
-	// GitHub answers (the daemon's repositoryHeld). release_children answers such a child released,
-	// with nothing for its architect to retry. Nil holds none.
+	// RepositoryHeld says whether the daemon holds an issue whose apply found its repository left
+	// out by a failed GitHub App installation read, while that repository is still unread: the
+	// daemon records it itself once GitHub answers (the daemon's repositoryHeld). release_children
+	// answers such a child released, with nothing for its architect to retry. Nil holds none.
 	RepositoryHeld func(key string) bool
 	// RoleFor is the role that works a phase (the daemon's workflow.RoleFor, handed in because the
 	// workflow's tests import this package). The operator's retry of a failed phase worker applies

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -117,6 +118,16 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	go func() { w.refreshOnMappingChange(running); close(refreshed) }()
 	t.Cleanup(func() { stop(); <-refreshed })
 	return w, client, installs, stream, js
+}
+
+// rigWorkflow is the rig's engine and admission (of cap), wired to the rig's runtime as the boot
+// wires the daemon's: the engine holds an issue whose repository resolves unread in w
+// (holdForRead), and w's own applies run through both.
+func rigWorkflow(w *workflowRuntime, cap int) (*workflow.Engine, *admit.Admission) {
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, HoldUnread: w.holdForRead, DesignGate: config.DesignGateOff}, quietLogger())
+	admission := admit.New(w.records, engine, cap, "LEGION", quietLogger())
+	w.engine, w.admission, w.handlers = engine, admission, []intake.Handler{engine, admission}
+	return engine, admission
 }
 
 // prepareAsDelivered prepares fact as the Dispatch consumer does, delivering it again after a
@@ -742,20 +753,18 @@ func TestARepositoryWhoseInstallationReadFailedIsServedOnceARetryReadsIt(t *test
 		t.Fatal("zeta/tools served while its read still fails")
 	}
 
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
-	admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
-	w.engine, w.admission, w.handlers = engine, admission, []intake.Handler{engine, admission}
+	engine, admission := rigWorkflow(w, 1)
 	client.issue = dispatch.Issue{Key: "LEGION-301", Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 1}
 	fact := intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
 	prepared, err := w.prepareRepository(ctx, fact)
 	if err != nil {
 		t.Fatalf("prepare LEGION-301 on zeta/tools = %v, want it prepared to be applied and acknowledged", err)
 	}
-	if !w.repositoryHeld("LEGION-301") {
-		t.Fatal("LEGION-301 is not held for zeta/tools' read")
-	}
 	if _, err := intake.ApplyFact(ctx, w.pool, "test", "todo-1", prepared, engine, admission); err != nil {
 		t.Fatal(err)
+	}
+	if !w.repositoryHeld("LEGION-301") {
+		t.Fatal("LEGION-301 is not held for zeta/tools' read after its apply")
 	}
 	if got := recordedIssue(t, w, "LEGION-301"); got != nil {
 		t.Fatalf("LEGION-301 recorded as %+v while zeta/tools' read fails", got)
@@ -829,9 +838,8 @@ func TestABootListingsRootOnARepositoryWhoseReadFailedIsAdmittedOnceItIsServed(t
 	installs := &installations{missing: map[string]bool{"review acme/widgets": true}}
 	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
 	w, client, installs, _ := mappingRigWith(t, installs)
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
-	admission := admit.New(w.records, engine, 2, "LEGION", quietLogger())
-	w.engine, w.admission, w.handlers, w.bootID = engine, admission, []intake.Handler{engine, admission}, "listing-boot"
+	rigWorkflow(w, 2)
+	w.bootID = "listing-boot"
 	client.mu.Lock()
 	client.listed = []dispatch.IssueSummary{
 		{Key: "LEGION-401", ResolvedRepo: "zeta/tools", Title: "on the unread repository", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1},
@@ -892,9 +900,8 @@ func TestAHeldEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *tes
 	installs := &installations{}
 	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
 	w, client, installs, _, js := mappingRigJS(t, installs)
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
-	admission := admit.New(w.records, engine, 2, "LEGION", quietLogger())
-	w.engine, w.admission, w.handlers, w.bootID, w.holdPollInterval = engine, admission, []intake.Handler{engine, admission}, "held-event-boot", 10*time.Millisecond
+	engine, admission := rigWorkflow(w, 2)
+	w.bootID, w.holdPollInterval = "held-event-boot", 10*time.Millisecond
 	failing, served := dispatch.Issue{Key: "LEGION-501", ResolvedRepo: "zeta/tools", Title: "LEGION-501", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1},
 		dispatch.Issue{Key: "LEGION-502", ResolvedRepo: "acme/widgets", Title: "LEGION-502", Status: "todo", Rank: "B", HandedOver: true, LastSeq: 1}
 	client.mu.Lock()
@@ -975,6 +982,11 @@ func TestAServedRepositoryKeptOnItsLastAnswerHoldsNoOtherRepositoryBack(t *testi
 	if resolved, err := w.ResolveRepository("acme/widgets"); err != nil || resolved.Repo != "acme/widgets" || resolved.DefaultBranch != "main" {
 		t.Fatalf("ResolveRepository(acme/widgets) = %#v, %v; want its last read, acme/widgets@main", resolved, err)
 	}
+	// An admission on the kept repository reads no default branch from GitHub: it takes the last
+	// read, so it waits for no read that is failing.
+	if _, err := w.prepareUnrecorded(context.Background(), intake.DispatchIssue{Key: "LEGION-801", Seq: 1, Status: "todo", Title: "kept", Rank: "A", HandedOver: true, ResolvedRepo: "acme/widgets"}, false, 0); err != nil {
+		t.Fatalf("prepare an admission on kept acme/widgets = %v, want its last read with no GitHub read", err)
+	}
 }
 
 // Held issues are admitted parents first, as the boot listing's are: a child under a child of a
@@ -988,9 +1000,8 @@ func TestHeldChildrenAreAdmittedParentsFirst(t *testing.T) {
 	installs := &installations{}
 	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
 	w, client, installs, _ := mappingRigWith(t, installs)
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
-	admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
-	w.engine, w.admission, w.handlers, w.bootID = engine, admission, []intake.Handler{engine, admission}, "parents-first-boot"
+	engine, admission := rigWorkflow(w, 1)
+	w.bootID = "parents-first-boot"
 	root := dispatch.Issue{Key: "LEGION-98", ResolvedRepo: "acme/widgets", Title: "root", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}
 	parent := dispatch.Issue{Key: "LEGION-99", ResolvedRepo: "zeta/tools", Title: "parent", Status: "todo", Rank: "B", Parent: new(root.Key), LastSeq: 1}
 	child := dispatch.Issue{Key: "LEGION-100", ResolvedRepo: "zeta/tools", Title: "child", Status: "todo", Rank: "C", Parent: new(parent.Key), LastSeq: 1}
@@ -1052,5 +1063,113 @@ func TestASlowButAnsweringGitHubIsServedOnARefresh(t *testing.T) {
 	installs.setFailing(nil, "implement zeta/tools")
 	if !within(10*time.Second, func() bool { return served(w, "zeta/tools") }) {
 		t.Fatalf("zeta/tools not served after %d slow reads, want it served once GitHub answers", installs.reads("implement zeta/tools"))
+	}
+}
+
+// applyTodo prepares and applies key's labelled todo event at seq on repo, as the Dispatch
+// consumer does.
+func applyTodo(t *testing.T, w *workflowRuntime, engine *workflow.Engine, admission *admit.Admission, key, repo string, seq int64) {
+	t.Helper()
+	fact := intake.DispatchIssue{Key: key, Seq: seq, Status: "todo", Title: key, Rank: "A", HandedOver: true, ResolvedRepo: repo}
+	prepared, err := prepareAsDelivered(t, w, fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := intake.ApplyFact(context.Background(), w.pool, "test", fmt.Sprintf("%s-todo-%d", key, seq), prepared, engine, admission); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An issue held for its repository's installation read that a person moves out of todo and back
+// while a drain reads it stays held: the drain reads the older status (backlog) and lets go only
+// the hold it read, not the one the issue's new todo event made meanwhile, so the issue is admitted
+// once its repository is served. A drain that let go of whatever hold the key had left the issue
+// held by nothing, labelled todo in Dispatch and never admitted.
+func TestAHoldMadeAgainWhileADrainReadsTheIssueOutlivesThatRead(t *testing.T) {
+	quickInstallReads(t)
+	installs := &installations{}
+	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	engine, admission := rigWorkflow(w, 1)
+	const key = "LEGION-601"
+	todo := dispatch.Issue{Key: key, ResolvedRepo: "zeta/tools", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}
+	client.mu.Lock()
+	client.issues = map[string]dispatch.Issue{key: todo}
+	client.mu.Unlock()
+	applyTodo(t, w, engine, admission, key, "zeta/tools", 1)
+	if !w.repositoryHeld(key) {
+		t.Fatalf("%s not held for zeta/tools' read", key)
+	}
+	var bounced atomic.Bool
+	client.mu.Lock()
+	client.reading = map[string]func() dispatch.Issue{key: func() dispatch.Issue {
+		// While the drain reads the issue, the person moves it to backlog and back to todo: the
+		// drain is answered the backlog, and the todo event at sequence 3 is applied meanwhile.
+		backlog := todo
+		backlog.Status, backlog.LastSeq = "backlog", 2
+		again := todo
+		again.LastSeq = 3
+		client.mu.Lock()
+		client.issues[key] = again
+		client.mu.Unlock()
+		applyTodo(t, w, engine, admission, key, "zeta/tools", 3)
+		bounced.Store(true)
+		return backlog
+	}}
+	client.mu.Unlock()
+	testwait.Eventually(t, "a drain read "+key+" while it bounced", bounced.Load)
+	time.Sleep(10 * installReadRetry.Max)
+	if !w.repositoryHeld(key) {
+		t.Fatalf("%s let go by the drain that read it in backlog, though its todo event held it again meanwhile", key)
+	}
+	installs.setFailing(nil, "implement zeta/tools")
+	if !within(10*time.Second, func() bool { return recordedIssue(t, w, key) != nil }) {
+		t.Fatalf("%s = %+v once zeta/tools is served, held %t; want it admitted", key, recordedIssue(t, w, key), w.repositoryHeld(key))
+	}
+}
+
+// An event prepared while its repository was refused for a missing App (no hold at preparation)
+// whose apply, after a read of the mapping, finds the repository unread is held all the same: the
+// hold is made where the fact applies, so the issue, with nothing said on it, is admitted once
+// GitHub answers. Held only at preparation, the apply said nothing and held nothing, and the issue
+// was never admitted.
+func TestAnApplyThatFindsItsRepositoryUnreadHoldsTheIssue(t *testing.T) {
+	ctx := context.Background()
+	quickInstallReads(t)
+	installs := &installations{missing: map[string]bool{"review zeta/tools": true}}
+	w, client, installs, _ := mappingRigWith(t, installs)
+	engine, admission := rigWorkflow(w, 1)
+	const key = "LEGION-701"
+	client.mu.Lock()
+	client.issues = map[string]dispatch.Issue{key: {Key: key, ResolvedRepo: "zeta/tools", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}}
+	client.mu.Unlock()
+	prepared, err := prepareAsDelivered(t, w, intake.DispatchIssue{Key: key, Seq: 1, Status: "todo", Title: key, Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installs.mu.Lock()
+	delete(installs.missing, "review zeta/tools")
+	installs.mu.Unlock()
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	read := w.requestMappingRead()
+	testwait.Eventually(t, "the read of the mapping after zeta/tools' read failed", func() bool { return w.mappingApplied.Load() >= read })
+	if _, _, _, unread := w.repositories.lookup("zeta/tools"); !unread {
+		t.Fatal("zeta/tools is not unread after the read whose installation read failed")
+	}
+	if _, err := intake.ApplyFact(ctx, w.pool, "test", key+"-todo-1", prepared, engine, admission); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordedIssue(t, w, key); got != nil {
+		t.Fatalf("%s recorded as %+v while zeta/tools' read fails", key, got)
+	}
+	if notes := repositoryNotes(t, w, key); len(notes) != 0 {
+		t.Fatalf("notes on %s = %q, want none: it is held", key, notes)
+	}
+	if !w.repositoryHeld(key) {
+		t.Fatalf("%s not held after an apply that found zeta/tools unread", key)
+	}
+	installs.setFailing(nil, "implement zeta/tools")
+	if !within(10*time.Second, func() bool { return recordedIssue(t, w, key) != nil }) {
+		t.Fatalf("%s not admitted once zeta/tools is served", key)
 	}
 }
