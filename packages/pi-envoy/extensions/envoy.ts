@@ -122,7 +122,9 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr, VERSION } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, Events, type NatsConnection, StringCodec, type Subscription } from "nats";
-import { version as packageVersion } from "../package.json" with { type: "json" };
+import { name as packageName, version as packageVersion } from "../package.json" with {
+  type: "json",
+};
 import {
   AgentStreamPublisher,
   type AgentStreamSettingsState,
@@ -2096,7 +2098,7 @@ export default function envoyExtension(pi: PiApi): void {
             : DELIVERY_CAPABILITIES,
         driving: false,
         selfSubscribed: true,
-        plugin: { name: "@sjawhar/pi-envoy", version: packageVersion },
+        plugin: { name: packageName, version: packageVersion },
       })
       .then((result) => {
         registeredFor = registeringFor;

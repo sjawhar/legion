@@ -48234,7 +48234,9 @@ class StdioServerTransport {
 
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
+
 // package.json
+var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
   daemonApiVersion: 40
@@ -48803,7 +48805,7 @@ function channelAllowlist(directories) {
   const dropIns = join3(directories.managedDirectory, "managed-settings.d");
   let dropInFiles = [];
   try {
-    dropInFiles = readdirSync2(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join3(dropIns, name));
+    dropInFiles = readdirSync2(dropIns).filter((name2) => name2.endsWith(".json") && !name2.startsWith(".")).sort().map((name2) => join3(dropIns, name2));
   } catch {
     dropInFiles = [];
   }
@@ -49143,11 +49145,11 @@ function stopPane(why) {
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
   const projects = join6(configDir, "projects");
-  const name = `${sessionID}.jsonl`;
+  const name2 = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file2 = join6(projects, directory, name);
+      const file2 = join6(projects, directory, name2);
       if (await stat2(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
@@ -49294,21 +49296,21 @@ function phaseOpParameters(zod) {
   const api2 = zodSchemaApi(zod);
   const fields = {};
   for (const option of PhaseOpArguments.options) {
-    for (const [name, declared] of Object.entries(option.shape)) {
-      if (name === "op")
+    for (const [name2, declared] of Object.entries(option.shape)) {
+      if (name2 === "op")
         continue;
       const field = declared instanceof exports_external.ZodOptional ? declared.unwrap() : declared;
       if (field instanceof exports_external.ZodString)
-        fields[name] = api2.string().optional();
+        fields[name2] = api2.string().optional();
       else if (field instanceof exports_external.ZodBoolean)
-        fields[name] = api2.boolean().optional();
+        fields[name2] = api2.boolean().optional();
       else if (field instanceof exports_external.ZodEnum) {
         const [first, ...rest] = field.options.map(String);
         if (first === undefined)
-          throw new Error(`phase op field ${name} has no values`);
-        fields[name] = api2.enum([first, ...rest]).optional();
+          throw new Error(`phase op field ${name2} has no values`);
+        fields[name2] = api2.enum([first, ...rest]).optional();
       } else
-        throw new Error(`phase op field ${name} has a kind phaseOpParameters does not map`);
+        throw new Error(`phase op field ${name2} has a kind phaseOpParameters does not map`);
     }
   }
   const byField = fields;
@@ -49530,10 +49532,10 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   const fields = query(socket, pane, TMUX_PANE_FORMAT)?.replace(/\r?\n$/, "").split("\t");
   if (fields === undefined || fields.length < 6)
     return;
-  const [name = "", window2 = "", automaticRename, group = "", pid, panePid = ""] = fields.map(oneLine);
+  const [name2 = "", window2 = "", automaticRename, group = "", pid, panePid = ""] = fields.map(oneLine);
   if (pid !== serverPid || !ownPane(panePid))
     return;
-  const session = group === "" ? name : group;
+  const session = group === "" ? name2 : group;
   if (!visible(session) || session.startsWith("#{"))
     return;
   if (visible(window2) && (automaticRename === "0" || automaticRename === "off")) {
@@ -49557,10 +49559,10 @@ function sessionTitle(environment, directory, sources = {}) {
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
   const directoryName = oneLine(basename4(directory) || directory);
-  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
+  const name2 = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
   return (sessionId) => {
     const own = oneLine(chosen(sessionId) ?? "");
-    return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+    return visible(own) ? own : `${name2} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
   };
 }
 
@@ -49882,7 +49884,7 @@ async function startChannelSession(options) {
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
-      plugin: { name: "@sjawhar/claude-envoy", version: options.pluginVersion }
+      plugin: { name, version: options.pluginVersion }
     });
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -50180,11 +50182,11 @@ async function startChannelSession(options) {
     }
   };
 }
-async function executeEnvoyTool(runtime, name, input) {
+async function executeEnvoyTool(runtime, name2, input) {
   const { identity } = runtime;
-  const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
+  const spec = envoyToolSpecs.find((candidate) => candidate.name === name2);
   if (spec === undefined)
-    throw new UnsupportedEnvoyToolError(name);
+    throw new UnsupportedEnvoyToolError(name2);
   switch (spec.operation) {
     case EnvoyToolOperation.send: {
       const args = parseArguments(spec, input);

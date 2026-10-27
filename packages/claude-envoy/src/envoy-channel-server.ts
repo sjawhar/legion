@@ -67,7 +67,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { connect } from "nats"
 import { z } from "zod"
-import { version as packageVersion } from "../package.json" with { type: "json" }
+import { name as packageName, version as packageVersion } from "../package.json" with {
+  type: "json",
+}
 import {
   type ChannelForwarder,
   type ChannelForwarderConnection,
@@ -743,7 +745,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
-      plugin: { name: "@sjawhar/claude-envoy", version: options.pluginVersion },
+      plugin: { name: packageName, version: options.pluginVersion },
     })
   }
 
