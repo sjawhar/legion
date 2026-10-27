@@ -151,3 +151,21 @@ func TestAStaleAddressWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *test
 		t.Fatalf("claim %+v after the stale observation, want the held suspension ended", claim)
 	}
 }
+
+// (M7) A reclaim relaunch is uncharged: a RoleUnheld on a ready claim leaves Budgets{} unchanged
+// and calls Resume once on the recorded session. A mutation that adds LaunchFailures++ to the
+// replaceProcess path fails here, which pins the uncharged property the death-budget residual rests
+// on: a run of healthy heals must not spend the launch budget.
+func TestAReclaimRelaunchIsUnchargedAndResumesOnce(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+
+	h.must(RoleUnheld{Claim: h.token, Trigger: "publish"})
+
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{})
+	resumes := h.wantCalls("Resume", 1)
+	if resumes[0].Spec.ResumeSessionFile != sessionFile {
+		t.Fatalf("resumed %q, want the recorded session %q", resumes[0].Spec.ResumeSessionFile, sessionFile)
+	}
+}
