@@ -368,6 +368,45 @@ func TestPublishRouteNamesTheAdHocTopicSubscriberThatDidNotConfirm(t *testing.T)
 	expectFrames(t, served, 0, 100*time.Millisecond)
 }
 
+// An ad-hoc topic sent while the listener's connection to its server is down is answered inside
+// the send's window, as packages/envoy/AGENTS.md says of both confirmed sends, with an error rather
+// than a 200. The topic's own core publish waits on the reconnect too, so it must end with the
+// window rather than after the bus's own 5 s reconnect wait, which outlasts envoy-client's 5 s
+// attempt: the sender's client would abort before the answer arrives.
+func TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown(t *testing.T) {
+	srv, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the interest registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	if _, err := registry.Upsert(store.Interest{SessionID: "ses_recipient", MachineID: "other-machine"}, []string{"notifications.team.>"}); err != nil {
+		t.Fatalf("register ses_recipient's interest: %v", err)
+	}
+	if err := sessions.Put("ses_recipient", session.SessionEntry{MachineID: "other-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register ses_recipient: %v", err)
+	}
+	startStandIn(t, uri, "ses_recipient", always)
+	deps := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
+
+	srv.Stop(t)
+	// Publish once the client has seen the drop and is reconnecting, as a listener whose server
+	// went away is, rather than in the moment before it notices.
+	waitFor(t, 5*time.Second, "the listener's connection to be reconnecting", client.Conn.IsReconnecting)
+	recorder, elapsed := publishThrough(deps, `{"topic":"notifications.team.outage","message":"through a stopped hub","idempotency_key":"outage-1"}`)
+	if recorder.Code == http.StatusOK || elapsed > 4500*time.Millisecond {
+		t.Fatalf("status %d after %s, want an error inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
+	}
+}
+
 // A forward copy the stream stored on a session's agent subject reaches every listener's durable;
 // the durable acknowledges it and delivers it to nobody, so a serve-port session subscribed to the
 // copy's topic is not sent the message a second time.
