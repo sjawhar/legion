@@ -71,14 +71,17 @@ func advance(pr record.PullRequest, headSHA string) (record.PullRequest, bool) {
 const maxMoves = 32
 
 // madeMoves is moves with the move from previous to head and the moves of chain's pushes made,
-// each once and the newest last, at most maxMoves of them.
+// each once and the newest last, at most maxMoves of them. A chain that ends at head has the move
+// from previous to head as its last push's, and that move is made once.
 func madeMoves(moves []record.Move, previous, head string, chain []record.ClassifiedPush) []record.Move {
 	made := make([]record.Move, 0, len(chain)+1)
 	for _, p := range chain {
-		made = append(made, record.Move{Before: p.Before, SHA: p.SHA})
+		if m := (record.Move{Before: p.Before, SHA: p.SHA}); !slicesContain(made, m) {
+			made = append(made, m)
+		}
 	}
-	if previous != "" {
-		made = append(made, record.Move{Before: previous, SHA: head})
+	if m := (record.Move{Before: previous, SHA: head}); previous != "" && !slicesContain(made, m) {
+		made = append(made, m)
 	}
 	kept := make([]record.Move, 0, len(moves)+len(made))
 	for _, m := range moves {

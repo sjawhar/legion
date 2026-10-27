@@ -3,6 +3,7 @@ package classify
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +241,8 @@ func stampHead(pr record.PullRequest, at time.Time) record.PullRequest {
 // push is handoff-only, which the record keeps for good (it carries an approval across) and the
 // run does not copy; each settlement holds ten check runs and is delivered twice, and the second
 // delivery takes no step. Heads are 40-character SHAs and each head step carries its arrival time.
+// Whether its push comes before or after its head, each head records its move once, so the record
+// remembers the last maxMoves distinct moves.
 func TestAHeadRunStaysBounded(t *testing.T) {
 	encoded := func(v any) int {
 		b, err := json.Marshal(v)
@@ -251,16 +254,21 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
 		lost                int
+		pushFirst           bool
 		maxSteps, maxPushes int
 	}{
-		{"every push three heads late", -1, 8, 4},
-		{"the fifth push lost", 5, maxRunSteps, maxRunSteps},
+		{"every push three heads late", -1, false, 8, 4},
+		{"the fifth push lost", 5, false, maxRunSteps, maxRunSteps},
+		{"every push before its head", -1, true, 8, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := record.PullRequest{HeadSHA: sha(0), CheckedHead: sha(0), Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
 			largestRun, largestMoves, largestRow := 0, 0, 0
 			start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 			for i := 1; i <= 200; i++ {
+				if tc.pushFirst {
+					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(i), Before: sha(i - 1), HandoffOnly: i%2 == 0})
+				}
 				pr = stampHead(AdvancePullRequestHead(pr, sha(i)), start.Add(time.Duration(i)*time.Minute))
 				settlement := SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
 					Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}}
@@ -272,7 +280,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 				if pr, _ = ApplyCheckSettlement(pr, settlement); pr.Run != nil && len(pr.Run.Steps) != steps {
 					t.Fatalf("after %d heads the redelivered settlement took a step: %d steps, want %d", i, len(pr.Run.Steps), steps)
 				}
-				if late := i - 3; late >= 1 && late != tc.lost {
+				if late := i - 3; !tc.pushFirst && late >= 1 && late != tc.lost {
 					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(late), Before: sha(late - 1), HandoffOnly: late%2 == 0})
 				}
 				if pr.Run != nil {
@@ -282,8 +290,12 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 							i, len(pr.Run.Steps), len(pr.Run.Pushes), tc.maxSteps, tc.maxPushes)
 					}
 				}
-				if len(pr.Moves) > maxMoves {
-					t.Fatalf("after %d heads the record holds %d moves, want at most %d", i, len(pr.Moves), maxMoves)
+				distinct := map[record.Move]bool{}
+				for _, m := range pr.Moves {
+					distinct[m] = true
+				}
+				if len(pr.Moves) > maxMoves || len(distinct) != len(pr.Moves) || len(distinct) != min(i, maxMoves) {
+					t.Fatalf("after %d heads the record holds %d moves, %d distinct, want %d, each once", i, len(pr.Moves), len(distinct), min(i, maxMoves))
 				}
 				largestMoves = max(largestMoves, encoded(pr.Moves))
 				largestRow = max(largestRow, encoded(pr.Run)+encoded(pr.Moves)+encoded(pr.Pushes))
@@ -291,6 +303,23 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 			t.Logf("largest stored head run: %d bytes; largest stored moves: %d bytes; largest run, moves and pushes together: %d bytes; pushes kept at the end: %d (%d bytes)",
 				largestRun, largestMoves, largestRow, len(pr.Pushes), encoded(pr.Pushes))
 		})
+	}
+}
+
+// One head records one move, its push delivered before the head or after it.
+func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
+	want := []record.Move{{Before: "h0", SHA: "h1"}}
+	push := record.ClassifiedPush{SHA: "h1", Before: "h0"}
+	fresh := func() record.PullRequest {
+		return record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{}, Required: []string{"ci"}}
+	}
+	first := AdvancePullRequestHead(ApplyPush(fresh(), push), "h1")
+	if !reflect.DeepEqual(first.Moves, want) {
+		t.Errorf("the push before its head left moves %+v, want %+v", first.Moves, want)
+	}
+	late := ApplyPush(AdvancePullRequestHead(fresh(), "h1"), push)
+	if !reflect.DeepEqual(late.Moves, want) {
+		t.Errorf("the push after its head left moves %+v, want %+v", late.Moves, want)
 	}
 }
 
