@@ -351,16 +351,22 @@ case "$1" in
       args+=("$1")
       shift
     done
-    if [ "$command" = pg_dumpall ] && [ "${FAKE_DUMP:?}" = empty ]; then
-      echo "pg_dumpall: error: connection to server failed" >&2
-      exit 1
-    fi
-    # A dump that stops partway (killed, or its redirect's disk full) once it has written the
-    # schema: every CREATE TABLE and no row, the data sections being the dump's last and largest.
-    if [ "$command" = pg_dumpall ] && [ "$FAKE_DUMP" = cut ]; then
-      "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}" </dev/null | sed '/^COPY public\./,$d'
-      echo "pg_dumpall: error: could not write to output file: No space left on device" >&2
-      exit 1
+    if [ "$command" = pg_dumpall ]; then
+      case "${FAKE_DUMP:?}" in
+        empty)
+          echo "pg_dumpall: error: connection to server failed" >&2
+          exit 1
+          ;;
+        # A dump that stops partway (killed, or its redirect's disk full) once it has written the
+        # schema: every CREATE TABLE and no row, the data sections being the dump's last and largest.
+        cut)
+          "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}" </dev/null | sed '/^COPY public\./,$d'
+          echo "pg_dumpall: error: could not write to output file: No space left on device" >&2
+          exit 1
+          ;;
+        whole) ;;
+        *) echo "fake docker: unknown FAKE_DUMP: $FAKE_DUMP" >&2; exit 2 ;;
+      esac
     fi
     if "$stdin"; then
       exec "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}"
@@ -451,17 +457,18 @@ EOF
 
   # A dump that lost every row, made as mode $1 (described as $2), whose restore leaves $3 in the
   # new container's issues table: the dump check prints 0 before the old container stops, and the
-  # listing and count after the restore print something other than after a whole dump's.
+  # listing and count after the restore print something other than what they printed against the
+  # old container before the dump.
   lost_move() {
     local result="${temporary_dir}/move-$1"
     replay_move "$1"
-    if [ "$(cat "${result}.rows")" != "$3" ] || [ "$(cat "${result}.trailer")" != 0 ] || [ ! -s "${result}.after" ] \
-      || cmp -s "${result}.after" "${whole}.after"; then
-      printf 'FAIL: %s: the dump check prints 0, and the listing and count after the restore tell it from a whole dump; else the checks pass a move that lost every row\n' "$2"
+    if [ "$(cat "${result}.rows")" != "$3" ] || [ "$(cat "${result}.trailer")" != 0 ] || [ ! -s "${result}.before" ] \
+      || [ ! -s "${result}.after" ] || cmp -s "${result}.after" "${result}.before"; then
+      printf 'FAIL: %s: the dump check prints 0, and the listing and count after the restore differ from what they printed before the dump; else the checks pass a move that lost every row\n' "$2"
       show_move "$result"
       failures=$((failures + 1))
     else
-      printf 'PASS: %s: the dump check prints 0, and the listing and count after the restore tell it from a whole dump\n' "$2"
+      printf 'PASS: %s: the dump check prints 0, and the listing and count after the restore differ from what they printed before the dump\n' "$2"
     fi
   }
   lost_move empty "a dump that failed, leaving an empty file" none
