@@ -128,6 +128,26 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- `envoy-dispatch` serves on an inherited listening TCP socket that `DISPATCH_LISTEN_FD` names by
+  its descriptor number, and binds nothing: a test harness opens the socket on port 0 and holds the
+  port the kernel chose until Dispatch serves on it, so no other program can take it in between.
+  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not empty, must name the socket's
+  address, and `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening
+  TCP socket, or a setting that names another address, refuses startup naming the variable, with
+  nothing bound in its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a
+  loopback address. The `dispatch: listening` line names the address the server is bound to, in
+  both modes: a server on every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+- `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
+  descriptor number, and binds nothing, for a process a test harness starts (not a container:
+  Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the
+  socket's address, and `PORT=0` names none; a descriptor that is not a listening TCP socket, or a
+  setting that names another address, refuses startup naming the variable, with nothing bound in
+  its place. The API auth rule judges the socket's own address, so a socket on every interface
+  needs `ENVOY_API_TOKEN`, the OIDC pair or `ENVOY_API_ALLOW_UNAUTHENTICATED=1` as
+  `ENVOY_LISTEN_HOST=0.0.0.0` does, though an unset `ENVOY_LISTEN_HOST` means loopback. The
+  `envoy-listener listening` line's `addr` is the address the listener is bound to, in both modes:
+  `PORT=0` logs the port the kernel chose where it logged port 0, and a listener on every interface
+  logs `[::]:9020` where it logged `0.0.0.0:9020`.
 - Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
   `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
   server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
@@ -875,6 +895,11 @@
 
 ### Changed
 
+- A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
+  15 minutes after its row's last write, where it was 10, because it now adds
+  `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
+  `envoy_active_interests` gauge still list them, and a message matching one logs a failed
+  delivery to that session; a paused session that comes back within it still has them.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -1682,6 +1707,12 @@
   read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
   `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
   events already stored with `null`; a new answer stores `[]` (INFRA-569).
+
+- A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
+  API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
+  comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
+  the editor's link opener resolved as a page path under the document's own URL. A document that
+  already holds `[a@b.test](a@b.test)` keeps that link's bare target until it is edited.
 
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach
