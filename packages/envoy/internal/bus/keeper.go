@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,14 +30,16 @@ func (c *Client) startKeeper(cfg nats.StreamConfig, buckets []string, interval t
 	go c.keep(cfg, buckets, interval)
 }
 
-// keep is the keeper: every interval it puts back what the deployment's settings ask of the stream
-// (keepStream) and raises each of buckets, the program's own (WithKeptBuckets), back to the
-// deployment's copies (raiseReplicas), until the client stops. A start's reconcile can lose to a
-// concurrent start with other settings, since JetStream's stream update has no compare-and-swap
-// (ensureStreamWithConfig), and an operator can lower either by hand; the keeper ends both within
-// one period. A pass waits for a live connection: a pass while the client is not connected is
-// skipped. A pass that fails is logged and the next period tries again: the keeper never stops the
-// client or the process.
+// keep is the keeper: every interval it puts back what the deployment's settings and this binary
+// ask of the stream (keepStream) and raises each of buckets, the program's own (WithKeptBuckets),
+// back to the deployment's copies (raiseReplicas), until the client stops. A start's reconcile can
+// lose to a concurrent start with other settings or subjects, since JetStream's stream update has
+// no compare-and-swap (ensureStreamWithConfig), and an operator can lower either by hand; the
+// keeper ends both within one period. A pass waits for a live connection: a pass while the client
+// is not connected is skipped, and none starts once the client has stopped, though a tick and the
+// stop came together. A pass that fails is logged and the next period tries again: the keeper never
+// stops the client or the process. A failure once the client has stopped is the stop's, and is not
+// logged.
 func (c *Client) keep(cfg nats.StreamConfig, buckets []string, interval time.Duration) {
 	defer close(c.keeperDone)
 	ticker := time.NewTicker(interval)
@@ -46,6 +49,9 @@ func (c *Client) keep(cfg nats.StreamConfig, buckets []string, interval time.Dur
 		case <-c.stopCh:
 			return
 		case <-ticker.C:
+		}
+		if c.stopped() {
+			return
 		}
 		if c.Connected() {
 			c.keepPass(&cfg, buckets)
@@ -59,9 +65,12 @@ func (c *Client) keep(cfg nats.StreamConfig, buckets []string, interval time.Dur
 func (c *Client) keepPass(cfg *nats.StreamConfig, buckets []string) {
 	js := c.JS()
 	restored, err := keepStream(js, cfg)
-	if err != nil {
+	switch {
+	case err != nil && c.stopped():
+		return
+	case err != nil:
 		slog.Warn("envoy nats keeper could not restore the stream", slog.String("name", c.name), slog.String("stream", Stream), slog.String("error", err.Error()))
-	} else if len(restored) > 0 {
+	case len(restored) > 0:
 		slog.Warn("envoy nats keeper restored the stream", slog.String("name", c.name), slog.String("stream", Stream), slog.String("restored", strings.Join(restored, ", ")))
 	}
 	for _, bucket := range buckets {
@@ -71,6 +80,8 @@ func (c *Client) keepPass(cfg *nats.StreamConfig, buckets []string) {
 		from, err := raiseReplicas(js, bucket, cfg.Replicas)
 		switch {
 		case errors.Is(err, nats.ErrStreamNotFound):
+		case err != nil && c.stopped():
+			return
 		case err != nil:
 			slog.Warn("envoy nats keeper could not raise a bucket", slog.String("name", c.name), slog.String("bucket", bucket), slog.String("error", err.Error()))
 		case from > 0:
@@ -88,14 +99,22 @@ func (c *Client) awaitKeeper() {
 	}
 }
 
-// keepStream puts back what cfg, the deployment's settings, asks of the stream and a concurrent
-// start or an operator took away (keptStream): copies below cfg's count, a byte limit other than
-// cfg's when it sets one, and a missing StreamIDMetadataKey. It returns each field it restored,
-// old and new value, none when the stream already held them, in which case it sends nothing. It
-// never touches the subjects, the age, the duplicate window or discard: only a start reconciles
-// those, since two releases with different subject lists would otherwise switch the stream back
-// and forth every period. An update whose answer never came succeeds when the stream, read again,
-// holds it (unanswered), as at a start.
+// keepStream puts back what cfg, this binary's stream with the deployment's settings, asks of the
+// stream and a concurrent start or an operator took away. It writes keptStream: the stream as it
+// read it, with copies below cfg's count raised to it, a byte limit other than cfg's set to cfg's
+// when cfg sets one, a missing StreamIDMetadataKey added, the age, the duplicate window and discard
+// set to cfg's (the same in every release, ownedStream), and each of cfg's subjects the stream lacks
+// added unless it captures a role lane or overlaps a deployed subject (keptSubjects). It never
+// removes or replaces a subject: only a start does, since two releases with different subject lists
+// would otherwise switch the stream back and forth every period. Its write still carries every
+// other field as it read it, the other subjects included, so a concurrent write that lands between
+// its read and its write is lost again; the keeper of the program whose write it was puts its part
+// back a period later. It returns each field it restored, old and new value, none when the stream
+// already held them, in which case it sends nothing. A stream whose subjects capture the role lanes
+// it leaves to a start, sending nothing and returning an error when it needs anything: only a start
+// moves the role lanes off the stream, their consumers' filters first (migrateRoleLanesOffStream),
+// and a write of the list the keeper read could put them back after a start removed them. An update
+// whose answer never came succeeds when the stream, read again, needs nothing more (updateStream).
 func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {
@@ -105,14 +124,22 @@ func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, err
 	if reflect.DeepEqual(kept, info.Config) {
 		return nil, nil
 	}
-	if _, err := js.UpdateStream(&kept); err != nil && !(unanswered(err) && streamHolds(js, cfg, keptStream)) {
+	if roleLanes := slices.DeleteFunc(slices.Clone(info.Config.Subjects), func(subject string) bool { return !subjectCapturesRoleLanes(subject) }); len(roleLanes) > 0 {
+		return nil, fmt.Errorf("the stream carries subjects that capture the role lanes, which only a start moves off it: %s", strings.Join(roleLanes, ", "))
+	}
+	if err := updateStream(js, &kept, func(again *nats.StreamInfo) bool {
+		return reflect.DeepEqual(keptStream(again, cfg), again.Config)
+	}); err != nil {
 		return nil, refusedSettings(err, &info.Config, &kept)
 	}
 	return restoredFields(&info.Config, &kept), nil
 }
 
 // restoredFields names each field kept differs in from deployed, with its old and new value:
-// `replicas 1 -> 3`, `max_bytes -1 -> 2000000`, `envoy_stream_id added as <id>`.
+// `replicas 1 -> 3`, `max_bytes -1 -> 2000000`, `max_age 73h0m0s -> 72h0m0s`,
+// `duplicate_window 1m0s -> 72h0m0s`, `discard DiscardNew -> DiscardOld`,
+// `envoy_stream_id added as <id>`, `subjects added notifications.x.>`. kept's subjects are
+// deployed's with the keeper's additions after them (keptSubjects).
 func restoredFields(deployed, kept *nats.StreamConfig) []string {
 	var restored []string
 	if kept.Replicas != deployed.Replicas {
@@ -121,8 +148,20 @@ func restoredFields(deployed, kept *nats.StreamConfig) []string {
 	if kept.MaxBytes != deployed.MaxBytes {
 		restored = append(restored, fmt.Sprintf("max_bytes %d -> %d", deployed.MaxBytes, kept.MaxBytes))
 	}
+	if kept.MaxAge != deployed.MaxAge {
+		restored = append(restored, fmt.Sprintf("max_age %s -> %s", deployed.MaxAge, kept.MaxAge))
+	}
+	if kept.Duplicates != deployed.Duplicates {
+		restored = append(restored, fmt.Sprintf("duplicate_window %s -> %s", deployed.Duplicates, kept.Duplicates))
+	}
+	if kept.Discard != deployed.Discard {
+		restored = append(restored, fmt.Sprintf("discard %s -> %s", deployed.Discard, kept.Discard))
+	}
 	if id := kept.Metadata[StreamIDMetadataKey]; id != deployed.Metadata[StreamIDMetadataKey] {
 		restored = append(restored, fmt.Sprintf("%s added as %s", StreamIDMetadataKey, id))
+	}
+	if added := kept.Subjects[len(deployed.Subjects):]; len(added) > 0 {
+		restored = append(restored, "subjects added "+strings.Join(added, " "))
 	}
 	return restored
 }

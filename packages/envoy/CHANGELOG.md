@@ -874,14 +874,20 @@
   stream as it should be sends no update (INFRA-546).
 - The listener and Dispatch's server, the programs that own `ENVOY_NOTIFICATIONS`, now keep it
   while they run. JetStream's stream update has no compare-and-swap, so a start with other or no
-  settings that reads the stream before another start's raise and writes after it puts the old
-  copies, byte limit and metadata back. Every 30 seconds each program's keeper reads the stream
-  again and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit other than its
-  `ENVOY_STREAM_MAX_BYTES` (when set) and a missing `envoy_stream_id`, logging the WARN line
-  `envoy nats keeper restored the stream` with
-  `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>"`. It never
-  touches the subjects, the age, the duplicate window or discard, which only a start sets, so two
-  releases with different subject lists do not switch the stream back and forth. It also raises
+  settings, or another subject list, that reads the stream before another start's write and writes
+  after it puts the old subjects, copies, byte limit and metadata back. Every 30 seconds each
+  program's keeper reads the stream again and puts back copies below its `ENVOY_NATS_REPLICAS`, a
+  byte limit other than its `ENVOY_STREAM_MAX_BYTES` (when set), a missing `envoy_stream_id`, the
+  72-hour age and duplicate window and `DiscardOld` (compiled into every release alike), and adds
+  back each subject its binary compiles that the stream lacks, unless it overlaps a subject the
+  stream carries or captures a role lane, logging the WARN line
+  `envoy nats keeper restored the stream` with, for example,
+  `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  It only adds subjects: it removes and replaces none, so two releases with different subject
+  lists do not switch the stream back and forth, and each release's keeper adds back its own
+  subject that a concurrent write dropped. A stream that still carries role-lane subjects it
+  leaves to a start, which moves them off: when that stream needs anything, it sends nothing and
+  logs that it could not restore it. It also raises
   the buckets its program opens (the listener's `envoy_interests`, `envoy_roles`,
   `envoy_sessions` and `envoy_ci_state`, Dispatch's `envoy_webhook_redelivery`) back to
   `ENVOY_NATS_REPLICAS`, logging `envoy nats keeper raised a bucket` with `replicas="1 -> 3"`. A

@@ -272,9 +272,10 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 // limit (WithReplicas, WithStreamMaxBytes; ensureStreamWithConfig), creating the stream when the
 // server has none. Only the deployed services call it: envoy-listener and envoy-dispatch's server.
 // The client then keeps the stream until it stops: every 30 seconds its keeper puts back the
-// copies, the byte limit and the stream's id that a concurrent start or an operator took away
-// (keepStream), and raises each bucket WithKeptBuckets names that has fewer copies than
-// WithReplicas' count (raiseReplicas).
+// copies, the byte limit, the stream's id, the age, the duplicate window and discard that a
+// concurrent start or an operator took away, adds back each of this binary's subjects the stream
+// lacks that overlaps none it carries, and removes no subject (keepStream). It also raises each
+// bucket WithKeptBuckets names that has fewer copies than WithReplicas' count (raiseReplicas).
 func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
 	return newClient(urls, true, parseConnectOptions(options))
 }

@@ -282,20 +282,24 @@ The copies and the size limit stay where the settings put them only when every E
 a deployment carries the same `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`, so a clustered
 deployment sets both in every listener and in Dispatch's server. A start never writes fewer copies
 than it found, but JetStream's stream update has no compare-and-swap: a start with other settings,
-or none, that reads the stream before another start raises it and writes after puts the old
-copies, limit and metadata back.
+or none, or another subject list, that reads the stream before another start writes it and writes
+after puts the old subjects, copies, limit and metadata back.
 
 So every program that owns the stream, each listener and Dispatch's server, reads it again every
 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit other than its
-`ENVOY_STREAM_MAX_BYTES` (when set) and a missing `envoy_stream_id`, logging a WARN line
-`envoy nats keeper restored the stream` with
-`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>"`. It leaves the
-subjects, the age, the duplicate window and the discard policy to a start, so two releases with
-different subject lists do not switch the stream back and forth. It also raises the buckets its
-program opens back to `ENVOY_NATS_REPLICAS` (`envoy nats keeper raised a bucket`, with
-`replicas="1 -> 3"`). A pass that fails logs `envoy nats keeper could not restore the stream` or
-`envoy nats keeper could not raise a bucket` and is tried again 30 seconds later; it never stops
-the program.
+`ENVOY_STREAM_MAX_BYTES` (when set), a missing `envoy_stream_id`, and the 72-hour age and
+duplicate window and the discard policy (the same in every release), and adds back each subject
+its own build carries that the stream lacks, unless it overlaps a subject the stream has or is a
+role lane. It logs a WARN line `envoy nats keeper restored the stream` with, for example,
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+It only adds subjects and never removes or replaces one, so two releases with different subject
+lists do not switch the stream back and forth, and a subject a concurrent write dropped comes
+back within 30 seconds from the keeper of the release that carries it. A stream that still
+carries a role-lane subject is left to a start, which moves the role lanes off. It also raises
+the buckets its program opens back to `ENVOY_NATS_REPLICAS` (`envoy nats keeper raised a bucket`,
+with `replicas="1 -> 3"`). A pass that fails logs `envoy nats keeper could not restore the stream`
+or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds later; it never
+stops the program.
 
 During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
 seconds after the last start. Two programs with different limits each restore their own every 30

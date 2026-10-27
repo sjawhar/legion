@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -69,107 +70,270 @@ func keptAtSettings(id string) func(*nats.StreamInfo) bool {
 	}
 }
 
-// Two programs start at the same moment against an R1 stream whose subject list is old, so both
-// update it: one with three copies and a byte limit, one with the defaults, one copy and no limit.
-// JetStream's stream update has no compare-and-swap, so the default program's update can land
-// after the other's raise and put the stream back at one copy with no limit. Whichever write wins,
-// within a few keeper periods after both starts the stream has three copies, the byte limit and
-// its id (the one it had, or the one a start gave it), and the setting program's bucket has three
-// copies, every round. Each round runs on a cluster of its own, so it starts from a fresh stream;
-// a round whose race the default program won logs the keeper's restore.
+// interleavedJetStream runs another program's write in the middle of one program's read and write
+// of the stream: afterRead once its first StreamInfo has answered, beforeUpdate just before its
+// first UpdateStream is sent, each once and each only when set. It counts the stream updates sent
+// through it.
+type interleavedJetStream struct {
+	nats.JetStreamContext
+	afterRead, beforeUpdate func()
+	readOnce, updateOnce    sync.Once
+	updates                 atomic.Int32
+}
+
+func (js *interleavedJetStream) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
+	info, err := js.JetStreamContext.StreamInfo(stream, opts...)
+	if js.afterRead != nil {
+		js.readOnce.Do(js.afterRead)
+	}
+	return info, err
+}
+
+func (js *interleavedJetStream) UpdateStream(cfg *nats.StreamConfig, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
+	if js.beforeUpdate != nil {
+		js.updateOnce.Do(js.beforeUpdate)
+	}
+	js.updates.Add(1)
+	return js.JetStreamContext.UpdateStream(cfg, opts...)
+}
+
+// restoredLog is every field the keeper's restore lines logged so far, joined.
+func restoredLog(t *testing.T, logs *capturedLogs) string {
+	t.Helper()
+	var fields []string
+	for _, record := range logs.recordsWithMsg(t, "envoy nats keeper restored the stream") {
+		if record["level"] != "WARN" || record["stream"] != Stream {
+			t.Fatalf("keeper record = %v, want a WARN naming %s", record, Stream)
+		}
+		fields = append(fields, fmt.Sprint(record["restored"]))
+	}
+	return strings.Join(fields, ", ")
+}
+
+// Two programs start against an R1 stream whose subject list is old, so both update it: one with
+// three copies and a byte limit, one with the defaults, one copy and no limit. JetStream's stream
+// update has no compare-and-swap, and the test forces the order that loses the raise: the default
+// program's start reads the stream, the setting program's start raises it, and only then does the
+// default program's start write what it built from its read, one copy and no limit. Within a few
+// keeper periods the setting program's keeper puts the three copies and the byte limit back and
+// logs both, and the stream keeps its id, on every run.
 func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *testing.T) {
+	cluster, js := startClusterJetStream(t)
 	logs := captureLogs(t)
-	const bucket = "envoy_keeper_race"
-	oldSubjects := slices.Clone(streamSubjects[:len(streamSubjects)-1])
-	for round := range 5 {
-		t.Run(fmt.Sprintf("round %d", round), func(t *testing.T) {
-			cluster, js := startClusterJetStream(t)
-			deployed := *streamCfg
-			deployed.Subjects = oldSubjects
-			deployed.Replicas = 1
-			id := ""
-			if round%2 == 0 {
-				id = fmt.Sprintf("deployed-id-%d", round)
-				deployed.Metadata = map[string]string{StreamIDMetadataKey: id}
-			}
-			if _, err := js.AddStream(&deployed); err != nil {
-				t.Fatalf("deploy the R1 stream with the old subjects: %v", err)
-			}
-			if _, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
-				t.Fatalf("create the R1 bucket: %v", err)
-			}
-			restoresBefore := len(logs.recordsWithMsg(t, "envoy nats keeper restored the stream"))
+	const id = "deployed-id"
+	deployed := *streamCfg
+	deployed.Subjects = slices.Clone(streamSubjects[:len(streamSubjects)-1])
+	deployed.Replicas = 1
+	deployed.Metadata = map[string]string{StreamIDMetadataKey: id}
+	if _, err := js.AddStream(&deployed); err != nil {
+		t.Fatalf("deploy the R1 stream with the old subjects: %v", err)
+	}
 
-			programs := []struct {
-				options  []ConnectOption
-				replicas int
-			}{
-				{options: []ConnectOption{WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), WithKeptBuckets(bucket), withKeepInterval(testKeepInterval)}, replicas: 3},
-				{options: []ConnectOption{WithKeptBuckets(bucket)}, replicas: 1},
-			}
-			clients := make([]*Client, len(programs))
-			errs := make([]error, len(programs))
-			start := make(chan struct{})
-			var wg sync.WaitGroup
-			for i, program := range programs {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					<-start
-					clients[i], errs[i] = ConnectOwningStream(cluster.URLs(), program.options...)
-					if errs[i] == nil {
-						_, errs[i] = EnsureKeyValue(clients[i].JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: program.replicas})
-					}
-				}()
-			}
-			close(start)
-			wg.Wait()
-			for _, client := range clients {
-				if client != nil {
-					t.Cleanup(client.Close)
-				}
-			}
-			for i, err := range errs {
-				if err != nil {
-					t.Fatalf("start %d: %v", i, err)
-				}
-			}
+	defaults := parseConnectOptions(nil).streamConfig()
+	defaultStart := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
+		startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
+		if info, err := js.StreamInfo(Stream); err != nil || !keptAtSettings(id)(info) {
+			t.Fatalf("the setting program's start left the stream at %+v (%v), want three copies, the byte limit and the id", info, err)
+		}
+	}}
+	if err := ensureStreamWithConfig(defaultStart, &defaults); err != nil {
+		t.Fatalf("the default program's start: %v", err)
+	}
+	if n := defaultStart.updates.Load(); n != 1 {
+		t.Fatalf("the default program's start sent %d stream updates, want its one stale write", n)
+	}
 
-			awaitKept(t, js, Stream, "three copies, the byte limit and the id", keptAtSettings(id))
-			awaitKept(t, js, "KV_"+bucket, "three copies", func(info *nats.StreamInfo) bool { return info.Config.Replicas == 3 })
-			for _, client := range clients {
-				client.Close()
+	awaitKept(t, js, Stream, "three copies, the byte limit and the id", keptAtSettings(id))
+	logged := restoredLog(t, logs)
+	for _, want := range []string{"replicas 1 -> 3", fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("the keeper's lines restored %q, want %q among them", logged, want)
+		}
+	}
+}
+
+// The keeper's write is the stream as it read it with its own part put back, so a concurrent
+// start's write that lands between the keeper's read and its write is lost, its subject included.
+// The test forces that order: the keeper of a program with a byte limit reads the stream it must
+// restore, a start of a release that compiles one more subject adds that subject, and then the
+// keeper's write lands without it. The next pass of that release's keeper adds its subject back
+// and logs it, and a pass of the first program's keeper, whose binary does not compile the subject,
+// leaves it there.
+func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *testing.T) {
+	js := streamTestJetStream(t)
+	const added = "notifications.newer.>"
+	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
+	newer := parseConnectOptions(nil).streamConfig()
+	newer.Subjects = append(slices.Clone(streamSubjects), added)
+	if err := ensureStreamWithConfig(js, &limited); err != nil {
+		t.Fatalf("the limited program's start: %v", err)
+	}
+	lowered := deployedStream(t, js).Config
+	lowered.MaxBytes = -1
+	if _, err := js.UpdateStream(&lowered); err != nil {
+		t.Fatalf("remove the byte limit: %v", err)
+	}
+
+	keeper := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
+		if err := ensureStreamWithConfig(js, &newer); err != nil {
+			t.Fatalf("the newer release's start: %v", err)
+		}
+		if subjects := deployedStream(t, js).Config.Subjects; !slices.Contains(subjects, added) {
+			t.Fatalf("the newer release's start left the subjects %v, want %s among them", subjects, added)
+		}
+	}}
+	restored, err := keepStream(keeper, &limited)
+	if want := []string{fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)}; err != nil || !slices.Equal(restored, want) {
+		t.Fatalf("the limited program's keeper restored %v (%v), want %v", restored, err, want)
+	}
+	if subjects := deployedStream(t, js).Config.Subjects; slices.Contains(subjects, added) {
+		t.Fatalf("subjects %v still hold %s: the keeper's write did not land after the newer start's", subjects, added)
+	}
+
+	restored, err = keepStream(js, &newer)
+	if want := []string{"subjects added " + added}; err != nil || !slices.Equal(restored, want) {
+		t.Fatalf("the newer release's keeper restored %v (%v), want %v", restored, err, want)
+	}
+	if restored, err := keepStream(js, &limited); err != nil || len(restored) != 0 {
+		t.Fatalf("the limited program's next pass restored %v (%v), want nothing", restored, err)
+	}
+	info := deployedStream(t, js)
+	if want := newer.Subjects; !slices.Equal(info.Config.Subjects, want) || info.Config.MaxBytes != keeperByteLimit {
+		t.Fatalf("stream subjects %v, byte limit %d; want %v, %d", info.Config.Subjects, info.Config.MaxBytes, want, keeperByteLimit)
+	}
+}
+
+// A start moves the role lanes off a stream that still carries them, and a keeper that read the
+// stream before the move never puts them back: on a stream whose subjects capture the role lanes
+// it sends nothing and reports why, so its stale write cannot land after the start's. The test
+// forces that order through the keeper's read. Its next pass, on the stream the start moved them
+// off, restores the byte limit with no role lane in the list.
+func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
+	js := streamTestJetStream(t)
+	roleLane := contracts.RoleTopicPrefix + ">"
+	legacy := *streamCfg
+	legacy.Subjects = append(slices.Clone(streamSubjects), roleLane)
+	legacy.Metadata = map[string]string{StreamIDMetadataKey: "legacy-id"}
+	if _, err := js.AddStream(&legacy); err != nil {
+		t.Fatalf("deploy the stream with the role lanes: %v", err)
+	}
+	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
+	defaults := parseConnectOptions(nil).streamConfig()
+
+	keeper := &interleavedJetStream{JetStreamContext: js, afterRead: func() {
+		if err := ensureStreamWithConfig(js, &defaults); err != nil {
+			t.Fatalf("the start that moves the role lanes off: %v", err)
+		}
+	}}
+	restored, err := keepStream(keeper, &limited)
+	if err == nil || !strings.Contains(err.Error(), roleLane) || len(restored) != 0 {
+		t.Fatalf("the keeper's pass on the stream it read with the role lanes = %v (%v), want an error naming %s", restored, err, roleLane)
+	}
+	if n := keeper.updates.Load(); n != 0 {
+		t.Fatalf("the keeper sent %d stream updates, want none", n)
+	}
+	if subjects := deployedStream(t, js).Config.Subjects; streamCapturesRoleLanes(subjects) {
+		t.Fatalf("subjects %v capture the role lanes after the start moved them off", subjects)
+	}
+
+	restored, err = keepStream(js, &limited)
+	if want := []string{fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)}; err != nil || !slices.Equal(restored, want) {
+		t.Fatalf("the keeper's next pass restored %v (%v), want %v", restored, err, want)
+	}
+	if subjects := deployedStream(t, js).Config.Subjects; !slices.Equal(subjects, streamSubjects) {
+		t.Fatalf("subjects %v after the keeper's pass, want %v", subjects, streamSubjects)
+	}
+}
+
+// The keeper's subject list is the deployed one with only this binary's subjects added that it
+// lacks, that overlap none deployed and that capture no role lane: it keeps every deployed subject,
+// a foreign one, a widened one and a narrowed one included.
+func TestTheKeepersSubjectsAddOnlyItsOwnThatOverlapNothingDeployed(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		deployed, own []string
+		want          []string
+	}{
+		{"a missing subject", []string{"notifications.agent.>"}, []string{"notifications.agent.>", "notifications.slack.>"}, []string{"notifications.agent.>", "notifications.slack.>"}},
+		{"a foreign subject", []string{"notifications.agent.>", "notifications.retired.>"}, []string{"notifications.agent.>"}, []string{"notifications.agent.>", "notifications.retired.>"}},
+		{"a narrowed own subject", []string{"notifications.github.>"}, []string{"notifications.github.pr.>"}, []string{"notifications.github.>"}},
+		{"a widened own subject", []string{"notifications.github.pr.>"}, []string{"notifications.github.>"}, []string{"notifications.github.pr.>"}},
+		{"a role lane", []string{"notifications.agent.>"}, []string{contracts.RoleTopicPrefix + ">", ExceptionTopicPrefix + contracts.RoleTopicPrefix + ">"}, []string{"notifications.agent.>"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keptSubjects(tc.deployed, tc.own); !slices.Equal(got, tc.want) {
+				t.Fatalf("keptSubjects(%v, %v) = %v, want %v", tc.deployed, tc.own, got, tc.want)
 			}
-			t.Logf("the keeper restored the stream %d times this round", len(logs.recordsWithMsg(t, "envoy nats keeper restored the stream"))-restoresBefore)
 		})
 	}
 }
 
-// An operator update that lowers the stream to one copy, removes its byte limit and deletes its id
+// Two releases with different subject lists, one adding a subject and one adding another with a
+// subject the first compiles narrowed, never switch the stream back and forth: the second's keeper
+// adds its new subject once and leaves the first's wide subject in place, and from then on neither
+// keeper sends an update, with both new subjects in the list.
+func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
+	js := streamTestJetStream(t)
+	alpha := parseConnectOptions(nil).streamConfig()
+	alpha.Subjects = append(slices.Clone(streamSubjects), "notifications.alpha.>")
+	beta := parseConnectOptions(nil).streamConfig()
+	beta.Subjects = append(slices.Clone(streamSubjects), "notifications.beta.>")
+	beta.Subjects[slices.Index(beta.Subjects, "notifications.github.>")] = "notifications.github.pr.>"
+	if err := ensureStreamWithConfig(js, &alpha); err != nil {
+		t.Fatalf("the alpha release's start: %v", err)
+	}
+
+	restored, err := keepStream(js, &beta)
+	if want := []string{"subjects added notifications.beta.>"}; err != nil || !slices.Equal(restored, want) {
+		t.Fatalf("the beta release's keeper restored %v (%v), want %v", restored, err, want)
+	}
+	counting := &countingJetStream{JetStreamContext: js}
+	for range 3 {
+		for _, cfg := range []*nats.StreamConfig{&alpha, &beta} {
+			if restored, err := keepStream(counting, cfg); err != nil || len(restored) != 0 {
+				t.Fatalf("a keeper pass with subjects %v restored %v (%v), want nothing", cfg.Subjects, restored, err)
+			}
+		}
+	}
+	if writes := counting.written(); len(writes) != 0 {
+		t.Fatalf("the keepers wrote %v, want nothing", writes)
+	}
+	if want, subjects := append(slices.Clone(alpha.Subjects), "notifications.beta.>"), deployedStream(t, js).Config.Subjects; !slices.Equal(subjects, want) {
+		t.Fatalf("subjects %v, want %v", subjects, want)
+	}
+}
+
+// An operator update that lowers the stream to one copy, removes its byte limit, deletes its id,
+// lengthens its age, sets DiscardNew, removes one of this binary's subjects and adds a foreign one
 // is undone within a few periods by the keeper of a program whose settings are three copies and a
 // byte limit, which logs each field it restored. The id it restores is derived, and stays as it is
-// over the passes after. A foreign subject and another age the same update set are left as they
-// are: only a start reconciles those.
-func TestTheKeeperRestoresTheCopiesTheByteLimitAndTheIDAnOperatorTookAway(t *testing.T) {
+// over the passes after. The removed subject comes back at the end of the list, and the foreign
+// subject stays: the keeper only adds subjects.
+func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	logs := captureLogs(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
 	info := awaitStream(t, js, Stream)
+	const removed = "notifications.legion.>"
 
 	lowered := info.Config
 	lowered.Replicas = 1
 	lowered.MaxBytes = -1
 	lowered.Metadata = maps.Clone(info.Config.Metadata)
 	delete(lowered.Metadata, StreamIDMetadataKey)
-	lowered.Subjects = append(slices.Clone(info.Config.Subjects), "operations.foreign.>")
+	lowered.Subjects = append(slices.DeleteFunc(slices.Clone(info.Config.Subjects), func(subject string) bool { return subject == removed }), "operations.foreign.>")
 	lowered.MaxAge = info.Config.MaxAge + time.Hour
+	lowered.Discard = nats.DiscardNew
 	if _, err := js.UpdateStream(&lowered); err != nil {
 		t.Fatalf("operator update: %v", err)
 	}
 
 	restored := awaitKept(t, js, Stream, "three copies, the byte limit and an id", keptAtSettings(""))
-	if !slices.Equal(restored.Config.Subjects, lowered.Subjects) || restored.Config.MaxAge != lowered.MaxAge {
-		t.Fatalf("the keeper changed what only a start reconciles: subjects %v, age %s; want %v, %s", restored.Config.Subjects, restored.Config.MaxAge, lowered.Subjects, lowered.MaxAge)
+	if want := append(slices.Clone(lowered.Subjects), removed); !slices.Equal(restored.Config.Subjects, want) {
+		t.Fatalf("subjects after the keeper's restore = %v, want %v", restored.Config.Subjects, want)
+	}
+	if restored.Config.MaxAge != streamCfg.MaxAge || restored.Config.Discard != nats.DiscardOld {
+		t.Fatalf("age %s, discard %s after the keeper's restore; want %s, %s", restored.Config.MaxAge, restored.Config.Discard, streamCfg.MaxAge, nats.DiscardOld)
 	}
 	id := restored.Config.Metadata[StreamIDMetadataKey]
 	if want := deployedStreamID(restored.Created); id != want {
@@ -179,15 +343,15 @@ func TestTheKeeperRestoresTheCopiesTheByteLimitAndTheIDAnOperatorTookAway(t *tes
 		return reflect.DeepEqual(info.Config, restored.Config)
 	})
 
-	var fields []string
-	for _, record := range logs.recordsWithMsg(t, "envoy nats keeper restored the stream") {
-		if record["level"] != "WARN" || record["stream"] != Stream {
-			t.Fatalf("keeper record = %v, want a WARN naming %s", record, Stream)
-		}
-		fields = append(fields, fmt.Sprint(record["restored"]))
-	}
-	logged := strings.Join(fields, ", ")
-	for _, want := range []string{"replicas 1 -> 3", fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit), StreamIDMetadataKey + " added as " + id} {
+	logged := restoredLog(t, logs)
+	for _, want := range []string{
+		"replicas 1 -> 3",
+		fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit),
+		fmt.Sprintf("max_age %s -> %s", lowered.MaxAge, streamCfg.MaxAge),
+		"discard DiscardNew -> DiscardOld",
+		StreamIDMetadataKey + " added as " + id,
+		"subjects added " + removed,
+	} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("the keeper's lines restored %q, want %q among them", logged, want)
 		}
@@ -301,8 +465,10 @@ func TestAKeeperWithTheDefaultSettingsSendsNoUpdate(t *testing.T) {
 	}
 }
 
-// Close and Drain end the keeper before they return: once the client stops, a stream lowered to
-// one copy stays there.
+// Close and Drain end the keeper before they return, and a pass the stop interrupts logs nothing:
+// the test holds the keeper's update of a lowered stream until the stop has closed the connection,
+// so the update fails as a pass in flight at a shutdown does, and the keeper logs no failure for
+// it. Once the client stops, the stream stays at one copy.
 func TestStoppingTheClientStopsItsKeeper(t *testing.T) {
 	for _, stop := range []struct {
 		name string
@@ -313,8 +479,30 @@ func TestStoppingTheClientStopsItsKeeper(t *testing.T) {
 	} {
 		t.Run(stop.name, func(t *testing.T) {
 			cluster, js := startClusterJetStream(t)
+			logs := captureLogs(t)
 			client := startOnCluster(t, cluster, WithReplicas(3), withKeepInterval(testKeepInterval))
 			info := awaitStream(t, js, Stream)
+
+			entered := make(chan struct{})
+			client.mu.Lock()
+			conn := client.Conn
+			client.js = &interleavedJetStream{JetStreamContext: client.js, beforeUpdate: func() {
+				close(entered)
+				for deadline := time.Now().Add(keepWait); !conn.IsClosed() && time.Now().Before(deadline); {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}}
+			client.mu.Unlock()
+			lowered := info.Config
+			lowered.Replicas = 1
+			if _, err := js.UpdateStream(&lowered); err != nil {
+				t.Fatalf("lower the stream to one copy: %v", err)
+			}
+			select {
+			case <-entered:
+			case <-time.After(keepWait):
+				t.Fatalf("the keeper sent no update for the lowered stream within %s", keepWait)
+			}
 
 			stop.stop(client)
 			select {
@@ -322,11 +510,8 @@ func TestStoppingTheClientStopsItsKeeper(t *testing.T) {
 			default:
 				t.Fatalf("%s returned with the keeper still running", stop.name)
 			}
-
-			lowered := info.Config
-			lowered.Replicas = 1
-			if _, err := js.UpdateStream(&lowered); err != nil {
-				t.Fatalf("lower the stream to one copy: %v", err)
+			if failures := logs.recordsWithMsg(t, "envoy nats keeper could not restore the stream"); len(failures) != 0 {
+				t.Fatalf("the keeper logged %v for the pass the stop interrupted, want nothing", failures)
 			}
 			heldFor(t, js, Stream, "one copy", 6, func(info *nats.StreamInfo) bool { return info.Config.Replicas == 1 })
 		})
