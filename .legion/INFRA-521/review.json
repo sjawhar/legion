@@ -2,20 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T14:03:32Z",
-  "round": 4,
+  "completed": "2026-10-27T15:36:09Z",
+  "round": 5,
   "decision": "approved",
-  "reviewedHead": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af (code: retro's head); branch head above it carries only .legion/",
-  "context": "Returned to implementing at 12:16Z because the required `test` check was red at READY head 42256ccb. The implementer changed no code and re-ran the job, which passed on attempt 2. The test that failed on attempt 1 was the daemon Go test TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain (inflight_test.go:619), outside this diff. Since the approval at 1e4902d0 the only changes are retro's docs/solutions files (5 new) and .legion/.",
+  "reviewedHead": "71eaed836738aeff28bbaa74eb706fe77f62ae4b (the forward merge of main aaf24e34). Everything above it is .legion/ only.",
+  "fingerprint": "Reviewer's last review a9fc29b8: 65408ba43621b0d1d77170fc23f8459951108835f260820d7a30b76adee08360. New head 0c7ecf70: 21c38cf74adfda122fb8f45e7cddbb17b67d6c29eda0c5b18613d79aa1bc25df. The fingerprint changed, so this is a new round. The normalized diffs differ only by ' @phone' on 6 test declarations main added (8 tests counting light and dark).",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
   "verified": [
-    "Code diff 1e4902d0..ff875bc1: only 5 added docs/solutions/*INFRA-521.md files and .legion/ changes. No spec, config or dispatch doc changed.",
-    "Required checks at CI head 42256ccb: lint, typecheck, pr-title and test completed success (test on attempt 2). The dispatch job also succeeded: browser step 35.9 min against a base median of 45.3, iphone 223 passed. The compare from 42256ccb to ff875bc1 shows .legion/ only (2 files).",
-    "The retro docs repeat the true reason for the anchors, not the false one removed in round 2."
+    "Merge 71eaed83: playwright.config.ts adds only phoneTagged and its grep to main's file. Main's harness rewrite is kept and startsOwnServers is gone. theme.e2e.ts differs from main only by two title tags. No conflict markers are left. (thermonuclear-deep-review and the reviewer's diff.)",
+    "Main's 22 new chromium tests: 8 tagged and the rule agrees. pictures.e2e.ts:367 is R1 (branches on iphone at :413 and :444). task-items.e2e.ts:236 and :267 are R1 (via conversationThreadScope). text-typed-blocks.e2e.ts:34 and :79 are R2 (openCommentThread branches on the Thread dialog). theme.e2e.ts:169 is R1. The other 14 (block-references x4, email-links, github-checks x3, unknown-directive x4, task-items:289, text-typed-blocks:137) reach no phone idiom or branching helper.",
+    "--list at the head: iphone 231 (the 223 of table v2 plus the 8), chromium 808, and every other project the same as main plus the PR.",
+    "Required checks at CI head e061432a (the compare to 0c7ecf70 lists 1 file under .legion/): lint, typecheck, test and pr-title completed success.",
+    "Tester round 6 at 71eaed83: iphone 231 passed in the pod. The E2E lines of the implementer and the tester both cover the merge."
   ],
-  "conflict": "GitHub reports the pull request CONFLICTING (mergeStateStatus DIRTY) against main. A jj merge probe of legion/INFRA-521@origin with main@origin conflicts in packages/dispatch/e2e/playwright.config.ts and packages/dispatch/e2e/theme.e2e.ts. The implementer resolves this with a forward merge (conflicts-and-rewrites.md); the reviewer then compares the unchanged-diff fingerprint against this approval.",
-  "thermo": "Not run: since the last approved code, the diff adds only docs/solutions files."
+  "thermo": "thermonuclear-deep-review: approve, no findings. thermonuclear-code-quality: approve, no findings. It noted that AGENTS.md:1295 describes webkit-iphone's selection incompletely; that line is outside this PR's diff."
 }
