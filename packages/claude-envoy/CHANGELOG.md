@@ -4,6 +4,13 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it; `dist/` was regenerated. The block forms, the
+  pin and the 256-byte bound past which a block is no graph node are in the commands' `--help`
+  (`dispatch read --help`, `dispatch ask --help`, `dispatch doc-edit --help`).
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
