@@ -38,9 +38,9 @@ machine's role lane.
 
 - **A cache miss may refuse or retry. It may not destroy state another listener wrote.** Before
   releasing, deleting or superseding on a session's absence, read the session from the bucket
-  (`session.SessionRegistry.Refresh`, through `roleHolderSession` in `cmd/listener/api.go`). A read
-  that does not answer takes nothing. A plain `Get` stays right for a send to a missing target,
-  which refuses and lets its caller retry.
+  (`session.SessionRegistry.Refresh`, through `roleHolderSession` in `cmd/listener/role_holder.go`).
+  A read that does not answer takes nothing. A send to a target the cache misses reads through the
+  same way (`liveSessionEntry`), since a sender told its destination is gone acts on that answer.
   The interest reaper (`Registry.Reap`, `internal/store/kv.go`) is the one exception kept: it still
   deletes an interest on a cache miss. It checks liveness while holding the interest registry's
   lock, so a bucket read there would block every interest write behind it. It also deletes only an
@@ -50,7 +50,7 @@ machine's role lane.
   session of every matching interest on every message (`fanoutDelivery`, `cmd/listener/delivery.go`).
   A miss there is usually a dead session whose interest the reaper has not removed yet, so a
   fallback would cost one KV round trip per such interest per message. Read the bucket only where a
-  miss would destroy something.
+  miss would destroy something or be acted on as an absence.
 - **A test that polls for a state the code destroys hides why.** The e2e test polled
   `GET /v1/roles/<role>` for 30 s and threw away each answer. The first answer said
   `claim released`; the next 557 said `unclaimed`. Assert the first answer and print it.
