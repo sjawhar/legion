@@ -1,0 +1,14 @@
+diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+--- a/packages/envoy/AGENTS.md
++++ b/packages/envoy/AGENTS.md
+@@ -34,6 +34,10 @@ Each item below names a task and where its code is, then notes on it.
+ 
+   ENVOY_WEBHOOKS parsing, startup validation
+ 
++- **Replay demo A**: `internal/webhook/replay_demo_a.go`
++
++  invented for the INFRA-631 merge replay beside the webhook items; no such file exists
++
+ - **Listener behavior**: `cmd/listener/main.go`
+ 
+   subscribe/match/deliver flow

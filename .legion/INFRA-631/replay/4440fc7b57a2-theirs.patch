@@ -1,0 +1,107 @@
+diff --git a/packages/envoy/cmd/dispatch/README.md b/packages/envoy/cmd/dispatch/README.md
+--- a/packages/envoy/cmd/dispatch/README.md
++++ b/packages/envoy/cmd/dispatch/README.md
+@@ -396,7 +396,7 @@ What the two processes share, and what each keeps to itself:
+ - The two delivery durables keep their shape.
+   NATS admits one binder; the second process stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
+ 
+-- Eight periodic maintenance loops run once per period across the processes, not once per process.
++- Seven periodic maintenance loops run once per period across the processes, not once per process.
+   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose tick lands inside another's pass logs a skip;
+   and, under that lease, each pass is recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
+   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
+@@ -875,30 +875,11 @@ migration `0032_refs_provenance` gives each edge a `kind`, `created_at`, and `so
+ A row whose other end is a node kind the running build does not know (a newer build's, read during a rolling deploy) is left out of every list and every count that build serves (`nodeLoaders`, `refs/graph.go`, names the kinds it knows).
+ The migration refuses to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+ 
+-Each block of a document is a node of the graph too (migration `0121`; `packages/envoy/AGENTS.md`, "References form one graph").
+-Its reference is the document's with `#b-` and the block's id, percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
+-`dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`.
+-Text cites a block only while its id holds at most 256 bytes decoded (`text.MaxBlockIDBytes`), and any node only while its target id, the id its edge is stored under (`text.TargetID`:
+-an issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<id>`, an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
+-text citing past either is written with no edge.
+-The bounds decide only what the graph indexes.
+-Every write is taken whatever the length of a block id it names (a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion, a browser's edit);
+-a block carrying an id past 256 bytes is no node, and the server logs a warning naming the document, the longest id's length and the bound, and writes the version.
+-A route reads the reference it is given whatever its length (`text.ParseRef`):
+-`?to=`, `?from=` and `GET /api/v1/block-links` read a node of any name, and a block whose id is past 256 bytes is `404 NOT_FOUND`, no node.
+-An ask block and an anchor in a block are written under an id of any length (migrations `0127` and `0128`, Database migrations above).
+-A mention written inside a block starts at the innermost block holding it, so `?to=` a cited node names that block, whose `document` is the citing document;
+-a document's own read also lists the links at its blocks, each edge naming its block as `block`, and `?kind=part_of` on a document lists each of its current blocks.
+-A block reference pinned to a version of its document, `#b-<id>@v<N>` with N at most 9223372036854775807, reads the block as that version held it:
+-the node's `pin` carries the block's text at `N` and says whether the block is `unchanged`, `changed` or `removed` since.
+-`GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one document to the blocks of another.
+-Text stored before the release, and text an earlier build writes during the roll, is indexed by the server's block-index reconciliation (lease `block-index`), with no command run.
+-
+ ```bash
+ DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
+ ```
+ 
+-reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N`, `blocks_owed` being the documents it marked.
++reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed) and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N`.
+ It reads `dispatch.server_url` from the envoy config the same way the server does and refuses an empty value:
+ dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
+ 
+@@ -1300,32 +1281,18 @@ Each item below names a path with its method and identity, then its purpose.
+ 
+ - `/api/v1/issues/{key}/references` (GET; cookie, trusted header, or bearer)
+ 
+-  Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block.
++  Read the issue's eight-hop artifact reference closure.
+   An `If-None-Match` value equal to the response ETag returns `304`.
+ 
+ - `/api/v1/references?to=|from=&kind=&since=` (GET; cookie, trusted header, or bearer)
+ 
+   Edges of one node in the reference graph, newest first and cross-project:
+-  exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`);
++  exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference;
+   `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded).
+   The answer is `{node, edges}`, the node read and its edges.
+   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
+   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
+-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
+-  a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`.
+-  A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
+-  pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
+-  `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`;
+-  `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at.
+-
+-- `/api/v1/block-links?from=&to=` (GET; cookie, trusted header, or bearer)
+-
+-  The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document;
+-  one document may be both), each reference read whatever its length:
+-  `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first;
+-  `from`, `to` and every link's two blocks carry the six facts of every node ([Reference graph](#reference-graph)).
+-  A link is listed only while both blocks are current blocks of their documents.
+-  `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist.
++  `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist.
+ 
+ - `/api/v1/issues` (POST; cookie, trusted header, or bearer)
+ 
+@@ -1457,8 +1424,6 @@ Each item below names a path with its method and identity, then its purpose.
+   Any other file's kind is read from its bytes, never from the part's declared `Content-Type`:
+   it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image.
+   A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`.
+-  A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text;
+-  an upload under an existing artifact's name, one stored longer included, is never refused for its length.
+   An ask block whose body breaks its content rule (`paragraph+ bullet_list?`:
+   one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes.
+   A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit;
+@@ -1468,7 +1433,7 @@ Each item below names a path with its method and identity, then its purpose.
+ 
+ - `/api/v1/projects/{key}/artifacts` (GET, POST; cookie, trusted header, or bearer)
+ 
+-  List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read, and a new artifact's name held to 2692 bytes, as an issue upload's are.
++  List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read as an issue upload's is.
+   An ask block whose body breaks its content rule (`paragraph+ bullet_list?`:
+   one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes.
+   A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit;
+@@ -1559,8 +1524,6 @@ Each item below names a path with its method and identity, then its purpose.
+ - `/api/v1/artifacts/{id}/references` (GET; cookie, trusted header, or bearer)
+ 
+   Read an artifact's outgoing and incoming reference edges.
+-  A link a block of the artifact holds is outgoing from the artifact, a block target listed with its document as `artifact` while a current version holds the block;
+-  every item and document citing the artifact or one of its current blocks is listed once, a document as itself.
+ 
+ - `/api/v1/issues/{key}/artifacts/{slug}` (GET; cookie, trusted header, or bearer)
+ 
