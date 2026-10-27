@@ -2,41 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-27T03:44:58Z",
-  "headSha": "2bfa17f650fb8d6c984396968ec674c41e4a4692",
-  "round": 15,
-  "provider": "453 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-27T03:44Z; no subagent was used.",
+  "completed": "2026-10-27T04:45:51Z",
+  "headSha": "0c0012a2cb96c75499785119658bc46475182caf",
+  "round": 16,
+  "provider": "462 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-27T04:45Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Computed the fingerprint at 7f8941b8 and 2bfa17f6 and diffed its inputs file by file; read the pool.go and running-dispatch.md resolution against main 9b92ac14; counted duty.Exclusive callers at the head; ran a server built from the head."
+    "how": "Computed the unchanged-diff fingerprint at 2bfa17f6 (round 15's verified head) and at 0c0012a2; checked the merge's parents and the migration numbering; ran the smoke on a server built from the head."
   },
-  "fingerprint": {
-    "before": "e806d335e9d02137512985ca622d28ebdd71cc07c110b7330593cf01548830b2 at 7f8941b8",
-    "after": "e367cee7d38ec54a75d29b57954f0e44c802accaea9f8488a6bd91bec411efc3 at 2bfa17f6",
-    "difference": "Only packages/envoy/internal/dispatch/store/pool.go and docs/site/src/content/docs/dispatch/running-dispatch.md: the forward merge of main 9b92ac14 (#2302: shared pool 64, an outbox pool of 1) with this branch's leasePoolSize 9"
+  "rebaseRecheck": {
+    "from": "2bfa17f650fb8d6c984396968ec674c41e4a4692",
+    "to": "0c0012a2cb96c75499785119658bc46475182caf",
+    "fingerprint": "e367cee7d38ec54a75d29b57954f0e44c802accaea9f8488a6bd91bec411efc3 at both heads",
+    "verdict": "rebase re-check 2bfa17f6 → 0c0012a2: fingerprint unchanged, bare gates only",
+    "bareGates": "CI at 0c0012a2 read on GitHub: Tests 40451356216, Legion Envoy and Contracts 40451356186, Docs 40451356184, Worker Image 40451356309 and PR Title 40451430220 queued. Smoke: a server built from 0c0012a2 migrates a fresh database (infra366_t16) to 128; block-graph.sh exit 0, 37 PASS; unauthenticated GET /api/v1/block-links 401. Merge cfc79e39's parents are 58fadff0 and main baadccdc (#2317); main's highest migration 0120, this branch's 0121-0128."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The conflict resolution in the connection pools keeps one lease connection per leased caller and a correct documented total",
-      "surface": "The head's source read against main 9b92ac14, and a real Go server built from the head on a fresh database (infra366_t15, port 8801)",
-      "command": "git diff 9b92ac14 2bfa17f6 -- store/pool.go running-dispatch.md; grep duty.Exclusive callers in packages/envoy/{cmd,internal}; run the server and read its log",
-      "observed": "sharedPoolSize 64 and outboxPoolSize 1 from main, leasePoolSize 9 from this branch; nine callers (webhook redelivery, document compaction, suggestion outcomes, block-index, reference excerpts, architecture import, delivery reconcile, two delivery consumers); doc total 64+9+4+1+1+3 = 82; the server's block-index lease runs ('dispatch: block index … items=1') with no level=ERROR",
-      "headSha": "2bfa17f650fb8d6c984396968ec674c41e4a4692",
-      "negativeControl": "Main 9b92ac14 alone documents 8 lease connections and 81 total, without block-index"
-    },
-    {
-      "criterion": "The merged head still serves the block graph",
-      "surface": "Same server and the real dispatch CLI",
+      "criterion": "Rebase re-check: the merged head still serves the block graph",
+      "surface": "Real Go server built from 0c0012a2 on a fresh database (port 8801) and the real dispatch CLI",
       "command": "DISPATCH_URL=http://127.0.0.1:8801 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit 0, 37 PASS; schema_migrations max 128; merge parents b066bc15 and main 9b92ac14; main's highest migration 0120",
-      "headSha": "2bfa17f650fb8d6c984396968ec674c41e4a4692",
-      "negativeControl": "Unauthenticated GET /api/v1/block-links → 401"
+      "observed": "exit 0, 37 PASS; schema_migrations max 128",
+      "headSha": "0c0012a2cb96c75499785119658bc46475182caf",
+      "negativeControl": "Unauthenticated GET /api/v1/block-links → 401 NO_IDENTITY"
     }
   ],
-  "attempted": [
-    "The two-process lease test (dispatch-multiprocess lane) is CI's to judge; it was queued at the time of writing."
-  ],
-  "ci": "At 2bfa17f6: Tests 40445615245, Legion Envoy and Contracts 40445615427, Docs 40445615330, Worker Image 40445615248 and PR Title 40445692166 queued."
+  "ci": "At 0c0012a2: Tests 40451356216, Legion Envoy and Contracts 40451356186, Docs 40451356184, Worker Image 40451356309 and PR Title 40451430220 queued."
 }
