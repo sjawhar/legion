@@ -8,16 +8,19 @@ tags:
   - ghcr
   - multi-arch
   - buildx
-date: 2026-04-05
+  - native-runners
+date: 2026-10-27
 status: active
 module: envoy
 related_issues:
   - "#243"
+  - "INFRA-522"
 symptoms:
   - "docker push to ghcr.io fails silently"
   - "packages: write permission missing"
   - "gh release create not a git repository"
   - "arm64 build fails on amd64 runner"
+  - "arm64 image build under QEMU takes over 30 minutes"
 ---
 
 # GHCR Docker Multi-Arch Build in GitHub Actions
@@ -30,15 +33,21 @@ The envoy release workflow builds Go binaries and creates GitHub releases. Addin
 
 ### 1. GHCR Requires `packages: write` Permission
 
-The `GITHUB_TOKEN` can authenticate to GHCR via `docker/login-action`, but push will fail unless the workflow declares `packages: write`:
+The `GITHUB_TOKEN` can authenticate to GHCR via `docker/login-action`, but push will fail unless the job that pushes holds `packages: write`:
 
 ```yaml
-permissions:
-  contents: write   # for gh release create
-  packages: write   # for GHCR push — easy to forget
+docker:
+  permissions:
+    contents: read    # for actions/checkout
+    packages: write   # for GHCR push — easy to forget
 ```
 
-Without it, login succeeds but push fails. Set this at the workflow level so all jobs inherit it.
+Without it, login succeeds but push fails. `release-envoy-listener.yaml` sets `permissions: {}`
+at the workflow level and every job declares its own `permissions` block, so no job inherits a
+grant: the `docker` legs hold `contents: read` and `packages: write`, `image_index` holds
+`packages: write` alone, and `release_publish` holds `packages: write` (to move `latest`) beside
+`contents: write` (for the GitHub release) and its other scopes. A job added later with no block
+of its own gets no scope rather than an unreviewed grant.
 
 ### 2. Docker Build Context vs Dockerfile Path
 
@@ -65,16 +74,66 @@ Those two smoke steps are `docker/build-push-action@v6` with `load: true`, not a
 that the workflow's path triggers cover every file the build reads, and refuses a build written
 as a shell command, which it cannot read reliably.
 
-### 3. Multi-Arch Requires QEMU + Buildx
+### 3. Build Each Platform on Its Own Native Runner, Not Under QEMU
 
-Standard Docker on GitHub runners only builds for the runner's native architecture. For multi-arch (amd64 + arm64):
+A GitHub-hosted runner builds natively only for its own architecture. This workflow first built
+both platforms in one `docker` job on an amd64 runner: `docker/setup-qemu-action` emulated arm64
+behind one `platforms: linux/amd64,linux/arm64` build. It worked, and it was slow. Over 94 `main`
+runs from 2026-10-19 to 2026-10-27 the `docker` job's median was 40.17 minutes, 34.6 of them
+(median) the two-platform build-push step that ran the emulated arm64 build. Its smoke test
+covered amd64 alone, while the push was amd64 and arm64.
+
+The fix is Docker's "Distribute build across multiple runners": one matrix leg per platform, each
+on a runner of that architecture (`ubuntu-24.04-arm` for arm64), each pushing its platform by
+digest, and a job after them that joins the digests into the tagged index. No QEMU step is left,
+and each leg smoke-tests the platform it pushes, natively, before it pushes it:
 
 ```yaml
-- uses: docker/setup-qemu-action@v3      # ARM64 emulation on amd64 runner
-- uses: docker/setup-buildx-action@v3    # multi-platform builder (replaces default)
+docker:
+  name: docker (${{ matrix.arch }})
+  strategy:
+    matrix:
+      include:
+        - arch: amd64
+          runner: ubuntu-24.04
+        - arch: arm64
+          runner: ubuntu-24.04-arm
+  runs-on: ${{ matrix.runner }}
+  steps:
+    - uses: docker/setup-buildx-action@v4
+    - id: build
+      uses: docker/build-push-action@v7
+      with:
+        platforms: linux/${{ matrix.arch }}
+        provenance: mode=min
+        outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
+        cache-from: type=gha,scope=envoy-${{ matrix.arch }}
+        cache-to: type=gha,mode=max,scope=envoy-${{ matrix.arch }}
 ```
 
-Both are required. Missing QEMU causes arm64 builds to fail; missing buildx means `platforms` is ignored.
+- `outputs` replaces `push` and `tags`: the leg pushes an untagged image, and only the join tags
+  `envoy:<sha>`, once both legs have pushed. `push: true` beside `outputs` would request a second
+  exporter.
+- Each leg needs a `type=gha` cache scope of its own (`scope=<name>-<arch>`). Legs sharing one
+  scope overwrite each other's cache index, so each run would find only the other platform's
+  cache.
+- `docker/setup-buildx-action` stays on every leg: the `type=gha` cache exporter needs its
+  `docker-container` builder.
+- The digests travel as artifacts, not job outputs: a matrix job's outputs keep only the last
+  leg's value. Each leg writes `steps.build.outputs.digest` as the name of an empty file and
+  uploads it as `envoy-image-digest-<arch>`; the join downloads them with `pattern:
+  envoy-image-digest-*` and `merge-multiple: true`.
+
+The join is a job of its own (`image_index`) that runs `docker buildx imagetools create
+--metadata-file <file> --tag ghcr.io/sjawhar/legion/envoy:<sha> <image>@sha256:<amd64>
+<image>@sha256:<arm64>` with the runner's own docker buildx, so it checks out nothing and sets up
+no builder. It reads the index's digest from the metadata file
+(`jq -r '."containerimage.descriptor".digest'`), never back through the `envoy:<sha>` tag, which
+another run may move, and hands that digest to the attestation and the release job. With
+`provenance: mode=min` on each leg, each leg's push is itself an index of the platform manifest
+and its attestation manifest, and `imagetools create` carries both legs' attestation manifests
+into the joined index; the job's closing `docker buildx imagetools inspect` prints the index's
+platforms and attestation manifests in the run log.
 
 ### 4. Contracts Are Committed — No Generation Step Needed in Docker
 

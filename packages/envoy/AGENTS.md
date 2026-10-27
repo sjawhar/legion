@@ -3891,13 +3891,16 @@ issuer that instance started, lists its dev caller, exports the caller token tha
 stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
-image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
-smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
-`org.opencontainers.image.revision` with that sha, and its `attest` job attests the pushed image
-index's digest with `actions/attest-build-provenance`. Its `release_build` and `release_publish`
-jobs run only on `refs/heads/main`, so a branch dispatch publishes one immutable image, for a dev
-slot to pin before merge, and moves no tag. `release_build` holds no secret: it computes the
-version with `release-push.sh version` and builds and checks the agent-secrets binaries
+image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds and
+smoke-tests each platform on a native runner of its own, with no emulation (`docker (amd64)` on
+`ubuntu-24.04`, `docker (arm64)` on `ubuntu-24.04-arm`), and pushes it by digest, with no tag;
+its `image_index` job then joins the two into the `ghcr.io/sjawhar/legion/envoy:<commit sha>`
+index, each image labelled `org.opencontainers.image.revision` with that sha, and its `attest`
+job attests that index's digest with `actions/attest-build-provenance`. Its `release_build` and
+`release_publish` jobs run only on `refs/heads/main`, so a branch dispatch publishes one
+immutable image index, for a dev slot to pin before merge, and moves no tag. `release_build`
+holds no secret: it computes the version with `release-push.sh version` and builds and checks
+the agent-secrets binaries
 (`agent-secrets --version` on the linux/amd64 binary; `go version -m` on all six for the recorded
 `buildversion.tag`). `release_publish` moves `:latest`, confirms the version against the tags
 inside its concurrency group (`release-push.sh version --expect`; `queue: max`, so every run's job
@@ -3932,9 +3935,10 @@ digest differs from the `envoy:<sha>` index it points at. To pin from `latest`, 
 annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest | jq -r
 '.annotations["org.opencontainers.image.revision"]'`) and pin `envoy:<that sha>`'s digest.
 `release_publish` does not wait for `attest`; when `attest` alone fails, re-run the failed jobs,
-which signs the same digest `docker` handed over. The attestation is separate from the BuildKit
-provenance the `docker` job attaches inside the index (`provenance: mode=min`), which a deployment
-reads to map a digest to its commit.
+which signs the same digest `image_index` hands over. The attestation is separate from the
+BuildKit provenance (`provenance: mode=min`) each `docker` leg attaches to its platform's image,
+and the index carries both legs' provenance, which a deployment reads to map a digest to its
+commit.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux
