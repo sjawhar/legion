@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+sleep 900 # scratch INFRA-520: outlast the job timeout
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
