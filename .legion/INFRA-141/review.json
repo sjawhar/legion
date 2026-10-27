@@ -2,28 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-27T00:06:30Z",
+  "completed": "2026-10-27T02:49:45Z",
   "generation": 4,
-  "round": "the round after review 5659336410: code commits 3c79342be613 and 1e7885a92fc2; handoff head 3ff34ede",
-  "scope": "The architect's rulings (Envoy 57c238dbb0ea914e774aab870f4c7cf5, dd4fa95b8ea9271731330b673d25d38e). Confirm the five Minors of 5659336410, the race fix in roles_from_claims_test.go, and the CI change. If the race step does not cover ./internal/store and ./internal/kvwatch, request that one change. Otherwise raise only defects.",
-  "decision": "changes_requested",
-  "confirmed": [
-    "Own-write test: with setOwnRoleHolder dropped, TestRolesHeldByFollowsTheRoleClaims fails 30 of 30; with forgetRoleHolder dropped, 30 of 30 (go test -overlay, run here).",
-    "Recreated-bucket tests: a resetRoleHolders that keeps holders fails the store test 5 of 5 and the listener test (roles [planner reviewer]); one that keeps holderRevisions fails both too (target roles [], want [architect]).",
-    "kvwatch: with watch() no longer clearing complete, TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey fails 10 of 10.",
-    "Text: AGENTS.md and the CHANGELOG give 'interest KV watcher unavailable: role claims watcher stopped', which matches main.go's WatchErr label. WaitForCacheReady wraps its error with the cache's name (%w); no caller matches the error text. The WARN names both caches.",
-    "Race fix: timeOutRoleClaimScan no longer writes Registry.holders without holdersMu. No test now writes holders, holderRevisions or holderEpoch without the lock (code-quality pass).",
-    "Scope: since 757f5eff and d11db8ab only tests, comments, docs, the WaitForCacheReady error wrap, the WARN text and the workflow step changed."
+  "round": "the round after review 5660728893; code commit 81c75d73f5a9 (workflow only), handoff head 57f64b53",
+  "scope": "The architect's ruling (Envoy d7bb8ac483d1623dc9159018d1604e60): confirm the race step covers ./internal/store and ./internal/kvwatch, that the job's timeout-minutes leaves room for the step's -timeout to fire, and that nothing outside .legion/ changed since 1e7885a9 except that workflow file; approve by SHA if all hold and no defect is found.",
+  "decision": "approved",
+  "verified": [
+    "The envoy-go-race step now runs `go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...`.",
+    "timeout-minutes is 75 against a worst case of about 66 minutes (setup, the first step's 30 m, the compile, the second step's 30 m), so each step's -timeout fires before the runner cancels the job.",
+    "From 1e7885a9 to 57f64b53 the only path outside .legion/ is .github/workflows/envoy-and-contracts.yaml. No Go code changed, so this round gets no thermonuclear pass.",
+    "The new step has run in CI: Legion Envoy and Contracts run 40424820757, attempt 2 (I re-ran it once after the first attempt was cancelled without a replacement), job envoy-go-race completed success. The step 'Race-test the listener, the registry store and kvwatch' ran 02:42:09 to 02:48:14Z with conclusion success; the first race step ran 14 m 53 s."
   ],
-  "ci": "CI head 5dfa7c20ceb7: Tests, Legion Envoy and Contracts, Docs and Worker Image queued, and PR Title pending at reading. The new race step has not run in CI yet. A request for changes does not wait for CI. -race cannot run in this pod (no cgo).",
-  "thermonuclear": "Both run at 3ff34ede under the defect-only rule. deep-review: CLEAN (the callers, whether the race step can run with the job's Postgres service and DISPATCH_TEST_DATABASE_URL, and the docs). code-quality: CHANGES (the job timeout, below); the changed tests are deterministic.",
-  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session: anthropic/claude-opus-5-5, 315 of 315 assistant turns. DeepReview10: anthropic/claude-opus-5-5, 31 of 31. CodeQuality10: anthropic/claude-opus-5-5, 49 of 49.",
+  "ci": "CI head 118e2523290f (compare to 57f64b53: ahead, only .legion/). Required lint, typecheck and test completed success (Tests 40424820679, attempt 2), and pr-title success (PR Title 40425934982, attempt 2): I re-ran each once after their first attempts were cancelled. Legion Envoy and Contracts 40424820757 attempt 2 was still running its remaining jobs; its envoy-go-race job had completed success.",
+  "verdictProvenance": "Read from the session store's transcript (omp_session_files): this session, which wrote the verdict, anthropic/claude-opus-5-5, 339 of 339 assistant turns. No subagent ran this round.",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/envoy-and-contracts.yaml", "description": "The architect's required change. The new step race-tests only ./cmd/listener/. This PR's new concurrency also lives in ./internal/store (the role-holder map, holdersMu, the epoch fence) and ./internal/kvwatch (completeness, WithRescan), and no race step in any workflow covers either package. That is why a race in this PR's code reached a tester and not CI. Add ./internal/store/ and ./internal/kvwatch/... to the race step."},
-    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml", "description": "The envoy-go-race job keeps timeout-minutes: 45, and its first race step takes 12-18 min in recent runs. The new step's -timeout 30m can therefore never fire: the runner cancels the job first, so a hung listener test never prints Go's timeout dump naming the stuck test. Raise the job's timeout-minutes to cover both steps plus compile (about 60, more once store and kvwatch join), or lower the step's -timeout below what the job leaves."}
-  ],
-  "threads": "63 threads, all resolved. I replied 'Accepted: fixed in 3c79342be613' on the four threads of 5659336410 (PRRT_kwDORFy7ds6wdkPA, -wdkPK, -wdkPO, -wdkPT), each with the mutant results. No bot threads."
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "threads": "65 threads, all resolved. I replied 'Accepted: fixed in 81c75d73f5a9' on 5660728893's two threads (PRRT_kwDORFy7ds6wgKnh, PRRT_kwDORFy7ds6wgKnl), with the CI run's step results. No bot threads."
 }
