@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-529",
+  "completed": "2026-10-27T00:31:00Z",
+  "planDocument": "dispatch://INFRA-529/artifact/plan-md",
+  "base": "sjawhar/legion main 7f7edb8de3e3",
+  "summary": "createHeadlessProof gains readOnly (default false, so the pmdoc generators keep the server's document refusals). The SPA engine (markdown-engine.ts) passes readOnly: true, which installs remarkReadOnlyDirectives (new legion-owned file packages/proof-editor/src/read-only-directives.ts) in place of remarkTypedBlocks: paragraph-line directive refusals are not applied, and a container directive the block schema refuses (unknown name, undeclared attribute, refused value, or any directive with no schema) is replaced in place by a literal paragraph of its opening line, its children (label paragraph dropped, recursively processed, formatted), and a literal paragraph of its closing fence when the source closes it. block-schema.ts exports typedBlockRefusal(schema, node), the one rule visit and the read-only transform both use.",
+  "tasks": [
+    "1. packages/proof-editor/src/block-schema.ts: export typedBlockRefusal(schema, node): string | undefined returning the exact strings visit/directiveAttrs throw today; visit throws its result.",
+    "2. packages/proof-editor/src/read-only-directives.ts (new, legion-owned, biome-checked): remarkReadOnlyDirectives(schema?: BlockSchema). Source read via file.toString(). Opening line = source from the directive's start offset to end of that line, \\r dropped. Children kept with the data.directiveLabel paragraph dropped, recursed. Closing fence = trailing colon run of the directive's last source line, emitted only when that fence starts at or after the last child's end offset. A refused directive without position throws.",
+    "3. packages/proof-editor/src/lib-headless.ts: HeadlessProofOptions.readOnly; at :148 install remarkReadOnlyDirectives(options.blockSchema) when readOnly (also with no schema), else remarkTypedBlocks as today; update the option and parseMarkdown 'Throws for…' doc comments.",
+    "4. packages/proof-editor/tests/read-only-directives.test.ts (bun:test): default mode still throws unknown typed block \"note\"; read-only under 'space' and 'line': A1 body gives strong bold + paragraphs ':::note', 'A note line', ':::'; inner **inner** is strong; unclosed (no closing paragraph); label [Heads up]{.x} in the opening paragraph and no label paragraph; inside a quote and a list item no '>'/indent in fence paragraphs; unknown directive holding a known :::callout{} keeps the callout typed and does not take the inner fence as the outer's; Pandoc '::: warning', '::youtube{id=1}', ':callout{#x}' parse as paragraph text; :::callout{bogus=\"1\"} draws fences as text; :::callout{kind=\"warning\"} stays typed; no schema: :::note draws as text. src/tests/block-schema.test.ts stays unedited and passes.",
+    "5. packages/dispatch/web/src/features/refs/markdown-engine.ts: createHeadlessProof({ blockSchema, readOnly: true }); update the MarkdownEngine.parse comment (raw HTML still refuses until INFRA-342).",
+    "6. packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx: A1 body renders <strong>bold</strong>, shows ':::note', 'A note line', ':::' as text, no data-markdown-fallback; a Pandoc div body keeps bold with no fallback. The <img> fallback test at :276 stays.",
+    "7. packages/dispatch/e2e/unknown-directive.e2e.ts (new): resetDatabase, createProject, createIssue; createComment(key,{body}), createMessage(key,{body}), createAsk(key,{question: body}) with body 'Some **bold** text\\n\\n:::note\\nA note with **inner** words\\n:::\\n'; asUser(browser,'alice'); goto /issues/<key>/conversation; find each card by data-turn prefix comment:/message:/ask:; assert strong texts bold and inner, card text holds ':::note' and ':::' and no '**', no [data-markdown-fallback] inside.",
+    "8. Docs: packages/proof-editor/AGENTS.md (sixteenth copied-file edit kind for the block-schema.ts and lib-headless.ts edits, count updated; read-only-directives.ts added to the legion-own table, nine -> ten, and to the Conventions list); root biome.json:56-64 gains !packages/proof-editor/src/read-only-directives.ts; packages/dispatch/AGENTS.md:291 headless-parser sentence states the read-only engine's directive behaviour."
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1: a comment with bold text and a :::note block shows the bold formatted and the note block's lines as text (and the same for a message and an ask, which the Summary names)",
+      "surface": "Dispatch Conversation tab, Chromium, real Go server and Postgres (packages/dispatch/e2e)",
+      "command": "cd packages/dispatch && export DATABASE_URL='postgres://…@127.0.0.1:<port>/dispatch_infra529?sslmode=disable' <five harness port variables> && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
+      "pass": "passes at the PR head",
+      "negativeControl": "the same spec copied onto the PR's base commit, SPA rebuilt: fails on the strong assertion because the card is one fallback text node showing **bold**; both runs quoted on the PR",
+      "harness": "Postgres on the issue volume per docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md and a-pods-shared-postgres-is-alive-by-its-port-never-by-its-pid-file-INFRA-95.md (pg_isready guard, own ports and database); WebKit cannot launch in a pod, CI's dispatch job covers it; large files under $TMPDIR"
+    },
+    {
+      "criterion": "Engine behaviour rows and unchanged default refusals",
+      "surface": "@legion/proof-editor headless engine",
+      "command": "cd packages/proof-editor && bun run test && bun run typecheck && bun run lint",
+      "pass": "all pass with src/tests/block-schema.test.ts unedited",
+      "negativeControl": "the new file's default-mode case shows unknown typed block \"note\" still thrown"
+    },
+    {
+      "criterion": "MarkdownBody renders the A1 body formatted without fallback",
+      "surface": "MarkdownBody in happy-dom with the real engine and server schema",
+      "command": "cd packages/dispatch && bun test web/src/features/refs && bun run typecheck && bun run lint",
+      "pass": "pass",
+      "negativeControl": "at the base the new A1 case fails on data-markdown-fallback"
+    },
+    {
+      "criterion": "Server parity unchanged",
+      "surface": "pmdoc fixture generator",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check",
+      "pass": "no fixture diff"
+    },
+    {
+      "criterion": "Repository lint and CI",
+      "surface": "CI required jobs",
+      "command": "bunx biome check . (root); CI on the PR",
+      "pass": "green"
+    },
+    {
+      "criterion": "Production record after the deploy",
+      "surface": "production Dispatch",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /issues/INFRA-529/conversation --route /api/v1/issues/INFRA-529/comments",
+      "pass": "output on the PR's Production: line and on the issue, naming the running build and whether it carries the merge"
+    }
+  ],
+  "decisions": [
+    "Brace-less :::note and :::note[label] are unknown directives (remark parses both as container directives).",
+    "A known type with attributes the schema refuses (:::callout{bogus=\"1\"}) is drawn the same way: same whole-body fallback today, one rule (typedBlockRefusal) decides both.",
+    "Pandoc ::: fences, ::name leaf lines and :name{ text lines stop refusing the body in read-only mode and render as the paragraph text the parser reads (one line under the default soft-break policy, as on GitHub); they come from the same refusal function and the Pandoc form is a colon-fenced block.",
+    "An unclosed :::note runs to the end of its container: opening line shown, content formatted, no closing line.",
+    "Out of scope and unchanged: raw HTML blocks (INFRA-342; MarkdownBody.test.tsx:276 keeps its fallback), a known block whose content rule fails (Milkdown logs createNodeInParserFail and does not throw: reproduced with :::ask{#a1} holding a heading), the Go server's document refusals.",
+    "The spec's Go citation moved: pmdoc/directive.go:434 is now the Pandoc/malformed reason; the unknown-type refusal is pmdoc/refusals.go:147. Nothing in Go changes.",
+    "readOnly is a general read-only mode rather than a directive-only option, so INFRA-342 can hang its HTML rule on the same flag."
+  ],
+  "risks": [
+    "Siblings INFRA-526 and INFRA-528 likely edit lib-headless.ts and markdown-engine.ts; the edits here are one option and one processor line each, so the second to merge resolves a small textual conflict.",
+    "Order inside the transform: drop the label paragraph before keeping children; check the closing fence against the last child's end offset (nested case). Both have unit cases."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: PR body with Dispatch: INFRA-529, the proof object shape, the e2e base/head runs quoted on the PR, the simplify pass and the production check after the close (references/pr-body.md, merge-gate.md).",
+      "ce-simplify-code: the simplify pass over the settled transform and the copied-file edits before the proof head.",
+      "dispatch: posting the production check output on the issue and any message; write it in ASD-STE100 (asd-ste100) for readers."
+    ],
+    "test": [
+      "legion-worker: the tester's proof entries (criterion, surface, command, observed, headSha, negativeControl) and re-running the planned e2e at the head and at the base (references/pr-body.md#what-a-proof-is)."
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and review-threads.md for approving the head by SHA and checking the e2e base/head evidence; packages/proof-editor/AGENTS.md copied-file rules are the review checklist for the block-schema.ts and lib-headless.ts edits."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "'its literal lines' has three readings (whole source as a paragraph, fence lines literal with formatted content, a code block); whole-source needs fragile container-prefix stripping in quotes and lists.",
+        "answer": "The plan draws the fence lines literally and the content formatted, which needs no prefix stripping; recorded as a spec departure for the architect. Unit cases pin the reading with **inner** content, quotes and list items."
+      },
+      {
+        "finding": "The spec cites INFRA-342 as a model, but INFRA-342 is not built; a directive-only option would make INFRA-342 add a second one; siblings INFRA-526/528 edit the same files.",
+        "answer": "INFRA-342 is not a dependency; the option is a general readOnly flag INFRA-342 can reuse. Sibling overlap recorded as a small textual-conflict risk."
+      },
+      {
+        "finding": "The Go citation directive.go:434 moved (now the Pandoc/malformed reason; unknown type is refusals.go:147); brace-less :::note is malformed to Go but a container directive to TypeScript.",
+        "answer": "Citation correction recorded in the plan; brace-less :::note and :::note[label] are decided to count as unknown directives. No Go change."
+      },
+      {
+        "finding": "Leaf/text lines and known-type bad attributes go beyond 'unknown directive'.",
+        "answer": "Decided in: both produce the same whole-body fallback today and come from the same refusal functions; named as decisions in the plan and summary for the architect."
+      },
+      {
+        "finding": "Skipping the paragraph refusal does not draw a Pandoc div line by line under softBreaks 'space'.",
+        "answer": "Decided: Pandoc fences render as the paragraph text the parser reads (one line under 'space', as GitHub renders it); stated in the plan."
+      },
+      {
+        "finding": "Known types whose content rule fails may still refuse the whole body.",
+        "answer": "Measured: :::ask{#a1} holding a heading logs createNodeInParserFail and does not throw, so no whole-body fallback; out of scope, stated."
+      },
+      {
+        "finding": "One acceptance rule needed; directiveAttrs is not exported; the live editor's typedBlockRemarkPlugin must keep refusing; the schema-less engine has no directive handling.",
+        "answer": "block-schema.ts exports typedBlockRefusal used by both visit and the transform; remarkTypedBlocks/typedBlockRemarkPlugin unchanged; readOnly installs the transform also with no schema, with a unit case."
+      },
+      {
+        "finding": "Edits to copied files need AGENTS.md updates (edit kinds, legion-own table, biome.json exclusion, Conventions list) and doc comments.",
+        "answer": "Task 8 lists each: proof-editor AGENTS.md sixteenth edit kind and ten legion-own files, biome.json exclusion, Conventions list, lib-headless.ts and markdown-engine.ts comments, dispatch AGENTS.md:291."
+      },
+      {
+        "finding": "A1 is not fully machine-checkable: which surface, what 'lines as text' asserts, the negative control must fail for the stated reason, the production check names no page.",
+        "answer": "e2e uses createComment (plus message and ask), finds cards by data-turn prefix so the base run fails on content, asserts strong texts, fence text present, no '**', no data-markdown-fallback; production check names --page /issues/INFRA-529/conversation and --route /api/v1/issues/INFRA-529/comments."
+      },
+      {
+        "finding": "No criterion for live-view 'line' turns, unclosed directives, previews, nesting, bad attributes.",
+        "answer": "Unit cases cover 'line' and 'space', unclosed, quote and list nesting, nested unknown/known, bad attributes, no schema; previews share the same engine call."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Change: the read-only engine draws an unknown directive as its literal lines in place and formats the rest of the text.",
+      "plan": "The engine draws the refused directive's fence lines (opening line and closing fence) as literal text and its content as formatted Markdown, in place.",
+      "evidence": "A :::note's content is the author's Markdown; drawing it literally keeps every mark visible inside the block, the defect itself. A literal copy of the whole block must strip the container prefix from every continuation line (remark positions: '> ' in a quote, the item indent in a list), which the fence-lines form never touches. GitHub formats what is inside an unknown fence. A1 still holds as written: ':::note', 'A note line' and ':::' show as text and the bold outside is formatted.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
