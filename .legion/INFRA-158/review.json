@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-158",
+  "completed": "2026-10-27T07:21:00Z",
+  "round": 9,
+  "generation": 4,
+  "head": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "ci": "Required set: lint, typecheck, test, pr-title. All four queued at CI head 4440fc7b when this round ended; compare 4440fc7b...b37aa423 changes only .legion/. A request for changes does not wait on CI.",
+  "thermonuclear": "At 4440fc7b, scoped to the fourteenth merge (fingerprint b9213970 -> 2eeecd82): thermonuclear-deep-review CHANGES (65 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality APPROVE (13 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
+  "mergeChecks": {
+    "leasePoolSize 10": "matches the ten duty.Exclusive callers on the merged tree (compaction, suggestion-outcome, reference-excerpt, block-index, webhook redelivery, architecture, delivery reconcile, issue-ask-repair, consumerLease x2); the pool comment lists them",
+    "README eight loops": "matches: main's seven periodic leased loops plus issue-ask-repair; the per-durable consumer leases are not periodic, as before",
+    "main.go": "both loops start; the boot repair still runs before either",
+    "merged test file": "both tests whole"
+  },
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/block_index.go:339",
+      "description": "The close's and the repair's block-state writes leave a closed issue's document live ahead of its latest version (state is rendered, pmdoc/schema.go:377; no settlement runs while closed), and #2210's block index skips a document owed an index that is live ahead (pending && markdown != stored) until it reopens. Migration 0121 marks every document owed and the boot repair (main.go:286) runs before the loop (main.go:422), so on the deploy that ships both, every closed issue the repair writes, and every issue this release closes before its documents are indexed, gets no block graph until it reopens; rebuild-refs (refs/rebuild.go:97) re-marks every document owed, so the same happens after any rebuild for every closed issue whose close wrote a block state. Their #b- references resolve to no node (refs/graph.go), search links ?ask= instead of #b-, and owed_documents never reaches 0. Fix: index a live-ahead document of a closed issue at its latest version's stored rendering, whose blocks are that version's own."
+    }
+  ],
+  "fastFollow": "Wording only: the retro learning docs/solutions/envoy/a-new-duty-exclusive-caller-raises-lease-pool-size-and-a-shortfall-is-silent-INFRA-158.md cites nine callers and 8 to 9 (now ten, 9 to 10); cmd/dispatch/multiprocess_test.go:1301 says 'four of the seven leases' (eight); packages/envoy/CHANGELOG.md:1475 'never counts or stores'."
+}
