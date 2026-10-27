@@ -145,7 +145,10 @@ func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 		{name: "cannot reach site", outcome: tlsOutcome{status: tlsNetworkUnavailable, detail: "network is unreachable"}, want: "emSign positive control"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := verifyTLSPositiveControls([]tlsPositiveControl{{site: emSignTLSSite}}, func(tlsPositiveControl) tlsOutcome {
+			err := verifyTLSPositiveControls([]tlsSite{emSignTLSSite}, func(site tlsSite) tlsOutcome {
+				if site.control {
+					return tlsOutcome{status: tlsCertificateRefused}
+				}
 				return testCase.outcome
 			})
 			if testCase.want == "" {

@@ -802,7 +802,8 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # on PATH with its plugin enabled in the profile's lock; and go, gcc, curl, wget, python3, node, bun,
 # uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with `go version`
 # running (packages/daemon/internal/capabilities/image.go). It then has node, bun, omp's embedded bun,
-# uv, the AWS CLI, curl, Python and gh refuse each compromised chain while reaching the control. It
+# CodeGraph's Node, uv, the AWS CLI, curl, Python, gh and Chromium refuse each compromised chain while
+# reaching the control. It
 # prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, every TLS
 # decision, then `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered
 # agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is

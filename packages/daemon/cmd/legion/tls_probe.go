@@ -14,13 +14,13 @@ const (
 )
 
 type tlsSite struct {
-	name, url string
-	control   bool
+	name, url, root string
+	control         bool
 }
 
 var (
-	emSignTLSSite  = tlsSite{name: "emSign", url: "https://dv-g3b-emudhra.we-have-a-problem.com/"}
-	aaaTLSSite     = tlsSite{name: "AAA", url: "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/"}
+	emSignTLSSite  = tlsSite{name: "emSign", url: "https://dv-g3b-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/emsign-ecc-root-ca-g3.pem"}
+	aaaTLSSite     = tlsSite{name: "AAA", url: "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/aaa-certificate-services.pem"}
 	controlTLSSite = tlsSite{name: "control", url: "https://example.com/", control: true}
 	tlsSites       = []tlsSite{emSignTLSSite, aaaTLSSite, controlTLSSite}
 )
@@ -49,27 +49,30 @@ type tlsObservation struct {
 	tlsOutcome
 }
 
-// tlsPositiveControl proves a test endpoint still chains to the compromised root it is named for.
-// The roots are the CA-published certificates at repository.emsign.com/certs/emSignECCRootCAG3.crt
-// (SHA-256 86:A1:EC:BA:08:9C:4A:8D:3B:BE:27:34:C6:12:BA:34:1D:81:3E:04:3C:F9:E8:A8:62:CD:5C:57:A3:6B:BE:6B)
+// The root paths and fingerprints below are CA-published records from
+// repository.emsign.com/certs/emSignECCRootCAG3.crt (86:A1:EC:BA:08:9C:4A:8D:3B:BE:27:34:C6:12:BA:34:1D:81:3E:04:3C:F9:E8:A8:62:CD:5C:57:A3:6B:BE:6B)
 // and crt.sectigo.com/AAACertificateServices.crt
-// (SHA-256 D7:A7:A0:FB:5D:7E:27:31:D7:71:E9:48:4E:BC:DE:F7:1D:5F:0C:3E:0A:29:48:78:2B:C8:3E:E0:EA:69:9E:F4).
-type tlsPositiveControl struct {
-	site tlsSite
-	root string
+// (D7:A7:A0:FB:5D:7E:27:31:D7:71:E9:48:4E:BC:DE:F7:1D:5F:0C:3E:0A:29:48:78:2B:C8:3E:E0:EA:69:9E:F4).
+func compromisedTLSSites() []tlsSite {
+	var sites []tlsSite
+	for _, site := range tlsSites {
+		if site.root != "" {
+			sites = append(sites, site)
+		}
+	}
+	return sites
 }
 
-var tlsPositiveControls = []tlsPositiveControl{
-	{site: emSignTLSSite, root: "/usr/share/legion/tls-roots/emsign-ecc-root-ca-g3.pem"},
-	{site: aaaTLSSite, root: "/usr/share/legion/tls-roots/aaa-certificate-services.pem"},
-}
-
-func verifyTLSPositiveControls(controls []tlsPositiveControl, probe func(tlsPositiveControl) tlsOutcome) error {
+func verifyTLSPositiveControls(sites []tlsSite, probe func(tlsSite) tlsOutcome) error {
 	var failures []string
-	for _, control := range controls {
-		if outcome := probe(control); outcome.status != tlsConnectionAccepted {
-			failures = append(failures, fmt.Sprintf("%s positive control at %s did not accept its pinned root: %s",
-				control.site.name, control.site.url, outcome.detail))
+	for _, site := range sites {
+		if outcome := probe(site); outcome.status != tlsConnectionAccepted {
+			failures = append(failures, fmt.Sprintf("%s positive control at %s did not accept its pinned root: %s", site.name, site.url, outcome.detail))
+		}
+		negative := controlTLSSite
+		negative.root = site.root
+		if outcome := probe(negative); outcome.status == tlsConnectionAccepted {
+			failures = append(failures, fmt.Sprintf("%s positive control is not isolated: its pinned root accepted %s", site.name, negative.url))
 		}
 	}
 	if len(failures) > 0 {
@@ -79,14 +82,11 @@ func verifyTLSPositiveControls(controls []tlsPositiveControl, probe func(tlsPosi
 }
 
 func probeTLSPositiveControls(ctx context.Context, env []string, workDir string) error {
-	return verifyTLSPositiveControls(tlsPositiveControls, func(control tlsPositiveControl) tlsOutcome {
-		client := tlsCommandClient{
-			clientName: "positive-control", env: env, workDir: workDir,
-			command: func(site tlsSite) (string, []string, []string) {
-				return "curl", []string{"--cacert", control.root, "--fail", "--silent", "--show-error", site.url}, nil
-			},
-		}
-		return client.probe(ctx, control.site)
+	return verifyTLSPositiveControls(compromisedTLSSites(), func(site tlsSite) tlsOutcome {
+		client := tlsCommandClient{clientName: "positive-control", env: env, workDir: workDir, command: func(site tlsSite) (string, []string, []string) {
+			return "curl", []string{"--cacert", site.root, "--capath", "/nonexistent", "--fail", "--silent", "--show-error", site.url}, nil
+		}}
+		return client.probe(ctx, site)
 	})
 }
 
