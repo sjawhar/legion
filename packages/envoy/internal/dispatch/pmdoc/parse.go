@@ -890,21 +890,23 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
 		switch current := child.(type) {
 		case *ast.Text:
-			value := parseTextValue(current.Value(source), active)
+			// Goldmark's text stops before its line's ending, so only what the break trims is taken
+			// off, and off the text as written: a reference to a line feed or a space before the
+			// break is text to both parsers.
+			raw := current.Value(source)
 			hard, soft := current.HardLineBreak(), current.SoftLineBreak()
 			if hard || soft {
 				if _, run, backslash := lineSuffix(current, source); backslash {
-					value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
+					raw = bytes.TrimSuffix(raw, []byte("  "))
 				} else {
 					// The browser editor's parser reads the spaces and tabs a line ends with, which
 					// trimLineSuffixes took off, as a hard break only where they are two spaces
 					// or more and no tab; goldmark breaks hard at any two spaces ending the line.
-					value = strings.TrimSuffix(value, "\n")
 					hard = len(run) >= 2 && !strings.Contains(run, "\t")
 					soft = !hard
 				}
 			}
-			children = appendTextPiece(children, value, active)
+			children = appendTextPiece(children, parseTextValue(current, raw, active), active)
 			if hard {
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
@@ -919,7 +921,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				}
 			}
 		case *ast.String:
-			children = appendTextPiece(children, parseTextValue(current.Value, active), active)
+			children = appendTextPiece(children, parseTextValue(current, current.Value, active), active)
 		case *ast.Emphasis:
 			var marks []Mark
 			if current.Level >= 2 {
@@ -1012,13 +1014,22 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	return joinTexts(children), ended, nil
 }
 
-func parseTextValue(value []byte, marks []Mark) string {
+// parseTextValue is the text value of node, under marks, as the browser editor reads it:
+// code as written, and other text decoded (decodeMarkdownText) with each line feed it holds a
+// space, as that editor's import reads every line feed in text (remarkSoftBreakAsSpace in
+// packages/proof-editor/src/dispatch-soft-breaks.ts), a decoded `&#10;` included. An image's alt
+// text keeps its line feeds: that import reads the alt as an attribute, as written.
+func parseTextValue(node ast.Node, value []byte, marks []Mark) string {
 	for _, mark := range marks {
 		if mark.Type == "inlineCode" {
 			return string(value)
 		}
 	}
-	return decodeMarkdownText(value)
+	decoded := decodeMarkdownText(value)
+	if insideImage(node) {
+		return decoded
+	}
+	return strings.ReplaceAll(decoded, "\n", " ")
 }
 
 func appendInline(target *[]*Node, nodes []*Node) {

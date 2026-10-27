@@ -42,9 +42,9 @@ func decodeMarkdownText(value []byte) string {
 // reference is shaped as characterReference: `&name;`, `&#` and up to seven decimal digits, or
 // `&#x` and up to six hexadecimal digits, then `;`. A numeric one names its code point, or U+FFFD
 // where the parser refuses the code point (numericReferenceCharacter). A named one is decoded as
-// HTML decodes it and counts only when that changed it and did not stop short of its `;`, as
-// `&notit;` decodes to `¬it;`; `&semi;` alone names a `;`. Anything else is not a reference and
-// stays text.
+// HTML decodes it, but for `&nLt;` and `&nGt;`, which Go's table lacks, and counts only when that
+// changed it and did not stop short of its `;`, as `&notit;` decodes to `¬it;`; `&semi;` alone
+// names a `;`. Anything else is not a reference and stays text.
 func characterReferenceAt[T string | []byte](value T, at int) (length int, characters string, ok bool) {
 	end := at + 1
 	if end >= len(value) {
@@ -81,6 +81,13 @@ func characterReferenceAt[T string | []byte](value T, at int) (length int, chara
 		return 0, "", false
 	}
 	reference := string(value[at : end+1])
+	// Go's html table omits these two (src/html/entity.go, a TODO); character-entities names them.
+	switch reference {
+	case "&nLt;":
+		return len(reference), "\u226A\u20D2", true
+	case "&nGt;":
+		return len(reference), "\u226B\u20D2", true
+	}
 	decoded := html.UnescapeString(reference)
 	if decoded == reference || strings.HasSuffix(decoded, ";") && reference != "&semi;" {
 		return 0, "", false
