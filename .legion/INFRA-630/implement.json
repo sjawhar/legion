@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-630",
-  "completed": "2026-10-27T16:41:29Z",
+  "completed": "2026-10-27T17:28:42Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2423",
   "proof": [
     {
       "criterion": "4 (before the merge, the push path the production check will see): a build that differs from main's files lands as one github-actions[bot] commit touching only dist/ and legion/, and check-dist passes there; main moved means nothing pushed and a fresh run",
       "surface": "release-push.sh push-built, the rebuild workflow's push step, on real build output against a local bare origin reached through the deploy-key path (git insteadOf rewrite of git@github.com:example/repo.git)",
       "command": "bash $TMPDIR/infra630/pushbuilt-proof.sh (scratch clone of the head as origin main; commit rewording the dispatch issue description in packages/contracts/src/dispatch-tools.ts; bun run build -- --in-place && bun run check-dist; tar -cf ... -C packages/claude-envoy dist legion; release-push.sh push-built <base> <tar> in a fresh checkout of base; bun run check-dist in a fresh clone at the landed commit)",
-      "observed": "push-built exit 0, GITHUB_OUTPUT pushed=true, no gh call; origin main gained one commit, parent 749dceae (base), author/committer github-actions[bot], subject 'chore(claude-envoy): rebuild dist/ and legion/ from 749dceaebb6a' plus GitHub's skip keyword, changing only dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js; check-dist at that commit: 'dist/ and legion/ match a fresh build'",
-      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "observed": "push-built exit 0, GITHUB_OUTPUT pushed=true, no gh call; origin main gained one commit, parent c823f323 (base), author/committer github-actions[bot], subject 'chore(claude-envoy): rebuild dist/ and legion/ from c823f3232c60' plus GitHub's skip keyword, changing only files under dist/; check-dist in a fresh clone at that commit: 'dist/ and legion/ match a fresh build'",
+      "headSha": "7fb39f1e2f94761d7ba6834eeac88d1114875cc1",
       "negativeControl": "origin main moved one commit before push-built: exit 0, origin main unchanged at the moved commit, no pushed=true, stub gh logged exactly 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'; the real tar with a README.md member appended: '::error::release-push.sh push-built: member README.md of ... is not dist, legion or a path under them', exit 1, origin and checkout untouched"
     },
     {
@@ -18,16 +18,24 @@
       "surface": "packages/claude-envoy/scripts/build.ts from a shell at the repository root",
       "command": "bun packages/claude-envoy/scripts/build.ts; bun packages/claude-envoy/scripts/build.ts --out packages/claude-envoy/x; bun packages/claude-envoy/scripts/build.ts --out $TMPDIR/infra630-out && $TMPDIR/infra630-out/bin/dispatch --help && env -i PATH=$PATH HOME=$TMPDIR/h CLAUDE_CODE_SESSION_ID=t bun $TMPDIR/infra630-out/dist/envoy-channel.js </dev/null",
       "observed": "--out build exit 0 with no node_modules in the copy; bin/dispatch --help prints the usage, exit 0; envoy-channel.js prints 'no envoy.json at ...: Dispatch and Envoy are off', exit 0; a build from the repository root is byte-identical to main's committed dist/ and legion/ (diff -r empty), and `bun .../build.ts --check` from / passes",
-      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5 (build.ts unchanged since)",
       "negativeControl": "no mode: exit 2 with the usage line naming --check | --in-place | --out <dir>; --out packages/claude-envoy/x: 'refusing --out: ... is inside the repository', exit 1, nothing created"
     },
     {
-      "criterion": "3. Release-credential check (extended) and the script tests pass; the deploy key in the build job is refused",
+      "criterion": "3. Release-credential check (extended, push commands scoped per workflow) and the script tests pass",
       "surface": ".github/scripts shell checks, as the lint and test jobs run them",
       "command": "bash .github/scripts/check-release-credentials.sh; bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/release-push.test.sh (PyYAML from a $TMPDIR venv first on PATH)",
-      "observed": "'check-release-credentials: 9 credentialed job(s) and 9 build job(s) across 4 workflows keep credentials out of jobs that run dependency code', exit 0; 237 passed, 0 failed; 419 passed, 0 failed",
-      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
-      "negativeControl": "deep-worker run on a temp copy of .github with DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }} added to claude-envoy-rebuild.yaml's build job env: exit 1, \"claude-envoy-rebuild.yaml:60: job 'build' names secrets.DEPLOY_KEY at env.DEPLOY_KEY\"; the test suite also asserts this refusal and a push job running bun"
+      "observed": "'check-release-credentials: 9 credentialed job(s) and 9 build job(s) across 4 workflows keep credentials out of jobs that run dependency code', exit 0; 243 passed, 0 failed (new cases: push-main with the deploy key in the rebuild workflow, push-built in release.yaml, the key on the rebuild's download step, each refused); 419 passed, 0 failed",
+      "headSha": "7fb39f1e2f94761d7ba6834eeac88d1114875cc1",
+      "negativeControl": "temp copy of .github with the rebuild push step changed to 'release-push.sh push-main x y': exit 1, \"claude-envoy-rebuild.yaml:141: job 'push' names secrets.DEPLOY_KEY at step 'Land the build on main' env.DEPLOY_KEY; ... a step whose run calls release-push.sh push-built, which claude-envoy-rebuild.yaml allows\""
+    },
+    {
+      "criterion": "2. The required test job fails when the plugin's source does not build, does not build the same bytes twice, or puts a private name in the bundle",
+      "surface": "the required test job's new steps (pr-and-main.yaml:248-263), run locally with the job's exact commands",
+      "command": "cd packages/claude-envoy && bun run build -- --in-place && bun run check-dist; cd ../.. && .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion",
+      "observed": "'built envoy-channel, session-hook, session-title-hook, dispatch into dist/ and the Legion plugin into legion/'; 'dist/ and legion/ match a fresh build'; check-private-names: 60 files, exit 0; jj diff of the two directories empty afterwards",
+      "headSha": "7fb39f1e2f94761d7ba6834eeac88d1114875cc1",
+      "negativeControl": "the tester's scratch PR (acceptance 2) breaks a source; locally, an in-repo --out and a modeless run are refused (exit 1 / exit 2) as in proof 2"
     }
   ],
   "filesChanged": [
@@ -65,6 +73,7 @@
     "packages/claude-envoy/tests/legion-plugin-fresh.test.ts",
     "packages/daemon/internal/daemon/launchers.go",
     "packages/daemon/internal/workflow/awaiting_reconcile_test.go",
+    "packages/envoy-client/scripts/build-dispatch-cli.sh",
     "packages/pi-legion/src/skills-guard.test.ts",
     "scripts/e2e/README.md",
     "scripts/e2e/claude-backend-tmux.sh"
@@ -90,7 +99,7 @@
     "bin/dispatch's missing-bundle message updated the same way."
   ],
   "openQuestions": [
-    "The new workflow's own pull_request run on head 85120d98 is https://github.com/sjawhar/legion/actions/runs/40543251233 (queued when this handoff was written; not waited for). Expected: build job green with changed=false, push job skipped. The tester reads it."
+    "None. The rebuild workflow's pull_request run on the new head is on PR #2423's checks; not waited for."
   ],
   "searchReasons": [
     ".github/scripts/check-body-embed-limit.sh: a comment naming main's packages/claude-envoy/dist/*.js as a copy of the body limit, kept fresh by main's Rebuild Claude Envoy plugin workflow (updated here).",
@@ -169,5 +178,15 @@
     "scripts/e2e/dispatch-session-settings.sh: contracts' `bun run build` and the Dispatch web app's build.",
     "scripts/e2e/dispatch-user-turns.sh: `bun run build:web` of the Dispatch web app.",
     "scripts/pi-plugin-prepack.sh: pi-envoy's/pi-legion's `bun run build --metafile`, other packages."
+  ],
+  "round": 2,
+  "round1": [
+    "Finding 1: deleted the scheduled run's age-based red step and its header sentences; schedule hourly -> daily (23 5 * * *) (783ad752).",
+    "Finding 2: '## Contract change census' added to the PR body: searches, every hit with its disposition, rollout = immediate refusal and what it closes.",
+    "Finding 3: lag stated as one workflow run with both jobs' runner queues, and the hand-written files live first, in AGENTS.md, README.md, CHANGELOG.md, docs/deployment.md (7fb39f1e).",
+    "Minor 1: check-release-credentials.sh PUSH_COMMANDS is per workflow (783ad752).",
+    "Minor 2: the required test job now runs the rebuild's checks: in-place build, check-dist, private-name check (783ad752).",
+    "Fast-follow (architect: no deferral): is_commit_sha helper, one bot identity for tag and push-built, unreachable staged-path loop removed (783ad752).",
+    "Also: packages/envoy-client/scripts/build-dispatch-cli.sh comment no longer says claude-envoy commits its bundles."
   ]
 }
