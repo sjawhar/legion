@@ -2,19 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-536",
-  "completed": "2026-10-27T14:58:57Z",
+  "completed": "2026-10-27T18:01:31Z",
   "round": 3,
-  "codeHead": "6c7efe727834eb5e7d9b9b6fb5e3666a7ae2f7c2",
+  "kind": "confirmation after a conflict-forced merge",
+  "approvedBefore": "fab3a02763d3dae5282c6688d7d3248d5bd97bc7",
+  "codeHead": "125828a5654f9c652cf2d92c3aa2c5410c920335",
+  "fingerprint": "e27cb169e075462183b62c43f00c842eab3501a4722a0f38d27833145cfec4a4 at fab3a027 and at aaa81f70: unchanged",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "ci": "CI head 6c7efe72 (newest pull_request run). The required lint, typecheck, test and pr-title runs are completed and passed, and so are envoy-go, dispatch and the other heavy jobs (Envoy settlement at 14:58Z: 15 passed, 0 failed, 9 skipped). compare 6c7efe72...5d36f8ea: handoffsOnly true.",
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 6c7efe72. No finding. The merge aac74fb5 keeps both CHANGELOG entries. Main b08a56bc..c892b97d touches nothing in pmdoc, the e2e files or proof-editor. pmdoc tests ok (228 s, Linear skipped); go vet and the packages/dispatch typecheck are clean.",
-    "codeQuality": "Verdict: APPROVE at 6c7efe72. No finding. Both round-2 findings are fixed."
-  },
-  "threads": "All six threads are resolved. My four (PRRT_kwDORFy7ds6woSXi, PRRT_kwDORFy7ds6woSXp, PRRT_kwDORFy7ds6woSXt, PRRT_kwDORFy7ds6woSX0) carry my acceptance replies. The two from round 2 (PRRT_kwDORFy7ds6wqFlX, PRRT_kwDORFy7ds6wqFlh) carry the implementer's fix replies, for 6c7efe72, which I verified.",
-  "conflict": "At approval GitHub reports the pull request CONFLICTING again: main moved to 59f6647d. git merge-tree names one conflict, packages/envoy/CHANGELOG.md, and auto-merges packages/envoy/internal/dispatch/pmdoc/parse.go, which main changed in 8 lines, with new email read-back tests. The conflict merge comes back for the fingerprint check: equal means a confirmation, different means a new round.",
+  "ci": "CI head 125828a5 (the merge of main 452e4647): required lint, typecheck, test and pr-title passed; dispatch, dispatch-memory, dispatch-multiprocess, envoy-go-race, envoy-e2e-local, envoy-smoke and envoy-infra-go passed. The non-required envoy-go failed: internal/dispatch/api passed go test's 10-minute package limit (600.189s, with no test hung; the running test had run 4s). Main fails the same way without this change: main runs 40503757570 and 40500675840, api FAIL at 600.1s. The package took 447.7s at this PR's previous head 6c7efe72. This is tracked as dispatch://INFRA-523 (rerun catalog: dispatch/api past the 10m default) and dispatch://INFRA-520 (an explicit -timeout for the envoy-go step). compare 125828a5...aaa81f70: handoffsOnly true.",
   "keyFindings": []
 }
