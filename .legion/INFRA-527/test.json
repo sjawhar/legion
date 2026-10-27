@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-527",
+  "completed": "2026-10-27T04:09:22Z",
+  "head": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command at 89bf76b8ae03 with the tester lane's ports and database: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts )` → 15 passed, 1 skipped (theme's iPhone-only margin-sheet row on desktop). Re-ran its red leg independently at the fork point 7f7edb8d: 6 failed at toHaveCount(2), Received 0."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1 (spec) and A4: a comment with one ticked and one unticked task item shows a ticked and an unticked checkbox that cannot be toggled, in light and dark",
+      "surface": "Issue page, Conversation tab (/issues/<KEY>/conversation), expanded thread; Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector in the issue pod",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts )",
+      "observed": "15 passed, 1 skipped: rows A1 light/dark in chromium and iphone green (2 checkboxes, ticked/unticked as source, disabled, on the text's first line, list-style none, a mouse click leaves both unchanged).",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "task-items.e2e.ts copied (with editor.ts) into the fork-point tree /legion/scratch/infra-527-base (styles.css and MarkdownBody.tsx byte-identical to 7f7edb8d, no task-checkboxes.ts) and run with DATABASE_URL=$DB_BASE_URL → 6 failed, each at expect(locator).toHaveCount(2), Received: 0, after the comment's text was visible."
+    },
+    {
+      "criterion": "A2 (plan): a reply under a decision inside a document shows one ticked and one unticked disabled checkbox with no bullet",
+      "surface": "Issue page (/issues/<KEY>), spec document, decision block reply thread; Chromium and iPhone 13",
+      "command": "same run as above (task-items.e2e.ts row 'a reply under a decision inside a document shows the checkboxes with no bullet')",
+      "observed": "passed in chromium and iphone.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "At the fork point the same row failed in chromium and iphone at toHaveCount(2), Received: 0."
+    },
+    {
+      "criterion": "A3 (plan) on the real surface: ordered, nested (three deep), capital [X], long wrapped, quoted, code- and bold-first, and mixed lists each give every task item exactly one box ticked as its source, and a plain item none",
+      "surface": "Issue page, Conversation tab, one comment holding all shapes; Chromium and iPhone 13, light and dark",
+      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted after the run), `bun run e2e -- e2e/zz-tester-probe.e2e.ts`, which logged each li's box count, checked state, list-style and the box/first-line rectangles",
+      "observed": "All 13 task items: 1 box each, checked equals data-checked (capital [X] ticked), list-style none, box right edge = li content left, text starts 6px after it on the same line; nested boxes step right 28px per level; plain numbered and plain bullet items keep decimal/disc and no box. Screenshots dispatch://INFRA-527/artifact/tester-shapes-chromium-light-png and dispatch://INFRA-527/artifact/tester-shapes-chromium-dark-png.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "`- [ ] ` with no text is not a task item in the parser (rendered as a disc bullet with the literal text \"[ ]\") and drew no box, the same as the document editor's parse; the fork-point run above draws no box for any task."
+    },
+    {
+      "criterion": "A box follows a live edit of its comment",
+      "surface": "Issue page, Conversation tab, open thread; Chromium and iPhone 13",
+      "command": "throwaway probe row: a human comment `- [ ] flip me / - [x] stays`, thread expanded, then editComment (PATCH /api/v1/comments/<id>) to `- [x] flip me / - [x] stays / - [ ] added`",
+      "observed": "The open thread went from 2 boxes (first unticked) to 3 boxes (first ticked, third unticked) without reload; no duplicate boxes. 2 passed.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "The same edit sent with an agent token, on an agent-authored comment, was refused 403 HUMAN_ONLY ('only users may perform this action')."
+    },
+    {
+      "criterion": "Other block-Markdown surfaces draw the box and the box is never a keyboard stop",
+      "surface": "Inbox (/) ask card whose question holds a task list; Chromium and iPhone 13",
+      "command": "throwaway probe row: createAsk with question 'Ready to ship?\\n\\n- [x] tests green\\n- [ ] notes written', open /, then 60 Tab presses checking document.activeElement",
+      "observed": "2 boxes on the card, first ticked, second not; no Tab press focused a box. 2 passed. Screenshot dispatch://INFRA-527/artifact/tester-inbox-chromium-png.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "Fork-point run above: no box exists, so nothing reads a tick."
+    }
+  ],
+  "ci": "Read on GitHub at 89bf76b8ae03 at 2026-10-27T04:08Z: Tests, Docs, Legion Envoy and Contracts, PR Title workflow runs and the changes/lint/typecheck/test/build/pr-title checks all queued; not waited for. db22b792 (handoff-only, skip-checks) carries no runs.",
+  "notes": [
+    "Inline variant and MarkdownPreview (the collapsed one-line turn preview) draw no box by plan D5; the implementer's open question on the preview is with the INFRA-138 architect.",
+    "The read-only task boxes on an Inbox card sit just under the card's own interactive selection checkbox and look alike in shape; the read-only ones are filled in link blue when ticked. Not a defect against the spec."
+  ]
+}
