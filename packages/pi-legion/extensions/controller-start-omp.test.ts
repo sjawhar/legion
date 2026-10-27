@@ -83,8 +83,18 @@ const PROJECT = "legion";
 /** The TUI's busy row while a turn runs (`⎋ Working…`). */
 const BUSY = "Working…";
 
-/** How long a case waits for one thing the session owes it before failing on it. */
-const DEADLINE_MS = 30_000;
+/**
+ * How long after the spawn a wait may last: Oh My Pi's startup, which loads both extensions before
+ * `/legion-controller-start` runs, took about 27 s of wall time (9 s of CPU) in a slow but normal
+ * pod, so the waits that span it get this much from the spawn.
+ */
+const STARTUP_DEADLINE_MS = 150_000;
+
+/** How long one wait for something the started session owes a case may last once startup is over. */
+const STEP_DEADLINE_MS = 30_000;
+
+/** A case's own timeout: its startup, each of its waits and the cleanup of its processes. */
+const CASE_TIMEOUT_MS = 600_000;
 
 /**
  * Wide enough that the start message, as the TUI renders the user message, fits on one row, so
@@ -260,6 +270,7 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
     await writeFile(path.join(home, ".omp", "agent", "keybindings.yml"), hooks.keybindings);
   }
 
+  const spawnedAt = Date.now();
   const terminal = spawnInteractive(
     binary,
     {
@@ -297,7 +308,9 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
     what: string,
     probe: () => T | undefined | Promise<T | undefined>
   ): Promise<T> => {
-    const deadline = Date.now() + DEADLINE_MS;
+    // A wait gets its own step, and one that starts before Oh My Pi's startup could be over gets
+    // until the startup deadline: the first wait of every case spans that startup.
+    const deadline = Math.max(Date.now() + STEP_DEADLINE_MS, spawnedAt + STARTUP_DEADLINE_MS);
     for (;;) {
       if (exitCode !== undefined) {
         throw new Error(
@@ -487,7 +500,7 @@ test.skipIf(skip)(
     await settledOn(session, "Start procedure done.");
     expect(session.turns.length).toBe(1);
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 test.skipIf(skip)(
@@ -514,7 +527,7 @@ test.skipIf(skip)(
     next.reply("Typed message answered.");
     await settledOn(session, "Typed message answered.");
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 test.skipIf(skip)(
@@ -543,7 +556,7 @@ test.skipIf(skip)(
     await Bun.sleep(3_000);
     expect(session.turns.length).toBe(1);
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 test.skipIf(skip)(
@@ -566,7 +579,7 @@ test.skipIf(skip)(
     expect(userMessages[0]).toContain(START_MESSAGE_JSON);
     expect(userMessages.filter((entry) => entry.includes(START_MESSAGE_JSON))).toHaveLength(1);
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 // Main's pi-envoy delivers every card as a steer, which starts a turn of its own when the session
@@ -644,7 +657,7 @@ test.skipIf(skip)(
     expect(userMessages[0]).toContain(START_MESSAGE_JSON);
     expect(userMessages.filter((entry) => entry.includes(START_MESSAGE_JSON))).toHaveLength(1);
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 // The claim runs from the start command, after startup, in the terminal the operator reads: a
@@ -668,7 +681,7 @@ test.skipIf(skip)(
     await Bun.sleep(3_000);
     expect(session.turns).toHaveLength(0);
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 // A `/new` replaces the controller session, and pi-legion's session_switch handler claims the new
@@ -715,7 +728,7 @@ test.skipIf(skip)(
       "capability revoked"
     );
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 // A `/new` typed while the start command's claim is in flight stops that claim at its
@@ -800,7 +813,7 @@ test.skipIf(skip)(
     expect(replacedUsers).toEqual([]);
     expect(session.turns).toHaveLength(1);
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
 
 // The same refused re-claim, with a `task` subagent's view focused when the `/new` starts. Oh My
@@ -870,5 +883,5 @@ test.skipIf(skip)(
       "capability revoked"
     );
   },
-  120_000
+  CASE_TIMEOUT_MS
 );
