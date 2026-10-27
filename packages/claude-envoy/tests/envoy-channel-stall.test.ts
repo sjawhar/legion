@@ -207,5 +207,102 @@ describe.skipIf(!envoyStackEnabled)(
         await rm(home, { recursive: true, force: true })
       }
     }, 120_000)
+
+    test("a session whose redial once hung still exits on SIGTERM", async () => {
+      if (stack === undefined) throw new Error("the Envoy stack did not start")
+      const { envoyUrl } = stack
+      const proxy = await startStallProxy(stack.natsHostPort)
+      const home = await mkdtemp(join(tmpdir(), "claude-envoy-stall-exit-"))
+      const configDirectory = join(home, "claude-config")
+      await mkdir(configDirectory)
+      await writeFile(
+        join(configDirectory, "envoy.json"),
+        JSON.stringify({ envoy: { enabled: true, url: envoyUrl, natsUrls: [proxy.url] } }),
+      )
+      const sessionID = `ses_stall_exit_${crypto.randomUUID().replaceAll("-", "")}`
+      const server = Bun.spawn(["bun", channelEntry], {
+        cwd: home,
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          HOME: home,
+          CLAUDE_CONFIG_DIR: configDirectory,
+          CLAUDE_CODE_SESSION_ID: sessionID,
+          CLAUDE_PLUGIN_DATA: home,
+          ENVOY_HEARTBEAT_MS: "240000",
+        },
+        stdin: "pipe",
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+      let stderr = ""
+      void (async () => {
+        for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream()))
+          stderr += chunk
+      })()
+      // Real nats.js ping and dial timers against a real listener: each wait polls the real clock.
+      const waitFor = async (
+        condition: () => boolean | Promise<boolean>,
+        deadline: number,
+        what: string,
+      ) => {
+        while (!(await condition())) {
+          if (server.exitCode !== null)
+            throw new Error(`the channel server exited waiting for ${what}: ${stderr}`)
+          if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}: ${stderr}`)
+          await Bun.sleep(100)
+        }
+      }
+      try {
+        server.stdin.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: { name: "test", version: "0" },
+            },
+          })}\n`,
+        )
+        server.stdin.write(
+          `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
+        )
+        const started = Date.now()
+        await waitFor(
+          async () =>
+            (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok &&
+            proxy.connections[0]?.subscribedAt !== undefined,
+          started + 30_000,
+          "the session's registration and first subscription",
+        )
+        // The first redial after the freeze hangs (accepted, never answered); the next one forwards.
+        proxy.stallNext(1)
+        const frozenAt = proxy.freeze()
+        await waitFor(
+          () =>
+            proxy.connections.some(
+              (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined,
+            ),
+          frozenAt + 60_000,
+          "the session to subscribe again after the hung redial",
+        )
+        const signalledAt = Date.now()
+        server.kill("SIGTERM")
+        const outcome = await Promise.race([
+          server.exited.then(() => "exited"),
+          Bun.sleep(15_000).then(() => "running"),
+        ])
+        console.log(
+          `claude-envoy stall exit: SIGTERM -> ${outcome} after ${((Date.now() - signalledAt) / 1000).toFixed(1)} s`,
+        )
+        expect(outcome).toBe("exited")
+      } finally {
+        server.kill("SIGKILL")
+        await server.exited
+        await proxy.close()
+        await rm(home, { recursive: true, force: true })
+      }
+    }, 120_000)
   },
 )
