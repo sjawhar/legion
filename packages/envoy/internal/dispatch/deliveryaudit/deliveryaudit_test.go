@@ -35,7 +35,7 @@ func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 var commentColumns = []string{
 	"comment_id", "event_id", "owner", "created_at", "published_at", "author", "shape", "reopened",
 	"target", "target_kind", "owed_reasons", "addressed", "mention_state", "mention_error",
-	"route_used", "claim_used", "route_source",
+	"route_used", "claim_used", "route_source", "mention_envelope_id", "mention_delivery",
 }
 
 // recorder is the outbox's NATS boundary: it accepts every envelope and records each topic under
@@ -62,8 +62,12 @@ func (r *recorder) sent(eventID string) []string {
 	return slices.Clone(r.topics[eventID])
 }
 
-// rig is a Dispatch API server on its own database, with a stand-in Envoy listener that knows one
-// live session, s-mention, and refuses every send to it.
+// heardEnvelope is the envelope id the stand-in listener mints for every send to s-heard.
+const heardEnvelope = "envelope-heard-1"
+
+// rig is a Dispatch API server on its own database, with a stand-in Envoy listener that knows two
+// live sessions: s-mention, every send to which it refuses, and s-heard, every send to which it
+// accepts under heardEnvelope.
 type rig struct {
 	handler   http.Handler
 	database  *store.Store
@@ -75,13 +79,23 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	const mentioned = `{"session_id":"s-mention","title":"mentioned","capabilities":["btw","steer"]}`
+	const heard = `{"session_id":"s-heard","title":"heard","capabilities":["btw","steer"]}`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s-mention":
 			_, _ = w.Write([]byte(mentioned))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s-heard":
+			_, _ = w.Write([]byte(heard))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte("[" + mentioned + "]"))
+			_, _ = w.Write([]byte("[" + mentioned + "," + heard + "]"))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var send struct {
+				TargetSession string `json:"target_session"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&send); err == nil && send.TargetSession == "s-heard" {
+				_, _ = w.Write([]byte(`{"event_id":"` + heardEnvelope + `","recipient":"s-heard","duplicate":false}`))
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"the session's pane is gone"}`))
 		default:
@@ -392,6 +406,17 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		"body": "Which Friday?", "anchor": map[string]any{"artifact": document, "quote": "on Friday"},
 	})
 
+	// (h) A person's reply on an ask's thread that mentions a live session by BTW, which the
+	// listener accepts.
+	heardIssue, _ := createIssue(t, r, "BET", "Heard", "A heard mention.\n")
+	heardAsk := r.call(t, http.MethodPost, "/api/v1/issues/"+heardIssue+"/asks", "", "s-heard-asker", map[string]any{
+		"question": "Which zone?",
+	}, http.StatusCreated)["id"].(string)
+	heardReply := r.comment(t, "/api/v1/issues/"+heardIssue+"/comments", "alice", "", map[string]any{
+		"body": "Ask s-heard.", "ask_id": heardAsk,
+		"mentions": []map[string]any{{"target": "session:s-heard"}}, "delivery": "btw",
+	})
+
 	r.publishAll(t)
 
 	// After the publish: a follower who joins the ask now was not following when the reply went
@@ -425,6 +450,7 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 			"owner": threadIssue, "shape": "reply", "reopened": "true", "target_kind": "session",
 			"owed_reasons": "claimant", "route_used": "", "claim_used": "session:s-claimant",
 			"route_source": threadClaim, "mention_state": "", "mention_error": "",
+			"mention_envelope_id": "", "mention_delivery": "",
 		})
 		if row["event_id"] == "" || row["published_at"] == "" {
 			t.Errorf("the reply's row names no published event: %v", row)
@@ -439,16 +465,35 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		}
 	})
 
-	t.Run("a mention whose delivery failed carries the attempt's state and error", func(t *testing.T) {
+	t.Run("a mention whose delivery failed carries the attempt's state, error and mode", func(t *testing.T) {
 		row := targetRow(t, rows, mention, agent("s-mention"))
 		expect(t, row, map[string]string{
 			"shape": "conversation", "owed_reasons": "mention", "target_kind": "session",
-			"mention_state": "failed", "claim_used": "", "route_used": "",
+			"mention_state": "failed", "mention_delivery": "steer", "mention_envelope_id": "",
+			"claim_used": "", "route_used": "",
 		})
 		if row["mention_error"] == "" {
 			t.Errorf("the failed mention's row carries no error: %v", row)
 		}
 		r.expectAddressedAsRecorded(t, row)
+	})
+
+	t.Run("a sent mention carries the envelope the listener minted and the attempt's mode", func(t *testing.T) {
+		row := targetRow(t, rows, heardReply, agent("s-heard"))
+		expect(t, row, map[string]string{
+			"shape": "ask_thread", "owed_reasons": "mention", "target_kind": "session",
+			"mention_state": "sent", "mention_error": "", "mention_delivery": "btw",
+			"mention_envelope_id": heardEnvelope,
+		})
+		_, recorded := r.query(t, `
+			select envelope_id, delivery from comment_deliveries
+			where comment_id = $1 and target = 'session:s-heard' order by attempt desc limit 1
+		`, heardReply)
+		if len(recorded) != 1 || recorded[0]["envelope_id"] != row["mention_envelope_id"] || recorded[0]["delivery"] != row["mention_delivery"] {
+			t.Errorf("comment_deliveries = %v, want the row's envelope id and mode: %v", recorded, row)
+		}
+		asker := targetRow(t, rows, heardReply, agent("s-heard-asker"))
+		expect(t, asker, map[string]string{"owed_reasons": "asker;follower", "mention_state": "", "mention_envelope_id": "", "mention_delivery": ""})
 	})
 
 	t.Run("an ask-thread reply is owed to the asker and the followers as they stood when it was published", func(t *testing.T) {

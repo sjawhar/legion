@@ -84,6 +84,8 @@ The columns, in this order, are a contract that other scripts consume.
 | `route_used` | The issue's route at the time, as Dispatch stores it (`role:<name>` or `session:<id>`). Empty when the issue had no route, or when the comment is on no issue. |
 | `claim_used` | The issue's claimant at the time, as `<kind>:<id>`, such as `session:<id>` or `user:<login>`. Empty when the issue had no claim. |
 | `route_source` | Where `route_used` and `claim_used` were read. When both came from one `issue.*` event, this is that event's sequence number. When they came from different events, it is `<route seq>;claim=<claim seq>`. Either part is `issues-row` when no event carried that value and the `issues` row was read instead. Empty when the comment is on no issue. |
+| `mention_envelope_id` | The envelope id of the attempt that `mention_state` reads: the id the Envoy listener minted when it accepted the send. A receipt that carries no comment id can be tied to its comment through it. Empty when the attempt has none (it failed, it is pending, or the stream already held the message), or when `mention_state` is empty. |
+| `mention_delivery` | The delivery mode of the attempt that `mention_state` reads: `btw`, `aside` or `steer`. Empty when `mention_state` is empty. |
 
 A comment with no target has exactly one row, with `target` empty. Rows are ordered by
 `created_at`, then `comment_id`, then `target`.

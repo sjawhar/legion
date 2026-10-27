@@ -202,12 +202,14 @@ select s.id::text as comment_id,
            when not s.has_issue then ''
            when s.route_from = s.claim_from then s.route_from
            else s.route_from || ';claim=' || s.claim_from
-       end as route_source
+       end as route_source,
+       coalesce(delivery.envelope_id, '') as mention_envelope_id,
+       coalesce(delivery.delivery, '') as mention_delivery
 from state s
 left join targets t on t.comment_id = s.id
 -- The newest delivery attempt of the mention that resolved to this target session.
 left join lateral (
-    select cd.state, coalesce(cd.error, cd.resolve_error) as error
+    select cd.state, coalesce(cd.error, cd.resolve_error) as error, cd.envelope_id, cd.delivery
     from comment_deliveries cd
     where cd.comment_id = s.id
       and (
