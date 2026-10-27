@@ -24,7 +24,8 @@ const (
 	relatedTermLimit = 25
 	// relatedMatchBudget bounds the chosen terms' summed df, and with it how many rows their OR
 	// query can match and so its time: measured on production on 27 October 2026, 2,033 matches
-	// answered in 92 ms and 4,759 in 170 ms.
+	// answered in 92 ms and 4,759 in 170 ms. A word that would pass it is skipped, not the end of
+	// the pick: the rarer words scored below it still fit.
 	relatedMatchBudget = 3000
 	// relatedProbeLimit is the most lexemes absent from the statistics the picker counts live, by
 	// their frequency in the text. Each costs a bounded exists per kind; counting every lexeme of a
@@ -403,8 +404,9 @@ type relatedCandidate struct {
 // idf), where df is how many of the project's items hold it and N how many items the project
 // has. It keeps at most relatedTermLimit lexemes by score, ties by lower df then lexeme, and drops
 // a lexeme no other item holds (df 0), one in more than a tenth of the project (past
-// relatedCommonFloor), and numbers and hashes (relatedNoise); it stops adding once the summed df
-// would pass relatedMatchBudget. The excluded owner's items count toward no df.
+// relatedCommonFloor), and numbers and hashes (relatedNoise); a lexeme whose df would take the
+// summed df past relatedMatchBudget is skipped, and the next by score is weighed in its place. The
+// excluded owner's items count toward no df.
 //
 // df comes from the project's statistics (refreshSearchTermStats). A lexeme they do not hold, or
 // whose df the excluded owner's items bring to zero, is probed live, the relatedProbeLimit most
@@ -476,8 +478,11 @@ func (s *server) pickRelatedTerms(
 	quoted := make([]string, 0, relatedTermLimit)
 	matches := 0
 	for _, candidate := range candidates {
-		if len(picked.Terms) == relatedTermLimit || matches+candidate.DF > relatedMatchBudget {
+		if len(picked.Terms) == relatedTermLimit {
 			break
+		}
+		if matches+candidate.DF > relatedMatchBudget {
+			continue
 		}
 		matches += candidate.DF
 		picked.Terms = append(picked.Terms, candidate.relatedTerm)

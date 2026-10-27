@@ -881,18 +881,19 @@ takes `artifacts`' lock for the length of the migration, and the alter waits for
 Migration `0130_related_checks` adds three tables for the related-item check, which INFRA-568 makes
 search by meaning first and by the project's rarest words. `related_checks` holds one row per
 check of an issue, an ask or a decision block a document edit adds, written by the check itself
-once it has answered (a check that ran out of time included; the no-write related route records
-nothing): its project and source, the actor, the outcome (`found`, `none` or `not_made`), how it
-searched (`meaning_and_keywords` or `keywords_only`, none when not made), the reason it was not
-made or searched by keywords alone, the lexemes it searched for, its keyword, meaning and total
-milliseconds and how many items it listed. `search_term_stats` (how many of a project's searchable
-items hold each lexeme) and `search_term_totals` (how many searchable items the project has, and
-when they were counted) are the statistics the check picks its keywords from; the term-statistics
-refresh, also added by INFRA-568, rebuilds a project's rows at boot and every 10 minutes, and the
-check only reads them. Every row names its project with `on delete cascade`, and a check's row
-also cascades from its issue, document or ask. The tables are new, so the migration rewrites and
-refuses no row and its census answers `0`; its foreign keys take the referenced tables' locks for
-milliseconds, as `0070`'s did.
+once it has answered (a check that ran out of time, or whose request ended first, included; the
+no-write related route records nothing): its project and source, the actor, the outcome (`found`,
+`none` or `not_made`), how it searched (`meaning_and_keywords` or `keywords_only`, none when not
+made), the reason it was not made (`timeout` for the check's own allowance running out, apart from
+`cancelled` for its request ending first) or searched by keywords alone, the lexemes it searched
+for, its keyword, meaning and total milliseconds and how many items it listed. `search_term_stats`
+(how many of a project's searchable items hold each lexeme) and `search_term_totals` (how many
+searchable items the project has, and when they were counted) are the statistics the check picks
+its keywords from; the term-statistics refresh, also added by INFRA-568, rebuilds a project's rows
+at boot and every 10 minutes, and the check only reads them. Every row names its project with `on
+delete cascade`, and a check's row also cascades from its issue, document or ask. The tables are
+new, so the migration rewrites and refuses no row and its census answers `0`; its foreign keys
+take the referenced tables' locks for milliseconds, as `0070`'s did.
 
 Migration `0131_issue_embedding_spec` makes an issue's meaning-search text its title and its spec:
 `issue_embedding_text(title, spec)` is the title, a blank line and the markdown of the latest
@@ -1253,18 +1254,19 @@ made. It searches the write's own project in two stages started together:
   scored by its count in the text times its idf, BM25's `ln(1 + (N − df + 0.5)/(df + 0.5))`, where
   df is how many of the project's searchable items hold it and N how many items the project has.
   At most 25 are kept, highest score first; a lexeme no other item holds, one held by more than a
-  tenth of the project's items and more than 10, a number and a hash are dropped, and words stop
-  being added once their summed df would pass 3,000, which bounds how many rows the OR of them
-  matches and so its time. The query's keyword arms are ranked by idf-weighted coordination, the
-  sum of the idf of the chosen words an item holds plus a thousandth of `ts_rank_cd` to order
-  items holding the same words, where search ranks them by `ts_rank_cd` alone, so an item holding
-  three of the text's rare words outranks one repeating one of them. The rest of the query, the
-  per-kind lists and their fusion, is search's own.
+  tenth of the project's items and more than 10, a number and a hash are dropped, and a word whose
+  df would take the chosen words' summed df past 3,000 is skipped for the next by score, which
+  bounds how many rows the OR of them matches and so its time. The query's keyword arms are
+  ranked by idf-weighted coordination, the sum of the idf of the chosen words an item holds plus a
+  thousandth of `ts_rank_cd` to order items holding the same words, where search ranks them by
+  `ts_rank_cd` alone, so an item holding three of the text's rare words outranks one repeating one
+  of them. The rest of the query, the per-kind lists and their fusion, is search's own.
 - Stage 2, when an embedder is configured, embeds the text and runs search's meaning query, which
   fuses the same keyword arms with the nearest vectors. If it answers within 3 s of the check's
   start, its result is the check's (searched by meaning and keywords); otherwise stage 1's is
   (searched by keywords only, with the reason). If stage 1 has not answered when the 5 s end, the
-  check was not made.
+  check was not made, for time (reason `timeout`); if the request that ran it ends first, it was
+  not made, cancelled (reason `cancelled`), which says nothing of the search's time.
 
 df and N come from `search_term_stats` and `search_term_totals` (`0130`), which the term-statistics
 refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) rebuilds for every project at
@@ -1277,20 +1279,21 @@ one `{block_id, question, suggestions}` per block in document order), always say
 did. `outcome` is `found`, `none` or `not_made`; `search` is `meaning_and_keywords` or
 `keywords_only`, with `search_note` saying why keywords only, and is absent when the check was not
 made; `missing` is the reason exactly when it was not made (the text holds no word to search for,
-the search behind it did not answer within 5s, the search behind it failed, …), so a client built
-before `outcome` still says so; and `search_query` is two or three of the words it used, spelled
-as the title spells them, for a reader's own `dispatch search`. `related` holds the three items
-most like what was filed, one per issue or document, each ask item carrying `ask`, where it stands
-(`open`; `answered`, with its latest answer, who gave it, when and the options chosen; or
-`resolved`, with the resolution and the last answer a person gave before it, if any); `decision`
-names an already-answered ask that may settle the same question, with who answered and when. An
-issue create forced past the title-overlap refusal also names those issues in `title_matches`. The
-search leaves out everything the write's owner holds — the new issue and its spec, or the issue or
-project document an ask or a block sits on and everything inside it — so nothing is ever suggested
-that the writer already has. A hit on an issue that is `done` ranks below every hit on an open
-owner, since keyword search otherwise puts an issue already closed as a duplicate above the open
-issue it was closed into. `GET` and `POST /api/v1/projects/{key}/related` (`dispatch related`) run
-the same check on a title and a text and write nothing.
+the search behind it did not answer within 5s, the request that ran it ended before the check
+finished, the search behind it failed, …), so a client built before `outcome` still says so; and
+`search_query` is two or three of the words it used, spelled as the title spells them, for a
+reader's own `dispatch search`. `related` holds the three items most like what was filed, one per
+issue or document, each ask item carrying `ask`, where it stands (`open`; `answered`, with its
+latest answer, who gave it, when and the options chosen; or `resolved`, with the resolution and the
+last answer a person gave before it, if any); `decision` names an already-answered ask that may
+settle the same question, with who answered and when. An issue create forced past the
+title-overlap refusal also names those issues in `title_matches`. The search leaves out everything
+the write's owner holds — the new issue and its spec, or the issue or project document an ask or a
+block sits on and everything inside it — so nothing is ever suggested that the writer already has.
+A hit on an issue that is `done` ranks below every hit on an open owner, since keyword search
+otherwise puts an issue already closed as a duplicate above the open issue it was closed into.
+`GET` and `POST /api/v1/projects/{key}/related` (`dispatch related`) run the same check on a title
+and a text and write nothing.
 
 Every check of a write is recorded in `related_checks` (`0130`): its outcome, how it searched, the
 reason, the words, and its keyword, meaning and total milliseconds. `GET /api/v1/related-checks`

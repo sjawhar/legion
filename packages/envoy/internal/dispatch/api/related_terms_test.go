@@ -240,9 +240,9 @@ func TestRelatedTermsProbeAProjectWithNoStatisticsAndStartItsRefresh(t *testing.
 	}
 }
 
-// The pick stops adding terms once their summed df would pass relatedMatchBudget, which bounds
-// the rows the keyword query matches.
-func TestRelatedTermsStopAtTheMatchBudget(t *testing.T) {
+// The pick leaves out a term whose df would take the summed df past relatedMatchBudget, which
+// bounds the rows the keyword query matches.
+func TestRelatedTermsHoldToTheMatchBudget(t *testing.T) {
 	handler, database, srv := relatedTermsServer(t)
 	createSuggestionProject(t, handler, "BUDGET")
 	// Statistics of a project far larger than a test seeds: 100,000 items, so no df below is too
@@ -260,6 +260,69 @@ func TestRelatedTermsStopAtTheMatchBudget(t *testing.T) {
 	}
 	if picked.Terms[0].Surface != "charlie" {
 		t.Fatalf("charli's surface = %q, want the text's own 'charlie'", picked.Terms[0].Surface)
+	}
+}
+
+// seedTermStats writes a project's statistics directly: items as its N, and each lexeme's df.
+func seedTermStats(t *testing.T, database *store.Store, project string, items int, df map[string]int) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx,
+		`insert into search_term_totals (project_key, items, refreshed_at) values ($1, $2, now())`, project, items); err != nil {
+		t.Fatalf("seed %s's totals: %v", project, err)
+	}
+	for lexeme, ndoc := range df {
+		if _, err := database.Pool.Exec(ctx,
+			`insert into search_term_stats (project_key, lexeme, ndoc) values ($1, $2, $3)`, project, lexeme, ndoc); err != nil {
+			t.Fatalf("seed %s's df of %q: %v", project, lexeme, err)
+		}
+	}
+}
+
+// summedDF is the df the chosen terms add up to, which relatedMatchBudget bounds.
+func summedDF(picked relatedTerms) int {
+	sum := 0
+	for _, term := range picked.Terms {
+		sum += term.DF
+	}
+	return sum
+}
+
+// A word the budget has no room for is skipped, not the end of the pick: two mid-df words a text
+// repeats outrank two rare words it names once, and once the first is chosen the second would pass
+// the budget, yet the rare words scored below it still fit and are chosen.
+func TestRelatedTermsSkipAWordPastTheMatchBudgetAndKeepTheRarerOnes(t *testing.T) {
+	handler, database, srv := relatedTermsServer(t)
+	createSuggestionProject(t, handler, "SKIP")
+	// 20,000 items: a tenth is 2,000, so none of these is too common.
+	seedTermStats(t, database, "SKIP", 20000, map[string]int{"deploy": 1800, "rollout": 1500, "quokka": 1, "xanthan": 2})
+
+	text := "Quokka xanthan" + strings.Repeat(" deploy", 30) + strings.Repeat(" rollout", 20)
+	picked := pickTerms(t, srv, "SKIP", text, relatedExclusion{})
+	if got, want := termLexemes(picked), []string{"deploy", "quokka", "xanthan"}; !slices.Equal(got, want) {
+		t.Fatalf("picked %v, want %v: rollout (df 1,500) after deploy (1,800) passes 3,000 and is skipped", got, want)
+	}
+	if sum := summedDF(picked); sum > relatedMatchBudget {
+		t.Fatalf("chosen terms' summed df = %d, past the budget %d", sum, relatedMatchBudget)
+	}
+}
+
+// In a project where a tenth of the items is past the budget, one allowed word can pass it alone;
+// scoring first, it is skipped and the rare words are still chosen, where stopping at it chose
+// nothing.
+func TestRelatedTermsSkipASingleWordPastTheMatchBudget(t *testing.T) {
+	handler, database, srv := relatedTermsServer(t)
+	createSuggestionProject(t, handler, "LONE")
+	// 100,000 items: a tenth is 10,000, so a df of 5,000 is not too common but passes 3,000.
+	seedTermStats(t, database, "LONE", 100000, map[string]int{"alpha": 5000, "quokka": 1, "xanthan": 2})
+
+	text := "Quokka xanthan" + strings.Repeat(" alpha", 50)
+	picked := pickTerms(t, srv, "LONE", text, relatedExclusion{})
+	if got, want := termLexemes(picked), []string{"quokka", "xanthan"}; !slices.Equal(got, want) {
+		t.Fatalf("picked %v, want %v: alpha (df 5,000) passes the budget alone and is skipped", got, want)
+	}
+	if picked.TSQuery != "'quokka' | 'xanthan'" {
+		t.Fatalf("tsquery = %q, want the two rare words ORed", picked.TSQuery)
 	}
 }
 

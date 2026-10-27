@@ -275,7 +275,8 @@ func sameTiming(got, want model.RelatedCheckTiming) bool {
 
 // The records route counts the checks in its window by source kind, outcome, search mode and
 // reason, and summarizes the keyword and total times; from is inclusive, to exclusive, and the
-// project and source kind filters narrow it.
+// project and source kind filters narrow it. A check whose request ended first (cancelled) is
+// neither completed nor skipped for time.
 func TestRelatedChecksRouteCountsAndPercentilesOverTheWindow(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "REC")
@@ -296,6 +297,7 @@ func TestRelatedChecksRouteCountsAndPercentilesOverTheWindow(t *testing.T) {
 		{"REC", issue, "ask", "not_made", "", "timeout", nil, 5000, hour(4)},
 		{"REC", issue, "decision_block", "not_made", "", "blank_text", nil, 1, hour(5)},
 		{"RECB", other, "issue", "found", "keywords_only", "no_embedder", new(50), 60, hour(1)},
+		{"RECB", other, "issue", "not_made", "", "cancelled", nil, 900, hour(6)},
 		{"REC", issue, "issue", "found", "keywords_only", "no_embedder", new(400), 500, hour(30)},
 	})
 	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
@@ -328,11 +330,11 @@ func TestRelatedChecksRouteCountsAndPercentilesOverTheWindow(t *testing.T) {
 		params url.Values
 		total  int
 	}{
-		{"every project, every time", url.Values{}, 7},
+		{"every project, every time", url.Values{}, 8},
 		{"to is exclusive", url.Values{"project": {"REC"}, "from": {stamp(start)}, "to": {stamp(hour(3))}}, 2},
 		{"from is inclusive, every project", url.Values{"from": {stamp(hour(1))}, "to": {stamp(hour(2))}}, 2},
 		{"from alone", url.Values{"from": {stamp(hour(24))}}, 1},
-		{"one other project", url.Values{"project": {"RECB"}}, 1},
+		{"one other project", url.Values{"project": {"RECB"}}, 2},
 	} {
 		if report, _ := getRelatedChecks(t, handler, filter.params); report.Total != filter.total {
 			t.Errorf("%s (%v): total %d, want %d", filter.name, filter.params, report.Total, filter.total)
@@ -343,6 +345,13 @@ func TestRelatedChecksRouteCountsAndPercentilesOverTheWindow(t *testing.T) {
 	if asks.SourceKind == nil || *asks.SourceKind != "ask" || asks.Total != 2 || asks.Completed != 1 || asks.SkippedForTime != 1 ||
 		!sameTiming(asks.KeywordMS, timingOf(1, 350, 350, 350, 1)) || !sameTiming(asks.TotalMS, timingOf(2, 3100, 5000, 5000, 2)) {
 		t.Fatalf("ask checks = %+v, want the two ask checks", asks)
+	}
+
+	cancelled, _ := getRelatedChecks(t, handler, url.Values{"project": {"RECB"}})
+	if cancelled.Total != 2 || cancelled.Completed != 1 || cancelled.SkippedForTime != 0 ||
+		fmt.Sprint(cancelled.ByReason) != fmt.Sprint(map[string]int{"no_embedder": 1, "cancelled": 1}) {
+		t.Fatalf("RECB checks = total %d completed %d skipped %d reasons %v, want 2, 1, 0 and the cancelled check under by_reason alone",
+			cancelled.Total, cancelled.Completed, cancelled.SkippedForTime, cancelled.ByReason)
 	}
 
 	none, body := getRelatedChecks(t, handler, url.Values{"project": {"NOPE"}})

@@ -349,6 +349,76 @@ func TestRelatedCheckBoundsPastTheAllowanceIsNotMadeAndRecorded(t *testing.T) {
 	}
 }
 
+// A check whose request goes away while its keyword stage is held, long before its allowance
+// ends, is not made because the request ended, and is recorded as cancelled: it did not run out of
+// time, so the records route must not count it as skipped for time.
+func TestRelatedCheckBoundsARequestThatEndsFirstIsRecordedCancelled(t *testing.T) {
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "GONE")
+	createSearchIssue(t, handler, "GONE", "Quarterly zymurgy ledger drifts", "")
+	source := createSearchIssue(t, handler, "GONE", "Zymurgy ledger totals drift", "")
+	// The creates' own checks may have started a refresh of the statistics; wait it out and
+	// refresh them here, so the check below starts none and its pick is the one waiter on the lock.
+	awaitTermStatsRefresh(t, served, "GONE")
+	refreshTermStats(t, database, "GONE")
+	srv := directServer(deps)
+	srv.suggestionTimeout = time.Minute
+
+	lockTx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(context.Background(), "lock table search_term_stats in access exclusive mode"); err != nil {
+		t.Fatalf("lock search_term_stats: %v", err)
+	}
+	request, endRequest := context.WithCancel(context.Background())
+	defer endRequest()
+	answered := make(chan *model.Suggestions, 1)
+	go func() {
+		answered <- srv.relatedCheck(request, relatedInput{
+			project: "GONE", text: "Zymurgy ledger totals drift",
+			source: suggestionSource{kind: "issue", issueKey: source, actor: model.Actor{Kind: "user", ID: "alice"}},
+			record: true,
+		})
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var waiting int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_locks where relation = 'search_term_stats'::regclass and not granted
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waits: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the check's pick never waited on the term statistics")
+		}
+	}
+	endRequest()
+	var suggestions *model.Suggestions
+	select {
+	case suggestions = <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check did not answer within 10s of its request ending")
+	}
+	if err := lockTx.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the request that ran it ended before the check finished" {
+		t.Errorf("suggestions = %+v, want not made, the request having ended first", suggestions)
+	}
+	rows := readRelatedCheckRows(t, database, "source_issue_key = $1 and outcome = 'not_made'", source)
+	if len(rows) != 1 || deref(rows[0].Reason) != "cancelled" {
+		reasons := make([]string, len(rows))
+		for index, row := range rows {
+			reasons[index] = deref(row.Reason)
+		}
+		t.Fatalf("not-made related_checks rows for %s have reasons %q, want one cancelled", source, reasons)
+	}
+}
+
 // A migration's lock on asks holds the check past its allowance and then holds its record too,
 // since related_checks' insert locks every table its foreign keys name even where the key is null.
 // When the record's second runs out, pgx cancels its statement, so the row is lost unless it is

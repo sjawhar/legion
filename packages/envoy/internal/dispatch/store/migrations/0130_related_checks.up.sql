@@ -31,13 +31,15 @@ create table related_checks (
   -- did neither to the end, so it has no search.
   search text check (search in ('meaning_and_keywords', 'keywords_only')),
   check ((outcome = 'not_made') = (search is null)),
-  -- Why a check was not made (blank_text, timeout, search_failed, too_many_blocks,
+  -- Why a check was not made (blank_text, timeout, cancelled, search_failed, too_many_blocks,
   -- already_exists, project_unresolved), or why a check that was made searched by keywords alone
   -- (no_embedder, meaning_timeout, embed_failed, meaning_failed, keywords_only_requested). Null
-  -- for a check that searched by meaning and keywords.
+  -- for a check that searched by meaning and keywords. timeout is the check's own allowance
+  -- running out; cancelled is the request that ran it ending first.
   reason text check (reason in (
-    'blank_text', 'timeout', 'search_failed', 'too_many_blocks', 'already_exists', 'project_unresolved',
-    'no_embedder', 'meaning_timeout', 'embed_failed', 'meaning_failed', 'keywords_only_requested'
+    'blank_text', 'timeout', 'cancelled', 'search_failed', 'too_many_blocks', 'already_exists',
+    'project_unresolved', 'no_embedder', 'meaning_timeout', 'embed_failed', 'meaning_failed',
+    'keywords_only_requested'
   )),
   -- The lexemes the keyword search used, in the order it chose them.
   terms text[] not null default '{}',

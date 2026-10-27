@@ -179,7 +179,8 @@ func TestCreateAskSuggestsAnsweredPastDecision(t *testing.T) {
 // TestRelatedCheckReportsNotMadeWhenItsContextIsDone: the write succeeds whatever its check does,
 // and a check that could not search says it was not made and why. The check runs after the
 // write already committed, so this calls it directly with an already-expired context rather than
-// contriving a genuinely slow query.
+// contriving a genuinely slow query. That context is the caller's, not the check's allowance, so
+// the check says the request ended first rather than that the search ran out of time.
 func TestRelatedCheckReportsNotMadeWhenItsContextIsDone(t *testing.T) {
 	_, _, deps := newTestServer(t, testServerOptions{})
 	srv := directServer(deps)
@@ -192,8 +193,8 @@ func TestRelatedCheckReportsNotMadeWhenItsContextIsDone(t *testing.T) {
 		project: "ANY", text: "a title that would otherwise search",
 		source: suggestionSource{kind: "issue", issueKey: "ANY-1"},
 	})
-	if suggestions.Outcome != "not_made" || suggestions.Missing != "the search behind it did not answer within 5s" || suggestions.Search != "" {
-		t.Fatalf("suggestions = %+v, want not_made with the timeout as missing and no search when the context is already done", suggestions)
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the request that ran it ended before the check finished" || suggestions.Search != "" {
+		t.Fatalf("suggestions = %+v, want not_made with the request's end as missing and no search when the context is already done", suggestions)
 	}
 	if len(suggestions.Related) != 0 || suggestions.Decision != nil {
 		t.Fatalf("suggestions = %+v, want nothing related or decided when search could not run", suggestions)

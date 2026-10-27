@@ -137,6 +137,7 @@ const (
 const (
 	relatedReasonBlankText         = "blank_text"
 	relatedReasonTimeout           = "timeout"
+	relatedReasonCancelled         = "cancelled"
 	relatedReasonSearchFailed      = "search_failed"
 	relatedReasonAlreadyExists     = "already_exists"
 	relatedReasonProjectUnresolved = "project_unresolved"
@@ -152,7 +153,15 @@ const (
 const (
 	relatedBlankTextMissing    = "the text holds no word to search for"
 	relatedSearchFailedMissing = "the search behind it failed"
+	relatedCancelledMissing    = "the request that ran it ended before the check finished"
 )
+
+// errRelatedAllowanceEnded is the cause a check's allowance context ends with when its own
+// deadline fires. A check whose context ended with any other cause stopped because the request
+// that ran it went away, which says nothing of how long the search takes, so it is recorded as
+// cancelled rather than timeout (GET /api/v1/related-checks counts only timeout as skipped for
+// time).
+var errRelatedAllowanceEnded = errors.New("the related-item check's allowance ended")
 
 // relatedAllowance is the deadline the whole check runs under: relatedCheckAllowance on every
 // server the deployment builds, since register sets no suggestionTimeout, and whatever a test set
@@ -208,7 +217,7 @@ func (s *server) decisionBlockChecks(
 	if len(blocks) == 0 {
 		return nil
 	}
-	bounded, cancel := context.WithTimeout(ctx, s.relatedAllowance())
+	bounded, cancel := context.WithTimeoutCause(ctx, s.relatedAllowance(), errRelatedAllowanceEnded)
 	defer cancel()
 	checks := make([]decisionBlockCheck, len(blocks))
 	var overflow []relatedCheckRecord
@@ -349,7 +358,8 @@ type relatedPick struct {
 // embedding followed by stage 2, search's meaning query, which fuses the same keyword arms with
 // the nearest vectors. Stage 2's answer within relatedMeaningAllowance is the result, searched by
 // meaning and keywords; otherwise stage 1's is, searched by keywords only, with the reason. If
-// stage 1 has not answered when the allowance ends, the check was not made.
+// stage 1 has not answered when the allowance ends, the check was not made, for time; if the
+// request that ran it goes away first, it was not made, cancelled.
 //
 // The source's own items are left out, each owner keeps its best-ranked item, open owners come
 // before done issues, and the best three are Related; the decision is the first answered ask in
@@ -371,7 +381,7 @@ func (s *server) runRelatedCheck(
 	ctx context.Context, input relatedInput, started time.Time,
 ) (*model.Suggestions, relatedRecord) {
 	allowance := s.relatedAllowance()
-	bounded, cancel := context.WithTimeout(ctx, allowance)
+	bounded, cancel := context.WithTimeoutCause(ctx, allowance, errRelatedAllowanceEnded)
 	defer cancel()
 	record := relatedRecord{project: input.project, terms: []string{}}
 	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
@@ -381,12 +391,26 @@ func (s *server) runRelatedCheck(
 		return suggestions, record
 	}
 	timedOut := "the search behind it did not answer within " + allowance.String()
-	// searchFailed answers a stage 1 read that failed: timed out when the allowance had ended by
-	// then, failed otherwise.
+	// callerGone reports a check stopped by its request going away, not by the allowance: a
+	// decision block's checks run under the edit's one allowance, which ends theirs with the same
+	// cause as their own.
+	callerGone := func() bool {
+		return bounded.Err() != nil && !errors.Is(context.Cause(bounded), errRelatedAllowanceEnded)
+	}
+	// ended answers a check whose allowance context is done: timed out (missing says what did not
+	// answer) when the allowance ran out, cancelled when the request went away first.
+	ended := func(missing string) (*model.Suggestions, relatedRecord) {
+		if callerGone() {
+			return notMade(relatedReasonCancelled, relatedCancelledMissing)
+		}
+		return notMade(relatedReasonTimeout, missing)
+	}
+	// searchFailed answers a stage 1 read that failed: ended when the allowance context was done
+	// by then, failed otherwise.
 	searchFailed := func(err error) (*model.Suggestions, relatedRecord) {
 		slog.Warn("dispatch: related-item check not made", "error", err)
 		if bounded.Err() != nil {
-			return notMade(relatedReasonTimeout, timedOut)
+			return ended(timedOut)
 		}
 		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
 	}
@@ -396,7 +420,7 @@ func (s *server) runRelatedCheck(
 		switch {
 		case err != nil && bounded.Err() != nil:
 			slog.Warn("dispatch: related-item check not made", "error", err)
-			return notMade(relatedReasonTimeout, "the project lookup behind it did not answer within "+allowance.String())
+			return ended("the project lookup behind it did not answer within " + allowance.String())
 		case err != nil:
 			slog.Warn("dispatch: related-item check not made", "error", err)
 			return notMade(relatedReasonProjectUnresolved, "the project behind it could not be resolved")
@@ -473,7 +497,7 @@ func (s *server) runRelatedCheck(
 	select {
 	case <-pick.ready:
 	case <-bounded.Done():
-		return notMade(relatedReasonTimeout, timedOut)
+		return ended(timedOut)
 	}
 	if pick.err != nil {
 		return searchFailed(pick.err)
@@ -502,6 +526,11 @@ func (s *server) runRelatedCheck(
 			reason = relatedReasonMeaningTimeout
 		}
 	}
+	// A meaning stage cut short by the request going away did not time out, and nobody waits on
+	// the keyword stage's answer.
+	if callerGone() {
+		return ended(timedOut)
+	}
 	if answered {
 		suggestions.Search = relatedMeaningAndKeywords
 		// Stage 1's time is recorded when it has answered by now; it is not waited for.
@@ -519,7 +548,7 @@ func (s *server) runRelatedCheck(
 			}
 			answer = stage
 		case <-bounded.Done():
-			return notMade(relatedReasonTimeout, timedOut)
+			return ended(timedOut)
 		}
 		suggestions.Search = relatedKeywordsOnly
 		suggestions.SearchNote = relatedKeywordsOnlyNote(reason, meaningAllowance)
