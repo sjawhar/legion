@@ -2,31 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-583",
-  "completed": "2026-10-27T08:39:30Z",
-  "round": "review round 1: answers the changes requested at b77feab1 (code head 9ec4eb64)",
+  "completed": "2026-10-27T09:05:00Z",
+  "round": "review round 2: answers the changes requested at 73b32603 (code head c53d0f10)",
   "proof": [
     {
-      "criterion": "Review finding 2 and the anchor de-duplication: the five filters, as GitHub's pinned action reads them, start the right jobs; packages/envoy/listenfd starts the jobs whose closure #2229 puts it in; nested anchors flatten",
-      "surface": "the pinned action's own code, dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d dist/index.js on node 24, base: HEAD in a scratch git repository under $TMPDIR, filters block extracted from .github/workflows/envoy-and-contracts.yaml at c53d0f10",
-      "command": "for each probe file: modify it, run `env GITHUB_EVENT_NAME=push GITHUB_EVENT_PATH=event.json GITHUB_OUTPUT=<f> INPUT_BASE=HEAD INPUT_FILTERS=\"$(cat wf-filters4.yaml)\" INPUT_LIST-FILES=none INPUT_PREDICATE-QUANTIFIER=some node dist/index.js`, read its 'Changes output set to' line",
-      "observed": "internal/pglisten/listener.go -> envoy_infra_go, envoy_go_race, dispatch_memory, dispatch_multiprocess, broker_multiprocess (dispatch_memory and dispatch_multiprocess reach pglisten only through dispatch_command_tests -> *dispatch_server); listenfd/listenfd.go -> envoy_infra_go, envoy_go_race, dispatch_memory, dispatch_multiprocess; contracts/src/index.ts and skills/dispatch/SKILL.md -> none of the five; .bun-version -> envoy_go_race only (bun_install -> *bun_toolchain); internal/pgmigrate/scan.go -> all five. picomatch over all 5,397 repository paths plus two listenfd probes, 8072b2b5's filters vs c53d0f10's: differences only on the listenfd probes (dispatch_memory 2, dispatch_multiprocess 2, envoy_infra_go 2, broker_multiprocess 0, envoy_go_race 0).",
-      "headSha": "c53d0f10bc79282bd46bd005b8a41675a4793b18",
-      "negativeControl": "the same filters with dispatch_command_tests' `- *dispatch_server` renamed to an undefined anchor: the pinned action exits 1 and sets no output"
+      "criterion": "Review round 2 finding: the Critical conventions bullet no longer claims envoy-go backs up envoy-infra-go; the filters still start the right jobs at this head",
+      "surface": "the pinned action's own code, dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d dist/index.js on node 24 (base: HEAD in a scratch git repository under $TMPDIR), on the filters block extracted from .github/workflows/envoy-and-contracts.yaml at 44308a09; plus the workflow's own envoy-go and envoy-infra-go steps",
+      "command": "per probe file: modify it, run `env GITHUB_EVENT_NAME=push GITHUB_EVENT_PATH=event.json GITHUB_OUTPUT=<f> INPUT_BASE=HEAD INPUT_FILTERS=\"$(cat wf-filters5.yaml)\" INPUT_LIST-FILES=none INPUT_PREDICATE-QUANTIFIER=some node dist/index.js`; read 'Changes output set to'. grep -n 'go test' .github/workflows/envoy-and-contracts.yaml",
+      "observed": "packages/envoy/infra/core/core.go -> envoy_infra_go, envoy_go_race, envoy: envoy-go starts, but its unit step is `go list ./... | grep -v /integration | xargs go test` in packages/envoy (line 1045) and packages/envoy/infra is its own module (infra/go.mod, infra/go.work), so infra's `go test ./...` (line 1138) runs only in envoy-infra-go, as the corrected bullet says. Other probes as round 1: internal/pglisten -> all five; listenfd -> envoy_infra_go, envoy_go_race, dispatch_memory, dispatch_multiprocess; contracts/src and skills/dispatch -> none of the five; .bun-version -> envoy_go_race only; internal/pgmigrate -> all five. Filter patterns (comments stripped) are byte-identical to c53d0f10's; coverage at this head: 932/731/215/1378/901 files, 0 unmatched.",
+      "headSha": "44308a09567fb58ae1aa3c9c276dd92c8f291264",
+      "negativeControl": "the same filters with dispatch_command_tests' `- *dispatch_server` renamed to an undefined anchor: the pinned action exits 1 and sets no output (round 1, same patterns)"
     },
     {
-      "criterion": "AC1 at the round's head: each job's filter names every file the job reads",
-      "surface": "edited workflow's filters vs go list -deps -test closures of each job's command in the issue pod",
-      "command": "plan.md Appendix B go list commands, then bun $TMPDIR/infra583/js/cover.ts on the filters block of c53d0f10",
-      "observed": "dispatch_memory 932 files, dispatch_multiprocess 731, broker_multiprocess 215, envoy_go_race 1378, envoy_infra_go 901: 0 unmatched each, exit 0; AC2 probe paths start none of the five",
-      "headSha": "c53d0f10bc79282bd46bd005b8a41675a4793b18",
-      "negativeControl": "rds-global-bundle.pem and internal/testnats/* removed from the filters: broker_multiprocess 1 unmatched, dispatch_multiprocess 6, envoy_infra_go 6, exit 1"
-    },
-    {
-      "criterion": "AC2 (first round, unchanged by this round's filter sets): contracts/src or skills/dispatch* starts none of the five; a closure package starts each",
+      "criterion": "AC2 (first round; filter patterns unchanged since): contracts/src or skills/dispatch* starts none of the five; a closure package starts each",
       "surface": "GitHub Actions, scratch PRs #2326 and #2327 based on legion/INFRA-583",
       "command": "gh api repos/sjawhar/legion/commits/<scratch head>/check-runs (run 40447824879 attempt 1; run 40447830920)",
-      "observed": "#2326: the five skipped; #2327: the five ran and ended success. This round's de-duplication changes no path any filter matches (picomatch comparison above), so the result carries to c53d0f10.",
-      "headSha": "c53d0f10bc79282bd46bd005b8a41675a4793b18",
+      "observed": "#2326: the five skipped; #2327: the five ran and ended success. No filter path changed in a way that alters a match except the listenfd addition (round 1 picomatch comparison).",
+      "headSha": "44308a09567fb58ae1aa3c9c276dd92c8f291264",
       "negativeControl": "#2327 (a comment in internal/pgmigrate) starts all five, so #2326's skips come from the filters"
     }
   ],
@@ -37,12 +29,10 @@
     "packages/envoy/infra/AGENTS.md"
   ],
   "trickyParts": [
-    "dispatch_memory now reaches dispatch_server through two anchor levels (dispatch_memory -> dispatch_command_tests -> dispatch_server); the pinned action flattens it (proof 1).",
-    "packages/envoy/listenfd does not exist on this branch yet; its pattern matches nothing until #2229 merges, so the merge order of #2229 and #2325 no longer matters for the filters (INFRA-253's and INFRA-520's implementers told on Envoy)."
+    "This round changes only prose and one workflow comment; the filter patterns are byte-identical to c53d0f10's with comments stripped."
   ],
   "deviations": [
-    "Finding 2 handled by adding packages/envoy/listenfd/* to dispatch_server and listener_command now rather than leaving it to whichever PR merges second; the risk line records that #2229's conflict resolution must keep the lines.",
-    "Scratch PR #2386 (a comment in internal/pglisten) was closed with its run cancelled before it started, with over 200 runs queued; the pinned action's own code run in the pod is this round's proof."
+    "Fast-follow done in this round: the keep-current rule is written once (packages/envoy/AGENTS.md Critical conventions); the Dispatch and envoy-infra guides point to it, and the listenfd note names infra/host/heldportwrapper."
   ],
   "openQuestions": []
 }
