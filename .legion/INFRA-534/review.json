@@ -2,20 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-534",
-  "completed": "2026-10-27T15:06:56Z",
-  "round": 2,
-  "kind": "fingerprint confirmation after a conflict-forced merge (not a new round); READY was withdrawn because the head conflicted with main, not refused",
+  "completed": "2026-10-27T16:38:25Z",
+  "round": 3,
+  "kind": "new round: the fingerprint changed across the conflict-forced merge of main 452e4647",
+  "codeHead": "1fe803dee98234ae279fcc3cf6ed37815b5be53e",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
-  "confirmation": {
-    "lastReview": "APPROVE at 79a6da4846e731a464b1c5e3253ed2fe5c2f9e97",
-    "newCodeHead": "feb2e9df6ecf57520fdd2a2b5bc03dd48b078183 (merge of main 9d97293d above retro's d26289a1)",
-    "fingerprint": "340dab0f0cf379f091077dc93f454bce1db97eab3316e284570219f8c7e861a8 at both 79a6da48 and ef9f27b8 (fork_point(\"main\"@origin | <head>), fileset '~(.legion | docs/solutions)'): unchanged",
-    "baseChangeInPmdoc": "main 1b8d5c13..9d97293d: parse.go links an email autolink to its mailto: URL (shared by every reader, the stored readers included), plus email_readback_test.go, escape_test.go and linkify_test.go rows. The reviewer ran `go test -p 1 ./internal/dispatch/pmdoc -count=1 -skip Linear` at the merged head with bun installed: ok (175.6 s)."
-  },
-  "ci": "CI head feb2e9df (compare to ef9f27b8: handoffsOnly true, 2 files). Required lint, typecheck, test and pr-title completed success at 15:06Z; one earlier pr-title run cancelled, superseded by the successful one.",
+  "fingerprint": "340dab0f0cf379f091077dc93f454bce1db97eab3316e284570219f8c7e861a8 at cd14fd01 (last APPROVE) -> d676ee2dc9cd1011fca19f547d6fece9a323baaed9bbd45c7e3635681e529213 at 16f1d37e. The only change to the branch's diff is in escape.go altReadsBack: the merge took main's removal of the pipeAfterEvenBackslashes table-cell guard and kept the PR's (reads, stored bool) return.",
+  "verification": [
+    "Reviewer: exhaustive render comparison of main 452e4647 and the merged head over 43,119 one-cell tables (image alt, image alt between text, and text cells over |, \\, a, *, ~, _, space up to length 5). There were 224 differences, all intended reading changes: unequal tilde runs, and a `~` that counts as an attention marker, e.g. ![a*~*](u) whose alt the engine reads as a~. No difference comes from pipes or backslashes.",
+    "Deep review: on 228,759 labels, storedMarkdown reads every alt as main's inlineMarkdown does. Parse now splits a cell at a pipe after an even run of backslashes and refuses the row, so the removed guard is redundant. All 263 table-cell alt rendering differences from main are cases where the engine misreads main's bytes and reads head's correctly. `go test -p 1 ./internal/dispatch/pmdoc -count=1 -skip Linear` in the workspace: ok, 244 s. `bun run check`: fixtures up to date. differential.sh --base 452e46479082 --head 1fe803de over two new table corpora (27,170 documents) and tgt/adv: every GATE line 0 except the known tgt:t-27479 misread.",
+    "Code quality: the resolution is minimal and correct; no dead code; both sides' CHANGELOG entries survived."
+  ],
+  "ci": "CI head 1fe803de (compare to 16f1d37e: handoffsOnly true, 2 files). Required lint, typecheck, test and pr-title completed success at 16:38Z; one earlier pr-title run cancelled, superseded by the successful one.",
+  "threads": "Three threads, all the reviewer's round-1 threads, answered and resolved earlier; no new threads.",
   "fastFollow": "Unchanged from round 2: pmdoc writer choice as one rule (read-back depth in inlineWithEscapes and imageAlt), and \"the writer before INFRA-534\" in place of \"main\" in permanent comments; group, not kind, at strikethrough_test.go:61."
 }
