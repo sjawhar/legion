@@ -25,12 +25,15 @@ const (
 // started. Without the GitHub App neither intake reads anything, so neither connects. broker is the
 // server's event broker, through which Intake appends issue.deployed (RecordDeployedEvents).
 //
-// The returned stop waits for both intakes' Runs, which return once ctx is cancelled, then closes
-// both clients. It does not wait for a message still in an intake's handler: deliver runs on the
-// subscription's delivery goroutine under a deadline of its own and acknowledges the message when
-// it ends, which can be after Run has returned. cmd/dispatch defers stop beside its publisher's
-// Close, so the clients stay open until the publisher closes, and such a message can be
-// acknowledged while Dispatch shuts down.
+// Both intakes route by one SettingsCache, which reads delivery_settings at start and again each
+// time settingsWake is signalled -- in the server, the shared listener's wake on SettingsChannel --
+// so no message and no timer reads the row. A nil settingsWake reads it once.
+//
+// The returned stop waits for both intakes' Runs and the cache's, which return once ctx is
+// cancelled, then closes both clients. Intake's Run returns only once it has stopped delivering
+// (Intake.StopDelivering): a message in its handler then finishes, under a deadline of its own
+// (intakeMessageTimeout), and is acknowledged before stop closes the client, and the messages
+// behind it are handed back to NATS for the next process.
 //
 // The intakes cannot share a client: a bus.Client holds one JetStream subscription, and refuses the
 // second intake's bind with bus.ErrSubscriptionHeld.
@@ -41,7 +44,7 @@ const (
 // can block the other's, which one lease over both durables did (the measurement is on
 // consumerLease). A pool that cannot open those connections is returned as the error, with
 // neither intake started: an intake that could not take its lease would reconcile nothing.
-func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client, broker *events.Broker) (stop func(), err error) {
+func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client, broker *events.Broker, settingsWake <-chan struct{}) (stop func(), err error) {
 	if github == nil {
 		slog.Info("dispatch delivery: no GitHub App key — the intakes are idle")
 		return func() {}, nil
@@ -59,9 +62,11 @@ func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, e
 		intakeClient.Close()
 		return nil, fmt.Errorf("connect the job intake: %w", err)
 	}
+	settings := newSettingsCache(pool, settingsWake)
 	var running sync.WaitGroup
-	running.Go(func() { newIntake(intakeClient, pool, leases, github, broker).Run(ctx) })
-	running.Go(func() { newJobIntake(jobClient, pool, leases, github, realJobClock{}).Run(ctx) })
+	running.Go(func() { settings.Run(ctx) })
+	running.Go(func() { newIntake(intakeClient, pool, leases, github, broker, settings).Run(ctx) })
+	running.Go(func() { newJobIntake(jobClient, pool, leases, github, realJobClock{}, settings).Run(ctx) })
 	return sync.OnceFunc(func() {
 		running.Wait()
 		intakeClient.Close()

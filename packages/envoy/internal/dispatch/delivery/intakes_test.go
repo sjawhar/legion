@@ -41,13 +41,13 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 			clients = append(clients, client)
 		}
 		return client, err
-	}, pool, fake.newTestClient(), events.NewBroker())
+	}, pool, fake.newTestClient(), events.NewBroker(), nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)
 	}
-	// Run reads settingsPollInterval, which a later test's shrinkIntakeFlowControl writes, so the
-	// test ends only once both intakes have stopped (startIntake's reason).
+	// The test ends only once both intakes have stopped, so nothing they started outlives the
+	// test's own cleanups (startIntake's reason).
 	t.Cleanup(func() {
 		cancel()
 		stop()
@@ -152,7 +152,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	stop, err := StartIntakes(runCtx, func(string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL})
-	}, pool, github, events.NewBroker())
+	}, pool, github, events.NewBroker(), nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)
@@ -217,7 +217,7 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 	stop, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 		var err error
 		first, err = bus.Connect([]string{natsURL})
 		return first, err
-	}, pool, newFakeGitHub(t).newTestClient(), events.NewBroker())
+	}, pool, newFakeGitHub(t).newTestClient(), events.NewBroker(), nil)
 	if !errors.Is(err, refused) {
 		t.Fatalf("start the intakes = %v, want the job intake's connect error", err)
 	}
@@ -281,9 +281,10 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 
 	jobsCtx, stopJobs := context.WithCancel(ctx)
 	jobsDone := make(chan struct{})
+	jobs := newJobIntake(shared, pool, leases, github, realJobClock{}, loadedSettingsCache(t, ctx, pool))
 	go func() {
 		defer close(jobsDone)
-		newJobIntake(shared, pool, leases, github, realJobClock{}).Run(jobsCtx)
+		jobs.Run(jobsCtx)
 	}()
 	t.Cleanup(func() {
 		stopJobs()
@@ -294,7 +295,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 	})
 
 	seedDeliverySettings(t, ctx, pool)
-	startIntake(t, newIntake(shared, pool, leases, github, events.NewBroker()))
+	startIntake(t, newIntake(shared, pool, leases, github, events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
 	var refusal map[string]any
 	waitFor(t, 20*time.Second, func() bool {
 		for _, record := range logs() {
