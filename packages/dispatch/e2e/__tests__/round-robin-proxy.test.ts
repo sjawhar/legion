@@ -384,10 +384,16 @@ describe("DISPATCH_E2E_PROCESSES", () => {
   });
 
   test("A's and B's ports join the collision check in two-process mode only", async () => {
-    const clash = { DISPATCH_E2E_PORT_A: "9021" };
-    const twoProcesses = await importPorts({ ...clash, DISPATCH_E2E_PROCESSES: "2" });
+    // The ports resolve, and a collision is refused, when `harnessPorts` is called, not on import.
+    const resolve = [
+      "bun",
+      "-e",
+      `(await import(${JSON.stringify(harnessPortsModule)})).harnessPorts()`,
+    ];
+    const clash = { DISPATCH_E2E_PORT_A: "9021", FAKE_ENVOY_PORT: "9021" };
+    const twoProcesses = await run(resolve, { ...clash, DISPATCH_E2E_PROCESSES: "2" });
     expect(twoProcesses.code).not.toBe(0);
     expect(twoProcesses.stderr).toContain("DISPATCH_E2E_PORT_A and FAKE_ENVOY_PORT name port 9021");
-    expect((await importPorts(clash)).code).toBe(0);
+    expect((await run(resolve, clash)).code).toBe(0);
   });
 });

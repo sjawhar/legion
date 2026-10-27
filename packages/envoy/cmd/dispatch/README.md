@@ -394,6 +394,17 @@ with or without brackets (`::1` or `[::1]`). A bad `DISPATCH_PORT` refuses the
 boot before anything connects, and an address the server cannot bind ends the
 process with exit status 1.
 
+A test harness that holds the port instead hands the server a listening TCP
+socket it opened on port 0, so no other program can take the port the kernel
+chose before the server serves on it: `DISPATCH_LISTEN_FD` is the descriptor
+number the server inherits it as. The server then binds nothing. It serves on
+that socket, and `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not
+empty, must name the socket's address (`DISPATCH_PORT=0` never does). A
+descriptor that is not a listening TCP socket, or a setting that names another
+address, refuses the boot, and nothing is bound in its place. `DISPATCH_SERVER_URL`
+is not derived from the socket. Either way the server logs the address it serves
+on once it serves, as `dispatch: listening addr=<host:port>`.
+
 ### Profiling
 
 Set `DISPATCH_PPROF_PORT` to a port to serve the Go profiler (`net/http/pprof`) on
