@@ -583,7 +583,8 @@ func TestAHeldChildDoesNotStartWhileItsRootWaitsOnAPerson(t *testing.T) {
 // A root waiting on its design gate when the operator switches gates.design to off is not left
 // suspended: no approval request counts with the gate off, so the next admission pass moves the wait
 // to a question of the tree still with the person, or, with none, answers it, and the architect
-// resumes told to register its spec, which opens the gate.
+// resumes told the gate is closed until its spec is registered. Either way the pass reports the
+// change, so admission reads the record again and resumes an answered root in that same pass.
 func TestAGateWaitIsDecidedOnceTheGateIsSwitchedOff(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -606,12 +607,10 @@ func TestAGateWaitIsDecidedOnceTheGateIsSwitchedOff(t *testing.T) {
 			if tc.question {
 				seedQuestion(t, pool, "ask-q", 4)
 			}
-			engine := testEngine(config.DesignGateOff, nil)
-			seedRecord(t, pool, func(tx pgx.Tx) error {
-				scoped, _ := intake.WithCommitHooks(context.Background())
-				_, _, err := engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil, nil)
-				return err
-			})
+			changed := reconcileGateOff(t, pool)
+			if !changed {
+				t.Errorf("the pass reported no change, want it to report the wait it decided")
+			}
 			got := recordedRoot(t, pool)
 			if tc.question {
 				if got.Awaiting == nil || got.Awaiting.Ask != "ask-q" || got.Awaiting.GateVersion != 0 || got.Answered() || got.Awaiting.Since.Seq != 5 {
@@ -623,9 +622,81 @@ func TestAGateWaitIsDecidedOnceTheGateIsSwitchedOff(t *testing.T) {
 				t.Fatalf("wait = %#v, want it answered", got.Awaiting)
 			}
 			task := resumeTask("LEGION-208", *got.Awaiting, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}, nil, false)
-			if !strings.Contains(task, "when your spec is registered") || strings.Contains(task, "register_gate") {
-				t.Fatalf("resume task = %q, want it to say the gate opens when the spec is registered, with no approval advice", task)
+			for _, want := range []string{"no approval", "closed at version 3", "register it at its current version, which opens the gate"} {
+				if !strings.Contains(task, want) {
+					t.Errorf("resume task = %q, want it to name %q", task, want)
+				}
+			}
+			for _, not := range []string{"is registered", "register_gate", "request approval"} {
+				if strings.Contains(task, not) {
+					t.Errorf("resume task = %q, want no %q: the gate is closed, and no approval is asked for", task, not)
+				}
 			}
 		})
+	}
+}
+
+// reconcileGateOff runs one ReconcileAwaiting pass over LEGION-208 with gates.design: off, and
+// returns whether it reported a change.
+func reconcileGateOff(t *testing.T, pool *pgxpool.Pool) bool {
+	t.Helper()
+	engine := testEngine(config.DesignGateOff, nil)
+	changed := false
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		scoped, _ := intake.WithCommitHooks(context.Background())
+		var err error
+		_, changed, err = engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil, nil)
+		return err
+	})
+	return changed
+}
+
+// Under gates.design: off a wait on a question is no wait on the gate: the pass leaves it on its
+// own question, though an older question of the tree is also with the person, and answers nothing
+// when none is (the question's own handlers decide that wait).
+func TestAQuestionWaitUnderGateOffIsLeftAsItIs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		older bool
+	}{
+		{name: "an older question also with the person", older: true},
+		{name: "no question with the person"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			root := askRoot()
+			root.Phase = phase.AwaitingPerson
+			root.Awaiting = &record.Awaiting{Ask: "ask-q", Since: record.EventMark{Seq: 7}}
+			seedIssue(t, pool, root)
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3})
+			if tc.older {
+				seedQuestion(t, pool, "ask-older", 4)
+				seedQuestion(t, pool, "ask-q", 7)
+			}
+			reconcileGateOff(t, pool)
+			got := recordedRoot(t, pool)
+			if got.Awaiting == nil || got.Awaiting.Ask != "ask-q" || got.Awaiting.GateVersion != 0 || got.Answered() || got.Awaiting.Since.Seq != 7 {
+				t.Fatalf("wait = %#v, want it left on ask-q from 7, unanswered", got.Awaiting)
+			}
+		})
+	}
+}
+
+// A wait on the gate under gates.design: off whose gate stands open is answered by the open gate in
+// the pass that finds it, not moved first to a question of the tree still with the person.
+func TestAnOpenGateAnswersAGateWaitUnderGateOffBeforeAnyQuestionMovesIt(t *testing.T) {
+	pool := migratedPool(t)
+	root := askRoot()
+	root.Phase = phase.AwaitingPerson
+	root.Awaiting = &record.Awaiting{GateVersion: 3, Artifact: "artifact-208", Since: record.EventMark{Seq: 5}}
+	seedIssue(t, pool, root)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
+	seedQuestion(t, pool, "ask-q", 4)
+	if !reconcileGateOff(t, pool) {
+		t.Errorf("the pass reported no change, want it to report the wait it answered")
+	}
+	got := recordedRoot(t, pool)
+	if !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByApproval || got.Awaiting.GateVersion != 3 {
+		t.Fatalf("wait = %#v, want it answered by the open gate at version 3", got.Awaiting)
 	}
 }

@@ -289,6 +289,36 @@ func TestTheResumeUnderGateOffSaysNoPersonApproved(t *testing.T) {
 	}
 }
 
+// A root waiting on its design gate when the operator switches gates.design to off, with nothing
+// else with the person, is answered and resumed in one admission pass: it takes the free slot
+// ahead of a root that never ran, rather than waiting for the next fact or tick while that root
+// takes it.
+func TestAGateWaitAnsweredByTheGateSwitchedOffResumesInThatPass(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmissionWithGate(t, 1, config.DesignGateOff, nil)
+	putIssue(t, pool, record.Issue{
+		Key: "LEGION-100", Tree: "LEGION-100", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
+		Generation: 1, Status: "in_progress", Rank: "Z", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Awaiting: &record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 5}},
+	})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 3})
+	seedWaiting(t, pool, "LEGION-NEXT", "A")
+	tick(t, pool, admission, "tick-1")
+	if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
+		t.Fatalf("root after one pass = %s (awaiting %+v), want it answered and resumed at admitted, its gate closed", got.Phase, got.Awaiting)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+	var resumes []string
+	for _, request := range superviseRequests(t, pool, "LEGION-100") {
+		if request.Op == "start" && request.Role == claim.RoleArchitect {
+			resumes = append(resumes, request.Task)
+		}
+	}
+	if len(resumes) != 1 || !strings.Contains(resumes[0], "closed at version 3") {
+		t.Fatalf("architect starts = %q, want one resume saying the gate is closed at version 3", resumes)
+	}
+}
+
 // An answered root is no root blocked on Dispatch links: its tree already runs (a root in
 // awaiting_person carries its run, record.Issue.CarriesRun), so promotion resumes it whatever its
 // links say, and the state's blocked list and the free-slot count agree with promotion. Round 1's
