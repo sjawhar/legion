@@ -104,7 +104,9 @@ type AppContextOptions struct {
 	GitHubAPIBase string
 	OIDC          *oidc.Verifier
 	AgentStream   agentstream.Source
-	Lifetime      context.Context
+	// Lifetime is the process context the API's background work runs on (api.Deps.Lifetime);
+	// required, since New registers the API, which refuses a server without one.
+	Lifetime context.Context
 	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL       string

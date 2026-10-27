@@ -20,9 +20,7 @@ import (
 // is written through a slog text handler on io.Discard, so the number is the line's own cost
 // without the operator's stderr behind it.
 func BenchmarkARouteWithAndWithoutItsAccessLogLine(b *testing.B) {
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	b.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(b, slog.NewTextHandler(io.Discard, nil))
 
 	logged, database, _, served := newRegisteredTestServer(b, testServerOptions{})
 	key := benchmarkIssue(b, logged, database)
@@ -57,9 +55,7 @@ func BenchmarkARouteWithAndWithoutItsAccessLogLine(b *testing.B) {
 // BenchmarkTheAccessLogLineAlone measures the wrapper and the line over a handler that only
 // writes a short JSON body, so the cost is the log line's rather than a route's work.
 func BenchmarkTheAccessLogLineAlone(b *testing.B) {
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	b.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(b, slog.NewTextHandler(io.Discard, nil))
 
 	body := bytes.Repeat([]byte("x"), 512)
 	answer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

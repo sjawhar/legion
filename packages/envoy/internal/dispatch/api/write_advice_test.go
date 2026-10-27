@@ -881,6 +881,7 @@ func newFailingAdviceHandler(t *testing.T, query string, suggestionTimeout time.
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      broker,
+		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

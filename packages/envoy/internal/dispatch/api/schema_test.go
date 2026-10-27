@@ -11,7 +11,7 @@ import (
 
 func TestBlockSchemaRouteServesEmbeddedSchema(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux, Deps{})
+	Register(mux, Deps{Lifetime: t.Context()})
 
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/schema/blocks", nil))

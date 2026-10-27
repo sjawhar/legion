@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"log/slog"
 	"net"
 	"reflect"
@@ -543,9 +544,11 @@ func (l *capturedLogs) recordsWithMsg(t *testing.T, message string) []map[string
 func captureLogs(t *testing.T) *capturedLogs {
 	t.Helper()
 	logs := &capturedLogs{}
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// Setting the previous logger back leaves the log package writing into logs, so its output
+	// and flags are put back as well.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	return logs
 }
 

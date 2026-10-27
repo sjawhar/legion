@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -63,9 +64,10 @@ func TestStopWatchIsFinal(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(lockedWriter{&logs, &logsMu}, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 
 	registry.StopWatch()
 	if err := registry.Rewatch(conn); err != nil {

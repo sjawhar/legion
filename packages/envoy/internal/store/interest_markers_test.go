@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"regexp"
 	"slices"
@@ -25,9 +26,10 @@ import (
 func captureJSONLogs(t *testing.T) func() []map[string]any {
 	t.Helper()
 	logs := &lockedBuffer{}
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	return func() []map[string]any {
 		var records []map[string]any
 		for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {

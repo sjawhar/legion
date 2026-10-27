@@ -195,10 +195,8 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	mux := http.NewServeMux()
 	served := register(mux, deps)
 	t.Cleanup(served.eventRelay.wait)
-	if served.deliveryHub != nil {
-		t.Cleanup(served.deliveryHub.wait)
-		t.Cleanup(served.deliverySockets.wait)
-	}
+	t.Cleanup(served.deliveryHub.wait)
+	t.Cleanup(served.deliverySockets.wait)
 	return mux, database, deps, served
 }
 
@@ -521,12 +519,13 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		Identity: headerIdentity(database),
 		Docs:     documentService,
 		Events:   broker,
+		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 
 	if response := dispatchRequest(t, mux, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1880,13 +1879,13 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
-		Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker, Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	handler := http.NewServeMux()
-	Register(handler, deps)
+	t.Cleanup(Register(handler, deps))
 	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)

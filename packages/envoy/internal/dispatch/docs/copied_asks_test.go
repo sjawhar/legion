@@ -492,9 +492,7 @@ func askEditsOf(t *testing.T, service *Service, ask string) int {
 // writes the decided wording back into the block beside its decision, logging that it did.
 func TestADocumentEditOfADecidedAsksWordingIsWrittenBackAndLeavesItsRow(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	writes := map[string]func(t *testing.T, service *Service, document string){
 		"live edit": func(t *testing.T, service *Service, document string) {
 			editLiveTree(t, service, document, func(tree *pmdoc.Node) *pmdoc.Node {
@@ -586,9 +584,7 @@ func rewordAsAnEarlierRelease(t *testing.T, service *Service, document string, a
 // the boot's restoration then finds nothing left to restore.
 func TestASettlementRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	for _, closing := range []string{"answered", "resolved"} {
 		t.Run(closing, func(t *testing.T) {
 			service, original := newTestService(t)
@@ -758,9 +754,7 @@ func TestTheBootsRestorationSettlesTheRestoredAsksOwnDocument(t *testing.T) {
 // again.
 func TestASettlementLogsEachBlockItTakesForACopyOnce(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, original := newTestService(t)
 	service.settle = time.Hour
 	asks := copiedAskSource(t, service, original)

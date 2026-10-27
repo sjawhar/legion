@@ -36,12 +36,13 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 		AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs:        docsAPI,
 		ServerURL:   "https://dispatch.example",
+		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 	return mux, database
 }
 

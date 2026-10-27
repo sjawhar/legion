@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -33,14 +34,27 @@ func (l *logBuffer) String() string {
 	return l.b.String()
 }
 
+// setDefaultLogger makes handler the default logger's for the test's lifetime. slog.SetDefault also
+// points the log package's output at handler and clears its flags, and setting the previous logger
+// back undoes neither, so the cleanup puts the log package's output and flags back as well: without
+// that, every log.Print after the test writes into its finished buffer instead of stderr.
+func setDefaultLogger(t testing.TB, handler slog.Handler) {
+	t.Helper()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
+}
+
 // captureLog sends the default logger's lines to a buffer for the test's lifetime, as the
 // deployment's own logger writes them: a text handler, the one cmd/dispatch installs.
 func captureLog(t *testing.T) *logBuffer {
 	t.Helper()
 	logged := &logBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 

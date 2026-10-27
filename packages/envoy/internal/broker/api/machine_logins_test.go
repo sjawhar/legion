@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -352,15 +353,17 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 	t.Run("a new pod renews without a token, logged, until it renews with its own token", func(t *testing.T) {
 		id, podUID, key := enrollPod(t)
 		var records []slog.Record
-		previous := slog.Default()
+		// slog.SetDefault also redirects the log package, which setting previous back does not undo.
+		previous, output, flags := slog.Default(), log.Writer(), log.Flags()
+		restore := func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) }
 		slog.SetDefault(slog.New(capturingHandler{records: &records}))
-		t.Cleanup(func() { slog.SetDefault(previous) })
+		t.Cleanup(restore)
 		for range 2 {
 			if status, code := renew(t, key, id, nil); status != http.StatusOK {
 				t.Fatalf("renew with no body, a new pod enrollment = %d %s, want 200", status, code)
 			}
 		}
-		slog.SetDefault(previous)
+		restore()
 		warned := 0
 		for _, r := range records {
 			attrs := map[string]string{}
@@ -399,7 +402,7 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 		if status, code := renew(t, key, id, nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
 			t.Fatalf("renew with no body after renewing with the token = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
 		}
-		slog.SetDefault(previous)
+		restore()
 		refusedWarn := 0
 		for _, r := range records {
 			attrs := map[string]string{}

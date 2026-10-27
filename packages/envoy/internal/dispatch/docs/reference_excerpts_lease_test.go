@@ -54,9 +54,7 @@ func TestTwoReconciliationRunnersRunTheTickOnceAndSkipOnce(t *testing.T) {
 		t.Fatalf("index the document's mention: %v", err)
 	}
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
 
 	newRunner := func(database *store.Store) *Service {
 		service := New(Deps{Store: database, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"log/slog"
 	"runtime"
 	"slices"
@@ -306,9 +307,10 @@ func TestEachBeginRefusalIsKeyedToItsCaller(t *testing.T) {
 	ctx, release := HoldsConnection(context.Background())
 	defer release()
 	var logs bytes.Buffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 
 	if _, err := beginFromOneSite(ctx, database.Pool); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("transaction from the first call site: %v, want ErrNestedAcquire", err)

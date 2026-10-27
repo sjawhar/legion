@@ -101,8 +101,9 @@ type Deps struct {
 	// down, so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines
 	// behind, and ends each open stream (streamEvents, streamAgentConversation) and closes each
 	// delivery socket with 1012 so http.Server.Shutdown is not held for its whole budget by a
-	// connection that never goes idle. The delivery hub runs on it, and GET /ws/delivery is
-	// mounted only with one. Nil means unbounded, which is what a test gets.
+	// connection that never goes idle. The delivery hub and the event stream relay run on it.
+	// Required: Register refuses a Deps without one, since nothing would ever end the work it
+	// bounds; a test passes its own t.Context().
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
@@ -255,8 +256,8 @@ type server struct {
 	// Only a test sets it, so a budget that ends before every selected session is read is the
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
-	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
-	// with no Lifetime (register), which mounts no GET /ws/delivery.
+	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
+	// register mounts has one, and only a server a test builds directly (directServer) has none.
 	deliveryHub *deliveryHub
 	// deliverySockets is every open GET /ws/delivery socket, which the test hook drops.
 	deliverySockets deliverySocketSet
@@ -299,20 +300,17 @@ type queryer interface {
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
-// With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
-// the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
-// document websocket, under the same wrappers; a server without one (a test's) has neither, so
-// nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
-// open SSE connection reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
-// have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+// The server holds the delivery hub (LEGION-690), which starts its goroutines on the first
+// subscription and runs them until Deps.Lifetime ends, and mounts GET /ws/delivery beside the
+// document websocket, under the same wrappers. It also holds the event stream relay (INFRA-66),
+// which every open SSE connection reads and which starts its own listening connection on the
+// first of them, also on Deps.Lifetime. The returned wait blocks until the hub, every delivery
+// socket and the relay have ended. Call it only after Lifetime has been cancelled and before the
+// database pool closes.
 //
-// That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
-// which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// runs its relay on context.Background() instead, so nothing ever ends that relay, and the wait
-// this returns blocks for ever once an SSE connection has started it. The delivery hub sets no
-// such trap, since it is built only with a Deps.Lifetime. Give the server a Deps.Lifetime where
-// it is built, or do not call the wait.
+// Register panics when deps has no Lifetime: the hub and the relay would run on no context that
+// ever ends, so they would outlive the process's shutdown, or the test that built the server, and
+// the returned wait would block for ever once an SSE connection had started the relay.
 func Register(mux *http.ServeMux, deps Deps) func() {
 	s := register(mux, deps)
 	return s.waitBackground
@@ -320,24 +318,23 @@ func Register(mux *http.ServeMux, deps Deps) func() {
 
 // waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's.
 func (s *server) waitBackground() {
-	if s.deliveryHub != nil {
-		s.deliverySockets.wait()
-		s.deliveryHub.wait()
-	}
+	s.deliverySockets.wait()
+	s.deliveryHub.wait()
 	s.eventRelay.wait()
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes. It is also called with a zero Deps, as
-// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
-// must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler or the relay's first subscriber.
+// relay a test waits out before its database closes. It is also called with a Deps holding only
+// a Lifetime, as TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay
+// cheap and must not dial or read the nil Store: whatever reaches the database or the network
+// starts later, from a handler, the relay's first subscriber or the hub's.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps}
-	s.eventRelay = newEventStreamRelay(s, s.lifetime())
-	if deps.Lifetime != nil {
-		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
+	if deps.Lifetime == nil {
+		panic("api.Register: Deps.Lifetime is required: it is the context that ends the delivery hub, the event stream relay and every broadcast delivery (a test passes t.Context())")
 	}
+	s := &server{deps: deps}
+	s.eventRelay = newEventStreamRelay(s, deps.Lifetime)
+	s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
@@ -349,10 +346,8 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		const pattern = "/ws/doc/{room}"
 		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))))
 	}
-	if s.deliveryHub != nil {
-		const pattern = "/ws/delivery"
-		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket)))))
-	}
+	const deliveryPattern = "/ws/delivery"
+	mux.Handle("GET "+deliveryPattern, accesslog.Handler(deliveryPattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(deliveryPattern, s.serveDeliverySocket)))))
 	return s
 }
 

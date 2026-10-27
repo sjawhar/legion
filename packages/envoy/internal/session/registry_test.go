@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"log/slog"
 	"os"
 	"reflect"
@@ -419,9 +420,10 @@ func waitForSessionEviction(t *testing.T, reg *SessionRegistry, sessionID string
 func captureSessionRegistryLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	var logs lockedBuffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	return &logs
 }
 

@@ -139,12 +139,13 @@ func newContractRig(t *testing.T) *contractRig {
 		Store: dispatchDB, Identity: headerIdentity(dispatchDB),
 		ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
 		AgentSecretsURL: brokerServer.URL, AgentSecretsTokenFile: accountTokenFile(t, dispatchToken),
+		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new dispatch API dependencies: %v", err)
 	}
 	dispatchMux := http.NewServeMux()
-	Register(dispatchMux, deps)
+	t.Cleanup(Register(dispatchMux, deps))
 
 	return &contractRig{Dispatch: dispatchMux, BrokerURL: brokerServer.URL, brokerStore: brokerStore, issuer: issuer, issuerKey: issuerKey}
 }

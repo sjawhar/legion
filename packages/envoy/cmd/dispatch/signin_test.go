@@ -36,9 +36,7 @@ func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
 		t.Fatalf("openPeople: %v", err)
 	}
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(&logs, nil))
 
 	start := time.Now()
 	retirePlainRefreshTokens(ctx, people, 500*time.Millisecond)

@@ -214,10 +214,8 @@ func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 	claims := issuer.Claims(serviceTokenSubject, serviceTokenAudience)
 	claims["iss"] = chosen
 
-	previous := slog.Default()
 	logs := &storetest.LockedLog{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
 
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil,
 		issuer.Mint(t, issuer.signing, claims))

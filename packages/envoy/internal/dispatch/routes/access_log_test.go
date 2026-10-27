@@ -2,6 +2,7 @@ package routes
 
 import (
 	"bytes"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -37,12 +38,25 @@ func routeLines(logged *logBuffer, route string) []string {
 	return lines
 }
 
+// setDefaultLogger makes handler the default logger's for the test's lifetime. slog.SetDefault also
+// points the log package's output at handler and clears its flags, and setting the previous logger
+// back undoes neither, so the cleanup puts the log package's output and flags back as well: without
+// that, every log.Print after the test writes into its finished buffer instead of stderr.
+func setDefaultLogger(t *testing.T, handler slog.Handler) {
+	t.Helper()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
+}
+
 func captureAccessLog(t *testing.T) *logBuffer {
 	t.Helper()
 	logged := &logBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 

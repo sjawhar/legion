@@ -295,11 +295,13 @@ func envoyJSONHome(t *testing.T) string {
 // (the GitHub App, the store, the dashboard origin) and nil elsewhere.
 func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) http.Handler {
 	t.Helper()
+	built.Lifetime = t.Context()
 	appCtx, err := appContextFor(boot, built)
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
-	handler, _ := routes.New(appCtx)
+	handler, waitDelivery := routes.New(appCtx)
+	t.Cleanup(waitDelivery)
 	return handler
 }
 
@@ -1462,9 +1464,7 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 // per address and User-Agent, with the load balancer's address and never a token.
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 	var logged bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewJSONHandler(&logged, nil))
 	previousTokenLines := func() []map[string]any {
 		t.Helper()
 		var lines []map[string]any

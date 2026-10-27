@@ -578,7 +578,7 @@ func (s *server) deliverBroadcast(messages []model.Message, delivery string, act
 		go func() {
 			defer wait.Done()
 			for message := range pending {
-				ctx := store.WithTransactionTracking(s.lifetime())
+				ctx := store.WithTransactionTracking(s.deps.Lifetime)
 				// Bound to the attempt the write opened. A human who changes the mode from the
 				// agent card while this worker is queued settles that attempt and sends their
 				// own; the worker must then send nothing, because an attempt of its own would
@@ -599,15 +599,6 @@ func (s *server) deliverBroadcast(messages []model.Message, delivery string, act
 	}
 	close(pending)
 	wait.Wait()
-}
-
-// lifetime is the process context background work runs on: cancelled when the server shuts
-// down, unbounded in a test that configured none.
-func (s *server) lifetime() context.Context {
-	if s.deps.Lifetime == nil {
-		return context.Background()
-	}
-	return s.deps.Lifetime
 }
 
 // GET /api/v1/broadcasts

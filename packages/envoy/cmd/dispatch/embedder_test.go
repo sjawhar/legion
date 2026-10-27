@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -50,13 +51,26 @@ func withOverrides(base, overrides map[string]string) map[string]string {
 	return values
 }
 
+// setDefaultLogger makes handler the default logger's for the test's lifetime. slog.SetDefault also
+// points the log package's output at handler and clears its flags, and setting the previous logger
+// back undoes neither, so the cleanup puts the log package's output and flags back as well: without
+// that, every log.Print after the test writes into its finished buffer instead of stderr.
+func setDefaultLogger(t *testing.T, handler slog.Handler) {
+	t.Helper()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
+}
+
 // capturedLog sends the default logger to the returned buffer for the rest of the test.
 func capturedLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logged bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(&logged, nil))
 	return &logged
 }
 

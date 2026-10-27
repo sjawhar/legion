@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"log/slog"
 	"maps"
 	"reflect"
 	"runtime"
@@ -30,6 +32,21 @@ import (
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
 	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+}
+
+// setDefaultLogger makes handler the default logger's for the test's lifetime. slog.SetDefault also
+// points the log package's output at handler and clears its flags, and setting the previous logger
+// back undoes neither, so the cleanup puts the log package's output and flags back as well: without
+// that, every log.Print after the test writes into its finished buffer instead of stderr.
+func setDefaultLogger(t *testing.T, handler slog.Handler) {
+	t.Helper()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
 }
 
 func newTestService(t *testing.T) (*Service, string) {

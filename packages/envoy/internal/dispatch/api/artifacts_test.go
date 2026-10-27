@@ -529,6 +529,7 @@ func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, Deps{
 		Store:    &store.Store{},
+		Lifetime: t.Context(),
 		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
 	})
 

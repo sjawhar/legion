@@ -65,6 +65,7 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      events.NewBroker(),
+		Lifetime:    t.Context(),
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL
@@ -75,7 +76,7 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 	return mux
 }
 
@@ -289,10 +290,8 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	rig := newFakeBrokerRig(t)
 	missing := filepath.Join(t.TempDir(), "missing")
 	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
-	previous := slog.Default()
 	logs := &storetest.LockedLog{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
 
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
 	if response.Code != http.StatusInternalServerError {

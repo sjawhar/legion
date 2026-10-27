@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"os"
 	"slices"
@@ -75,9 +76,10 @@ func publishedDestinations(t *testing.T, database *store.Store, eventID int64) (
 // logging the subject and the violation.
 func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 	var logged lockedBuffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 
 	client, subscriber, _ := grantedNATS(t, "notifications.dispatch.>", "_INBOX.>", "$JS.API.>")
 	received := subscribe(t, subscriber, roleTopic)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -127,9 +128,10 @@ func TestParseSharedAgentTokensRefusesAnEmptyOrRepeatedEntry(t *testing.T) {
 func warnings(t *testing.T) func() []map[string]any {
 	t.Helper()
 	var buffer bytes.Buffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buffer, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	return func() []map[string]any {
 		var lines []map[string]any
 		for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {

@@ -3,6 +3,7 @@ package redeliver_test
 import (
 	"context"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"sync/atomic"
@@ -63,9 +64,10 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 func captureDefaultLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	buffer := &lockedBuffer{}
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(buffer, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	return buffer
 }
 

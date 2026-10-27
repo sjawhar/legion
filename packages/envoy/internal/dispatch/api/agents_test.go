@@ -25,9 +25,10 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 		Identity:    headerIdentity(database),
 		AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Envoy:       envoy.New(envoyURL),
+		Lifetime:    t.Context(),
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 	return mux
 }
 

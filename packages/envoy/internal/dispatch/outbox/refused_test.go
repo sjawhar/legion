@@ -3,6 +3,7 @@ package outbox
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -68,9 +69,10 @@ func (b *lockedBuffer) String() string {
 // published, and the event is marked published instead of backing off forever.
 func TestRunTreatsADestinationNATSRefusesAsDone(t *testing.T) {
 	var logged lockedBuffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 
 	database := storetest.Open(t)
 	broker := events.NewBroker()

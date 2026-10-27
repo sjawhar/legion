@@ -281,10 +281,11 @@ func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
 // With nobody in `people`, GET /users is an empty list, never null: the picker maps over it.
 func TestListUsersAnswersAnEmptyListWhenNobodyHasSignedIn(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux, Deps{
+	t.Cleanup(Register(mux, Deps{
+		Lifetime: t.Context(),
 		Store:    storetest.Open(t),
 		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
-	})
+	}))
 	response := dispatchRequest(t, mux, http.MethodGet, "/api/v1/users", nil, "alice")
 	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `{"users":[]}` {
 		t.Fatalf("list users with nobody signed in: status=%d body=%s", response.Code, response.Body.String())

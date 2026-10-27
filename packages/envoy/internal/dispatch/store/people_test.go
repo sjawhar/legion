@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -89,9 +90,10 @@ func storedRefreshToken(t *testing.T, database *Store, email string) *string {
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logs bytes.Buffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	return &logs
 }
 

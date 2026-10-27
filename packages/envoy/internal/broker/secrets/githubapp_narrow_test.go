@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -443,9 +444,10 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 // 500) is logged at WARN, never naming the token, and the wider token is still refused.
 func TestGitHubAppMintStillRefusesWhenGitHubDoesNotRevoke(t *testing.T) {
 	var logged bytes.Buffer
-	previous := slog.Default()
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
 	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)

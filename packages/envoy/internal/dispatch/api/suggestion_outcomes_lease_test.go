@@ -50,9 +50,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	second := storetest.SecondProcess(t, database)
 	firstLeases, secondLeases := sweepLeases(t, database), sweepLeases(t, second)
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
 
 	gate, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -129,9 +127,7 @@ func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
 	database := storetest.Open(t)
 	leases := sweepLeases(t, database)
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
 
 	const tick = time.Second
 	const ticks = 10

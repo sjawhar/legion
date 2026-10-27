@@ -177,12 +177,13 @@ func newSubscribersHandler(t *testing.T, database *store.Store, envoyURL string)
 		Docs:        documentService,
 		Events:      broker,
 		EnvoyURL:    envoyURL,
+		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 	return mux
 }
 

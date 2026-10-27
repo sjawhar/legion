@@ -366,12 +366,13 @@ func readingServer(t *testing.T, database *store.Store, persist docs.VersionedSt
 		Identity: headerIdentity(database),
 		Docs:     service,
 		Events:   broker,
+		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 	return mux
 }
 

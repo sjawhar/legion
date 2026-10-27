@@ -27,13 +27,11 @@ func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+	setDefaultLogger(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		return logs.Write(p)
-	}), nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	}), nil))
 
 	proxy.delay.Store(int64(time.Second))
 	client.Conn.Close()
@@ -77,13 +75,11 @@ func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+	setDefaultLogger(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		return logs.Write(p)
-	}), nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	}), nil))
 	logged := func(fragment string) bool {
 		logsMu.Lock()
 		defer logsMu.Unlock()

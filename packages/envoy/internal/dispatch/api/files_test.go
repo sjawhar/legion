@@ -170,13 +170,13 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 	memory := filestest.NewMemory()
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: headerIdentity(database), AgentTokens: sharedAgentTokens(t, "agent-token"),
-		ServerURL: "https://dispatch.example", Files: memory,
+		ServerURL: "https://dispatch.example", Files: memory, Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new deps with a store: %v", err)
 	}
 	withStore := http.NewServeMux()
-	Register(withStore, deps)
+	t.Cleanup(Register(withStore, deps))
 	served := dispatchRequest(t, withStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
 	if served.Code != http.StatusOK || served.Body.String() != "legacy bytes" {
 		t.Fatalf("serve a row-held version with a store configured: status=%d body=%q", served.Code, served.Body.String())
@@ -223,13 +223,13 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	// Without a store at all, a cleared row is a configuration the server names: 503.
 	noStore, err := NewDeps(DepsInput{
 		Store: database, Identity: headerIdentity(database), AgentTokens: sharedAgentTokens(t, "agent-token"),
-		ServerURL: "https://dispatch.example",
+		ServerURL: "https://dispatch.example", Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new deps without a store: %v", err)
 	}
 	withoutStore := http.NewServeMux()
-	Register(withoutStore, noStore)
+	t.Cleanup(Register(withoutStore, noStore))
 	unconfigured := dispatchRequest(t, withoutStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
 	if unconfigured.Code != http.StatusServiceUnavailable || responseCode(t, unconfigured) != "FILE_STORE_UNAVAILABLE" {
 		t.Fatalf("serve a cleared row with no store: status=%d body=%s, want 503 FILE_STORE_UNAVAILABLE", unconfigured.Code, unconfigured.Body.String())

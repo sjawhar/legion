@@ -493,7 +493,7 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 // took 5.046 s and no test in the package reddened — is what the field this change added makes
 // possible (INFRA-56).
 func TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound(t *testing.T) {
-	if got := register(http.NewServeMux(), Deps{}).suggestionAllowance(); got != 300*time.Millisecond {
+	if got := register(http.NewServeMux(), Deps{Lifetime: t.Context()}).suggestionAllowance(); got != 300*time.Millisecond {
 		t.Fatalf("the server a deployment runs allows %s for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise", got)
 	}
 }
