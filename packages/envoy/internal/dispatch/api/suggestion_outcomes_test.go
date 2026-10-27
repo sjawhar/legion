@@ -172,6 +172,57 @@ func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 	}
 }
 
+// A suggestion younger than settle is not judged, whatever older event a page carries: here
+// another person's message on the suggested issue, written before the suggestion, becomes settle
+// old while the suggestion is not. The agent comments on what it filed and, moments later, updates
+// the suggested issue; judged at the older event's turn, the comment alone would read as an
+// override. Judged once it is settle old, the rules see both writes, and it is acted_on.
+func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
+	const settle = 2 * time.Second
+	ctx := context.Background()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	srv := directServer(deps)
+	createSuggestionProject(t, handler, "OYOUNG")
+	target := createOutcomeIssue(t, handler, "OYOUNG", "Target issue")
+	source := createOutcomeIssue(t, handler, "OYOUNG", "Source issue")
+	if err := sweepSuggestionOutcomes(ctx, database.Pool); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	// Filing the source recorded suggestions of its own; the test judges only the one it seeds.
+	if _, err := database.Pool.Exec(ctx, `delete from write_suggestions where source_issue_key = $1`, source); err != nil {
+		t.Fatalf("clear the suggestions filing recorded: %v", err)
+	}
+
+	older := time.Now()
+	postOutcomeMessage(t, handler, target, "bob", "A note of my own on the target.")
+	time.Sleep(settle / 2)
+	seedWriteSuggestion(t, srv, "issue", source, "", "alice", "issue", target, target)
+	recorded := time.Now()
+	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
+	postOutcomeMessage(t, handler, source, "alice", "Looking into this here first.")
+
+	// bob's message is settle old now; the suggestion is not.
+	time.Sleep(time.Until(older.Add(settle + 200*time.Millisecond)))
+	if age := time.Since(recorded); age >= settle {
+		t.Fatalf("the suggestion is already %v old; the test needs it younger than %v here", age, settle)
+	}
+	if _, err := sweepSuggestionOutcomePages(ctx, database.Pool, suggestionOutcomePage, settle); err != nil {
+		t.Fatalf("sweep while the suggestion is young: %v", err)
+	}
+	if row := readSuggestionOutcome(t, srv, source, target); row.Outcome != "ignored" {
+		t.Fatalf("outcome = %+v while the suggestion is younger than settle; want ignored until it is settle old", row)
+	}
+
+	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
+	time.Sleep(settle + 200*time.Millisecond)
+	if _, err := sweepSuggestionOutcomePages(ctx, database.Pool, suggestionOutcomePage, settle); err != nil {
+		t.Fatalf("sweep once the suggestion is settle old: %v", err)
+	}
+	if row := readSuggestionOutcome(t, srv, source, target); row.Outcome != "acted_on" {
+		t.Fatalf("outcome = %+v; want acted_on, the update written moments after the comment", row)
+	}
+}
+
 // A suggestion is recorded after its write commits, outside the events' commit-order lock, so it
 // can commit after an event that started later than it did - here the suggestion's transaction is
 // held open across the event's whole write - and after a pass has read that event and moved its
