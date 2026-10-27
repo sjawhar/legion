@@ -50,11 +50,7 @@ const stub = path.join(scratch, "stub");
 mkdirSync(stub);
 put(
   path.join(co, "packages/dispatch/e2e/run-server.sh"),
-  [
-    "#!/usr/bin/env bash",
-    'exec bun "$STUB_DIR/server.ts"',
-    "",
-  ].join("\n"),
+  ["#!/usr/bin/env bash", 'exec bun "$STUB_DIR/server.ts"', ""].join("\n"),
   0o755
 );
 // No DISPATCH_E2E_PORT: the server takes a port of the kernel's choosing and reports it as the Go
@@ -73,9 +69,11 @@ put(
     "});",
     "appendFileSync(",
     '  path.join(process.env.STUB_DIR ?? "", "servers.log"),',
-    '  `${process.pid} ${server.port} ${process.env.DATABASE_URL}\\n`',
+    // `\${…}` keeps each placeholder literal here: the stub writes them into server.ts, where
+    // Bun expands them when it runs.
+    `  \`\${process.pid} \${server.port} \${process.env.DATABASE_URL}\\n\``,
     ");",
-    'console.log(`msg="dispatch: listening" addr=127.0.0.1:${server.port}`);',
+    `console.log(\`msg="dispatch: listening" addr=127.0.0.1:\${server.port}\`);`,
     "",
   ].join("\n")
 );

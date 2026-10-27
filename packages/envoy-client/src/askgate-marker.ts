@@ -39,9 +39,10 @@ import { hasErrnoCode, messageFor } from "./errors";
  * and consumes one matching marker by unlinking it: exactly one process wins an unlink, so a
  * marker posts one write and a replay finds none. A file whose bytes differ from the reviewed ones
  * matches no marker. An upload's `--path` sends the bytes the CLI read for that check. A record
- * that is there but cannot be read, or names a store that is gone, is a refusal. The store's
- * `mode` file holds the gate's mode: `warn` lets an unmarked write post with a warning, anything
- * else refuses it.
+ * that is there but cannot be read, or names a store that is gone, is a refusal. Each owner file
+ * of the session's record carries that owner's check mode, so the mode is the session's and no
+ * other session of the same process can change it: `block` refuses an unmarked write, and `warn`,
+ * which is a file with no mode, lets it post with a warning.
  */
 
 /** The record's directory in a session's state directory: one file for each owner. */
