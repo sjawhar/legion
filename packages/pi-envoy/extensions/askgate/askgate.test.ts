@@ -2314,16 +2314,17 @@ console.log(JSON.stringify(args, null, 2));
         cwd: work,
         timeoutMs: 10_000,
       });
-      expect(g.dryRuns[1]?.script).toContain(
-        "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file '"
+      // The dry run names the file as the call wrote it: the gate copies nothing.
+      expect(g.dryRuns[1]?.script).toBe(
+        "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt"
       );
       expect(g.dryRuns[2]).toMatchObject({
         script: "cd inner >/dev/null && pwd -P",
         cwd: path.join(work, "sub"),
         timeoutMs: 10_000,
       });
-      expect(g.dryRuns[3]?.script).toContain(
-        "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file '"
+      expect(g.dryRuns[3]?.script).toBe(
+        "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt"
       );
       expect(g.calls).toHaveLength(5);
       expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
@@ -3396,7 +3397,7 @@ describe("the literal grammar, widened to forms with no expansion", () => {
       .join("\n");
   };
   for (const [file, first, tool] of [
-    ["skills/dispatch/references/asks.md", "dispatch ask --issue", "dispatch_ask"],
+    // Main deleted skills/dispatch/references/, whose asks.md held one more example.
     ["skills/legion-worker/references/findings.md", "dispatch ask --issue", "dispatch_ask"],
     ["skills/legion-worker/references/findings.md", "dispatch comment --issue", "dispatch_comment"],
     ["skills/legion-retro/SKILL.md", "dispatch message --issue", "dispatch_message"],
@@ -4139,6 +4140,10 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     DISPATCH_URL: "http://127.0.0.1:9",
     DISPATCH_TOKEN: "test-token",
   };
+  // Block mode, so a post that does not use its marker is refused, never posted with a warning:
+  // a post that succeeds then proves the marker the gate minted matched. The harness's default
+  // session entry turns the block arm off, which is warn mode.
+  const gateEnv = { ...env, OMP_ASKGATE: "block" };
   const BRIEF = "# Brief\n\nShip it on Friday.\n";
   const NOTE = "The acceptance run passed on the staging cluster.\n";
   const CHANGED = "a file this write posts changed after AskGate reviewed it";
@@ -4187,7 +4192,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
   test("a reviewed markdown upload by --path posts the bytes the model reviewed, once", async () => {
     fs.writeFileSync(path.join(work, "brief.md"), BRIEF);
     const command = "dispatch artifact --issue DSP-1 --name brief.md --path brief.md";
-    const g = bind({ env, cwd: work });
+    const g = bind({ env: gateEnv, cwd: work });
     expect(await g.bash("upload", command)).toBeUndefined();
     expect(g.calls[0]?.user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
     const posted = await post(command, g.store);
@@ -4201,7 +4206,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
   test("a reviewed --body-file posts the text the model reviewed, once", async () => {
     fs.writeFileSync(path.join(work, "note.md"), NOTE);
     const command = "dispatch comment --issue DSP-1 --body-file note.md";
-    const g = bind({ env, cwd: work });
+    const g = bind({ env: gateEnv, cwd: work });
     expect(await g.bash("comment", command)).toBeUndefined();
     const posted = await post(command, g.store);
     expect(posted.code).toBe(0);
@@ -4216,7 +4221,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
   ] as const)
     test(`a ${form} file edited between the review and the post is refused, and nothing posts`, async () => {
       fs.writeFileSync(path.join(work, file), BRIEF);
-      const g = bind({ env, cwd: work });
+      const g = bind({ env: gateEnv, cwd: work });
       expect(await g.bash("edited", command)).toBeUndefined();
       // An `edit` later in the same message changes the file after the gate read it.
       fs.writeFileSync(path.join(work, file), `${BRIEF}An edit made in the same message.\n`);
