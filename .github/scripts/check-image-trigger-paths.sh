@@ -68,7 +68,11 @@
 #      the remedy,
 #   4. a run step the net catches, since skipping one leaves an image whose inputs no trigger
 #      owes,
-#   5. no image build found at all, since that checks nothing.
+#   5. no image build found at all, since that checks nothing,
+#   6. the other direction, for a workflow whose every job builds or needs a job that does: a
+#      `pull_request` or `pull_request_target` trigger that matches a file no build reads, since
+#      each push to a pull request touching only such files then builds an image for nothing.
+#      A `push` trigger and a workflow with other jobs are left alone.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.
@@ -1033,6 +1037,10 @@ if not builds:
         "delete this check"
     )
 
+# Per workflow, every file its builds read, and the jobs that build; the over-broad check below
+# reads them.
+read_by: dict[Path, set[str]] = {}
+building_jobs: dict[Path, set[str]] = {}
 for workflow, job_name, step, context, dockerfile in builds:
     if not Path(dockerfile).is_file():
         problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing; add the "
@@ -1065,6 +1073,8 @@ for workflow, job_name, step, context, dockerfile in builds:
                 )
         except Unreadable as error:
             problems.append(f"::error file={dockerfile},line={line}::{dockerfile}:{line}: {error}")
+    read_by.setdefault(workflow, set()).update(path for _, files in inputs for path in files)
+    building_jobs.setdefault(workflow, set()).add(job_name)
 
     # A trigger that starts the workflow is not enough: a gate can skip the build on a change
     # the trigger let through, and the image is then not built for that change either. The
@@ -1095,6 +1105,46 @@ for workflow, job_name, step, context, dockerfile in builds:
         )
     if not triggers:
         print(f"{dockerfile}: {workflow} has no path-triggered event; nothing to check")
+
+
+def only_builds(document: dict, building: set[str]) -> bool:
+    """True when every job of the workflow builds an image or transitively needs one that does,
+    so whatever starts the workflow starts an image build and nothing else."""
+    jobs = document.get("jobs") or {}
+
+    def reaches(name: str, seen: frozenset) -> bool:
+        if name in building:
+            return True
+        needs = (jobs.get(name) or {}).get("needs") or []
+        needs = [needs] if isinstance(needs, str) else list(needs)
+        return any(need not in seen and reaches(need, seen | {name}) for need in needs)
+
+    return bool(jobs) and all(reaches(name, frozenset()) for name in jobs)
+
+
+# The other direction, for a pull request: a pull_request or pull_request_target trigger of a
+# workflow that only builds starts a full image build for every file it matches, at every push to
+# the pull request, so it must match nothing the builds do not read (a file the .dockerignore
+# drops, or one no COPY names); the queue the required checks wait in pays for each such build.
+# A push to main is left alone, and so is a workflow with other jobs, whose trigger answers for
+# those jobs too.
+for workflow, read in read_by.items():
+    document = documents[workflow]
+    if not only_builds(document, building_jobs[workflow]):
+        continue
+    for label, event_filter in event_filters(workflow, document):
+        if label.split(".")[1] not in ("pull_request", "pull_request_target"):
+            continue
+        extra = [path for path in FILES if event_filter.covers(path) and path not in read]
+        if extra:
+            more = f" and {len(extra) - 1} more" if len(extra) > 1 else ""
+            problems.append(
+                f"::error file={workflow}::{workflow} {label} matches {extra[0]}{more}, which no "
+                f"image build reads, so a pull request touching only that builds an image for "
+                f"nothing; exclude it with a `!` pattern after the pattern that matches it"
+            )
+        else:
+            print(f"{workflow} {label}: matches only files its image builds read")
 
 # Every excusal is printed, so a reader can audit the list against what it excused.
 for excusal in dict.fromkeys(excused):

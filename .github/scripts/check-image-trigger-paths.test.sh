@@ -1573,5 +1573,47 @@ run_check "$root"
 check "a foreign workflow_call is refused" "$(is "$status" 1)"
 check "  and names it" "$(contains "$out" 'acme/ci/.github/workflows/image.yml@v1')"
 
+# pr_trigger <root>: a pull_request trigger with the push trigger's paths beside it.
+pr_trigger() {
+  sed -i 's|^  workflow_dispatch:|  pull_request:\n    paths:\n      - "package.json"\n      - "packages/app/**"\n      - "docker/**"\n      - ".dockerignore"\n      - ".github/workflows/image.yaml"\n  workflow_dispatch:|' \
+    "$1/.github/workflows/image.yaml"
+}
+
+echo "case: a pull request trigger of a build-only workflow that matches a file no build reads"
+root=$(fixture pr-over-broad)
+pr_trigger "$root"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the trigger and the file the .dockerignore drops" "$(contains "$out" 'image.yaml on.pull_request.paths matches packages/app/dist/out.js, which no image build reads')"
+check "the push trigger with the same paths is not refused" "$(is "$(contains "$out" 'on.push.paths matches')" false)"
+sed -i 's|^  workflow_dispatch:|      - "!packages/app/dist/**"\n  workflow_dispatch:|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "passes once a ! pattern drops it" "$(is "$status" 0)"
+check "  and says so" "$(contains "$out" 'on.pull_request.paths: matches only files its image builds read')"
+
+echo "case: a file in a matched directory that no COPY names"
+root=$(fixture pr-uncopied)
+pr_trigger "$root"
+sed -i 's|      - "packages/app/\*\*"|      - "packages/**"|' "$root/.github/workflows/image.yaml"
+sed -i 's|^  workflow_dispatch:|      - "!**/dist/**"\n  workflow_dispatch:|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the uncopied file" "$(contains "$out" 'on.pull_request.paths matches packages/other/readme.md, which no image build reads')"
+
+echo "case: a job that needs the build still makes the workflow build-only"
+root=$(fixture pr-needs-build)
+pr_trigger "$root"
+printf '  after:\n    needs: docker\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo done\n' >> "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "  on the over-broad trigger" "$(contains "$out" 'on.pull_request.paths matches packages/app/dist/out.js')"
+
+echo "case: a workflow with a job that does not need the build answers for that job too"
+root=$(fixture pr-other-job)
+pr_trigger "$root"
+printf '  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo test\n' >> "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+
 
 summary "check-image-trigger-paths.sh"

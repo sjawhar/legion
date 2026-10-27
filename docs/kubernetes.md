@@ -449,8 +449,8 @@ Where the digest is published:
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or
   `<legion version>` worker-image tag.
 
-Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
-PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
+Worker-image tags: `sha-<12 hex of the built commit>` on every run that completes (on a pull request
+that is the PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
 job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
@@ -502,7 +502,8 @@ cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the w
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
 from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
-the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
+the PR head and publishing `sha-` only; a newer push to the pull request cancels the older head's build,
+so a superseded head may have no image — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
 workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
@@ -519,7 +520,9 @@ than merging and publishing nothing. The Go build inputs are `go.work`, `go.work
 `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own pull request
 rather than in the next image build.
 `.github/scripts/check-image-trigger-paths.sh` (the lint job of `pr-and-main.yaml`) parses the Dockerfile
-and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
+and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it; it also fails
+when trigger (2) matches a file no image build reads (the `!` patterns drop what the `.dockerignore` keeps
+out of the context), so a pull request touching only such files builds no image.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
