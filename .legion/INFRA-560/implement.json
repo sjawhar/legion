@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-560",
+  "completed": "2026-10-27T05:52:12Z",
+  "proof": [
+    {
+      "criterion": "Pulumi mock tests and goldens show each item (front door on two or more pods hosting one Tailscale Service with a stored certificate, per-workload replicas and strategy, zone and node spreading, budgets and one priority class, liveness probes, Secret checksums, Cloud SQL availability, proxy sizing, default tier); fail before, pass after",
+      "surface": "envoy-infra's Go suite and the dispatch server's Go suite, as CI's envoy-infra-go job and the release job run them",
+      "command": "cd packages/envoy/infra && go test ./... -count=1 -timeout 30m; cd packages/envoy && go test ./cmd/dispatch/ -count=1; tailnet_service script tests also run as a compiled test binary with PATH=<busybox 1.35 applets> ENVOY_TEST_SHELL=<busybox sh> -test.run TailnetService",
+      "observed": "gcp, provider and every other infra package ok except TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot, which fail with 'these tests need mkfs.ext4 on this machine' (host lacks mkfs.ext4; data_disk_test.go and cloudconfig.go unchanged); cmd/dispatch ok; TailnetService script tests PASS under busybox, dash and bash",
+      "headSha": "de49c936df08d2bcbe90a894e71a5115c27133b2",
+      "negativeControl": "The head's _test.go files and goldens copied onto a git archive of base 819dc283d: the gcp test build fails (undefined: dispatchCertPaths, undefined: tailnetServiceHost, unknown field TailnetService) and the cmd/dispatch test build fails (undefined: newHTTPServer, undefined: maxConnAge); at head, a resolved tailnetService other than svc:<hostname> is refused naming tailnetService and not echoing the value (TestDispatchRefusesATailnetServiceOtherThanItsOwn)"
+    },
+    {
+      "criterion": "The component exposes the new inputs (and drops appPriorityClassName)",
+      "surface": "the pulumi-resource-envoy-infra plugin binary Pulumi installs, read with the Pulumi CLI v3.268.0 that .github/actions/install-pulumi pins",
+      "command": "cd packages/envoy/infra && go build -o $TMPDIR/pre-head ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema $TMPDIR/pre-head | jq '.resources[\"envoy-infra:gcp:Dispatch\"] | (.inputProperties|keys), .requiredInputs'",
+      "observed": "inputs include databaseAvailabilityType, frontDoorPdbMinAvailable, frontDoorReplicas, frontDoorToolsImage, listenerPdbMinAvailable, listenerReplicas, priorityClassName, proxyCpu, proxyMemory, tailnetService; requiredInputs include tailnetService and frontDoorToolsImage; no appPriorityClassName",
+      "headSha": "de49c936df08d2bcbe90a894e71a5115c27133b2",
+      "negativeControl": "the same query on a plugin built from base 819dc283d lists appPriorityClassName and none of the new inputs"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/cmd/dispatch/conn_age.go",
+    "packages/envoy/cmd/dispatch/conn_age_test.go",
+    "packages/envoy/cmd/dispatch/main.go",
+    "packages/envoy/cmd/dispatch/main_test.go",
+    "packages/envoy/infra/README.md",
+    "packages/envoy/infra/gcp/dispatch.go",
+    "packages/envoy/infra/gcp/dispatch_cloud.go",
+    "packages/envoy/infra/gcp/dispatch_construct_test.go",
+    "packages/envoy/infra/gcp/dispatch_frontdoor.go",
+    "packages/envoy/infra/gcp/dispatch_frontdoor_test.go",
+    "packages/envoy/infra/gcp/dispatch_kube.go",
+    "packages/envoy/infra/gcp/dispatch_test.go",
+    "packages/envoy/infra/gcp/export_test.go",
+    "packages/envoy/infra/gcp/natshub_test.go",
+    "packages/envoy/infra/gcp/tailnet_service.go",
+    "packages/envoy/infra/gcp/tailnet_service_test.go",
+    "packages/envoy/infra/gcp/testdata/dispatch-*.golden (listener-pod, pod, pod-with-azure-federation, pod-with-azure-key, pod-with-broker-and-app, serve, tailnet-pod)",
+    "packages/envoy/infra/provider/provider_test.go",
+    "packages/envoy/internal/dispatch/store/pool.go"
+  ],
+  "trickyParts": [
+    "tailnet_service.go and tailnet_service_test.go are shared with INFRA-549 (architect, 02:41Z), which copies them byte for byte; they were committed alone in b1c6c868 and are unchanged since. INFRA-549's implementer has the API.",
+    "Approval of a Tailscale Service advertisement is read from the self node's service-host capability in `tailscale status --json` (ipn/ipnlocal/local.go:1565-1573 at v1.104.1), not from the precedent's 'invalid domain' inference.",
+    "Liveness and startup probes call /livez with curl and no -f: envoy-dispatch answers 204 with no I/O; the listener has no /livez route and its router answers 404 with no I/O, which still counts as an answer. /healthz (dependency checks) stays readiness only.",
+    "Checksum annotations use each Secret's resourceVersion; the TLS Secret carries none and is declared empty with ignoreChanges on data and stringData."
+  ],
+  "deviations": [
+    "envoy-infra-v2.6.0 (tag at 819dc283d) released appPriorityClassName after the plan was written, so the rename to priorityClassName now renames a released input. Per plan T10's branch for that case, the CHANGELOG keeps the released entry and records the rename in the Breaking entry; the release is a major bump anyway. Expected release: envoy-infra-v3.0.0.",
+    "T9.2 (SetKeepAlivesEnabled(false) at shutdown) is not added: Go's Server.Shutdown already writes every response with Connection: close (net/http server.go doKeepAlives includes shuttingDown). TestShutdownAlreadyClosesKeepAliveConnections records that fact.",
+    "Spec items BG-11 and BG-12 (added by the INFRA-63 architect, 04:02Z): proxyCpu/proxyMemory inputs, default 1 CPU / 2Gi (the cloud-sql-proxy v2.26.3 sidecar example); default databaseTier db-custom-4-15360 (max_connections 500 holds 15 pods at 32 connections each); pool.go comment fixed.",
+    "Liveness and startup probes use a new /livez endpoint rather than /healthz (simplify pass finding): /healthz on the listener can exceed curl's 8 s on a slow hub and would restart it.",
+    "The advertiser container is named advertiser, not cert-order: it advertises, recovers a stuck advertisement, orders the certificate and writes the ready file."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "A consumer on envoy-infra-v2.6.0 that sets appPriorityClassName must rename it to priorityClassName at the upgrade (INFRA-561's window).",
+    "The gcp package's two data-disk tests need mkfs.ext4, absent on this pod's host; CI's runner has it."
+  ]
+}
