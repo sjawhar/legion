@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-530",
+  "completed": "2026-10-27T05:22:32Z",
+  "verdict": "pass",
+  "round": "rebase re-check b6a86edf087d3fa27e6d76c79af3ec14eae8887e → 8ea0a5bd58e57f3ad3d84e5a4d32db7a785d9381: fingerprint unchanged, bare gates only",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Recomputed its fingerprint independently: jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum gives 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3 at b6a86edf (the head of my last E2E line) and at 8ea0a5bd. Re-ran its four pmdoc tests at 8ea0a5bd: PASS, engine compared, no skip. The behaviour itself was verified in round 1 at 8a431a76, the same fingerprint (my independent dispatch CLI + browser drive, https://github.com/sjawhar/legion/pull/2307#issuecomment-6432238516)."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "rebase re-check: the change verified at 8a431a76 and b6a86edf is the change at 8ea0a5bd, and it still holds there",
+      "surface": "the pull request's diff against its fork point, and the Dispatch spec page in real Chromium (desktop and iPhone emulation) against the real Go Dispatch server + Postgres 17/pgvector (email-links.e2e.ts)",
+      "command": "fingerprint command above for b6a86edf and 8ea0a5bd; source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- email-links.e2e.ts; cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack' -count=1 -v",
+      "observed": "fingerprint 10032dfc… on both sides; e2e 2 passed (chromium, iphone); Go 4 PASS, no skip",
+      "headSha": "8ea0a5bd58e57f3ad3d84e5a4d32db7a785d9381",
+      "negativeControl": "round 1 at 5158fd92 (main + tests, no fix): e2e 2 failed with stored [first@b.test](first@b.test), Go FAIL with href a@b.test against the engine's mailto:a@b.test, and my CLI drive's doc-read showed [cell@b.test](cell@b.test); the code is the same now, as the fingerprint shows"
+    }
+  ],
+  "ciRead": "Code head 113b8d72 (GitHub's update-branch merge of main), read 05:22Z: lint, typecheck, test, pr-title, build, changes queued; read as running. 8ea0a5bd is handoff-only (skip-checks: true). PR mergeable: MERGEABLE."
+}
