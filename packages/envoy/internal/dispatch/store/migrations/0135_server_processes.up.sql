@@ -1,4 +1,4 @@
--- 0130_server_processes.up.sql
+-- 0135_server_processes.up.sql
 -- INFRA-555: the registry of live envoy-dispatch server processes (internal/dispatch/processes),
 -- one row per process, written by the process itself once it has bound its port and before it
 -- serves its first request, kept alive by a heartbeat every few seconds and deleted once its HTTP
