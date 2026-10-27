@@ -721,6 +721,60 @@ describe("the related-item check", () => {
     expect(result.text).toBe([createdLine, form].join("\n"));
   });
 
+  test("dispatch_issue naming an external issue Dispatch already holds does not say it created one", async () => {
+    // Dispatch answers an external reference it already holds with 200 (a new issue is 201), the
+    // existing issue, and a check not made because nothing was created: the head server's answer.
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      const method = init?.method ?? "GET";
+      if (target.pathname === "/api/v1/issues" && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            key: "DSP-42",
+            title: "External issue",
+            project: "DSP",
+            status: "triage",
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+            advice: {
+              suggestions: {
+                outcome: "not_made",
+                related: [],
+                missing: "Dispatch already holds this issue; nothing was created",
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (target.pathname === "/api/v1/projects/DSP/architecture-sources" && method === "GET") {
+        return new Response("[]", { headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error(`unexpected request: ${method} ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "DSP", title: "External issue", external: "owner/repo#7" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec(),
+      fetchImpl: fetchImpl as typeof fetch,
+      subscriptions: async () => [],
+    });
+
+    expect(result.text).toContain("DSP-42");
+    expect(result.text).not.toMatch(/^Created DSP-42/m);
+  });
+
   test("an ask item says where the ask stands", async () => {
     const answer = (selected: string[], text: string | null) => ({
       user: "alice",
