@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-612",
-  "completed": "2026-10-27T16:12:00Z",
+  "completed": "2026-10-27T17:15:00Z",
   "proof": [
+    {
+      "criterion": "Round 3: in an editable document a malformed decision's blank option is not hidden, so typing `- Option A` into a decision with no options stores `Option A` as an option; a text body and a read-only document still hide a blank option",
+      "surface": "Dispatch editable document page /issues/<KEY> (issue spec) and artifact page, read-only version view ?v=1, and the conversation tab, on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts e2e/typed-block-content-rule.e2e.ts e2e/task-items.e2e.ts --project chromium --project iphone",
+      "observed": "96 passed (8.6m) at 00db1b8a, including the new case 'typing a new option into a decision with no options stores it as a typed option' (stored markdown holds `Which one?\\n\\n- Option A`) and the reworked blank-option case (body: display none; editable document: display list-item; read-only ?v=1: display none). dispatch refs/doc 430 pass 0 fail, typecheck exit 0, biome no diagnostics.",
+      "headSha": "00db1b8a3eb4",
+      "negativeControl": "Before-leg at main 2df3353c with only the new text-typed-blocks.e2e.ts, -g \"typed option\", chromium and iphone: 2 failed at line 347 toContain(\"- Option A\"), Received \"Intro.\\n\\n:::ask{#a1 …}\\nWhich one?Option A\\n\\n- \\n:::…\". Before-leg abandoned, never pushed."
+    },
     {
       "criterion": "Conflict with main (INFRA-565 #2388 and others) resolved by a forward merge that keeps both sides; the server-attribute drop still runs after the schema refusal on main's remarkDecideTypedBlocks; PR MERGEABLE",
       "surface": "Dispatch SPA (production build) on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone (pod harness, implementer lane); bun test and tsc for proof-editor and dispatch; gh pr view",
