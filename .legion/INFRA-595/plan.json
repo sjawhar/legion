@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-595",
+  "completed": "2026-10-27T04:30:30Z",
+  "plan": "dispatch://INFRA-595/artifact/plan-md",
+  "summary": "Replace the CI summary loop's per-second copy-and-sort of the whole cache (packages/envoy/internal/cistore/loop.go:70-156, cistore.go:633-645) with a change feed in the Store (marked in cacheStateLocked/evictCachedLocked/resetCache only when content changes) and a deadline min-heap in a summarizer; passes run only on the existing tick grid (start + k*tick) when something changed or a queued deadline passed, so settlement timing, retries, the held gauge and its log are unchanged and nothing runs while idle. List() and runSummaryTick move to a _test.go helper with the same signatures so the existing tests keep their call sites.",
+  "tasks": [
+    "1. Commit summary_bench_test.go (BenchmarkSummaryIdle/Change at records=12000,30000, via openStore + cacheStateLocked + runSummaryTick, no due records, debounce 1h); run at base into $TMPDIR/infra595/bench-before.txt; build listener-base and measure its idle CPU with 30,000 seeded records before any production change.",
+    "2. cistore.go: change feed (feedAttached, changed set, cacheReset, changedWake cap 1, non-blocking wake; mark only on a higher revision, a new key or a removal), attachSummary (panics on a second attach; seeds every cached key), detachSummary, takeChanges, cachedState; remove List(); fix tick comments.",
+    "3. loop.go: claimFresh shared by schedule and the settle body; pure schedule(st, now, debounce) -> idle|wait(at)|held|attempt in exact integer ms (D, G, ClaimedAt+2*debounce+1, older-generation claim never fresh); summarizer with heap(at,key)+index+held under a mutex; pass(): apply changes, pop the due batch before any settlement, sort batch by key, re-schedule each, run the unchanged per-record body for attempts, then queue the key at now; StartSummaryLoop keeps its signature, one time.Timer on the tick grid, first pass at start+tick, wake on change arms the next grid instant, empty queue leaves the timer stopped, detach on ctx done.",
+    "4. Tests: summary_helpers_test.go (List, runSummaryTick per-store summarizer, panic on a different debounce); TestSummaryTickConcurrentExactlyOnce on two stores; held-count assertions at legacy_test.go:166-167 (2) and :193 (1); new TestScheduleMatchesThePredicates, TestARecordFallingDueSettlesWithNoOtherChange, TestAStaleClaimIsReclaimedWithNoOtherChange, TestARecordPastTheGraceIsCountedWithNoOtherChange, TestTheSummaryLoopSleepsWhileNothingChanges (incl. Rewatch replay), TestAFailingPublisherIsRetriedOncePerTick.",
+    "5. Docs: cmd/listener/main.go:581 gauge help and :884-887 comment; docs/solutions/architecture-patterns/envoy-ci-summary.md:20-23,49-51,94-95,101-103; packages/envoy/AGENTS.md ~2000 and ~2257; packages/envoy/CHANGELOG.md [Unreleased] Changed; .dispatch/architecture/envoy-listener.md event-driven sentence; test comments that describe the tick.",
+    "6. Proof at head: go vet ./... and go test (cistore, cmd/listener, -race cistore); live listener idle CPU base vs head with 30,000 seeded records plus one signed check-run settlement; scripts/e2e-local.sh; benchmarks after + benchstat."
+  ],
+  "acceptance": [
+    {
+      "criterion": "The summary is recomputed only when an entry changes or falls due (event-driven, due entries in order); no step copies or sorts the whole cache.",
+      "surface": "the real envoy-listener binary with 30,000 seeded CI records; internal/cistore",
+      "command": "Task 6.2 /proc utime+stime over 60 s idle, base vs head; go test -run 'TestTheSummaryLoopSleepsWhileNothingChanges|TestScheduleMatchesThePredicates' -v ./internal/cistore/; grep -rn 'func (s \\*Store) List\\|sort\\.' packages/envoy/internal/cistore/*.go | grep -v _test.go",
+      "pass": "head idle under 0.01 core vs base's measured figure; tests pass; no List; only per-record sorts (cistore.go:254,263, render.go:114,120,150) and the due batch's sort remain"
+    },
+    {
+      "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
+      "surface": "internal/cistore benchmarks",
+      "command": "cd packages/envoy && go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 6 ./internal/cistore/ (base and head), then benchstat",
+      "pass": "head idle 0 allocs/op and under 1 us/op at both sizes; head change equal allocs/op and 30,000 ns/op within 1.5x of 12,000; both runs in the PR body"
+    },
+    {
+      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change.",
+      "surface": "internal/cistore, cmd/listener, packages/envoy/scripts/e2e-local.sh",
+      "command": "go vet ./... && go test -count=1 ./internal/cistore/ ./cmd/listener/ && go test -race -count=1 ./internal/cistore/; bash packages/envoy/scripts/e2e-local.sh; go test -run TestARecordFallingDueSettlesWithNoOtherChange -v ./internal/cistore/",
+      "pass": "all pass; e2e-local's four pr.42.checks settlements and payload assertions pass"
+    },
+    {
+      "criterion": ".dispatch/architecture/envoy-listener.md says what is now true.",
+      "surface": "the file",
+      "command": "grep -c 'event-driven' .dispatch/architecture/envoy-listener.md",
+      "pass": "1, and the sentence matches the code"
+    }
+  ],
+  "productionCheck": "After a release carrying the merge reaches the cluster listener (theorem-labs/agent-infra envoy-cluster/listener.go:132-164 sets ENVOY_WEBHOOKS=github when the webhook secret and review App id exist): Cloud Monitoring kubernetes.io/container/cpu/core_usage_time for the listener container an hour before and after the rollout; /metrics envoy_ci_legacy_records_held; a real pull request's pr.<n>.checks settlement on the stream after the rollout.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff, six-field proofs, PR body with Dispatch: INFRA-595, push and skip-checks rules",
+      "asd-ste100: the PR body and any Dispatch message follow the deployment's ASD-STE100 rule",
+      "ce-simplify-code: the simplify pass once the change settles, before the proofs are taken at the final head",
+      "dispatch: any write to Dispatch (a message or an ask)"
+    ],
+    "test": [
+      "legion-worker: re-run each named proof at the head and record its six fields, including the negative controls the plan names"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for approving the head by SHA and references/pr-body.md for judging the proofs and before/after numbers"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "notBefore retry gap vs the summarizer's own writes: a change-driven retry spins at KV speed after a publish failure, and a stale claim needs two attempts (reclaim bumps the generation, then the claim), which a 1 h retry would block.", "answer": "Dropped notBefore. Passes run only on the tick grid (Decision 2), at most one per tick; after any attempt the key is queued at now for the next pass, so a failed publish retries at the next tick and the stale claim's reclaim and claim take two consecutive ticks, exactly as today. Wake sends are non-blocking. TestAFailingPublisherIsRetriedOncePerTick pins the bound."},
+      {"finding": "Second summarizer undefined; a panic forbids restart and a late summarizer would miss records cached before it.", "answer": "attachSummary seeds every cached key as a change (once per loop start); the feed records nothing while detached; detach on ctx done allows a later attach; a second concurrent attach panics (Decision 7, Task 2)."},
+      {"finding": "schedule() edges: an older-generation claim is reclaimed at D, not after 2*debounce; deadlines must match the predicates to the millisecond; the attempt decision must agree with the body; the due batch must be collected before any body runs.", "answer": "claimFresh shared by schedule and the body; exact integer-ms rules for D, G and ClaimedAt+2*debounce+1; older-generation claims never fresh; batch popped before settlement; TestScheduleMatchesThePredicates checks every millisecond around each boundary, including the older-generation claim (Task 3, Task 4)."},
+      {"finding": "'When the summary reports is unchanged' has a strict and a loose reading; firing exactly at D changes timing, order, replica collisions and clock behaviour.", "answer": "Strict reading kept: passes stay on start + k*tick, so a record is attempted at the first tick at or after it falls due, retries and the first pass keep their tick timing, the batch is sorted by key as List() sorted, and replicas keep independent tick phases. A forward wall-clock step can delay a queued deadline by at most its armed wait (Risks)."},
+      {"finding": "No machine thresholds for 'near zero', 'independent of size', 'no whole-cache copy'; benchmark mix, first call and identical source under-specified; before numbers must be re-measured.", "answer": "Thresholds in the criteria table (idle 0 allocs and under 1 us/op; change equal allocs and within 1.5x); the seed and a bucket refill are named as the only whole-cache visits; benchmark mix has no due records, the first call precedes ResetTimer, stores come from openStore, before numbers are measured at base on the same machine (Task 1)."},
+      {"finding": "The root's same-load-step rule cannot be met: INFRA-589's reproduction never runs the loop.", "answer": "Recorded as the plan's one spec departure: the committed benchmark plus the real listener binary's idle CPU with 30,000 seeded records, base and head on one machine; reported to the architect."},
+      {"finding": "Negative tests could pass vacuously through a helper that never saw the record; helper debounce undefined; the concurrent-replica test's point could be lost.", "answer": "Helper panics on a different debounce per store; held-count assertions added at legacy_test.go:166-167 and :193; TestSummaryTickConcurrentExactlyOnce moves its second replica to a second store and keeps both assertions (Task 4)."},
+      {"finding": "Gauge HELP text says 'last summary tick'; the one-time log floor could change.", "answer": "HELP becomes 'the summary loop's last pass held back' with the metric name and value unchanged; the first pass stays one tick after start, so the log's floor counts what it counted before (Decision 2, Task 5)."},
+      {"finding": "Several docs and comments would stay false (package doc, handoverGrace, markOverflowed, loop comments, AGENTS.md ~2000 and ~2257, envoy-ci-summary.md, test comments, CHANGELOG, architecture doc without a target sentence).", "answer": "Each is listed in Task 2, Task 3, Task 4 and Task 5, with the architecture sentence written out and a grep check."},
+      {"finding": "Unsupported claim: 26-76% of the cluster listener's 0.5 core.", "answer": "Kept as the review's estimate; the PR cites only measured numbers. The cluster listener does mount the GitHub route when its secret and App id exist (agent-infra envoy-cluster/listener.go:132-164)."},
+      {"finding": "Unsupported claim: 148 ms/29 MB and 379 ms/80 MB came from an uncommitted benchmark.", "answer": "Before numbers come from the committed BenchmarkSummaryIdle/Change at base on the implementer's machine."},
+      {"finding": "Unsupported claim: the production bucket holds 25,000-30,000 records.", "answer": "Kept labelled as an estimate (Risks); the benchmark and live run use the spec's 12,000 and 30,000."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Context for every child of INFRA-514: each fix states before and after numbers from the same load step (the committed load reproduction, dispatch://INFRA-589, once it merges), on the same machine.",
+      "plan": "Before and after numbers come from the committed BenchmarkSummaryIdle/BenchmarkSummaryChange at 12,000 and 30,000 records and from the real envoy-listener binary's idle CPU with 30,000 seeded CI records, base and head on the same machine.",
+      "evidence": "The INFRA-589 reproduction drives Dispatch only; its listener (port 19120) mounts no GitHub webhook route, so it opens no CI store and runs no summary loop (dispatch://INFRA-514/artifact/load-reproduction-2026-10-27-md lines 50, 80, 337-338; packages/envoy/cmd/listener/main.go:666-674).",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
