@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-576",
+  "completed": "2026-10-27T06:31:32Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2358",
+  "proof": [
+    {
+      "criterion": "Acceptance 2: release.yaml has the fewest sequential job stages that keep credentials out of jobs that build untrusted inputs (3, today 10), each stage stated with its reason",
+      "surface": "GitHub Actions on sjawhar/legion-smoke: the branch's exact release.yaml and worker-image.yaml job graph, needs, job and step if:s, step ids, outputs and call with: (refs/heads/main mapped to the probe branch), step bodies stubbed",
+      "command": "python3 gen.py (generator over the branch's release.yaml/worker-image.yaml) pushed to probe/infra-576-044809; run 40451765299 https://github.com/sjawhar/legion-smoke/actions/runs/40451765299",
+      "observed": "success. Stage 1: envoy_plugin_build, pi_legion_build, legion_build, pi_envoy_build (no needs). Stage 2: worker_image / build (05:46:22) and publish (05:46:51). Stage 3: worker_image_release and worker_image_attest / attest (05:47:12-16). worker_image / attest and worker_image_attest / build skipped. Call 1 built with skip_attest=true and legion_build's pair (pi_envoy=11.2.0 pi_legion=11.2.0); call 2 attested sha256:702e2fb6..., the digest call 1 output.",
+      "headSha": "3658796672b90cc72192e8fcffd5574460c499f8",
+      "negativeControl": "Run 40451765293 forced 'pi-envoy: Publish to npm' to fail: pi-envoy's later steps skipped, pi-legion's and envoy-plugin's 8 steps each succeeded, every legion step skipped, worker_image_attest / attest and worker_image_release skipped (pair_ok false, no legion release)."
+    },
+    {
+      "criterion": "Decision 4 and 6: one package's publish failure holds back no other package; attest and the release note still run when the plugin pair published and legion released, even if publish fails later",
+      "surface": "GitHub Actions on sjawhar/legion-smoke, the same generated probe",
+      "command": "run 40451765270 https://github.com/sjawhar/legion-smoke/actions/runs/40451765270 (forced failure of 'envoy-plugin: Push version bump', the last step of publish)",
+      "observed": "publish failure only at that step; pi-envoy, pi-legion, the pair check and all 6 legion steps succeeded; worker_image_attest / attest success and worker_image_release success, each reading pair_ok and tag from the failed publish job's outputs.",
+      "headSha": "3658796672b90cc72192e8fcffd5574460c499f8",
+      "negativeControl": "Run 40451765293 (pi-envoy npm failure): pair_ok false, so legion and the attestation both skipped."
+    },
+    {
+      "criterion": "Off main (branch workflow_dispatch) the release builds and publish skip, call 1 builds the sha- image only and call 2 attests it with worker-image.yaml's identity, as before",
+      "surface": "GitHub Actions on sjawhar/legion: workflow_dispatch of the branch's release.yaml",
+      "command": "gh workflow run release.yaml --ref legion/INFRA-576 -R sjawhar/legion -> run 40451569882 https://github.com/sjawhar/legion/actions/runs/40451569882; gh api repos/sjawhar/legion/attestations/sha256:2623de0d9fd021cb1063255c997938ccb7c6530b735e0478c18b27a1a196fdf0",
+      "observed": "success. envoy_plugin_build, pi_envoy_build, pi_legion_build, legion_build, publish skipped; worker_image / build pushed only ghcr.io/sjawhar/legion-worker:sha-3658796672b9 (label version sha-3658796672b9, empty plugin pair), digest sha256:2623de0d9fd0...; worker_image / attest skipped; worker_image_release skipped; worker_image_attest / build skipped; worker_image_attest / attest success. GitHub lists 1 attestation for that digest, subject ghcr.io/sjawhar/legion-worker, invocation run 40451569882, certificate SAN https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/legion/INFRA-576.",
+      "headSha": "3658796672b90cc72192e8fcffd5574460c499f8",
+      "negativeControl": "gh api repos/sjawhar/legion/attestations/sha256:0000000000000000000000000000000000000000000000000000000000000000 -> HTTP 404 Not Found."
+    },
+    {
+      "criterion": "Decision 7: worker_image_release's :<legion version> tag names exactly the digest the build pushed (--prefer-index=false) on the runner's own buildx",
+      "surface": "GitHub Actions ubuntu-24.04 runner on sjawhar/legion-smoke with a local registry service",
+      "command": "run 40451765371 https://github.com/sjawhar/legion-smoke/actions/runs/40451765371: docker buildx imagetools create --prefer-index=false --tag localhost:5000/probe:15.1.0 localhost:5000/probe@<digest>, then imagetools inspect --format '{{.Manifest.Digest}}'",
+      "observed": "buildx v0.38.0; source single OCI manifest sha256:8354eb263459...; the tag names sha256:8354eb263459... (equal).",
+      "headSha": "3658796672b90cc72192e8fcffd5574460c499f8",
+      "negativeControl": "The same create without --prefer-index=false tagged sha256:de61b6c74761..., a new index of another digest, which the release job's read-back would refuse."
+    },
+    {
+      "criterion": "Acceptance 3 / finding A1: the one publish job's composition (detach per package, two bump commits, push-main) releases each tag once and a re-run publishes nothing new",
+      "surface": "release-push.sh against a local bare remote standing in for GitHub (the repository's real-process test harness)",
+      "command": "TMPDIR=/legion/scratch/tmp bash .github/scripts/release-push.test.sh (case 'one publish job releases two packages from the run's commit')",
+      "observed": "Results: 362 passed, 0 failed. Both bumps land on main (the second rebased onto the first), each tag names its un-rebased bump on the run's commit, a re-run's version step releases each tag again and pushes nothing, origin's main and tags unchanged.",
+      "headSha": "3658796672b90cc72192e8fcffd5574460c499f8",
+      "negativeControl": "Re-run without the detach between packages: the second package's push-main refuses ('HEAD carries 2 commits main does not'), origin unchanged."
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/release.yaml",
+    ".github/workflows/worker-image.yaml",
+    ".github/scripts/check-release-credentials.sh",
+    ".github/scripts/check-release-credentials.test.sh",
+    ".github/scripts/check-image-trigger-paths.sh",
+    ".github/scripts/check-image-trigger-paths.test.sh",
+    ".github/scripts/release-push.test.sh",
+    "packages/pi-shared/test/skills-partition.test.ts",
+    "skills/AGENTS.md",
+    "AGENTS.md",
+    "docs/kubernetes.md",
+    "docs/site/src/content/docs/legion/running-legion.md",
+    ".dockerignore",
+    "packages/pi-envoy/README.md",
+    "packages/pi-legion/README.md"
+  ],
+  "trickyParts": [
+    "A caller of a reusable workflow must grant every scope the called file's permissions blocks declare, so both worker-image.yaml calls carry contents read, packages/id-token/attestations write; only the jobs inside differ.",
+    "The attest condition is a with: input (skip_attest) because check-image-trigger-paths.sh refuses a needs.<X>.outputs or github.ref term in a caller's if:; worker-image.yaml's build job skips on inputs.attest_digest, which check-image-trigger-paths.sh now admits as a call mode.",
+    "Without the per-package detach a first attempt still lands both bumps; it is the re-run that breaks (release-push.test.sh shows it), so the detach stays on every package.",
+    "check-release-credentials.sh rules were renumbered (old 5 -> 4, old 6 -> 5) when rule 4 went."
+  ],
+  "deviations": [
+    "Spec departures recorded in the plan (acceptance 1's reason is tags alone; outcome is 3 stages, replace-pending kept).",
+    "worker-image.yaml inputs are named skip_attest and attest_digest (negative names, so pull_request/workflow_dispatch runs where inputs are null behave as before).",
+    "The legion_version workflow_dispatch input is removed too: nothing documented it and the version tag moved to release.yaml's worker_image_release.",
+    "actionlint 1.7.12 reports only GitHub's newer cache-mode job key (and queue: max in the untouched listener workflow); those findings are ignored with -ignore."
+  ],
+  "openQuestions": [
+    "Acceptance 1 and 4 and the 'after' merge-to-published numbers are read after the merge by the production check (measurement script posted on the PR: https://github.com/sjawhar/legion/pull/2358#issuecomment-6434025628).",
+    "sjawhar/legion#2316 (INFRA-520) edits legion_build's setup-go and adds a cache restore step; whichever merges second carries the other's change."
+  ]
+}
