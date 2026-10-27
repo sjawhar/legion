@@ -205,9 +205,9 @@ func (s *server) checkArchitectureSource(ctx context.Context, owner, name, branc
 }
 
 // deleteArchitectureSource removes the source and, in the same transaction, the model it
-// projected: its components (by the components foreign key's cascade) and their dependency
-// edges (graph_edges loses their component arms with them). Every other source's components stay,
-// and snapshots stay as history.
+// projected: its components (by the components foreign key's cascade), their dependency
+// edges (graph_edges loses their component arms with them) and the times recorded for them
+// (component_facts). Every other source's components stay, and snapshots stay as history.
 func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Actor *model.Actor `json:"actor"`
@@ -241,6 +241,10 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 			writeSourceNotFound(w, key, repo)
 			return
 		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := architecture.DeleteOrphanComponentFacts(r.Context(), tx, source.Project); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

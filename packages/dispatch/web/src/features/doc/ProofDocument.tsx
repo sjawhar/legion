@@ -36,16 +36,18 @@ import {
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
+import { blockFragment } from "../refs/block-reference";
+import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
 import {
   buildIssuePath,
   buildProjectPath,
   buildReferencePath,
-  parseDispatchReference,
+  parseNodeReference,
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AskBlockHost, installTypedBlocks } from "./ask-block";
+import { installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import type { EditorHandle } from "./editor";
@@ -62,6 +64,7 @@ import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
+import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 
@@ -310,7 +313,9 @@ export function ProofDocument({
     if (blockId === null || blockId === undefined) {
       return false;
     }
-    return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
+    return copyText(
+      `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
+    );
   }, []);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
@@ -716,14 +721,14 @@ export function ProofDocument({
           </span>
           <a
             className={`block min-w-0 max-w-[90ch] truncate text-sm font-medium underline ${linkText} ${linkHoverText}`}
-            href={`#b-${encodeURIComponent(openDecision.block_id ?? "")}`}
+            href={blockFragment(openDecision.block_id ?? "")}
             onClick={(event) => {
               event.preventDefault();
               const blockID = openDecision.block_id;
               if (blockID === undefined || blockID === null) {
                 return;
               }
-              window.location.hash = `b-${encodeURIComponent(blockID)}`;
+              window.location.hash = blockFragment(blockID);
               editorRef.current?.focusBlock(blockID);
             }}
             title={openDecision.question}
@@ -772,12 +777,20 @@ export function ProofDocument({
             return;
           }
           const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
+          // The link's target is a node its author named, and opening it is a read, so it is read
+          // as a node's reference, whatever the length of its name.
           const href = anchor === null ? null : dispatchHrefOf(anchor);
-          const route = href === null ? undefined : parseDispatchReference(href);
+          const route = href === null ? undefined : parseNodeReference(href);
           if (route === undefined) {
             return;
           }
           event.preventDefault();
+          // A block of a spec pinned to a version opens that version under the spec's slug, which
+          // only the issue names; every other reference's path is known at once.
+          if (needsSpecSlug(route)) {
+            void fetchReferencePath(queryClient, route).then((path) => navigate(path));
+            return;
+          }
           navigate(buildReferencePath(route));
         }}
       >

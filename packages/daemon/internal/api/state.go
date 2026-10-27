@@ -295,8 +295,8 @@ type Issue struct {
 
 // WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind
 // is `ask` with Ask, the id of the oldest question of its tree still with the person, or `gate`
-// with GateVersion and ArtifactID, the spec version a person has not reviewed (no daemon of this
-// contract writes a gate wait yet). Since is Dispatch's time of the hand-back the wait began at,
+// with GateVersion and ArtifactID, the spec version of its registered document a person has not
+// reviewed. Since is Dispatch's time of the hand-back the wait began at,
 // absent when unknown. AnsweredAt and AnsweredBy are absent until a person's act answers the wait;
 // the root then waits at the front of admission's waiting line for its slot.
 type WaitingOnView struct {
@@ -511,9 +511,9 @@ func StrandedMoves() []StrandedMove {
 //     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
 //   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
 //     relaunches its session with fresh budgets, and a catch-up follows.
-//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
-//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
-//     architect.
+//   - StrandedWorkflowStart, a failed phase worker: the retry of its held phase — its architect's
+//     retry_or_escalate, or the operator's retry (`legion claims retry`, which applies the same
+//     retry) — since a failed claim ignores resume and deliver.
 func (c StrandedClaim) Move() StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {

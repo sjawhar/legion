@@ -9,6 +9,22 @@ the stage scripts share: standalone helpers they run, and the files they source
 [`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
+Every `docker run` in these scripts sets a CPU and a memory limit inline, and its container is
+removed when the run ends (an `EXIT` trap's `docker rm -f -v`, or `--rm`): the proofs run on a
+shared devbox, where an unbounded container takes cores and memory from every other run there.
+Every scratch Postgres keeps its data directory on `tmpfs`, so no run leaves a volume behind, and
+tmpfs is charged to the container's memory. Every scratch Postgres gets `--cpus 2 --memory 2g`,
+except the session databases of Stage 4a and Stage 4b, which get `--cpus 2 --memory 4g`: they hold
+every pod's Oh My Pi session for the whole run, hours for Stage 4b. NATS gets `--cpus 1` (0.5 in `lib/nats-stream.test.ts`) `--memory
+512m`, enough for one run's JetStream streams. A kind proof's containers on the kind network get
+`--cpus 2 --memory 2g`: each runs one static binary from the work directory, a Go test driver that
+runs the daemon against the cluster or, in `share-volumes-kind.sh`'s probe, `legion probe-boot`.
+The one exception is kind's node container, which `kind create cluster` starts
+([`lib/kind-sandbox.sh`](#libkind-sandboxsh)): it has no limit, because the kubelet inside it
+reads the host's capacity, not a cgroup cap. `burstable-kind.sh`'s pods declare memory limits of
+19 Gi and 32 Gi, which the kubelet admits against the host's memory; a smaller cap on the node lets
+the kernel kill pod processes below their own limits, and the kubelet does not see why.
+
 | script | proves |
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state` with the 20-row capability report on it (`resource-limits` open under tmux, carrying the `capabilities.decided` line to write; `pool-capacity` present, since tmux runs no probe pod), registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
@@ -22,7 +38,8 @@ through `scripts/e2e/.shellcheckrc`.
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the issue pod `issue: {memory: 32Gi, memory_request: 8Gi}` is admitted, scheduled and recorded `Burstable`, its `roles` container carrying exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable issue pod and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
-| `merged-root-waits.sh` | the daemon keeps a tree's order, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child, and lands once that child is parked; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
+| `merged-root-waits.sh` | the daemon keeps a tree's order at the close, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow lands, the child untouched; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
+| `child-adoption.sh` | a labelled root still queued in admission, which a person then makes a child of a live tree, joins that tree and runs there, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: Dispatch's re-parent event takes it out of `admission.waiting` and into the tree, planning with no slot and no architect of its own; `release_children` adopts one the daemon saw no re-parent of before it answers, from todo, from backlog (writing todo, whose event runs it) and from the state INFRA-214 reached (backlog, label off, todo), and the old linger's close stops none of it; a todo root under an unreleased child of the live tree is recorded but waits in no line, even with a slot free and a root of its own parked between it and the tree, until its release, and its own todo child waits with it, is refused 409 `CHILD_IN_OTHER_TREE` naming it and the held root when released alone, and joins the tree with it; such a root takes the free slot once a person moves an ancestor out from under the tree, unrecorded or recorded; a root that ran as a tree of its own is never held so, and takes the free slot; and a child recorded in another live tree is refused 409 `CHILD_IN_OTHER_TREE` naming it and that tree, with nothing changed or written |
 | `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
@@ -78,7 +95,7 @@ it acts, which needs `bun` on `PATH` (and `jq` for its log line).
 bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from the checkout
+Needs `go`, `docker`, `jq`, `curl`, `python3` and `tmux`. It builds the binary from the checkout
 (`packages/daemon/cmd/legion`), so it proves the tree you are standing in. When the first tmux on
 `PATH` is a script or mise itself, as on a devbox, the run's `PATH`, and so the daemon's, starts with
 the real binary that `mise which tmux` names in `packages/daemon`, the daemon's working directory
@@ -121,25 +138,33 @@ two sessions — neither collide nor report each other as a leftover:
   box's `~/.local/state/legion/legions.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
   what makes `boots == 1` true on a store that has served other runs.
-- a free daemon port picked per run by [`lib/free-port.sh`](#libfree-portsh), below the kernel's
-  ephemeral range, and on the devbox path the container `legion-e2e-pg-<pid>`.
+- a daemon port the kernel chose, held for the whole run by a keeper ([`lib/rig.sh`](#librigsh)'s
+  `keep_port`, [`lib/held-port.py`](#libheld-portpy)): `legion.yaml` names it, and each start
+  serves on a copy of the keeper's socket (`LEGION_LISTEN_FD`, `start_kept`), so the restart serves
+  the same port and nothing else can take it in between; and on the devbox path the container
+  `legion-e2e-pg-<pid>`.
+
+After each healthy start the run checks that the socket the daemon serves on is held by the
+daemon's and the keeper's processes alone (`held_only_by`: the socket's inode from the `LISTEN` row
+of `/proc/net/tcp`, its holders from `/proc/*/fd`): a copy that leaked into the daemon's tmux
+server, a pane or a `legion` CLI call would keep the port listening after the daemon stops.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and
-signals the daemon; `docker ps -a --filter name=legion-e2e-pg` comes back empty and no daemon is
-left holding the run's port.
+signals the daemon and the keeper; `docker ps -a --filter name=legion-e2e-pg` comes back empty and
+nothing is left holding the run's port. A failed run prints the daemon's log (`<work>/logs/daemon.log`).
 
 ### How it fails
 
-Every step is fatal and names its reason: no port to pick ([`lib/free-port.sh`](#libfree-portsh):
-`ss` missing or failing, or no room below the ephemeral range), the refusal that does not name its
-host, a first tmux that is a script or mise itself while `mise which tmux` names no tmux
-(`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at once
-and names the daemon's exit status),
-a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
-issues, a registry without exactly one entry for this run, a `firstBootAt` that moved across the
-restart, a daemon that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or
-exited non-zero on one. `stop_daemon` reads and judges the exit status, because `daemon.Run`
-returns 0 on a cancelled context — a non-zero status there is a defect, not a stop.
+Every step is fatal and names its reason: a keeper that never held a port, the refusal that does
+not name its host, a first tmux that is a script or mise itself while `mise which tmux` names no
+tmux (`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at
+once and names the daemon's exit status), a `/healthz` that never answers (each poll times out
+after 2 s: the kept port queues a request no daemon accepts), a socket held by any process but the
+daemon and its keeper, a state document that is not boot 1 with cap 4 and no issues, a registry
+without exactly one entry for this run, a `firstBootAt` that moved across the restart, a daemon
+that ignored a stop (SIGKILLed on the way out) or exited non-zero on one. `stop_daemon` reads and
+judges the exit status, because `daemon.Run` returns 0 on a cancelled context — a non-zero status
+there is a defect, not a stop.
 
 Two notes on what the script had to learn about its own surface:
 
@@ -172,7 +197,7 @@ LEGION_E2E_MODEL_ROUTE=box-login bash scripts/e2e/stage2-tmux-supervision.sh    
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
-`jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
+`jq`, `curl`, `python3`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how the
 agents reach Anthropic, independently of which devbox this runs on:
@@ -203,8 +228,8 @@ The `secrets` CLI named here and below is secretsd, shipped from `sjawhar/forwar
 `sjawhar/secretsd` repository is archived): it reads its agent tier from local sops files and its
 human tier through the local secretsd daemon, which asks for a YubiKey touch, and it never reads
 the agent-secrets broker. `agent-secrets` is the other CLI, which reads that broker, backed by a
-cloud Secret Manager. One key name can hold different values in the two stores - the App keys
-these runs use are the `secrets` store's. `agent-secrets` names its store in output and every
+cloud Secret Manager. One key name can hold different values in the two stores - the GitHub App
+keys these runs use are the broker's, read with `agent-secrets`. `agent-secrets` names its store in output and every
 refusal; `secrets` names none today.
 
 CI runs the unit and integration tests, not this script; what only this
@@ -221,7 +246,8 @@ What it stands up, all of it the run's own:
 - **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
   (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
   and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
-  names.
+  names, on a socket [`lib/held-port.py`](#libheld-portpy) opened on a port the kernel chose
+  (`ENVOY_LISTEN_FD`).
 - **The plugins**: this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, each packed as
   the release packs it, installed into the OMP profile `legion-e2e2-<pid>-<epoch>` by
   `lib/install-plugin-profile.sh` (`--package pi-envoy`, then `--package pi-legion`), under the
@@ -258,8 +284,9 @@ What it stands up, all of it the run's own:
   environment.
 - **The daemon**: `legion.yaml` with a fresh project key per run (`S2E<pid><epoch>` — a retired
   claim is never spawned again, so a reused key would fail on a store that served an earlier run),
-  a free port from [`lib/free-port.sh`](#libfree-portsh) (its second daemon and the listener get
-  two more, each excluding the ones already picked),
+  a port the kernel chose, held for the whole run by a [`lib/held-port.py`](#libheld-portpy)
+  keeper, which each start serves on (`LEGION_LISTEN_FD`; the restart keeps it), as the second
+  daemon's is by a keeper of its own,
   `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
   `XDG_STATE_HOME` and `TMUX_TMPDIR` point into the work directory, so the legions registry and
   the private tmux servers are the run's.
@@ -331,9 +358,9 @@ and sees one disposable pull request merged into `sjawhar/legion-smoke` by the d
 submission on its accepted READY: the repository allows no auto-merge, so the daemon merges it once
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
-The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI holding the two role App keys (the default pair unless the App inputs name
-another deployment's), and
+The run needs `go`, `docker`, `jq`, `curl`, `python3`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
+`secrets` CLI, the `agent-secrets` client reaching the secrets broker that holds the two role App
+keys (the default pair unless the App inputs name another deployment's), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
@@ -421,12 +448,14 @@ run's first write.
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
 checkout's two plugins in an isolated OMP profile and runs the Go daemon with a separate state
-directory, private tmux server, ports from [`lib/free-port.sh`](#libfree-portsh), a root-only
-Dispatch project, `admission_cap: 2`, `review_round_cap: 3`, `production_check_hours: 0.25` (the
-production check's bound, 14 days by default, brought inside the run: 15 minutes, after the first
-look's report, since a look open at the bound defers it by the look's own two-hour bound; the
-linger keeps its default 72 h, the tree's close being Stage 4b's proof), and the root design gate
-armed. Its
+directory, private tmux server, ports the kernel chose and [`lib/held-port.py`](#libheld-portpy)
+holds until each service serves on its own (the daemon's and Dispatch's by a keeper for the whole
+run, since both restart on the port every pane names, so every poll of either carries a timeout), a
+root-only Dispatch project, `admission_cap: 2`, `review_round_cap: 3`,
+`production_check_hours: 0.25` (the production check's bound, 14 days by default, brought inside
+the run: 15 minutes, after the first look's report, since a look open at the bound defers it by
+the look's own two-hour bound; the linger keeps its default 72 h, the tree's close being Stage
+4b's proof), and the root design gate armed. Its
 host-side helpers are [`lib/rig.sh`](#librigsh), and the workflow's vocabulary (Dispatch, the
 daemon's state, the agents, the proof human, the handoff checks) is
 [`lib/workflow.sh`](#libworkflowsh); the script defines only its runtime's reads, its scratch
@@ -451,11 +480,12 @@ configured, there is none to audit. The scratch Dispatch runs with `HOME` and `X
 the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children — the child is parked to `backlog` as soon as it
-is seen slotless, which is all it was filed for, so it holds up no acceptance above it — then
+is seen slotless, which is all it was filed for, so it holds up no close above it — then
 drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
 prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
-the proof's one-file smoke spec), the human approval, planner, implementer pull request,
+the proof's one-file smoke spec), the root's wait on the human at its gate (`awaiting_person`, no
+slot, the architect suspended), the human approval, the root's return to a slot, planner, implementer pull request,
 tester, reviewer, the architect's acceptance at `accepting`, retro, merger READY, the daemon's
 merge of the READY head, which closes the issue (`daemon-merge`), and the implementer's production
 check after the close, its first look and the bound's last look
@@ -493,10 +523,13 @@ approval request is opened, and the proof writes no review through the reviews r
 refusal and the release), a held
 worker after its launch budget and the architect's retry relaunching it, a root whose human
 decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
-architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
+root waits on the person without a slot, the human's changes request answers it and the root
+takes a slot back at `admitted` with its architect's session resumed, which `close_root` requires;
+the architect then ends its tree with `close_root`, the daemon posts its reason on the issue before
 it writes `done`, every status write on the issue is the daemon's, the freed slot goes to the next
-waiting root, and the journal has the gate's changes request, the close, the linger, the slot
-release and the architect's suspension), restart during
+root, and the journal has the root's wait, the gate's changes request, two slot releases (the wait
+and the close) and two slot takes (its admission and its return), the close, the linger and the
+architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials (`in-agent-credentials`): in one bash tool call of a real implementer pane, `gh` — the
 launcher directory's `legion gh` wrapper, over the daemon's PATH's real gh (`LEGION_GH_PATH`) —
@@ -803,11 +836,11 @@ box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), 
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
 `LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
 `packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
-Legion's role Apps resolve as Stage 3's do: the daemon runs `secrets <implement App key> -- …` and
-`secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
-`LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, and `prerequisites`
-checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, refuses
-one that does not resolve to the agent tier, and then proves each key is its id's App
+Legion's role Apps resolve as Stage 3's do: the daemon runs `agent-secrets <implement App key> -- …`
+and `agent-secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
+`LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, so each key comes from
+the secrets broker (the default review key is human tier: its first read waits for a person's
+grant), and `prerequisites` proves each key is its id's App
 ([`read_app_logins`](#libworkflowsh)) before the run's first write. The proof human is the devbox's ordinary
 `gh` acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts
 from the operator's own Oh My Pi session. The `EXIT` trap stops every process and container,
@@ -885,20 +918,25 @@ extended-duration affinity, the cgroup cpu quota in place of `nproc`), `LEGION_E
 all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge)) and
 `LEGION_E2E_MODEL_ROUTE` (`gateway`, today's shape, or `key-file`, for a cluster with no model
 gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
-`diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
+`agent-secrets`, `diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
 `aws` only under `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role` (the runtime kubeconfig's `aws eks
-get-token`), and the `secrets` CLI holding the implement App's key under the name
-`LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no YubiKey touch), with
+get-token`), and the secrets broker holding the implement App's key under the name
+`LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no person's grant), with
 `LEGION_E2E_IMPLEMENT_APP_ID` that App's id ([`lib/github-apps.sh`](#libgithub-appssh); both
 optional, defaulting to the default pair, and each refused by name when it is set and
 malformed). Stage 4a acts as the implement App alone, so it reads no
 review App input. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
 GitHub's `GET /app` under the key's JWT must answer that id and `contents: write`) before the run writes anything. The
-harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
-decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
+harness runs `agent-secrets <KEY> --reason=legion-live-proof-github-app-key -- sh -c 'printf %s "$<KEY>"'`: the `agent-secrets` client
+fetches the key from the broker and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
-other process; only the installation token enters each claim's Secret.
+other process; only the installation token enters each claim's Secret. `previous-layout`'s
+harness, an older commit's, reads the key with `secrets <KEY> -- …` instead; the script runs it
+through a wrapper (`$work/previous-harness`) that puts
+[`lib/secrets-via-broker.sh`](lib/secrets-via-broker.sh) first on its `PATH` as `secrets`, which
+turns that one call shape into the same `agent-secrets <KEY> --reason=… -- …` read and refuses any
+other.
 
 The `plugins` step packs this checkout's own `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` for
 `stale-plugin-install`'s own Resume through `lib/pack-plugin.sh`, as every proof that installs a
@@ -1022,7 +1060,7 @@ that reachability with a reverse tunnel, entirely of the run's own:
 | `LEGION_E2E_REPO_SECOND_OWNER` | required | `<owner>/<name>`, a repository under an owner other than `sjawhar` on which both Legion Apps are installed, where `second-owner` provisions an issue; refused when unset, not `<owner>/<name>`, or under `sjawhar`. Nothing is pushed to it |
 | `LEGION_E2E_PREVIOUS_IMAGE` | required | a worker image, by digest, built from a commit of `main` at daemon API contract 37 (the pod-owned disk, whose harness records each claim's session for the fixture) or 38 (the blocked issues, the same harness) and before one container (its issue pods run six role containers) that this checkout contains; refused when not pinned by digest, when its `org.opencontainers.image.revision` is a commit `origin/main` or this checkout does not contain, when that commit already runs one container, or when that commit's `DaemonAPIVersion` is neither 37 nor 38. `previous-layout` builds that commit's own harness and runs it on the image |
 | `LEGION_E2E_IMPLEMENT_APP_ID` | the default pair's implement App | the App's numeric id, which GitHub's `GET /app` must answer for its key ([`lib/github-apps.sh`](#libgithub-appssh)) |
-| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | the default pair's implement App key | the agent-tier secret-store key the `secrets` CLI resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | the default pair's implement App key | the agent-tier secrets broker key the `agent-secrets` client resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-role-init`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
@@ -1393,7 +1431,11 @@ changes; the revision raises a block; the human answers it; and the architect ha
 back, or requests approval again, which opens a new request since Request changes answered the old
 one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
-`<issue>-gate-verdict.json`.
+`<issue>-gate-verdict.json`. While tree 1 waits on the human (its question, or a closed gate it
+registered) it is in `awaiting_person` with no slot and its architect suspended; once the gate
+opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the
+run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how
+many times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
 `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
@@ -1705,8 +1747,10 @@ profile, launched with `controller-start-tmux.sh`'s `operator_env` line and `OMP
 fresh profile's first launch otherwise sits in the first-run setup wizard), its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
-conversation page as the person the header names. The session's model turns go through the model
-gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+conversation page as the person the header names. The session's model turns go through the route
+`LEGION_E2E_MODEL_ROUTE` names: the model gateway on the operator's own hawk login
+([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)), or a local key file
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
 The rig serves the checkout's built `packages/dispatch/web/dist` live. Do not run `bun run build:web`
 or `bun run e2e` in this checkout while a run is live: either rewrites that directory under the
@@ -1723,11 +1767,16 @@ or custom message after it and no background job the model started still owed it
 
 ```bash
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/dispatch-user-turns.sh   # the same, for a devbox with no Hawk gateway
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> DISPATCH_USER_TURNS_ONLY=spec-edit bash scripts/e2e/dispatch-user-turns.sh   # the spec-edit checks alone
 ```
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_MODEL_ROUTE` | `gateway` | `gateway` or `key-file`: how the session reaches Anthropic |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required under `gateway` | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_ANTHROPIC_KEY_FILE` | required under `key-file` | a 0600 file holding a plaintext Anthropic key, read by the key command on every call; the key command is written under the run's scratch directory, which every exit removes |
+| `DISPATCH_USER_TURNS_ONLY` | unset, every check | `spec-edit`: `session-registers` and the two spec-edit checks alone, then PASS; `spec-edit-card`: `session-registers` and `a-persons-spec-edit-reaches-its-writer` alone, then PASS |
 | `DISPATCH_USER_TURNS_OMP` | the pinned build, `.omp-pin`'s mise tool spec (`github:sjawhar/oh-my-pi@<version>`) | another Oh My Pi, as a mise tool spec |
 | `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots, the session's pane at exit, `extension-command-args` and `message-starts.jsonl`) and `session.jsonl`, the session's transcript |
 
@@ -1740,6 +1789,8 @@ Postgres and NATS containers; a run that finds another's leftovers refuses to st
 | check | what it holds |
 | :--- | :--- |
 | `session-registers` | the session registers with the listener from its cwd and advertises `aside`, `btw` and `steer` |
+| `a-persons-spec-edit-reaches-its-writer` | a person's message asks the session to create an issue in project UT whose spec's first section says `The export runs at 02:00 UTC.` and whose second section repeats the time, so the session is the spec's creator; the page opens the issue's Spec tab as the person, its document's connection dot reads connected (so the trusted header reaches the editor's socket), and it selects the first section's sentence and types `The export runs at 04:00 UTC.` over it; once the person's `artifact.version` settles, with Dispatch's own 30 s quiet time, the session's transcript holds one `artifact.human_edited` card whose diff adds the new sentence, within 60 s |
+| `the-writer-rewrites-what-the-edit-touched` | within 5 minutes of the person's version, a later version that lists the session says `04:00` in both sections and `02:00` nowhere |
 | `send-is-the-persons-own-turn` | the page's composer opens on Send and offers Send, Aside and BTW; a Send typed there is one user message in the session's transcript that is exactly the body, and no card; the session answers it |
 | `aside-is-the-persons-own-turn` | the same for an Aside |
 | `btw-is-a-side-question` | a BTW is answered in Dispatch and is no user message |
@@ -1899,7 +1950,7 @@ also drops the database and removes the work directory.
 bash scripts/e2e/verifiers-staging-token.sh     # → "verifiers e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `kubectl`, `jq`, `curl`, `ss` and `base64`, and credentials for the `staging`
+Needs `go`, `docker`, `kubectl`, `jq`, `curl`, `python3` and `base64`, and credentials for the `staging`
 kube context — it mints two real tokens with `kubectl -n legion create token default --audience
 {dispatch,envoy} --duration 10m` (the TokenRequest API) and reads the issuer from the cluster's own
 `/.well-known/openid-configuration`. That is why it is a devbox gate and not a CI job: GitHub's
@@ -1918,8 +1969,9 @@ What the run touches, and nothing else:
   box's `~/.local/share/dispatch`. Recreated from empty each run.
 - the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
   on ephemeral loopback ports.
-- two ports from [`lib/free-port.sh`](#libfree-portsh), one for `dispatch` and one for the
-  listener, the second excluding the first.
+- two ports the kernel chose, one for `dispatch` and one for the listener, each held by
+  [`lib/held-port.py`](#libheld-portpy) from that choice until its binary serves on it
+  (`DISPATCH_LISTEN_FD`, `ENVOY_LISTEN_FD`). The boot refusals exit before any bind and get none.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap signals both binaries and removes
 both containers; `docker ps -a --filter name=verifiers-e2e` comes back empty.
@@ -2209,7 +2261,7 @@ the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the scri
 | `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
 | `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
 | `driver` | a test binary of `TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive` (`internal/daemon/merged_root_waits_live_test.go`, `-tags e2e`) |
-| `proof` | the seven steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+| `proof` | the six steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
 
 The driver boots the whole daemon through `run`, the function `legion start` calls, over that
 PostgreSQL and that broker, and seeds one tree: a root in `accepting` on a reviewed, open pull
@@ -2221,13 +2273,11 @@ or published to the Envoy listener stand-in, or of what the fake worker runtime 
 launch and suspend. Step 7 also reads the store once, for the daemon's `processed_events` row of
 the envelope it drove, so that its window starts with that event applied; no route shows it, since
 the workflow only logs the event it leaves. The steps run in the order each one's state follows
-from the last, so the plan's step 6 is the control of its step 1 and runs beside it, and the
-restart runs where the wait it must not disturb stands:
+from the last, and the restart runs where the wait it must not disturb stands:
 
 | step | driven by | read back as |
 | :--- | :--- | :--- |
-| `step1-the-acceptance-waits-for-the-child` | the architect's `POST /legion/v1/signoff`, with a grant its registered session bought | 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child and `park_child`; the root still in `accepting` |
-| `step6-the-acceptance-lands-once-the-child-is-out` | the child parked to `backlog` by its own Dispatch event, the way the refusal names, then the same sign-off | the park read back on the state, then 200 and the root in `retro` |
+| `step1-the-acceptance-lands-while-the-child-runs` | the architect's `POST /legion/v1/signoff`, with a grant its registered session bought, while the child implements | 200, the root in `retro` with the Dispatch stand-in's `retro` write, and the child still `implementing` |
 | `step2-the-merged-root-waits-for-its-child` | the root's merge, as a `notifications.github.…` envelope | the root still `awaiting_merge`, its `pullRequest.state` now `merged`, its Dispatch status not `done`, its slot still held, no production check, no suspension asked of the runtime, no status write taken by the Dispatch stand-in, and exactly one `pr-merged` notice on the architect's role topic naming the pull request and the child |
 | `step5-a-restart-leaves-the-wait-and-tells-no-one-again` | a restart of the daemon at that state | over three seconds, the root still `awaiting_merge` on its merged pull request and still exactly one `pr-merged` notice: the boot's sweep leaves the wait and repeats no notice |
 | `step3-the-waiting-roots-child-completes-its-phase` | the child's implementer completion over `POST /legion/v1/handoff/complete` | 200, the child in `testing`, and the root still waiting — where a lingering tree refuses the completion 409 `TREE_LINGERING` |
@@ -2246,6 +2296,75 @@ migrations, the HTTP API, the claim supervision, `openWorkflow`, the JetStream c
 outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh directory under
 `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
 which the driver writes through `LEGION_E2E_DAEMON_LOG`.
+
+## child-adoption.sh
+
+```sh
+LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
+  [LEGION_E2E_NATS_BIN=<nats-server>] bash scripts/e2e/child-adoption.sh     # → "child adoption e2e: PASS in <n>s", exit 0
+```
+
+Runs on any Linux host with `go` — no Docker, no cluster. `LEGION_TEST_PG_DSN` is required and
+names the PostgreSQL the daemon migrates and runs on; the script starts none, so CI's service, a
+devbox container and a pod's own embedded PostgreSQL all satisfy it. The broker is the run's own:
+the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with
+`go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it
+(`-p -1`, read back from its log) and stopped on any exit. The four checks below are
+[`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` and
+`no-required-checks.sh` make too.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
+| `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
+| `driver` | a test binary of `TestAQueuedRootUnderALiveTreeJoinsItLive` (`internal/daemon/child_adoption_live_test.go`, `-tags e2e`) |
+| `proof` | the eleven steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+
+The driver boots the whole daemon through `run`, the function `legion start` calls, over that
+PostgreSQL and that broker, with an admission cap of 2 and a linger of eight seconds, and seeds two
+trees that hold both slots: T, the live tree, in planning with its design gate approved and its
+architect's launch unfinished, which the boot relaunches and the driver registers over the
+daemon's own worker stream and routes; and X, a second root, until step 5 parks it. So each queued
+root waits in `admission.waiting` until it joins T, and step 5 frees a slot, which each of steps 9
+to 11 first frees again by moving the root the step before slotted to backlog. Every issue the change
+acts on is recorded by the daemon from its own Dispatch envelopes on the `ENVOY_NOTIFICATIONS`
+stream; each release and park is T's architect's own call, with a grant its registered session
+bought. A step reads `GET /legion/v1/state` for `admission.waiting` and each issue's phase,
+generation, slot, architect and planner claim; `POST /legion/v1/children/park` answering 200, not
+403 `ISSUE_OUTSIDE_TREE`, as the route-visible proof that an issue is in T; what the daemon wrote to
+the Dispatch stand-in; and, for tree membership, which no route shows, the daemon's own record of
+the issue in its PostgreSQL. Step 4 also reads the outbox table, for the rows the old linger
+queued.
+
+| step | driven by | read back as |
+| :--- | :--- | :--- |
+| `queued-root-leaves-the-line` | C labelled todo with no parent, then its re-parent under T, each as a `notifications.dispatch.issue.…` envelope | C in `admission.waiting`, then out of it, recorded in T's tree, in `planning` with its planner's claim, no slot and no architect, over three seconds no launch of an architect of C's own, and a `child-status` notice on T's architect topic saying C joined T's tree from the admission queue |
+| `release-adopts-from-todo` | D labelled todo; the stand-in alone shows it todo under T; T's architect's `POST /legion/v1/waves/release` of D | 200, and as it answers, before any further envelope, D recorded in T's tree and in `planning`; no status write taken by the Dispatch stand-in; park 200 |
+| `release-adopts-from-backlog` | F labelled todo, then moved to backlog by envelope (it lingers); the stand-in alone shows it in backlog under T; the release of F; then the echo of the release's write (actor `legion-daemon:<project>`, status todo, the next sequence) | 200, and as it answers F recorded in T's tree, parked at `done` with no linger, and the stand-in took the release's PATCH to `todo`; after the echo, F in `planning` with its planner's claim; park 200 |
+| `release-adopts-infra-214-state` | E labelled todo, moved to backlog (it lingers), its label taken off and moved back to todo, each by envelope; the stand-in alone shows it todo under T; the release of E inside its linger | E todo at `done` and out of the line before the release (INFRA-214's state); 200, E recorded in T's tree and in `planning`; past its old linger's deadline plus an outbox poll, the old `linger_close` row run and gone, E still in `planning` with its planner's claim at the generation the release gave it, no `tree_close` supervise row and no `workspace_remove` row of E queued after the release, and no suspension, release or tree cleanup of E asked of the fake runtime |
+| `held-under-an-unreleased-child` | P on the stand-in alone, backlog under T, never recorded; H labelled todo under P, by envelope; then X moved to backlog by envelope, which frees its slot; then the release of H | H recorded as a root of its own but not in `admission.waiting`, with no slot and no architect; once X's slot is free, over three seconds, `admission.active` T's alone of cap 2, nothing waiting, and H still with no slot and no architect; then 200, H recorded in T's tree under P, in `planning`; park 200 |
+| `child-of-an-ancestry-held-root-waits-with-it` | P3 on the stand-in alone, backlog under T, never recorded; H3 labelled todo under P3, then K3 labelled todo under H3, each by envelope; then the release of K3 alone; then the release of H3 | H3 recorded as a root of its own, T on the Dispatch chain it records; K3 recorded in H3's tree under H3; over three seconds, with the slot step 5 freed standing free (`admission.active` T's alone of cap 2), H3 and K3 each out of `admission.waiting`, with no slot, no architect and no launch of one; the release of K3 409 `CHILD_IN_OTHER_TREE` whose message names K3 and H3, K3's record as it was (H3's tree, parent, phase, status, generation, sequence) and no status write taken by the Dispatch stand-in; then the release of H3 200, and as it answers H3 and K3 both recorded in T's tree, H3 under P3 and K3 under H3, then each in `planning` with its planner's claim, no slot and no architect |
+| `ancestry-held-past-a-parked-root-on-its-chain` | Q6 seeded as a root of its own parked in backlog (phase `done`, no parent recorded), shown on the stand-in backlog under T; P6 on the stand-in alone, backlog under Q6, never recorded; R6 labelled todo under P6, by envelope; then the release of R6 | Q6 recorded in its own tree; over three seconds, with the slot step 5 freed standing free (`admission.active` T's alone of cap 2), R6 not in `admission.waiting`, with no slot, no architect and no launch of one; R6 recorded as a root of its own, T on the Dispatch chain it records, past Q6; then 200, and as it answers R6 recorded in T's tree under P6, then in `planning` with its planner's claim, no slot and no architect |
+| `ancestry-held-root-queues-once-its-parent-leaves` | P2 on the stand-in alone, backlog under T, never recorded; H2 labelled todo under P2, by envelope; then P2 moved to no parent, on the stand-in and by P2's own envelope (status backlog, no parent, unlabelled) | H2 recorded as a root of its own, T on the Dispatch chain it records; over three seconds, with the slot step 5 freed standing free (`admission.active` T's alone of cap 2), H2 not in `admission.waiting`, with no slot, no architect and no launch of one; after P2's envelope, within the bounded wait, H2 holding that slot with its architect's claim, the fake runtime asked to launch H2's architect, H2 in `admission.active` and out of `admission.waiting`, recorded in its own tree with T on no chain it records, and P2 still unrecorded |
+| `a-root-that-ran-keeps-queueing` | H2 moved to backlog by envelope, which frees its slot; a tree lifecycle seeded under R's key, as R's own run would have left it, R never recorded; P4 on the stand-in alone, backlog under T, never recorded; R labelled todo under P4, by envelope | H2 with no slot; within the bounded wait, R holding the free slot with its architect's claim, the fake runtime asked to launch R's architect, R in `admission.active` and out of `admission.waiting`, recorded in its own tree with T on no chain it records: not held under T, whose release would refuse it |
+| `ancestry-held-root-queues-once-a-recorded-ancestor-leaves` | R moved to backlog by envelope, which frees its slot; Q seeded as T's child parked in backlog (phase `done`), shown on the stand-in backlog under T; P5 on the stand-in alone, backlog under Q, never recorded; H5 labelled todo under P5, by envelope; then Q moved to no parent, on the stand-in and by Q's own envelope (status backlog, no parent, unlabelled) | R with no slot; Q recorded in T's tree; H5 recorded as a root of its own, T on the Dispatch chain it records, through Q; over three seconds, with the slot free, H5 not in `admission.waiting`, with no slot, no architect and no launch of one; after Q's envelope, within the bounded wait, H5 holding that slot with its architect's claim, the fake runtime asked to launch H5's architect, H5 in `admission.active` and out of `admission.waiting`, recorded in its own tree with T on no chain it records, and P5 still unrecorded |
+| `release-refuses` | H5 moved to backlog by envelope, which frees its slot; U seeded as a second live tree in that slot, with G recorded as its child parked in backlog; the stand-in shows G in backlog under T; the release of G | H5 with no slot; 409 `CHILD_IN_OTHER_TREE` whose message names G and U; G's record as it was (U's tree, parent, phase, status, generation, sequence); no status write taken by the Dispatch stand-in |
+
+What the proof stands in for lies outside the change: the broker is a native `nats-server`,
+Dispatch is the board the whole-daemon drivers share (`liveDispatch`, in
+`internal/daemon/live_proof_test.go`), which holds each issue's status, parent and labels, answers
+the issue reads the release and the event preparation make, 404s an issue it does not hold, lists
+no issues at boot and records every write the daemon makes, Envoy's listener is the package's
+`noticeListener`, GitHub knows each repository's default branch, takes each issue branch the
+workflow creates and knows no pull request, the two Apps' tokens are placeholders, and no agent
+runs: each claim is launched by the package's fake runtime, which provisions each claim's
+workspace in its own pod, so no host clone is made. T, X, step 7's Q6, step 9's tree lifecycle under
+R, step 10's Q and step 11's U and G are seeded through the store, as every daemon test seeds its fixture,
+and each seed is printed as one. The configuration load, the store and its migrations, the HTTP
+API, the claim supervision, `openWorkflow`, the JetStream consumers and the outbox lanes are the
+real ones. `CHILD_ADOPTION_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and
+printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
+writes through `LEGION_E2E_DAEMON_LOG`.
 
 ## no-required-checks.sh
 
@@ -2300,7 +2419,7 @@ switch), and the `processed_events` rows of the push and the synchronize.
 What the proof stands in for lies outside the rule: the broker is a native `nats-server` rather
 than the testcontainers one the daemon's other NATS tests start, GitHub is a REST stand-in that
 also answers the repository a launch reads and a GraphQL root that knows no pull request, Dispatch
-is the board both whole-daemon drivers share (`liveDispatch`, in
+is the board the whole-daemon drivers share (`liveDispatch`, in
 `internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener`, the two
 Apps' tokens are placeholders, and no agent runs: a send-back's implementer is launched by the
 package's fake runtime, which provisions its own workspace so the daemon clones nothing, and never
@@ -2311,36 +2430,83 @@ real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `T
 printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
 writes through `LEGION_E2E_DAEMON_LOG`.
 
-## lib/free-port.sh
+## lib/held-port.py
 
-Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
-later. Stage 1, Stage 2, Stage 3 (through [`lib/rig.sh`](#librigsh)'s `pick_port`) and
-`verifiers-staging-token.sh` take their ports from it.
+Starts a server on a TCP port the kernel chose, and holds that port from the choice until the
+server serves on it, so nothing else can take it in between. Python 3.9 or later, standard library
+only. It replaces picking a port that was free a moment earlier and passing its number: such a port
+can be taken before the server binds it, and the bind then fails with `address already in use`. The
+server must adopt an inherited listening socket: `ENVOY_LISTEN_FD` (envoy-listener),
+`DISPATCH_LISTEN_FD` (envoy-dispatch) or `LEGION_LISTEN_FD` (`legion start`).
 
 ```sh
-port=$(bash scripts/e2e/lib/free-port.sh)                  # → 20000 ≤ port < first ephemeral port
-second=$(bash scripts/e2e/lib/free-port.sh "$port")        # never $port
-third=$(bash scripts/e2e/lib/free-port.sh "$port" "$second")
+# One server: the helper listens on 127.0.0.1:0 and becomes the server.
+python3 scripts/e2e/lib/held-port.py exec --port-file "$work/dispatch.port" \
+  --fd-env DISPATCH_LISTEN_FD \
+  --env DISPATCH_PORT={port} --env DISPATCH_SERVER_URL=http://127.0.0.1:{port} \
+  -- "$work/envoy-dispatch" &
+server_pid=$!                       # the server's own PID: the helper executes it in place
+
+# A port that outlives restarts: a keeper holds it, and each start receives a copy.
+python3 scripts/e2e/lib/held-port.py keep --port-file "$work/listener.port" --socket "$work/listener.sock" &
+keeper_pid=$!                       # wait for listener.port before the first start
+python3 scripts/e2e/lib/held-port.py exec --from "$work/listener.sock" \
+  --fd-env ENVOY_LISTEN_FD --env PORT={port} -- "$work/envoy-listener" &
 ```
 
-The port comes from 20000 up to, not including, the first port of
-`/proc/sys/net/ipv4/ip_local_port_range` (32768 on a default kernel). The kernel autobinds every
-outbound socket from that range, so between the pick and the bind, any connection the run opens
-(go build's module fetches, a Postgres dial, a curl) could take a port inside it. The bind would
-then fail with `address already in use`. The kernel never autobinds a port below the range.
-`ss -ltnH` rules out a port something already listens on. Each argument is a port the caller has
-already picked and not yet bound, and the helper never returns one of them, so several picks in
-one run stay distinct.
+`exec [--host H | --from SOCKPATH] [--port-file F] --fd-env NAME [--env K=V]... -- CMD [ARG]...`
+opens a listening socket on `H:0` (default `127.0.0.1`; an IPv6 address such as `::1` works) or,
+with `--from`, receives one from the keeper at `SOCKPATH`. It puts the socket on descriptor 3,
+inheritable, and keeps no other copy. It replaces `{port}` in each `--env` value and in CMD and
+its arguments, sets each `K=V` and `NAME=3`, writes the port and a newline to F (a temporary file in
+F's directory, then a rename, so a reader never sees half a number) and executes CMD in its own
+process: `$!` is the server's PID. A failure before CMD runs exits 1 and names what failed on
+stderr; a CMD that cannot be executed exits 127 (not found) or 126, after F was written. Either way
+the socket closes with the process and the port is free again.
 
-### How it fails
+`keep [--host H] --port-file F --socket SOCKPATH` holds one listening socket for its whole life and
+serves the unix socket `SOCKPATH`, answering each connection with a copy of the held socket
+(SCM_RIGHTS). It writes F only once `SOCKPATH` listens, so a reader of F can start an
+`exec --from` at once. Every server started from it serves the same port, and a restart cannot
+lose the port to another process. It runs until killed: SIGTERM or SIGINT exits 0 and removes
+`SOCKPATH`; the caller's cleanup kills it.
 
-It exits non-zero, printing the reason on stderr and nothing on stdout, when:
+Between two servers, a kept port still listens. The kernel accepts a connection into the socket's
+queue and nothing answers it until the next server starts and accepts it. A check that the server
+is down therefore sees a hang, not a refusal: poll with a timeout (`curl --max-time 2`) and take the
+timeout for down.
 
-- `ss` is missing or fails (`ss: command not found`, or `ss`'s own error). An unanswered busy
-  check is never read as a free port.
-- the ephemeral range starts at 21000 or below (`the ephemeral range starts at <n>, leaving no
-  room above 20000`).
-- 50 draws find no free port (`no free port found below <n>`).
+`held-port.test.ts` runs the real envoy-listener of this checkout through both commands: it serves
+on the port the port file names in the helper's own PID, a competing bind is refused before the
+server runs, the listener holds the socket only on its own close-on-exec copy, a command that
+cannot run frees its port, and a keeper keeps its port, unanswered, between two listeners. It
+builds the listener with `go`, so CI runs it after `setup-go`.
+
+Every stage proof and rig takes its servers' ports this way, apart from the ports Stage 4a and
+Stage 4b pin inside the range the devbox security group admits. [`lib/rig.sh`](#librigsh)'s
+`start_held`, `keep_port` and `start_kept` wrap it for the scripts that source the rig (Stage 1,
+Stage 3, the 4b.13b acceptance, `claude-backend-tmux.sh`, `controller-start-tmux.sh`,
+`dispatch-user-turns.sh`, the docs rigs and the skill-scenarios rig); Stage 2 and
+`verifiers-staging-token.sh` call it directly. A daemon always serves on a keeper's socket, since its
+`legion.yaml` must name the port before it starts. A process that binds port 0 itself and reports
+what it got — `nats-server -p -1`, a Bun fake, `kubectl port-forward :<port>` — needs no helper; the
+rig reads its report with `report_port`. A port a person sets explicitly is used as given, and an
+occupied one fails with `address already in use`.
+
+## lib/port-file.sh
+
+The wait for the port file [`lib/held-port.py`](#libheld-portpy) writes, which `lib/rig.sh`'s
+`start_held` and `keep_port` and `packages/envoy/scripts/search-smoke.sh` and `searchbench.sh`
+share. Sourced, never run; it needs nothing of its caller's.
+
+```sh
+. "$root/scripts/e2e/lib/port-file.sh"
+read_port_file "$work/dispatch.port" "$server_pid" port || waited=$?
+```
+
+`read_port_file FILE PID VAR` polls FILE every tenth of a second while PID lives and assigns VAR
+the port it names. It prints nothing, so each caller words its own failure: it returns 0 once VAR
+is set, 1 when PID exits before FILE is written, and 2 after `port_file_seconds` (30).
 
 ## lib/built-from.sh
 
@@ -2930,15 +3096,19 @@ The caller sets `root` (the checkout), `work` (the run's scratch directory: ever
 working directory or command line names it is the run's), `evidence` (each service started by
 `start_process` logs to `$evidence/logs/<name>.log`) and `timeout_hook` (empty, or a function a
 timed-out wait runs before it fails), and defines `note` and `fail`, which exits. Stage 1 calls
-only `real_bin_path`, so it sets `root` and `work` and defines `fail` alone.
+`real_bin_path`, `keep_port`, `start_kept` and `held_only_by`.
 
 | function | does |
 | :--- | :--- |
 | `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds. After SECONDS of wall time, each poll's own run included, it runs `timeout_hook` and fails naming WHAT. It says what it waits for on entry and every 60 s. A poll that never returns would hold the wait, so callers bound their remote calls. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
-| `pick_port VAR` | assigns VAR a port from [`lib/free-port.sh`](#libfree-portsh) that no earlier pick of the run returned. It assigns in place: a command substitution would run it in a subshell and lose the run's set of picks |
 | `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
-| `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
-| `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
+| `start_held NAME PORT_VAR FD_ENV [--env K=V]… -- CMD…` | starts CMD as the service NAME through [`lib/held-port.py`](#libheld-portpy) `exec`: a socket listening on a port the kernel chose, held from that choice until CMD serves on it, handed over as descriptor 3 with `FD_ENV=3`; `{port}` in an `--env` value or in CMD is its port. It waits, bounded, for the helper's port file and sets PORT_VAR before CMD runs; `NAME_pid` is CMD's own pid. A CMD that clears its environment (`env -i`) names `FD_ENV=3` itself |
+| `keep_port NAME PORT_VAR` | starts the keeper NAME (`held-port.py keep`, its socket `$work/NAME.sock`), which holds one socket on a port the kernel chose for the whole run, and sets PORT_VAR once it hands out copies. The caller's cleanup stops it (`NAME_pid`). A configuration can name the port before its service starts, and a restart cannot lose it. Between two servers the port listens unanswered, so every poll of it carries a timeout |
+| `start_kept NAME KEEPER FD_ENV [--env K=V]… -- CMD…` | starts CMD as `start_held` does, on a copy of the socket the keeper KEEPER holds (`exec --from`) |
+| `report_port LOG PATTERN` | prints the port a process that bound port 0 itself reported: the digits right after the first match of the extended regex PATTERN in LOG (`'Listening for client connections on [^ ]*:'` for `nats-server -p -1`). It fails while no line matches, so it is also the poll that waits for one |
+| `listening_holders PORT` | prints the pid of every process holding the one socket listening on PORT: its inode from the `LISTEN` row of `/proc/net/tcp` and `/proc/net/tcp6`, its holders from `/proc/*/fd`. It fails when no socket, or more than one, listens on PORT |
+| `held_only_by PORT PID…` | succeeds when the holders of the socket listening on PORT are exactly the PIDs given; otherwise it prints each holder's pid and command line and fails. Stage 1 runs it after each daemon start with the daemon and its keeper |
+| `await_start NAME PID SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives, and fails naming NAME's log the moment PID exits |
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
@@ -3166,6 +3336,21 @@ its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND`
 line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
 that quotes it.
 
+With the design gate armed (`gates.design: root-issues`), a root whose architect registers a closed
+gate while no worker of its tree runs waits on a person: `drive_gate ISSUE LABEL [SECONDS]` runs
+`architect_registers_gate`, then `await_gate_wait` (the root in `awaiting_person` with
+`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, then its
+architect `suspended` within `phase_seconds`), approves the registered version as the proof human,
+then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding a slot,
+since a slot free at the answer is taken in the same transaction) within 120 s, then
+`await_root_slot`, the root out of `awaiting_person` holding a slot in `admission.active`, within
+`SECONDS` (`phase_seconds` by default; Stage 3's first root passes 1800, since its slot comes back
+only when a root that took the slot it gave up registers its own gate in turn). A timeout in any of
+them prints the root's phase, slot, `waitingOn` and architect state and the admission state. Only
+then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` accept
+an architect already suspended in `awaiting_person`, whose pane the watcher checked at its launch,
+since a proof may look after the root's wait began.
+
 `request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
 tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
 the Legion footer naming its own session, as its role ends every review. The daemon sets aside a
@@ -3225,11 +3410,12 @@ which two optional operator inputs give:
 | input | what it names |
 | :--- | :--- |
 | `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |
-| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the `secrets` CLI resolves to the App's private key (base64-encoded PEM) |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secrets broker key the `agent-secrets` client resolves to the App's private key (base64-encoded PEM) |
 
-Each defaults to the pair the live proofs have always used, which the lib holds in one place
-(`default_<role>_app_id`, `default_<role>_app_key_name`), so a run here sets none of them and acts
-as it always has, and a deployment with its own Apps sets all four.
+Each defaults to the lib's default pair, `legion-implementer` (App ID 5341240) and
+`legion-reviewer` (App ID 5341243), which the lib holds in one place (`default_<role>_app_id`,
+`default_<role>_app_key_name`), so a run here sets none of them, and a deployment with its own Apps
+sets all four.
 
 `require_app_inputs ROLE...` reads each role's pair, taking the default for an input that is
 unset, and fails naming the input that is set but malformed: an id that is not a number of at most
@@ -3238,7 +3424,7 @@ in a shell command and as a variable name, and a pasted key is refused by its le
 never prints the value. With both roles read it also refuses one id or one key
 name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
 block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
-runs `secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
+runs `agent-secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
 refuses, writing nothing, a role the last `require_app_inputs` did not read.
 `check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over that file and
 fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,
@@ -3330,9 +3516,9 @@ trap. `LEGION_E2E_KIND` names the kind binary when it is not on `PATH`.
 
 ## lib/live-daemon-proof.sh
 
-The run a whole-daemon live proof makes around its driver. `merged-root-waits.sh` and
-`no-required-checks.sh` differ only in what their driver proves, so each sets its own values and
-makes this run.
+The run a whole-daemon live proof makes around its driver. `merged-root-waits.sh`,
+`no-required-checks.sh` and `child-adoption.sh` differ only in what their driver proves, so each
+sets its own values and makes this run.
 
 ```sh
 . "$root/scripts/e2e/lib/live-daemon-proof.sh"     # sourced, never run
@@ -3349,18 +3535,19 @@ prints `LABEL e2e: PASS in <n>s (evidence: <dir>)`, or
 
 | argument | is |
 | :--- | :--- |
-| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks` |
+| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks`, `child adoption` |
 | `SLUG` | the name of the run's own files under `TMPDIR` (or `/tmp` when it is unset): the work directory `legion-e2e-SLUG.<pid>.*`, which holds the broker's store and the driver binary `SLUG.test`, and the evidence directory `legion-e2e-SLUG-evidence.*` when `EVIDENCE` is empty |
 | `TEST` | the one test the driver runs (`-test.run '^TEST$'`); `proof` fails unless the driver reports `--- PASS: TEST`, so a driver that skipped, or a pattern that matched nothing, is no pass |
-| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
+| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`, `CHILD_ADOPTION_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
 
-The two drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
+The three drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
 (`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`);
 the configuration the daemon boots with (`newLiveProof` reads `LEGION_E2E_NATS_URL`, skips when it
 is unset, and builds the workflow configuration around it); the stream the daemon's intake
-consumes; the Dispatch board stand-in (`liveDispatch`); the store; the seeding of a tree into the
-next free admission slots (`admit`); and the envelope, `processed_events` and notice reads and
-writes a step makes, the notices read by the issue whose architect they tell (`architectNotices`).
+consumes; the Dispatch board stand-in (`liveDispatch`, which holds each issue's status, parent and
+labels and 404s an issue it does not hold); the store; the seeding of a tree into the next free
+admission slots (`admit`); and the envelope, `processed_events` and notice reads and writes a step
+makes, the notices read by the issue whose architect they tell (`architectNotices`).
 
 ## lib/secret-leaks.ts
 

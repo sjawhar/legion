@@ -4,6 +4,93 @@
 
 ### Added
 
+- A person's browser edit of a document reaches the agent sessions that wrote it. Once the
+  document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
+  one `artifact.human_edited` event: the person who edited last is its actor, and its payload
+  names the two versions the quiet window spans, each person who edited, and the unified diff of
+  the two versions, cut at its last line end within 4,096 bytes. It goes to the issue's route and
+  to each session the document credits, never to a person. The quiet window is a row of the new
+  table `document_edit_notices` (migration 0129), so a notice still pending when a process stops
+  is sent by the next sweep of either process; the sweep runs every 5 seconds under the
+  `edit-notices` lease, and the lease pool grows from nine connections to ten for it. A notice
+  on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
+  spec.md v4 to v7`. `DISPATCH_TEST_EDIT_NOTICE_QUIET`, under `DISPATCH_TEST_HOOKS=1`, sets the
+  quiet time for an end-to-end test process. The actor is the sender of the latest edit a person
+  made, never a name picked from the people an edit credits: an agent's edit after a
+  person's still names the person, which the new column `doc_settlements_pending.last_person`
+  (same migration) keeps across processes; an edit made while two peers were connected names
+  nobody: an open window keeps its actor and takes the edit in, and with no window open the edit
+  holds the window until a later version names a person, whose notice covers both.
+- Each block of a Dispatch document is a node of the reference graph. A reference can name one
+  block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
+  `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
+  `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
+  pins it to version N of the document. N is at most 9223372036854775807: a larger N is no
+  reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every version the
+  document has is `404 NOT_FOUND` `no version N of <document>`. A block id of any length is
+  written, by a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion or a
+  browser's edit; the graph keys a block by its id, so one longer than 256 bytes, decoded
+  (`text.MaxBlockIDBytes`), is no graph node: its version is written, a mention inside it starts
+  at the block holding it, the server logs a warning naming the document, the longest id's length
+  and the bound, and a read of its reference is `404 NOT_FOUND`. An ask block, a comment anchored
+  in a block and an ask anchored in one are written under a block id of any length, so a
+  settlement never fails on one. Text cites a reference, a block's or any other, only while its
+  block id is within that bound and the target id the graph stores its edge under
+  (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's
+  `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id) holds at most
+  2048 bytes (`text.MaxTargetBytes`), since a slug or an item id has no bound of its own: past
+  either the text is written and cites nothing, and a live document page whose block is past them
+  names the document, one whose document or item is past them nothing. The bounds decide only
+  what the graph indexes: `GET /api/v1/references?to=|from=` and `GET /api/v1/block-links` read
+  the reference they are given whatever its length (`text.ParseRef`), so a node of any name is
+  read, and no reference's length answers `400`. A new artifact's name, and the reference key
+  `<owner>/<slug>` it gives the artifact, hold at most 2692 bytes: an upload past either is
+  `400 INVALID_ARTIFACT` naming the bound, and an artifact already stored past it keeps taking
+  versions and edits. A
+  mention written inside a block starts at the innermost block holding it: `GET /api/v1/references`
+  names that block as the source (`kind: "block"`, with
+  `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed
+  in), a node cited from two blocks of one document counts twice, a document's own read names the
+  block at each edge as `block`, and each block is `part_of` its document, which a document's read
+  lists only under `?kind=part_of`. A block reference's read carries the block's whole current
+  `text`; a pinned one also carries `pin`, the block's text at that version and whether it is
+  `unchanged`, `changed` or `removed` since. Deleting a block takes the links to it out of every
+  list, count, closure and outgoing list until a version restores its id.
+  `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one
+  document to the blocks of another. `GET /api/v1/artifacts/{id}/references` keeps every source.
+  Migrations `0121`-`0126` add the block tables, the triggers that owe the index what any build
+  writes, and the seed of the comments, asks and issue messages already holding `#b-`, and
+  `0127`-`0128` rebuild the ask-block and block-anchor indexes over `block_id_key`, the id's
+  SHA-256, holding `asks` while its two indexes build and `comments` while its one does; the
+  server's block-index reconciliation (lease `block-index`, logged as `dispatch: block index`)
+  indexes every document and text owed, with no command run, and takes one more lease connection
+  per server, nine. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`.
+  The dashboard titles a block link with the block's text, its hover card shows the document and,
+  for a pinned link, the version and how the block stands since, a pinned link opens that version,
+  and Referenced by shows one row per citing block, each linked to its block; on a document's page
+  each row also links the document's own block the edge meets (`block <id>`), so a source citing
+  two of its blocks is two rows. The dashboard draws a picture and opens a link an author names
+  whatever the length of its target's key; only bare text it links is held to the index's
+  bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
+  graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. They are on every node
+  `GET /api/v1/references` and `GET /api/v1/block-links` answer, whatever its kind, always
+  present: who made the node and when, who last changed its own text or fields and when (its
+  maker while nothing has changed it since; a claim, an answer or a resolution is no change), the
+  node it belongs to (`{kind, id, ref?}`) and the version of that parent it belongs to. A fact
+  Dispatch never recorded is `[]` for an actor list and `null` otherwise: a session has none, and
+  a block's maker is known only when the block is in its document's first version or Dispatch
+  indexed the version before the one that first held it. Migrations `0130` and `0131` add
+  `comments.written_version` and `asks.written_version`, the version current when a comment or
+  an ask was written on a document without an anchor (an approval request's, the version it names
+  when it opens), which a `before insert` trigger records for every build's insert, and `0133` and
+  `0134` fill them on the rows stored before, from the latest version created at or before each
+  item or, for an approval request, from its `ask.opened` event, holding `comments` and then
+  `asks` `EXCLUSIVE` while they write, which every write of that table waits behind. Migration
+  `0132` creates `component_facts`, which each import keeps from this release on: a component's
+  `made_at` and `changed_at`, judged by a digest of its own fields. A component stored before it
+  has no `made_at`, and no `changed_at` until an import changes it.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -19,6 +106,17 @@
   containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
   CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
   Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
+  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
+  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
+  that already exists in the cluster; the component reads the class and the app Deployment waits
+  on the read, so a missing class fails the preview or update rather than leaving the one app pod
+  stopped and its replacement refused. `appPdbMinAvailable` registers a PodDisruptionBudget named
+  for the app, over its pods alone, with that `minAvailable` and Kubernetes' default
+  `unhealthyPodEvictionPolicy`, so a drain waits for the app. The front door and the listener are
+  unchanged, and with neither set the component renders what it always did. The component
+  refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
+  the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
@@ -48,6 +146,26 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- `envoy-dispatch` serves on an inherited listening TCP socket that `DISPATCH_LISTEN_FD` names by
+  its descriptor number, and binds nothing: a test harness opens the socket on port 0 and holds the
+  port the kernel chose until Dispatch serves on it, so no other program can take it in between.
+  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not empty, must name the socket's
+  address, and `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening
+  TCP socket, or a setting that names another address, refuses startup naming the variable, with
+  nothing bound in its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a
+  loopback address. The `dispatch: listening` line names the address the server is bound to, in
+  both modes: a server on every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+- `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
+  descriptor number, and binds nothing, for a process a test harness starts (not a container:
+  Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the
+  socket's address, and `PORT=0` names none; a descriptor that is not a listening TCP socket, or a
+  setting that names another address, refuses startup naming the variable, with nothing bound in
+  its place. The API auth rule judges the socket's own address, so a socket on every interface
+  needs `ENVOY_API_TOKEN`, the OIDC pair or `ENVOY_API_ALLOW_UNAUTHENTICATED=1` as
+  `ENVOY_LISTEN_HOST=0.0.0.0` does, though an unset `ENVOY_LISTEN_HOST` means loopback. The
+  `envoy-listener listening` line's `addr` is the address the listener is bound to, in both modes:
+  `PORT=0` logs the port the kernel chose where it logged port 0, and a listener on every interface
+  logs `[::]:9020` where it logged `0.0.0.0:9020`.
 - Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
   `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
   server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
@@ -785,6 +903,11 @@
 
 ### Changed
 
+- A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
+  15 minutes after its row's last write, where it was 10, because it now adds
+  `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
+  `envoy_active_interests` gauge still list them, and a message matching one logs a failed
+  delivery to that session; a paused session that comes back within it still has them.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -873,6 +996,171 @@
 - `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
   is how long a machine login lasts without a refresh: an approval mints its credential for that
   long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
+- The Envoy listener answers a message route the bus did not serve with
+  `503 {"error":"envoy: the message bus did not answer: <reason>"}` and `Retry-After: 1`, in place
+  of the 500 that often reached no caller: `POST /v1/messages/send` and `POST /v1/messages/publish`
+  each take a 3.5 s budget from the request's own context, which the send's session read, the
+  publish route's resolution of a role lane's holder (its claim read, its holder's session read
+  and the release of a lapsed claim) and both routes' publish run inside, and the publish route
+  answers that same 503 for a role-holder read that did not answer or that the budget ran out on,
+  so a role store that does not answer is reported inside the caller's attempt. A publish the
+  NATS server denies under this listener's own grant is not an outage and is not retryable: it is
+  `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
+  with no `Retry-After`, since the grant forbids the subject until an operator changes it. Only
+  the publish route can be denied this way, and only for a topic the stream does not capture (a
+  role lane or an ad-hoc topic, published over core NATS): a send publishes
+  `notifications.agent.<id>`, which the stream captures, so it goes through JetStream. A
+  publish that lost the race for a role's claim — every resolution attempt spent on a supersession
+  — keeps the 503 and the `Retry-After: 1` but answers
+  `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`.
+  `GET /v1/roles/<role>` resolves its holder within the same 3.5 s budget, and answers that race,
+  which it answered 500, with the same 503 and `Retry-After: 1`, worded
+  `{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; a
+  role store that did not answer within its cap or the budget, which it also answered 500, is the
+  bus-unavailable 503 with `Retry-After: 1`, as on the publish route. A role claim record no read
+  can decode (one naming no holder, or JSON that is not a claim) is, on both routes,
+  `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no
+  `Retry-After` and not the bus-unavailable 503: the bus answered it, and a retry reads the same
+  record. Both message routes read the
+  sender's interest record for the envelope's `sender` within a second of that budget
+  (`senderStampReadTimeout`): a read that does not answer stamps the session id and the title this
+  listener's cache holds, and the publish goes on to meet the silent bus itself and answer the
+  503 inside the attempt. `GET /v1/sessions`, `GET /v1/registry/<session_id>` and `GET
+  /v1/interests/<session_id>` read an interest record their cache misses from the bucket within
+  the same 3.5 s budget (a session row's read capped at a second, and a list's reads sharing one
+  budget), where a silent bus held them for the 10 s JetStream wait: a read that does not answer
+  is that 503 with `Retry-After: 1`, where the first two answered a row with no topics and the
+  third a 503 with neither the named body nor `Retry-After`. An interest record the bus holds but
+  this build cannot decode is not that 503: the two single-session routes answer
+  `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no
+  `Retry-After`, and `GET /v1/sessions` lists that session with no topics and roles, as it did,
+  rather than refusing the list, while the registry logs `registry read an interest record it
+  cannot decode` at WARN naming the session. A read counts as answered only for its named answers:
+  no key, that undecodable record, or an id the interest bucket refuses as a key (`bus.ErrRefused`,
+  an earlier listener's id past `envoy_interests`' get bound that `envoy_sessions` still lists, or
+  one outside nats.go's key alphabet), which the list shows with no topics and roles, logged
+  `session listed with no topics: its interest record could not be read` at WARN naming the
+  session. `GET /v1/registry/<session_id>` answers such a live session the same way, 200 with no
+  topics and roles, logged `session answered with no topics: its interest record could not be
+  read`, where it answered 413 or 400, which Dispatch's envoy client read as a session that cannot
+  exist; `GET /v1/interests/<session_id>`, which asks for the record by that key, and a key the
+  session bucket refuses keep their 413 or 400. Every other error is a
+  read that did not answer, whatever it names, a raw socket error from a broken connection among
+  them, and all three routes answer it with the 503 and `Retry-After: 1`. The routes that write -
+  `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`,
+  `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read
+  and write within the same 3.5 s budget, where a silent bus held each for the 10 s JetStream wait
+  (40 s for a claim whose own write met it), and answer store work that did not answer with that
+  503 and `Retry-After: 1`, where they answered a 500 or a 503 with neither the named body nor
+  `Retry-After`; their 409, 413 and 400 are unchanged. A write the budget abandons may still land
+  after the 503: a put writes what the caller's retry writes again, and a delete or a claim is
+  conditional on the revision it read. An
+  interest record this build cannot decode no longer locks out the routes that write it, which
+  failed on the read and every retry: `DELETE /v1/interests/<session_id>` deletes
+  it and releases the session's role claims (204, where it answered 500); `POST
+  /v1/interests/subscribe` and `POST /v1/roles/set` replace the claimant's with the one the request
+  names rather than merging (where they answered 503 and 500), and the registry logs `registry
+  replaced an interest record it cannot decode` at WARN naming the session; the session's role
+  claims, in the role bucket, are kept. `POST /v1/interests/unsubscribe` releases the role claims
+  its topics name and leaves the record, which routes none of its topics, answering 200 where it
+  answered 500, and a role claim taken from a holder whose record is unreadable no longer answers
+  500 after it lands. The 413 for a message NATS cannot
+  take whole and the 400 for a subject or key it refuses are unchanged. A publish on either route
+  whose request context has already
+  ended — its budget spent, which a role-holder resolution that answers just as the budget ends
+  can leave it, or the request cancelled — puts nothing on the wire and is answered that 503: a
+  core subject has no duplicate window and the client retries every 5xx, so a message emitted
+  behind a failure answer would reach its subscriber twice. A core publish checks its context
+  immediately before it publishes, one check that sees both a spent deadline and a cancel, so one
+  cancelled while NATS reconnects sends nothing; a cancel after that check cannot be undone, and
+  the publish goes ahead. A JetStream publish relies on nats.go,
+  whose request sends nothing under an ended context. A send resolves its target from the session
+  store itself rather than from this listener's cache of it — a cache miss is read through to the
+  `envoy_sessions` bucket within a second, the same direct get the role paths already make — so
+  `404 {"error":"no live session <id>"}` is now only the store's own word that the key is gone,
+  and an agent delivery reads that same store before it pushes. A delivery this listener cannot
+  place — no session record, a record naming nothing to push to, or a push that failed — is NAK'd
+  and redelivered every five seconds, counted from the message's first delivery rather than from
+  its age in the stream and stopping at 18 deliveries. The first two causes push nothing, so a
+  retry repeats nothing, and they are deferred as many times as the new
+  `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default `60s`) buys at that delay, twelve at the default. A
+  push that failed is deferred once however long the window, and its give-up is final whether or
+  not the give-up's notice can be published, so it is pushed at most twice: it may have landed,
+  since a refused prompt, a connection that never reached the session and an answer lost after
+  the session server took the prompt all come back as the same failure, and a retry that clears
+  the attempt record to push again would repeat an instruction the session may already have, once
+  per retry. At most 64 such messages are held deferred at once by the whole
+  listener (a quarter of the durable's ack-pending budget, one slot of which each deferral holds
+  for its whole window), in one budget shared by every delivery handler it builds — the one a
+  rebind after a NATS flap builds included — and keyed on each message, so only a message this
+  listener deferred gives a slot back when it is redelivered; one arriving past that cap is given
+  up at once. A slot whose message never comes back to this listener — the stream dropped or
+  purged it, or another subscriber took its redelivery — expires 125 s after the deferral that
+  took it (the five-second delay plus two of the durable's 60 s ack waits), so such messages hold
+  the budget no longer than that. Each deferral logs `listener agent delivery deferred` at INFO
+  with `reason`,
+  `attempt` and `window_deferrals`, the deferrals that message's cause is allowed (1 for
+  `push_failed`). The give-up counts its `delivery_status` and logs `listener agent delivery given
+  up` at WARN first, and only then publishes the `no_holder` delivery exception, once. A notice
+  that cannot be published — it embeds the original payload, so an envelope near the server's max
+  payload has its notice refused as too large on every attempt — logs `listener exception publish
+  failed` beside the give-up line and nothing else: the message is not NAK'd, it is acknowledged,
+  and it keeps the attempt record that stops a redelivery from pushing again. The ambiguous
+  `listener agent session not found anywhere`, which acknowledged such a message away on its first
+  attempt and counted it `skipped`, is gone, and `envoy_messages_delivered_total` carries the new
+  `delivery_status` labels `unplaceable_no_record`, `unplaceable_no_push_target` and
+  `unplaceable_push_failed` for those give-ups. Every send and publish is recorded in one line,
+  `listener send` or `listener publish`, INFO when accepted and WARN when refused, naming the
+  route's destination (`target_session` or
+  `topic`), the envelope's `event_id`, `source`, `source_session` and `payload_summary`, the
+  `status` answered, the `holder` a role lane resolved, and an `outcome` of `accepted`,
+  `invalid_request`, `too_large` or `bus_unavailable` on either line, `no_live_session` or
+  `capability_refused` on a send, and `publish_denied`, `role_unclaimed`, `role_lapsed`,
+  `role_holder_changed` or `role_claim_unreadable` on a publish (INFRA-141).
+- The Envoy listener's webhook routes and `/healthz` answer a bus that went silent inside their
+  callers' wait (INFRA-141). A GitHub check_suite
+  or check_run delivery's CI record - the wait for a write it queues behind and its own write - is
+  held to 4 s, two write budgets, each KV call included, where a silent bus held it for the 10 s
+  JetStream wait, and ends sooner when its request does; it is still the 503 a failed record was.
+  A write given up on may land after that 503, but it is a compare-and-swap at the revision it
+  read, and a redelivery of its observations writes nothing. A Slack event's publishes end 2.5 s
+  after the handler starts, inside the 3 s Slack waits, where they had the bus's 5 s; a Ghost
+  Wispr event's and a GitHub event's end when the sender drops the request, or at that 5 s; each
+  is still the 503 a failed publish was. `/healthz`'s flush, cache KV pings and durable consumer
+  read share one 3 s budget, so a stall in JetStream alone, which the flush does not see, is
+  answered in 3 s rather than 10 s: a check that did not answer within it is `503 unhealthy`
+  naming the dependency and `context deadline exceeded`, so the container health check (`curl
+  -sf`) still fails and replaces the task, as it did when the 10 s wait outran it. A check that
+  answered with a failure keeps its answer.
+- A session holds a role exactly when the role's claim in `envoy_roles` names it, and every
+  answer that names a role's holder reads the claim (INFRA-141). `GET /v1/sessions` rows and `GET
+  /v1/registry/<session_id>` (which Dispatch's route roster reads) report `roles` from the claims,
+  and so does the `sender.roles` a send or a publish stamps, where both took them from the
+  `notifications.role.<role>` topics on the session's interest record: a session whose record kept
+  a role's topic after another session claimed the role was reported holding it, and a holder
+  whose record lacked the topic was not. The listener keeps a watched view of the role bucket
+  (`store.Registry.RolesHeldBy`), so no answer pays a store read per role; a claim it cannot decode
+  gives its role to nobody and is logged at WARN once. The view answers only while it is complete:
+  its watcher's first scan delivered every claim, and after a recreated role bucket's reset only
+  once the refill's scan has. Until then (still loading, a scan nats.go's idle timer ended, a
+  refill still running, or its watcher ended) it is `store.ErrRoleViewNotReady`, a read that did
+  not answer: the bus-unavailable 503 with `Retry-After: 1` on the two session routes, never a
+  holder listed without its role, and a send's `sender.roles` left out without refusing it. A
+  first scan the idle timer ended is scanned again a second later until one completes
+  (`kvwatch.WithRescan`). The role claim watcher is the interest registry's second, so `/healthz`
+  now answers `503 unhealthy` when it stops or the role bucket is recreated under it
+  (`interest KV watcher unavailable: role claims watcher stopped`,
+  `interest KV watcher unavailable: role claims bucket envoy_roles was recreated under its watcher`,
+  or `interest KV unavailable: ...` from the request whose own ping finds the recreate), where a
+  ping of the role bucket's status was all it read before, and the self-health monitor counts
+  either as a terminal failure and rebuilds it, which refills the view. `POST /v1/roles/set`'s
+  rollback of a claim that did not land and its removal of the role's topic from the old holder
+  are best-effort tidying within the request's budget: a claim that landed answers 200 whatever
+  that cleanup did, a cleanup that failed is logged at WARN, and one the budget's end cut short at
+  INFO. A claim whose lost compare-and-swap is joined with a store call that did not answer is the
+  bus-unavailable 503 with `Retry-After: 1`, not the store's answer. The start's warm-up wait
+  covers the role claim view too, and its timeout is logged
+  `interest or role claim cache warm-up timed out`, its error naming the cache.
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is
@@ -1417,6 +1705,70 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
+  API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
+  comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
+  the editor's link opener resolved as a page path under the document's own URL. A document that
+  already holds `[a@b.test](a@b.test)` keeps that link's bare target until it is edited.
+
+- A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
+  renews its lease through a broker, so while every broker process was down, or none could reach
+  the database, no lease could be renewed, and the first sweep after the outage ended every
+  enrollment whose lease ran out meanwhile: each such pod lost its grants and stayed locked out
+  until it was relaunched. Every serving broker now beats on its own row of a `broker_serving` table
+  (migration 0019) every `BROKER_SWEEP_SECONDS`. A gap longer than three sweeps after the latest beat is
+  time no broker was serving, and until a broker beats again a lease that was still running at the
+  last beat stays live, so the sweep does not end it. The next beat gives that gap back to every
+  such lease that was not revoked, capped at `BROKER_LEASE_SECONDS` from then, and logs
+  `broker: gave back the time no broker was serving …`. A revoked enrollment, and one whose lease
+  ran out while a broker was serving, stays ended, and a renewal with another pod's or service
+  account's token is still refused `POD_IDENTITY_MISMATCH`. It does not cover a broker that runs but
+  that pods cannot reach (ingress, DNS, a NetworkPolicy, a stale `AGENT_SECRETS_URL`): leases still
+  end then. Grant lifetimes and pending requests still run on wall-clock time, the first deploy
+  restores nothing, and a pod whose renewer already exited 76 stays without one until it is
+  relaunched. `config.Load` now refuses to start unless `BROKER_LEASE_SECONDS` is more than four and
+  a half times `BROKER_SWEEP_SECONDS` (`2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS` is
+  refused), so a live session's lease cannot run out inside a gap the broker still counts as
+  serving. The defaults, 900 and 5, pass. A token login (`POST /v1/launcher-credentials/token`)
+  the broker could not complete (5xx, such as while the database is away) now spends neither its
+  source address's nor its account's rate-limit bucket, so the Legion daemon, which retries such a
+  login every few seconds through the outage, is not refused 429 on its first login after it.
+
+- Every `envoy-infra` component refuses a number in an integer input that is not a whole number
+  within the 64-bit integer range, at any depth (an object type's property, an array element, a
+  map value), naming the component and the input's path and never quoting a secret value, before
+  anything registers. Pulumi decoded such a number into the component's integer by conversion, so
+  a typed SDK or Pulumi YAML program sending `replicas: 2.5` got 2 replicas with no error, and one
+  past the range got whatever the conversion gave. The check reads the plugin's own schema, so an
+  integer input added later is covered with no list to keep.
+
+- Dispatch's event outbox publishes a backlog hundreds of times faster across a remote NATS hub.
+  It sent each envelope and waited for NATS to answer before it sent the next, then wrote the
+  answer to Postgres through the pool the API's requests queue for, so every destination of every
+  event cost a network round trip and a write: at a 150 ms round trip it published 1.7 to 1.9
+  events a second, and under load in production it fell up to about 29 minutes behind the events
+  being created. It now sends a whole claimed batch (100 events) before it waits for any answer
+  (`bus.Client.Window`), in id order, so NATS still takes each issue's events in order, and
+  writes the batch's outcome in one statement on a database pool of its own (`store.Pool.Outbox`):
+  540 events a second at a 150 ms round trip and 1,100 at 50 ms, with the API's pool busy
+  (`TestOutboxThroughputUnderRemoteLatency`). An event is still marked published only once NATS
+  accepted every destination of it. A publish NATS cannot take because the connection is down no
+  longer backs its event off behind the events after it: the batch stops and waits for the next
+  scan, so a backlog held up by an outage goes out in id order once NATS is back, where before the
+  first events of an issue reached the Legion daemon after later ones, which it drops as stale.
+  The shared database pool every request reads through holds 64 connections, from 16: under heavy
+  agent load the API held all sixteen and every other caller waited behind them.
+
+- Dispatch's server now reads a `|` after an even run of backslashes in a table row as the end of a
+  cell, as the browser editor reads it: `| a \\| b |` is the two cells `a \` and `b` on both, where
+  the server read one cell `a \| b`, so a document no longer showed one table in the live editor
+  and the command line and another in the past-version view. A `|` after an odd run (`\|`) is
+  still the cell's text. Code in a cell cannot hold a `|` right after an odd run of backslashes,
+  since no markdown of a cell writes it: an API replace, delete by quote or accepted suggestion
+  that adds such code is refused, naming the table, the cell and the header above it, also beside
+  such code a browser edit left, and a browser edit that holds one is stored with that `|` written
+  as text after the code (INFRA-172).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

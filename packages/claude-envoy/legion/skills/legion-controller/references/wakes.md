@@ -62,7 +62,8 @@ wake gives it>; `todo` with the `legion` label queues it again". Other admission
 
 ## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)
 
-A root whose architect asked a person a question and now waits only on them: the daemon returned
+A root whose architect asked a person a question, or handed its spec to a person for approval, and
+now waits only on them: the daemon returned
 its slot and suspends the architect after its turn, keeping its session. Read
 `issues.<KEY>.waitingOn`. Do not park it or start anything, and take nothing for the slot it
 returned: it is no reason to label or admit an issue ([Free
