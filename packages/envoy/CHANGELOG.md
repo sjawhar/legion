@@ -807,7 +807,8 @@
   event reaches them once every transaction that was open on the Postgres instance when it was
   written has ended, in Dispatch's database or any other on that instance, and a wait over five
   seconds logs the oldest such transaction. Each observation of the horizon uses one transaction id
-  (none while readers are idle). The horizon is read on the primary only.
+  (none while readers are idle) and runs on a two-connection pool of its own, so a full shared pool
+  does not hold live readers back. The horizon is read on the primary only.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
