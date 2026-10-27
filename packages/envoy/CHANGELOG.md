@@ -796,6 +796,18 @@
 
 ### Changed
 
+- Writes to different issues no longer wait on one database-wide advisory lock that every event
+  write took until it committed: a write now locks only its own issue's row (or its document's or
+  project's), so one issue's events still commit in order while a slow write on one issue no longer
+  holds back writes on every other. Event ids then no longer commit in id order across issues, so
+  the live event stream (SSE, and its `Last-Event-ID` resume), the delivery hub and
+  `GET /api/v1/references?since=` read only up to a safe horizon, the highest id below which every
+  event has committed or rolled back: an event that commits late under a lower id is still
+  delivered, in id order, rather than skipped. The cost is latency to live readers: a just-written
+  event reaches them once every transaction that was open on the Postgres instance when it was
+  written has ended, in Dispatch's database or any other on that instance, and a wait over five
+  seconds logs the oldest such transaction. Each observation of the horizon uses one transaction id
+  (none while readers are idle). The horizon is read on the primary only.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
