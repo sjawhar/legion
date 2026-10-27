@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T03:37:00Z",
-  "round": 4,
+  "completed": "2026-10-27T04:55:00Z",
+  "round": 5,
+  "rebaseRecheck": {
+    "from": "b0c0c10fbb54bb269bdd6db2cb942fdc669927db",
+    "to": "04fbe7963e51e0f5c2518e00535b221dfe39b34f",
+    "why": "Forward merge of main at baadccdc (bd81c99b6daa) to carry #2317's daemon test fix; no file of the branch changed.",
+    "fingerprint": "a5647b0894f9b42645105ad26fc51a50a146714d1d729725775474b536d36639 at both heads (jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum): unchanged, bare gates only",
+    "ci": "Read on GitHub at code head bd81c99b6daa: build, changes, lint, test, typecheck, pr-title queued (runs 40451701265, 40451701252, 40451701230, 40451728796); not waited for. The handoff head 04fbe7963e51 carries skip-checks.",
+    "smoke": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium at 04fbe7963e51 (SPA rebuilt on the merged tree, tester lane) -> rows 1-4 ✓, '4 passed (49.7s)'."
+  },
   "testedHead": "b0c0c10fbb54bb269bdd6db2cb942fdc669927db",
   "codeHead": "0d5fff64e7ad",
   "implementerProof": {
