@@ -1317,3 +1317,42 @@ func TestATruncatedReviewWithNoFooterIsSetAsideAndLogsTruncation(t *testing.T) {
 		t.Fatalf("logs = %s, want the set-aside line to carry body_truncated=true", got)
 	}
 }
+
+// A push the record's bound lets go - the oldest of more pushes waiting for a link than the bound
+// keeps, each behind a webhook that never arrived - is logged as a warning that names it, once, by
+// the push that let it go: the move it would have linked into is judged without it.
+func TestAPushTheBoundLetsGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	// Sixteen pushes of a line the branch never takes are the most the record keeps waiting
+	// (classify's maxWaitingPushes); the seventeenth lets the first go.
+	for i := 1; i <= 17; i++ {
+		logged.Reset()
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo(fmt.Sprintf("x%d", i-1), fmt.Sprintf("x%d", i), "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, message) {
+				warned = append(warned, line)
+			}
+		}
+		if i < 17 {
+			if len(warned) != 0 {
+				t.Fatalf("push %d of 16 waiting warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 {
+			t.Fatalf("the push past the bound warned %d times (%q), want once", len(warned), warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=x0", "after=x1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the push let go named", warned[0], want)
+			}
+		}
+	}
+}
