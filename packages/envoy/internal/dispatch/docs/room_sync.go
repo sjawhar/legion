@@ -60,7 +60,8 @@ const documentChangedChannel = "dispatch_doc_changed"
 // The room-sync channels beside documentChangedChannel. Each has a slot in roomSync.handlers;
 // a slot with no handler is still listened on, and drops what arrives on its channel.
 const (
-	// documentAwarenessChannel carries a room's awareness (cursors, presence) between processes.
+	// documentAwarenessChannel carries a room's awareness (cursors, presence) between processes,
+	// and the queries for it; awareness_relay.go has its wire format.
 	documentAwarenessChannel = "dispatch_doc_awareness"
 	// issueOpenChangedChannel carries the key of an issue that was closed or reopened.
 	issueOpenChangedChannel = "dispatch_issue_open_changed"
@@ -145,7 +146,8 @@ type roomSync struct {
 	// awareness, issueOpenChanged, query and answer handle the four channels beside the
 	// document-change channels the service's catch-up follows (handlers): documentAwarenessChannel,
 	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. Nil drops that
-	// channel's notifications, and nothing sets them yet outside tests.
+	// channel's notifications. awareness is the service's awareness relay (awarenessRelay.received);
+	// nothing sets the others yet outside tests.
 	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
 	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
 	// test waits on it before the write whose notification it expects, since a notification sent
@@ -154,7 +156,7 @@ type roomSync struct {
 }
 
 func newRoomSync(service *Service) *roomSync {
-	return &roomSync{service: service}
+	return &roomSync{service: service, awareness: service.awarenessRelay.received}
 }
 
 // ProcessID is this process's id among the envoy-dispatch processes on its database, minted once

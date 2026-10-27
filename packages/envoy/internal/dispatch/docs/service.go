@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -280,6 +281,12 @@ type Service struct {
 	// catchUps brings this process's rooms up to the stored head when another process appends
 	// (roomCatchUps), on the room-sync lane RegisterRoomSync runs.
 	catchUps *roomCatchUps
+	// awarenessRelay carries this process's rooms' awareness to the other processes and is ygo's
+	// relay (awareness_relay.go); the other processes' reaches it on room sync's awareness lane.
+	awarenessRelay *awarenessRelay
+	// hostname names this process on each document socket's upgrade (ProcessHeader), read once
+	// when the service is built; empty when the host would not say, and then no header is sent.
+	hostname string
 }
 
 type artifactOwner struct {
@@ -611,6 +618,15 @@ func New(deps Deps) *Service {
 	}
 	service.catchUps = newRoomCatchUps(service)
 	service.roomSyncSender = newRoomSyncSender(service)
+	service.awarenessRelay = newAwarenessRelay(service)
+	switch hostname, err := os.Hostname(); {
+	case err != nil:
+		slog.Warn("dispatch: read the host name the document sockets name their process by", "error", err)
+	case strings.ContainsFunc(hostname, func(r rune) bool { return r <= ' ' || r == 0x7f }):
+		slog.Warn("dispatch: the host name holds bytes a header cannot carry; document sockets name no process", "hostname", hostname)
+	default:
+		service.hostname = hostname
+	}
 	if deps.TestHooks {
 		service.hooks = newTestHooks()
 	}
@@ -651,8 +667,20 @@ func New(deps Deps) *Service {
 	// published write's suppression slot is finished before ygo's persistence observer runs
 	// (onLoadDocument), so that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
+	// A room forgets an awareness client it has not heard from in awarenessExpiry: a reader
+	// relayed from another process that died without removing it goes once its heartbeats stop.
+	srv.AwarenessExpiry = awarenessExpiry
 
 	service.srv = newRoomServer(srv)
+	// Every close the service makes removes the room's local awareness first, so the other
+	// processes hear the removal before the close tears the room's relay down.
+	service.srv.beforeClose = service.removeLocalAwareness
+	// Awareness crosses processes through the relay; document updates do not (awareness_relay.go).
+	// Attaching it after the server's hooks are set but before any room loads registers its
+	// observers on every room; the relay's Start cannot fail, so neither can this.
+	if err := srv.AttachRelay(service.awarenessRelay); err != nil {
+		panic(fmt.Sprintf("dispatch: attach the document awareness relay: %v", err))
+	}
 	srv.Authorize = service.authorize
 	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
@@ -695,8 +723,13 @@ const ShutdownDrainBudget = 9 * time.Second
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
 func (s *Service) Shutdown(ctx context.Context) error {
-	// Last, whichever way Shutdown returns: closing a room may yet have something to send.
-	defer s.roomSyncSender.close()
+	// Last, whichever way Shutdown returns: closing a room may yet have something to send. The
+	// awareness relay sends what it still holds - the removals the rooms' closes made, and what
+	// ygo's shutdown drained from the rooms' relay lanes - through the sender, so it closes first.
+	defer func() {
+		_ = s.awarenessRelay.Close()
+		s.roomSyncSender.close()
+	}()
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
 	// whether an editor was connected.
 	type loadedRoom struct {

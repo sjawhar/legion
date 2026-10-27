@@ -1,11 +1,14 @@
 package docs
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -225,8 +228,17 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 }
 
+// ProcessHeader names, on every answer to a document socket's request and on its upgrade above
+// all, the host name of the process serving it - the pod's name in production - so a check that
+// opens sockets through a load balancer can record which process each one reached (plan D10).
+const ProcessHeader = "X-Dispatch-Process"
+
 // ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.hostname != "" {
+		w.Header().Set(ProcessHeader, s.hostname)
+		w = &processHeaderWriter{ResponseWriter: w, line: []byte(ProcessHeader + ": " + s.hostname + "\r\n")}
+	}
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
@@ -283,6 +295,67 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// processHeaderWriter puts its line, ProcessHeader's, on a websocket upgrade made through it. The
+// upgrader (gorilla/websocket, which ygo's ServeHTTP and refuseOutsideSchema both use) takes the
+// connection and writes its 101 answer on it in one write, reading no header of the writer's, and
+// ygo passes it none of its own; so the connection this Hijack hands out adds the line to that
+// first write, right after its status line. Every other answer carries the header the ordinary
+// way (ServeHTTP sets it).
+type processHeaderWriter struct {
+	http.ResponseWriter
+	line []byte
+}
+
+func (w *processHeaderWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	conn, buffered, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &processHeaderConn{Conn: conn, line: w.line}, buffered, nil
+}
+
+// Unwrap gives http.ResponseController the writer underneath.
+func (w *processHeaderWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// processHeaderConn is a hijacked connection whose first write, the upgrade's answer, gains line
+// after its status line. line is cleared by that write, which the upgrade makes before it hands
+// the connection to any other goroutine, so every later write passes straight through.
+type processHeaderConn struct {
+	net.Conn
+	line []byte
+}
+
+func (c *processHeaderConn) Write(p []byte) (int, error) {
+	line := c.line
+	if line == nil {
+		return c.Conn.Write(p)
+	}
+	c.line = nil
+	status := bytes.Index(p, []byte("\r\n"))
+	if status < 0 || !bytes.HasPrefix(p, []byte("HTTP/1.1 101 ")) {
+		return c.Conn.Write(p)
+	}
+	status += len("\r\n")
+	answer := make([]byte, 0, len(p)+len(line))
+	answer = append(answer, p[:status]...)
+	answer = append(answer, line...)
+	answer = append(answer, p[status:]...)
+	written, err := c.Conn.Write(answer)
+	// What was written, counted in p's bytes.
+	switch {
+	case written <= status:
+	case written < status+len(line):
+		written = status
+	default:
+		written -= len(line)
+	}
+	return written, err
+}
+
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	actor, err := s.requestActor(r)
 	if err != nil {
@@ -311,6 +384,13 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	connection.actor = actor
 	connection.added = true
 	s.addConnection(room, connection.id, actor)
+	// A reader joining a room already resident here asks the other processes for their readers'
+	// awareness, so their cursors reach it at once; a room this join has yet to load asks once its
+	// load finishes (awarenessRelay.RoomActivated), and the connection registered above is what
+	// lets the answers in (holdsRoomForReaders).
+	if s.srv.GetDoc(room) != nil {
+		s.awarenessRelay.query(room)
+	}
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
 	}, true

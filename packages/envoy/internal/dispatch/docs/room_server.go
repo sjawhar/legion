@@ -25,6 +25,10 @@ import (
 // close, so no cycle runs through the gate.
 type roomServer struct {
 	*websocket.Server
+	// beforeClose runs ahead of every close of a room the service makes, holding the room's close
+	// gate, once the close knows the room is the one it closes (Service.removeLocalAwareness). It
+	// must not block. Nil runs nothing.
+	beforeClose func(room string)
 	// gatesMu guards gates and every gate's holders.
 	gatesMu sync.Mutex
 	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
@@ -52,6 +56,14 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	defer r.releaseGate(room, gate)
 	gate.Lock()
 	defer gate.Unlock()
+	return r.closeHeld(room, force)
+}
+
+// closeHeld is ygo's CloseRoom for a close that holds room's gate, after beforeClose.
+func (r *roomServer) closeHeld(room string, force bool) error {
+	if r.beforeClose != nil {
+		r.beforeClose(room)
+	}
 	return r.Server.CloseRoom(room, force)
 }
 
@@ -68,7 +80,7 @@ func (r *roomServer) closeInstance(room string, doc *crdt.Doc) (bool, error) {
 	if r.GetDoc(room) != doc {
 		return false, nil
 	}
-	if err := r.Server.CloseRoom(room, true); err != nil {
+	if err := r.closeHeld(room, true); err != nil {
 		if errors.Is(err, websocket.ErrRoomNotFound) {
 			return false, nil
 		}
@@ -97,7 +109,7 @@ func (r *roomServer) closeOwned(room string, owns func() bool, after func(error)
 	if !owns() {
 		return nil
 	}
-	return after(r.Server.CloseRoom(room, true))
+	return after(r.closeHeld(room, true))
 }
 
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,
