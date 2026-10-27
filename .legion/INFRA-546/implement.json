@@ -2,51 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-546",
-  "completed": "2026-10-27T13:05:00Z",
-  "round": 4,
+  "completed": "2026-10-27T18:15:00Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
   "answers": {
-    "review2": "Per the INFRA-14 architect's narrowing at the review cap: findings 1 and 2 fixed in e572c5be3cba; the six missing census hits added to the PR body (finding 3); the four Minor threads (4, 5, 6, 7) declined to the Fast-follow line with finding 9's test duplication; finding 8 (go.work.sum churn) restored to the merged base in fc60505cc364. All six round-2 threads answered and resolved."
+    "review3": "Per the architect's narrowing: finding 1 (republish once without the Nats-Msg-Id after ErrNotStored) fixed in ae6ca339075c; finding 2 (envoy-go-race red from the cluster tests) fixed in 7f536f31512a. Both threads answered and resolved. GitHub's conflict with legion/INFRA-439 (d48d71fd3078) merged forward at 09f28930a646 (fingerprint comment 6446336410)."
   },
   "proof": [
     {
-      "criterion": "No start or keeper lowers a deployed byte limit: an operator's raise of a full stream's limit stands, a lower one is raised to the setting",
-      "surface": "Real envoy-listener binary running against three nats-server v2.15.1 processes clustered on loopback, read with natscli v0.5.1",
-      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (P5; log https://github.com/sjawhar/legion/pull/2362#issuecomment-6442429631)",
-      "observed": "With the listener at ENVOY_STREAM_MAX_BYTES=44023414784 running, an operator raise to 50 GiB (53687091200) stood 40 s with no keeper write; an operator lowering to 1000000 was put back to 44023414784 by the keeper ('restored=\"max_bytes 1000000 -> 44023414784\"').",
-      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
-      "negativeControl": "At 40e1a16643ee the tester saw the keeper put a raised limit (200000) back to 20000 about 33 s after the raise (round-3 test.json); here the lowered limit 1000000 is the control that the keeper still restores the floor"
+      "criterion": "A GitHub delivery a full clustered nats-server 2.10 stream refused is stored once the stream has room, with no step-down; while still full the retry is an error",
+      "surface": "The bus's real publish path and async window against an in-process three-server nats-server v2.10.29 cluster, with deliveries built by the webhook's contracts.GithubEnvelopes (the hub's v2.15.1 does not stage the id, so no real-binary run reaches this path)",
+      "command": "cd packages/envoy && go test ./internal/bus/ -run TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom -count=1",
+      "observed": "Both deliveries refused with ErrStreamFull; on the full stream both retries (Publish, window) fail with ErrNotStored wrapping ErrStreamFull; after a purge both are stored at a sequence with the same data.",
+      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
+      "negativeControl": "With the republish removed: 'after a purge, a retry through Publish: stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold' on both paths, FAIL"
     },
     {
-      "criterion": "A retry of a publish a full clustered stream refused is never acknowledged as stored when the server holds no copy",
-      "surface": "The bus's real publish path and async window against an in-process three-server nats-server v2.10.29 cluster (the server where the duplicate is staged; v2.15.1 does not stage it)",
-      "command": "cd packages/envoy && go test ./internal/bus/ -run TestARetryOfAPublishTheFullClusterStreamRefusedFailsUntilTheStreamStoresIt -count=1",
-      "observed": "Refused with ErrStreamFull when full; both retries (Publish and the window) return ErrNotStored, still after a purge; after a stream leader step-down both are stored with Sequence > 0 and their Nats-Msg-Id.",
-      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
-      "negativeControl": "With either guard removed the retry returns nil while the stream does not hold the message, and the test fails ('... succeeded and the stream does not hold its message')"
+      "criterion": "The cluster tests are reliable under -race (envoy-go-race green)",
+      "surface": "internal/bus keeper and cluster tests built with -race, four processes at once, GOMAXPROCS=2 (CI's parallel packages)",
+      "command": "CGO_ENABLED=1 go test -race -c -o bus.race.test ./internal/bus/ && 4 x (GOMAXPROCS=2 ./bus.race.test -test.run 'Keep|Keeper|Stopping|Retry|Reconcile' -test.count=10) (/legion/scratch/tmp/p546/race-load.sh)",
+      "observed": "1,120 PASS, 0 FAIL. AwaitReady restarted a silent member where nats-server 2.10.29's start race left one out (logged 'restart cluster member nN: no other member's JetStream meta group heard from it within 15s').",
+      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
+      "negativeControl": "Before the change: 29 of 1,920 cluster starts stuck under the same load, none recovering within 90 s; the keeper race test failed 1 in 40 with 'the keeper's lines restored \"\"' because it read the log before the keeper wrote it"
     },
     {
-      "criterion": "Earlier proofs still hold: raise to three copies, limit, DiscardNew and id kept across listener and Dispatch starts; a full stream refuses and keeps what it holds",
+      "criterion": "Earlier real-binary proofs hold at this head (copies, limit, DiscardNew and id across listener and Dispatch starts; an operator's raise kept; a full stream refuses and keeps what it holds)",
       "surface": "Real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes and one standalone v2.15.1 server",
-      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (P1-P4)",
-      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one id, durable at 3; P2 unchanged at setting 1; P3 Dispatch restores subjects 5 -> 8 keeping copies, limit and id; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
-      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
+      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log https://github.com/sjawhar/legion/pull/2362#issuecomment-6449750660)",
+      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one id, durable at 3; P2 unchanged at setting 1; P5 a 50 GiB operator raise stood 40 s, a lowering to 1000000 was raised back; P3 Dispatch restores subjects 5 -> 8; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
+      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
       "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 naming ENVOY_NATS_REPLICAS=3; ENVOY_STREAM_MAX_BYTES=44023414784 on a 29 GB store -> exit 1 'insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 refused at load"
     }
   ],
   "filesChanged": [
-    "e572c5be3cba: internal/bus/nats.go (ErrNotStored, notStored, guard in publishJetStream), async.go (guard in the window), stream.go (ownedStream never lowers a deployed limit), keeper.go docs, publish_not_stored_test.go (new), stream_replicas_test.go, keeper_test.go; docs: CHANGELOG, AGENTS.md, cmd/dispatch/AGENTS.md, settings.go row, deploy/README.md, docs/architecture.md, docs/site dispatch/envoy.md and running-dispatch.md, docs/solutions nats-jetstream-stream-ensure-only-adds-subjects.md, .dispatch/architecture/envoy-listener.md",
-    "fc60505cc364: packages/envoy/infra/go.work.sum restored to the merged base c78a4e925318"
+    "09f28930a646 (merge): packages/envoy/internal/config/config.go and config_test.go (ENVOY_LISTEN_FD beside the replica and byte-limit parsing), .dispatch/architecture/envoy-listener.md",
+    "ae6ca339075c: internal/bus/nats.go (republish in publishJetStream), async.go (republish in the window, acknowledged helper), publish_not_stored_test.go, stream.go and webhook/webhook.go comments; docs: CHANGELOG, AGENTS.md, deploy/README.md, docs/site dispatch/envoy.md, .dispatch/architecture/envoy-listener.md",
+    "7f536f31512a: internal/testnats/cluster.go (AwaitReady restarts a silent member), internal/bus/keeper_test.go (awaitRestoredLog, stale-write answer recorded)"
   ],
   "trickyParts": [
-    "Another role in the pod holds ports 14221-14223, so this round's proof runs from /legion/scratch/tmp/p546b on ports 15321-15323 (client), 15421-15423 (routes), 15330 (standalone), 15390/15391 (listener), 15777 (Dispatch); Postgres stays on 14433 from /legion/scratch/tmp/pg546.",
-    "On nats-server v2.10.29 a purge does not clear the staged sequence-0 id; a stream leader step-down does."
+    "nats-server v2.10.29 start race: a member can come up with a dead Raft send queue and never join the meta group; only a restart fixes it (upstream v2.15.2 fixed).",
+    "Flakes show only under load: reproduce with four parallel race test processes (/legion/scratch/tmp/p546/race-load.sh).",
+    "The Legion daemon drops a repeated GitHub fact only by event_id; a GitHub redelivery has a new event_id. Reported to the INFRA-14 architect; not changed here.",
+    "Proof harness: /legion/scratch/tmp/p546b (own ports 153xx) because another role holds 14221-14223."
   ],
-  "deviations": [
-    "Review-2 Minors 4-7 and 9 are on the Fast-follow line per the architect's narrowing, not fixed here."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "READY waits for #2228 to merge and the base to become main (plan decision 1).",
-    "Who sets both settings in every program for the production deployment at the move (plan coordination item 1)."
+    "Whether the Legion daemon should drop a repeated GitHub fact by dedupe_key (packages/daemon), told to the architect.",
+    "READY waits for #2228 to merge and the base to become main."
   ]
 }
