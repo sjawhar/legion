@@ -387,10 +387,13 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 	return a.wakeForFreeSlot(ctx, tx, released)
 }
 
-// parentsFirst orders a Dispatch listing so that each issue comes after its parent whenever the
-// listing holds both, and keeps the listing's order otherwise. The workflow records a child only
-// under a recorded parent, so an unrecorded todo child under an unrecorded todo parent of a live
-// tree is recorded in the same pass as that parent, at any depth.
+// parentsFirst orders a Dispatch listing by how many of each issue's ancestors the listing itself
+// holds, so every issue comes after its parent, and keeps the listing's own order among the issues
+// of one such depth. The workflow records a child only under a recorded parent, so an unrecorded
+// todo child under an unrecorded todo parent of a live tree is recorded in the same pass as that
+// parent, at any depth. A recorded issue is ordered by the same rule, so a root's own listed move —
+// a close, a re-admission — is applied before its children's, which is the order the tree's own
+// events carry: a child's re-entry then reads the tree as that move left it.
 func parentsFirst(summaries []dispatch.IssueSummary) []dispatch.IssueSummary {
 	parents := make(map[string]*string, len(summaries))
 	for _, summary := range summaries {

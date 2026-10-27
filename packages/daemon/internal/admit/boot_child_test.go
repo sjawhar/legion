@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -137,4 +138,68 @@ func TestTheBootReadStillAdmitsALabelledOrphanAsItsOwnRoot(t *testing.T) {
 		t.Fatalf("orphan after the boot read = %#v, want a root of its own under parent %s", got, parent)
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: bootChild, Index: 0, AdmittedAt: fixedNow}})
+}
+
+// A child whose parent is recorded but whose tree is not live is no member of it at boot either:
+// the workflow records nothing of it, so one without the label stays unrecorded and a labelled one
+// is admitted as a root of its own, as its live event leaves it.
+func TestTheBootReadRecordsNoChildOfATreeThatIsNotLive(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		labelled bool
+	}{
+		{name: "no label"},
+		{name: "labelled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmissionWithGate(t, 2, config.DesignGateRootIssues, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			until := fixedNow.Add(time.Hour)
+			putIssue(t, pool, record.Issue{Key: bootRoot, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject,
+				Title: bootRoot, Tree: bootRoot, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", HandedOver: true, LingerUntil: &until, LastDispatchSeq: 1})
+			root := bootRoot
+			reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+				{Key: bootChild, ResolvedRepo: "acme/widgets", Title: "child", Status: "todo", Parent: &root, Rank: "B", HandedOver: tc.labelled, LastSeq: 7},
+			}, 10, 10, true)
+
+			got := maybeIssue(t, pool, bootChild)
+			if !tc.labelled {
+				if got != nil {
+					t.Fatalf("%s after the boot read = %#v, want no record: its tree lingers", bootChild, *got)
+				}
+				assertSlots(t, pool, nil)
+				return
+			}
+			if got == nil || got.Tree != bootChild || got.Phase != phase.Admitted {
+				t.Fatalf("the labelled child after the boot read = %#v, want a root of its own at admitted", got)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: bootChild, Index: 0, AdmittedAt: fixedNow}})
+		})
+	}
+}
+
+// A child the boot read records that waits on an unfinished Dispatch issue is recorded admitted and
+// not started, as its own todo event records it: what it waits on is read from the mirror the boot
+// writes before admission decides anything (daemon's reconcile, blockers.Reconcile).
+func TestTheBootReadHoldsATodoChildThatWaitsOnUnfinishedWork(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmissionWithGate(t, 2, config.DesignGateRootIssues, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedLiveTree(t, pool)
+	const blocker = "LEGION-99"
+	seedMirror(t, pool, blocker, "todo")
+	seedMirror(t, pool, bootChild, "todo", blocker)
+	root := bootRoot
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: bootChild, ResolvedRepo: "acme/widgets", Title: "child", Status: "todo", Parent: &root, Rank: "B", BlockedBy: []string{blocker}, LastSeq: 7},
+	}, 10, 10, true)
+
+	got := issue(t, pool, bootChild)
+	if got.Tree != bootRoot || got.Phase != phase.Admitted {
+		t.Fatalf("the blocked child after the boot read = %#v, want it recorded admitted in %s", got, bootRoot)
+	}
+	for _, got := range effects(t, pool) {
+		if request, ok := got.payload.(record.SuperviseRequest); ok && got.issue == bootChild && request.Op == "start" {
+			t.Fatalf("the boot read started the %s of the blocked child, want nothing started while it waits on %s", request.Role, blocker)
+		}
+	}
 }
