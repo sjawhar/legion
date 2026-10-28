@@ -2,43 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T16:40:00Z",
-  "round": 6,
-  "headTested": "ab61c138f1b9",
-  "handoffHead": "cfc5877290a8010c2bdf56bdc3162a6e20fd70ab",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round6-tar-gz (RESULTS.md); earlier rounds' artifacts infra606-tester-evidence-tar-gz, infra606-tester-round2..5-tar-gz",
-  "ci": "No check run reported on ab61c138 when read; not waited for. Main's reds, not this pull request's (relayed by the controller): recipients-claim.e2e.ts route-close test (#2324), TestDispatchConnectionsPerPodIsTheServers (#2464), mermaid.e2e.ts:194 diagram-timeout test (INFRA-138's tree).",
+  "completed": "2026-10-28T19:55:00Z",
+  "round": 7,
+  "headTested": "855a4bcb54f0",
+  "handoffHead": "b6041c3b2240cad720946feda99e1b4bfd393446",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round7-tar-gz (RESULTS.md, claimant-e2e.log, claimant-e2e-base2.log); earlier rounds' artifacts infra606-tester-evidence-tar-gz, infra606-tester-round2..6-tar-gz",
+  "ci": "On 855a4bcb every check was queued (one pr-title run cancelled) when read; not waited for. Main's reds, not this pull request's: recipients-claim.e2e.ts route-close test (#2324), TestDispatchConnectionsPerPodIsTheServers (#2464), mermaid.e2e.ts:194 (INFRA-138's tree).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Built Dispatch and the web app from the workspace (ab61c138) and round 5's head (95df9815) on the round-3 stack. Round 6's two changes do what their proofs say: after a SIGKILL with the listener up, the comment in flight at the kill reaches the route session once (round 5's red test passes, unmodified), and the Activity tab renders a failed receipt as 'could not deliver a comment mention to <target>' (driven in headless Chromium). The census now lists the outbox's receipt. Failure below is a case the proofs do not cover."
+    "how": "Built Dispatch from the workspace (855a4bcb) on the round-3 stack and drove round 7's two changes. Reopen after a failed resend: after a kill with the listener down from the restart, the claimed comment reaches the route session once (round 6: never); round 6's red test and every earlier red test pass, unmodified. Shared dedupe key: after a kill whose send had landed, the fallback copy is published with the mention's key and the ENVOY_NOTIFICATIONS stream keeps one message. The architect's race and loop checks hold (below). The failure is a live proof the change breaks, outside the implementer's proofs."
   },
   "failures": [
     {
-      "criterion": "Mention delivery is not lost through a Dispatch restart (INFRA-514: no event lost); a session the comment's route reaches still gets one copy when the listener is silent (round 3's ruling).",
-      "evidence": "STOP_LISTENER=1 AS_PERSON=1 crash.sh r6down 1 150 at head ab61c138: LGA-10 routed to session:ses-a; a person posts 8 comments mentioning ses-a, ses-b, ses-c with the listener at 4 s, so the three sends in flight at the kill have not reached it; SIGKILL 0.3 s into the drain; the listener is stopped once the new process is up. ses-a's NATS subject stores c2..c8 once each (route copies after the outbox's settle) and c1 never: c1's comment.created was published at 16:07:28 to notifications.dispatch.issue.LGA-10.comment.created only, because the outbox now counts a claimed attempt whose claim lapsed as left to the stranded pass (mentionResumed), and the pass's resend at 16:07:33 failed ('envoy listener: GET /v1/registry/ses-a ...'). Round 5's head 95df9815, same run (crash-r5down): ses-a stores all 8 once. Red test: TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails in packages/envoy/internal/dispatch/api/comment_delivery_silent_listener_test.go (commit 'test(dispatch): a mention a killed process claimed still reaches its session when the resend fails'); `cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<postgres url> go test ./internal/dispatch/api/ -run TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails -count=3` fails 3 of 3 ('s1 received 0 copies of the comment ... want exactly 1'); it passes 3 of 3 at 95df9815. Round 5's TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses (the send landed) must keep passing with it."
+      "criterion": "The pull request breaks no repository live proof; every reader of a changed contract is in the contract change census (entry 3: POST .../comments answers every mention attempt pending).",
+      "evidence": "`DATABASE_URL=postgres://postgres@127.0.0.1:35432/claimant_e2e?sslmode=disable DISPATCH_BIN=<envoy-dispatch built from 855a4bcb> bash scripts/e2e/dispatch-claimant-delivery.sh` exits 1: 6 ok, 3 FAIL - mention-delivered-claimant ('expected the mention's delivery row sent, read pending'), mention-failed-claimant and mention-failed-follower ('expected the mention's delivery row failed, read pending'). The driver (scripts/e2e/dispatch-claimant-delivery.ts personMentions, lines 229-268) reads GET /api/v1/comments/{id} right after the POST; this PR answers the attempt pending and settles it after the response. The topics the cases check are right at the head (failed -> notifications.agent.<P or C> carries the comment; delivered -> no agent topic). The same command with main's build c27469629a9b passes 9 of 9 (claimant-e2e-base2.log). The script arrived with the merge of #2225; the census's search for readers of a comment's deliveries (entry 3) does not name it. The failing script is the red test; no workflow runs it."
     }
   ],
   "failed": 1,
   "proof": [
     {
-      "criterion": "After a SIGKILL, each session gets exactly one copy of each comment, the one in flight at the kill included (crash.sh's case, the architect's ruling).",
-      "surface": "The load-test stack, listener at 2 s; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; each session's NATS subject read with $JS.API.STREAM.MSG.GET",
-      "command": "AS_PERSON=1 crash.sh r6person 1 130 (LGA-10 routed to session:ses-a)",
-      "observed": "ses-a, ses-b and ses-c each store c1..c8 exactly once (ses-a: 7 route copies and c1's mention).",
-      "headSha": "ab61c138f1b9",
-      "negativeControl": "Round 5's head 95df9815 (round 5): ses-a stored c1 twice."
+      "criterion": "A mention a killed process claimed reaches its session once, also when the resend fails and when the killed process's send had landed.",
+      "surface": "The load-test stack; a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into the drain; ENVOY_NOTIFICATIONS read with $JS.API.STREAM.MSG.GET",
+      "command": "STOP_LISTENER=1 AS_PERSON=1 crash.sh r7down (listener at 4 s, stopped after the restart); STOP_LISTENER=1 AS_PERSON=1 crash.sh r7landed (listener at 2 s); AS_PERSON=1 crash.sh r7person (listener up)",
+      "observed": "r7down: ses-a stores c1..c8 once each; c1's comment.created published to agent.ses-a after its resend failed. r7landed: the outbox published c1's fallback to agent.ses-a and the stream holds one message for it (seq 9, the landed mention, same Nats-Msg-Id). r7person: every session stores each comment once.",
+      "headSha": "855a4bcb54f0",
+      "negativeControl": "Round 6's head ab61c138, r6down: ses-a never received c1."
     },
     {
-      "criterion": "The Activity tab says whether a mention receipt was delivered (census entry 6, the outbox's receipt).",
-      "surface": "The Dispatch web app built from the workspace, headless Chromium on /issues/LGA-6/activity as person-1",
-      "command": "stuck.sh r6head 30 (listener that answers nothing, 30 comments on one lane), then the Activity tab; then one comment with a live listener and the Activity tab again",
-      "observed": "After the stuck burst: 30 rows 'could not deliver a comment mention to session:ses-x', none 'delivered'; comment.created=30, comment.delivery=30 (16 from the outbox), 1 copy per comment on ses-x. After the live mention: 'delivered a comment mention to session:ses-x'.",
-      "headSha": "ab61c138f1b9",
-      "negativeControl": "The implementer's run of the same browser test against activity-model.ts before the fix: 1 failed, no 'could not deliver' row; activity-model.ts:112 at round 5 rendered 'delivered' for every receipt."
+      "criterion": "A reopen racing an in-flight outbox batch never leaves the event marked published without the session's copy, and a reopened row does not loop (the architect's checks).",
+      "surface": "Two outbox.Run processes over the API's real reopen (throwaway Go stress, not committed); the stack with NATS stopped after a kill",
+      "command": "25 runs: a claimed, lapsed attempt, the listener silent, two outbox processes whose acknowledgements stall 0-1.5 s, then the stranded pass's failing resend; STOP_NATS=1 STOP_LISTENER=1 AS_PERSON=1 crash.sh r7nats with the event rows sampled every 10 s, then NATS started",
+      "observed": "Stress: 25 of 25 runs end with comment.created published and notifications.agent.s1 among its destinations. NATS down: c1's reopened row and every other unpublished row are re-claimed every 10 s with attempt_count 0 and no further reopen; NATS back: each comment published once with the copy, ses-a stores each once.",
+      "headSha": "855a4bcb54f0",
+      "negativeControl": "A stuck burst of 30 commits 30 comment.created and 30 comment.delivery events (no extra reopen event), 1 copy per comment."
     }
   ],
   "observations": [
-    "Round 6 changes the outbox's mention rule and the Activity wording only; the stream, relay, hub, agent stream and audit results of rounds 3 and 4 stand.",
-    "One fix shape that keeps both kill tests green: leave a claimed, lapsed attempt to the stranded pass but keep the comment's copy deferred until that resend settles, publishing it if the resend fails."
+    "Host-side drop of the fallback is by the same key: dedupeKeyNamesItsEvent (packages/contracts/src/envelope.ts:69) is true for any source 'dispatch' envelope, and the stream already drops it by Nats-Msg-Id before a host sees it.",
+    "Mentioned sessions that are neither route nor author (ses-b, ses-c) get no copy when the listener is down after the restart, as on main: there is no copy of theirs to fall back to."
   ]
 }
