@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T16:50:00Z",
+  "completed": "2026-10-28T13:48:20Z",
   "proof": [
+    {
+      "criterion": "Forward merge of main: the pull request is mergeable again with the change intact, and the key rulings are applied",
+      "surface": "the merged head's lint, types, generated dist, Go and TypeScript suites, and the real interactive Oh My Pi 18.12.2 file; GitHub's mergeability",
+      "command": "jj new legion/INFRA-511 main@origin; bunx biome check; bunx tsc --noEmit (pi-legion, pi-shared, pi-envoy, claude-envoy, contracts); bun scripts/build.ts --check (Bun 1.4.4); go test ./internal/api/ ./internal/prompts/ ./cmd/legion/; bun test in pi-legion (rig tests excluded), pi-shared, contracts, pi-envoy; LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test ./extensions/controller-start-omp.test.ts; gh pr view 2300 --json mergeable",
+      "observed": "merge 3d60177d clean after resolving the two CHANGELOG conflicts into pr2300 changie fragments and the isIdle type; all checks green (pi-legion 619, pi-shared 75, contracts 296, pi-envoy 1382 pass; real-binary file 9 pass); GitHub reports MERGEABLE; fingerprint f013c87e\u2026 \u2192 9fc5f559\u2026 (changed, explained in the PR comment)",
+      "headSha": "3d60177d5453dd9d307d686d25ceb3bd0d70f510",
+      "negativeControl": "at 7a720a5d GitHub reported CONFLICTING/DIRTY; before the isIdle resolution, tsc in pi-legion failed (TS2722 at controller-session.ts:318)"
+    },
     {
       "criterion": "Review round 5: the skill and role-prompt edits leave this pull request for their own, and nothing that reads those files breaks",
       "surface": "the role-prompt rules and the claude-envoy generated-copy check, run on this branch and on the new branch from main",
@@ -129,7 +137,8 @@
     "Tester round 7: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case waits for the subagent's first model request before focusing it)",
     "Tester round 8: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case's wait skips the task-label request)",
     "Review round 4: packages/pi-legion/src/controller-session.ts (clear another session's claim widget before the early return), packages/pi-legion/extensions/legion.test.ts (the regression test)",
-    "Review round 5: skills/legion-controller/references/session.md, packages/claude-envoy/legion/skills/legion-controller/references/session.md and packages/daemon/internal/prompts/roles/controller-root.md restored to main; their edits are in #2420"
+    "Review round 5: skills/legion-controller/references/session.md, packages/claude-envoy/legion/skills/legion-controller/references/session.md and packages/daemon/internal/prompts/roles/controller-root.md restored to main; their edits are in #2420",
+    "Forward merge: packages/{claude-envoy,pi-envoy,pi-legion}/CHANGELOG.md back to main's text with .changes/unreleased/pr2300-*.yaml fragments; packages/pi-legion/src/controller-session.ts (optional isIdle); packages/daemon/internal/api/version.go and packages/pi-legion/AGENTS.md (no Dispatch key)"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
