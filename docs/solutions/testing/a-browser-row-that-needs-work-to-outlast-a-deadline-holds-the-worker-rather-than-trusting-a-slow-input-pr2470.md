@@ -12,7 +12,6 @@ date: 2026-10-28
 status: active
 module: packages/dispatch/e2e
 related_issues:
-  - "INFRA-713"
   - "sjawhar/legion#2470"
 ---
 

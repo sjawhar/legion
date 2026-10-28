@@ -10,7 +10,6 @@ date: 2026-10-28
 status: active
 module: packages/dispatch/e2e
 related_issues:
-  - "INFRA-713"
   - "sjawhar/legion#2470"
   - "sjawhar/legion#2471"
 ---
@@ -38,7 +37,7 @@ related_issues:
 
 ## Evidence
 
-INFRA-713: `MarkdownBody.test.tsx:1341-1353` unit-tests the Mermaid refusal, so a removed timer
+sjawhar/legion#2470: `MarkdownBody.test.tsx:1341-1353` unit-tests the Mermaid refusal, so a removed timer
 would fail the `dispatch` job's unit step before Playwright ran. The control #2471 set
 `RENDER_TIME_LIMIT_MS = 600_000`, and the unit tests stayed green (295 pass in `web/src/features/refs`).
 
