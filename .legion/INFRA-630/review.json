@@ -2,39 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T10:12:18Z",
-  "round": 5,
-  "headReviewed": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T11:25:48Z",
+  "round": 6,
+  "headReviewed": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "ci": "Code head 4360b7a2 (only .legion/ above it, compare handoffsOnly true): typecheck success, lint in progress, test and pr-title queued at 10:11Z. Not waited for: this round requests changes.",
-  "roundFourItems": "All seven done. Merge f428381d matches merge-tree 30ebe359 in its five conflicted files with both sides kept; one land_on_main naming push-fold and push-built; pushed=true gone with no reader anywhere; both callers check the base sha first; workflow comments point to verify-build.sh; check-private-names.sh header corrected; verify-build applies a shipped skill's .gitignore and stops on a failed listing; one extract-built for every tar extraction. Thread PRRT_kwDORFy7ds6xDe55 answered and accepted.",
+  "important": 0,
+  "minor": 1,
+  "ci": "Code head c3a63d7e (only .legion/ above it, compare handoffsOnly true): required lint, typecheck, test and pr-title completed success at 11:25Z; the rebuild workflow's pull_request build job and changelog-fold's build job succeeded; the non-required envoy-and-contracts jobs were still queued.",
+  "roundFiveItems": "All done in c3a63d7e: fragment renamed pr-2423-built-plugin-rebuilt-on-main.yaml with no key in its body (changie fold-plan and fold-notes read it); the ten docs/solutions status lines name sjawhar/legion#2423, and no added line outside .legion/ carries an INFRA key; verify-build prints an ::error:: line and exits 1 on a failed git ls-files; three refusal cases for the fold's and a release's per-workflow allow-lists (269/0, and each fails when the allow-list is widened); the extract-built and verify-build caller lists cut to one place each in the named files. Thread PRRT_kwDORFy7ds6xEmiF answered and accepted; every thread on the pull request carries the reviewer's answer and is resolved.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 4360b7a2 (Minors: stale PR body phrases, fixed by the reviewer; no ::error:: line on a failed listing; no refusal case for changelog-fold.yaml's or a release's per-workflow allow-list)",
-    "codeQuality": "Verdict: CHANGES at 4360b7a2 (no correctness defect; the extract-built and verify-build caller lists restated in five files)"
+    "deepReview": "Verdict: APPROVE at c3a63d7e (Minor: caller lists still restated in README, packages/claude-envoy/AGENTS.md and release-push.sh's check-built paragraph)",
+    "codeQuality": "Verdict: APPROVE at c3a63d7e (no finding; same note on untouched restatements)"
   },
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/claude-envoy/.changes/unreleased/INFRA-630-built-plugin-rebuilt-on-main.yaml",
-      "description": "New Dispatch keys in public files, against the controller's 10:04Z ruling (dispatch://INFRA-576/comment/fa82b5f7-4448-46ad-835b-91d1d939d110, under dispatch://INFRA-472 'stop new leaks only'): the fragment's name and the '(INFRA-630)' ending its body, and the ten docs/solutions 'status: superseded … by INFRA-630' lines this PR adds. Rename the fragment pr-2423-built-plugin-rebuilt-on-main.yaml, drop the key from its body, and name the pull request (sjawhar/legion#2423) in place of the key in the ten status lines."
-    },
-    {
       "severity": "minor",
-      "file": "packages/claude-envoy/scripts/verify-build.sh",
-      "description": "Line 98: a failed git ls-files stops the script with only git's fatal line; give it an ::error::verify-build.sh line like every other refusal."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.test.sh",
-      "description": "The per-workflow allow-list is refused only for the rebuild; add cases refusing changelog-fold.yaml's key step running push-built or push-main, and a release's running push-fold."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/workflows/claude-envoy-rebuild.yaml",
-      "description": "The lists of jobs that run extract-built and verify-build are restated in verify-build.sh:14-17, claude-envoy-rebuild.yaml:81-84, envoy-and-contracts.yaml:1029-1031 and check-private-names.sh:23-26, and verify-build.sh explains steps 2-3 twice (24-28 and 75-80, 86-92); keep each list once (release-push.sh, verify-build.sh's header)."
+      "file": ".github/scripts/release-push.sh",
+      "description": "Fast-follow: the check-built paragraph (164-168), packages/claude-envoy/README.md:293-297, packages/claude-envoy/AGENTS.md:69 and claude-envoy-rebuild.yaml:12-15 still name the jobs that run verify-build or extract-built; they match today. Point them at the two script headers."
     }
   ]
 }
