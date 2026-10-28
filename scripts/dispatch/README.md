@@ -63,17 +63,15 @@ for the stage 4b proof.
 
 ## Meaning search check
 
-`meaning-search-check.ts` is the production check of Dispatch meaning search for INFRA-194, and
-anyone can run it again. A1 checks that a search answer was not degraded to keyword-only ranking.
+`meaning-search-check.ts` is a production check of Dispatch meaning search, and anyone can run it
+again. A1 checks that a search answer was not degraded to keyword-only ranking.
 A2 checks that a query sharing no word with its issue finds that issue in the top five. A3 reads
 the coverage report: every item has a current vector from the expected model.
 
 ```bash
 bun scripts/dispatch/meaning-search-check.ts \
   --a1-query 'meaning search' \
-  --pair 'INFRA-43=watching a running bot, the screen keeps scrolling down whenever output arrives, so earlier lines are impossible to study' \
-  --pair 'INFRA-30=language model vendor billing balance ran dry and automated code checks halted' \
-  --pair 'INFRA-32=flowchart markup inside pages shows as raw text instead of a drawn picture' \
+  --pair 'KEY=QUERY' \
   --lexeme-database "$TMPDIR/pg/.s.PGSQL.5432" \
   --coverage --expect-model '<the identity the deploy configures>' \
   --coverage-wait 600
@@ -81,7 +79,8 @@ bun scripts/dispatch/meaning-search-check.ts \
 
 Each check runs only when its flags are given, and at least one must be. `--coverage` and
 `--expect-model` go together, and `--coverage-wait` (seconds, default 600) only with them.
-`--pair KEY=QUERY` repeats and splits at the first `=`. Dispatch is resolved as for the census
+`--pair KEY=QUERY` repeats, one per pre-registered pair, and splits at the first `=`; the operator
+gives each pair's key at run time. Dispatch is resolved as for the census
 above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_URL` and
 `DISPATCH_TOKEN_FILE` or `DISPATCH_TOKEN` first). With Dispatch off it prints
 `unavailable: config` and exits 2; it never prints the resolution's notices, which name files.
@@ -151,11 +150,13 @@ Pass it as `--lexeme-database <dir>/.s.PGSQL.5432`: Bun's `SQL` refuses the prin
 
 ### The pre-registered pairs
 
-| Issue | Query |
-| --- | --- |
-| INFRA-43 | watching a running bot, the screen keeps scrolling down whenever output arrives, so earlier lines are impossible to study |
-| INFRA-30 | language model vendor billing balance ran dry and automated code checks halted |
-| INFRA-32 | flowchart markup inside pages shows as raw text instead of a drawn picture |
+The pairs, each a query and the key of the issue it should find, are recorded on the deployment's
+issue; the keys are given only at run time. The queries:
+
+- watching a running bot, the screen keeps scrolling down whenever output arrives, so earlier
+  lines are impossible to study
+- language model vendor billing balance ran dry and automated code checks halted
+- flowchart markup inside pages shows as raw text instead of a drawn picture
 
 Each query was fixed before the deploy and matched nothing on production then. A2 is judged on
 the issue's own row because its key and title are the only text Dispatch indexes for that row

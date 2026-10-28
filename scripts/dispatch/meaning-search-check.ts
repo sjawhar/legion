@@ -13,7 +13,7 @@ import {
   sessionDispatchSettings,
 } from "../../packages/envoy-client/src/session-settings";
 
-/** A production check of Dispatch meaning search (INFRA-194). Everything it prints is from an
+/** A production check of Dispatch meaning search. Everything it prints is from an
  * allowlist: validated keys, kind names, positions, counts, the validated build commit, the
  * place, match or mismatch, and a fixed failure category. It never prints a URL, the token, a
  * response body, an issue title, a query, the coverage identity or an exception's text, since
@@ -75,7 +75,7 @@ const CoverageCounts = z
   .refine((counts) => counts.items === counts.current + counts.lacking + counts.failed);
 type CoverageCounts = z.infer<typeof CoverageCounts>;
 
-/** INFRA-393's coverage report, `GET /api/v1/search/coverage`. Its kinds are whatever it lists. */
+/** The coverage report, `GET /api/v1/search/coverage`. Its kinds are whatever it lists. */
 const CoverageReport = z.looseObject({
   identity: z.string().nullable(),
   place: z.enum(["bedrock", "azure"]).nullable(),
