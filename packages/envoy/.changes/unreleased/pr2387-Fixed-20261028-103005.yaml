@@ -18,7 +18,7 @@ body: |-
       attempt did before, since an instruction that old sent unasked could act on stale context. The
       first deploy therefore sends, at its first passes, any attempt stranded in the hour before it.
       A resumed direct message is more than a minute old, so its session shows it as a card
-      rather than as its user's own turn. Migration `0135` adds `message_deliveries.urgency`, so a
+      rather than as its user's own turn. Migration `0136` adds `message_deliveries.urgency`, so a
       resumed direct message keeps the urgency it was sent with, whether the loop or a person's
       same-mode Retry resumes it (an attempt a Retry opens carries none), and two partial indexes
       the loop reads pending attempts through. The loop takes one more connection in the lease

@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -51,7 +50,7 @@ import (
 // read-only after BuildAppContext returns; per-request state lives on
 // *router.
 type AppContext struct {
-	SigningKey     string
+	SigningKey     auth.SigningKeys
 	WebDistDir     string
 	AssetStore     AssetStore
 	Sessions       auth.SessionStore
@@ -80,7 +79,7 @@ type AppContext struct {
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey     string
+	SigningKey     auth.SigningKeys
 	WebDistDir     string
 	AssetStore     AssetStore
 	Sessions       auth.SessionStore
@@ -103,7 +102,7 @@ type AppContextOptions struct {
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
-	OIDC          *oidc.Verifier
+	OIDC          api.ServiceTokenVerifier
 	AgentStream   agentstream.Source
 	Lifetime      context.Context
 	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
@@ -129,7 +128,7 @@ type AppContextOptions struct {
 
 // BuildAppContext bundles the shared HTTP-handler state.
 func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
-	if opts.SigningKey == "" {
+	if opts.SigningKey.Empty() {
 		return nil, fmt.Errorf("BuildAppContext: SigningKey required")
 	}
 	if opts.People == nil {
@@ -218,32 +217,20 @@ func (ctx *AppContext) RunDeliveryResume(lifetime context.Context, interval time
 	api.RunDeliveryResume(lifetime, ctx.apiDeps, interval, leases)
 }
 
-const (
-	pendingStateTTL  = 10 * time.Minute
-	maxPendingStates = 1000
-	oauthStateCookie = "dispatch_oauth_state"
-	oauthStateMaxAge = 10 * 60
-)
+// oauthStateTTL is how long a sign-in may take between /auth/start and the issuer's callback.
+const oauthStateTTL = oauthStateMaxAge * time.Second
 
 type router struct {
-	ctx           *AppContext
-	pendingMu     sync.Mutex
-	pendingStates map[string]pendingState
+	ctx *AppContext
 	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
 	// maxRetainedBytesHeld (serveRetainedAsset).
 	retainedHeld *semaphore.Weighted
 }
 
-type pendingState struct {
-	next      string
-	nonce     string
-	expiresAt time.Time
-}
-
 // New returns an http.Handler that serves all dispatch routes, and a wait that returns once the
 // delivery hub and its sockets have ended after the process lifetime is cancelled.
 func New(ctx *AppContext) (http.Handler, func()) {
-	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
+	r := &router{ctx: ctx, retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	// Every route the server itself answers writes one access-log line (accesslog.Handler); the
 	// dashboard's own files, served by staticHandler, write none.
@@ -263,6 +250,11 @@ func New(ctx *AppContext) (http.Handler, func()) {
 
 // ───── auth ─────────────────────────────────────────────────────────────────
 
+// authStart sends the browser to the issuer to sign in. The sign-in in flight (its state, nonce,
+// the page it returns to and when it lapses) travels in the browser's dispatch_oauth_state cookie,
+// signed under a key derived from the current signing key (signOAuthState), and no process keeps
+// it: whichever process holding that key the issuer's redirect reaches completes the sign-in. An
+// issuer not yet discovered is answered 503 SIGNIN_UNAVAILABLE, with no state cookie set.
 func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -278,13 +270,25 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "state")
 		return
 	}
-	next := sanitizeNext(req.URL.Query().Get("next"))
-	if !r.putPendingState(state, nonce, next) {
-		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
+	authURL, err := r.ctx.SignIn.AuthURL(req.Context(), callbackURL(r.ctx.ServerURL, req), state, nonce)
+	if err != nil {
+		// AuthURL fails only while the issuer is not discovered (oidc.ErrIssuerUnavailable).
+		slog.Warn("dispatch: sign-in not started: the sign-in issuer is not discovered", "error", err)
+		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge, !r.ctx.InsecureCookie))
-	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
+	value, err := signOAuthState(r.ctx.SigningKey, oauthState{
+		State: state,
+		Nonce: nonce,
+		Next:  signInNext(req.URL.Query().Get("next")),
+		Exp:   time.Now().Add(oauthStateTTL).Unix(),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state")
+		return
+	}
+	http.SetCookie(w, oauthStateCookieFor(value, oauthStateMaxAge, !r.ctx.InsecureCookie))
+	http.Redirect(w, req, authURL, http.StatusFound)
 }
 
 // authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
@@ -293,6 +297,14 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 // their pool username carries; under a domain, by the email of a Google account of the domain,
 // and the account's subject is recorded with the sign-in, which ends the address's sessions when
 // another account held it (auth.PeopleStore.SignInSubject).
+//
+// The sign-in must be one this browser started: its state cookie verifies under a key of the set,
+// has not lapsed, and names the state the issuer returned in the URL. Nothing records that a
+// state was used, yet each completes at most once: the callback clears the cookie before anything
+// else, the issuer's authorization code is single-use, and Exchange accepts only an ID token
+// carrying the nonce the cookie bound the sign-in to. An exchange that meets an issuer this
+// process has not discovered (another process started the sign-in) is answered 503
+// SIGNIN_UNAVAILABLE; any other failed exchange 502.
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -304,17 +316,22 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	http.SetCookie(w, oauthStateCookieFor("", -1, !r.ctx.InsecureCookie))
-	pending, ok := r.takePendingState(state)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
-		return
-	}
 	cookie, err := req.Cookie(oauthStateCookie)
-	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(pending.nonce)) != 1 {
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.nonce)
+	pending, ok := verifyOAuthState(r.ctx.SigningKey, cookie.Value, time.Now())
+	if !ok || subtle.ConstantTimeCompare([]byte(state), []byte(pending.State)) != 1 {
+		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
+		return
+	}
+	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.Nonce)
+	if errors.Is(err, oidc.ErrIssuerUnavailable) {
+		slog.Warn("dispatch: sign-in code exchange failed: the sign-in issuer is not discovered", "error", err)
+		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
+		return
+	}
 	if err != nil {
 		slog.Warn("dispatch: sign-in code exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
@@ -327,7 +344,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	subject := r.ctx.SignInRule.Subject(session.Claims)
-	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken, time.Now()); err != nil {
+	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken); err != nil {
 		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
@@ -336,7 +353,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	accesslog.Note(req.Context(), accesslog.KindUser, email)
-	http.Redirect(w, req, pending.next, http.StatusFound)
+	http.Redirect(w, req, sanitizeNext(pending.Next), http.StatusFound)
 }
 
 // issueSession ensures the person's session generation and sets the session cookie a sign-in
@@ -630,11 +647,32 @@ func servePage(w http.ResponseWriter, req *http.Request, path string) {
 		writeError(w, http.StatusInternalServerError, "read failed")
 		return
 	}
-	sum := sha256.Sum256(page)
 	w.Header().Set("Content-Type", contentType(path))
 	w.Header().Set("Cache-Control", pageCacheControl)
-	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	w.Header().Set("ETag", `"`+pageTag(page)+`"`)
 	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
+}
+
+// pageTag names a page by its bytes: lowercase hex of the first 16 bytes of their SHA-256. It is
+// servePage's ETag value and DashboardBuild's name for the build.
+func pageTag(page []byte) string {
+	sum := sha256.Sum256(page)
+	return hex.EncodeToString(sum[:16])
+}
+
+// DashboardBuild names the dashboard build served from webDistDir (processes.Instance): the
+// pageTag of its index.html, the page every dashboard route answers, so two processes report one
+// build exactly when they answer one page with one ETag. It is "" when there is no dashboard to
+// serve: no directory, no index.html, or one this process cannot read.
+func DashboardBuild(webDistDir string) string {
+	if webDistDir == "" {
+		return ""
+	}
+	page, err := os.ReadFile(filepath.Join(webDistDir, "index.html"))
+	if err != nil {
+		return ""
+	}
+	return pageTag(page)
 }
 
 func serveFile(w http.ResponseWriter, req *http.Request, path string) {
@@ -726,33 +764,6 @@ func sanitizeNext(raw string) string {
 		return "/"
 	}
 	return raw
-}
-
-func (r *router) putPendingState(token, nonce, next string) bool {
-	now := time.Now()
-	r.pendingMu.Lock()
-	defer r.pendingMu.Unlock()
-	for token, pending := range r.pendingStates {
-		if !pending.expiresAt.After(now) {
-			delete(r.pendingStates, token)
-		}
-	}
-	if len(r.pendingStates) >= maxPendingStates {
-		return false
-	}
-	r.pendingStates[token] = pendingState{next: next, nonce: nonce, expiresAt: now.Add(pendingStateTTL)}
-	return true
-}
-
-func (r *router) takePendingState(token string) (pendingState, bool) {
-	r.pendingMu.Lock()
-	defer r.pendingMu.Unlock()
-	pending, ok := r.pendingStates[token]
-	if !ok {
-		return pendingState{}, false
-	}
-	delete(r.pendingStates, token)
-	return pending, pending.expiresAt.After(time.Now())
 }
 
 func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {

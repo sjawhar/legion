@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -26,8 +27,11 @@ const redeliveryPace = time.Second
 
 // webhookSweeper builds the redelivery sweep for the App whose key Dispatch holds. It returns nil
 // when there is no key to sign with (the endpoints take only an App JWT) or no NATS for its
-// state. Its App client and its own backoff obey the GitHub rate limits every process shares, in
-// the database's github_rate_limits.
+// state. The sweep's KV bucket is opened by the first sweep that finds the client connected, not
+// here: the client connects in the background (serverBus), and a bus that is down at boot must
+// not stop the boot. A sweep before then is skipped and logged as failed. Its App client and its
+// own backoff obey the GitHub rate limits every process shares, in the database's
+// github_rate_limits.
 func webhookSweeper(natsClient *bus.Client, database *store.Store, app *auth.AppConfig, apiBase string) (*redeliver.Sweeper, error) {
 	if natsClient == nil {
 		return nil, nil
@@ -37,11 +41,13 @@ func webhookSweeper(natsClient *bus.Client, database *store.Store, app *auth.App
 	if err != nil || github == nil {
 		return nil, err
 	}
-	state, err := redeliver.OpenState(natsClient.JS())
-	if err != nil {
-		return nil, err
+	open := func() (bus.KeyValue, error) {
+		if !natsClient.Connected() {
+			return bus.KeyValue{}, errors.New("NATS is not connected, so the sweep's state cannot be opened yet")
+		}
+		return redeliver.OpenState(natsClient.JS())
 	}
-	return &redeliver.Sweeper{GitHub: github, State: state, Limits: limits, Logger: slog.Default(), Pace: redeliveryPace}, nil
+	return &redeliver.Sweeper{GitHub: github, Open: open, Limits: limits, Logger: slog.Default(), Pace: redeliveryPace}, nil
 }
 
 // redeliverWebhooks is the operator command over the same sweep: it lists the App webhook's

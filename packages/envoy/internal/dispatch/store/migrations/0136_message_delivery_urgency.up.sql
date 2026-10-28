@@ -1,4 +1,4 @@
--- 0135_message_delivery_urgency.up.sql
+-- 0136_message_delivery_urgency.up.sql
 -- The urgency a targeted message was sent with, kept on its attempt row so a send that resumes a
 -- stranded attempt (api/delivery_resume.go) hands the listener the urgency the person chose rather
 -- than none. A direct message's attempt 1 is written in the transaction that stores the message,
