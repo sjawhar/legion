@@ -45,6 +45,8 @@ type DispatchSettings struct {
 	AppKeySecretKey    string
 	AppCPU             string
 	AppMemory          string
+	AppEphemeral       string
+	ProxyEphemeral     string
 	PprofPort          int
 	// AgentTokenGeneration and KeepPreviousAgentToken are the resolved rotation of the agent token.
 	AgentTokenGeneration   int
@@ -72,6 +74,8 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		AppKeySecretKey:        s.appKeySecretKey,
 		AppCPU:                 s.appResources.appCPU,
 		AppMemory:              s.appResources.appMemory,
+		AppEphemeral:           s.appResources.appEphemeralStorage,
+		ProxyEphemeral:         s.appResources.proxyEphemeralStorage,
 		PprofPort:              s.pprofPort,
 		AgentTokenGeneration:   s.agentTokens.generation,
 		KeepPreviousAgentToken: s.agentTokens.keepPrevious,

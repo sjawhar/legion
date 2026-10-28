@@ -199,6 +199,21 @@ test("keeps the replaced answer on a changed ask answer event", () => {
   });
 });
 
+test("parses an ask the close of its issue withdrew", () => {
+  const parsed = AskEventPayloadSchema.parse({
+    opened_event_id: 12,
+    question: "Ship it?",
+    resolution: {
+      kind: "withdrawn",
+      reason: "Withdrawn by the close of DSP-1.",
+      actor: { kind: "session", id: "legion-daemon:DSP" },
+      at: "2026-10-25T00:00:00Z",
+    },
+  });
+
+  expect(parsed.resolution?.kind).toBe("withdrawn");
+});
+
 test("models answer changes, ask answer history, and the answers page", () => {
   const answer = {
     user: "alice@example.com",
