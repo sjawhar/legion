@@ -2,67 +2,68 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-148",
-  "completed": "2026-10-28T12:45:00Z",
-  "headTested": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-  "rebaseCheck": "Fingerprint at my last passed head 7069ebe5: 1a320dde…; at 42fc5702: 133e2dc2… (changed). The changed files are claude-envoy session-hook.ts, its dist and answers-hook.test.ts (9740c3f6), plus the merge of main into envoy AGENTS.md, model.go, outbox/publisher.go, publisher_document_authors_test.go and api/session_answers_test.go. Changed, so this was a full round.",
+  "completed": "2026-10-28T13:55:00Z",
+  "headTested": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+  "rebaseCheck": "Fingerprint at my last passed head 42fc5702: 133e2dc2…; at d52a5e7f: addb5f2b… (changed). Only claude-envoy/tests/answers-hook.test.ts and envoy api/session_answers_test.go changed (7cb6847c, test-only), plus a clean forward merge of main (6d96a55f). No product file of the branch's diff changed. I still ran a full round, because main's new code is in the Dispatch build and the plugins.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 42fc5702 (merge 5c38603c), against my build of the head's Dispatch (fresh database, schema_version 137):\n- A1 driver: passes, and no self-check carried a list.\n- Item probe: 10 items; exclusions and route refusals hold.\n- Doc-thread reply routing after the publisher.go merge: the person's doc comment and reply events go to notifications.agent.<session>, and the mention reply reaches it once.\n- Hook probes for 9740c3f6: all hold.\n- Under CPU load: 18/18 full-file runs and 21/21 targeted runs.\n- Both red tests fail against their mutations.\n- Dist matches a fresh pinned-Bun build.\n- answers-claude: 3 of 3. Real omp: 14 of 14.\n- A9 on the gateway route: turn 3 cacheRead 25724 = 25704 + 20."
+    "how": "At d52a5e7f, against my build of the head's Dispatch (fresh database, schema_version 137):\n- A1 driver: passes, no self-check carried a list.\n- Item probe: 10 items; exclusions and refusals hold.\n- New: a person's comment on an issue routed to the session that also mentions it is listed once.\n- Under CPU load: answers-hook.test.ts 18 of 18 full-file runs.\n- answers-claude: 3 of 3. Real omp: 14 of 14.\n- Claude dist matches a fresh pinned-Bun build.\n- A9 on the gateway route: turn 3 cacheRead 25986 = 25703 + 283."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "9740c3f6: a Claude hook carries a list only for the Dispatch URL envoy.json names now; with no URL it starts no refresher and names why",
-      "surface": "the committed hook bundle dist/session-hook.js run as Claude Code runs it (stdin input, CLAUDE_CONFIG_DIR envoy.json, no DISPATCH_* variables), against the local Dispatch on 18866; 18867 has nothing listening",
-      "command": "cd /legion/scratch/tmp/infra148-test (tokcase):\n- envoy.json `{not json`;\n- envoy.json with a token command and no serverUrl;\n- crossed URL: refresher on 18866, switched to 18867, hooks 1.0 and 1.3 s later;\n- same URL;\n- a token command that exits 3, hooks at startup and resume.",
-      "observed": "Invalid envoy.json: `could not be read (…/envoy.json: invalid JSON at line 1, column 2)`, and no refresher started. No serverUrl: the URL resolves to Dispatch's default http://localhost:8766 (answers-refresh.json dispatch_url), and the hook names `Unable to connect`. Crossed URL: `could not be read (the refresher read http://127.0.0.1:18866, not the Dispatch envoy.json names now)` at both offsets. Same URL: the saved 18866 list with `As read at …; this read failed: …`. Exit 3: both hooks show `dispatch.token's command exited with status 3`. TMPDIR was empty 11 s later, and no token was in the state files.",
-      "headSha": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-      "negativeControl": "With the URL check mutated to `true ||` and dist rebuilt with Bun 1.4.4, the cross-refresher red test failed 2 of 2. The mutation was restored, and `scripts/build.ts --check` reported `dist/ and legion/ match a fresh build`."
+      "criterion": "7cb6847c: one comment both the route and a mention hold is listed once",
+      "surface": "the dispatch CLI as a session against the local Dispatch; alice through the dev sign-in; an Envoy listener stand-in that resolves and accepts the mention",
+      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-routed.ts (issue routed `session:<S>` by PATCH, then a person's comment mentioning S); psql events and comment_deliveries",
+      "observed": "`dispatch answers` held the comment once, as `user alice · mentioned you` (1 occurrence). Its event carried suppressed_authors [S] and suppress_route true, so it went to the issue topic only. comment_deliveries has state sent for S.",
+      "headSha": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+      "negativeControl": "The other session's `dispatch answers` in the A1 run printed `No person wrote to this session in the last 72 hours.` I did not drive the failed-mention-then-retry path the new Go test builds (publish-time mention failure). That one is Go CI's."
     },
     {
-      "criterion": "Architect: tests/answers-hook.test.ts does not flake on a loaded host",
+      "criterion": "Architect: tests/answers-hook.test.ts does not flake on a loaded host (its request counts changed in 7cb6847c)",
       "surface": "tests/answers-hook.test.ts on this 2-CPU pod with 4 busy loops and 3 test processes at once",
-      "command": "cd packages/claude-envoy: 6 rounds × 3 parallel `bun test tests/answers-hook.test.ts`, then 7 rounds × 3 parallel `-t 'every SessionStart source|another Dispatch than envoy.json|never hands its list|start-up took past'`",
-      "observed": "18 of 18 full runs: 16 pass, 0 fail. 21 of 21 targeted runs: 4 pass, 0 fail.",
-      "headSha": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-      "negativeControl": "At ca7ea08d the same load failed 2 of 21 and 1 of 6 runs. With ANSWERS_LEAST_WAIT_MS = 0 the slow-start red test fails, receiving `could not be read (Dispatch did not answer within 0 ms)`; this mutation was restored too."
+      "command": "cd packages/claude-envoy: 6 rounds × 3 parallel `bun test tests/answers-hook.test.ts`",
+      "observed": "18 of 18 runs: 16 pass, 0 fail",
+      "headSha": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+      "negativeControl": "At ca7ea08d the same load failed 2 of 21 and 1 of 6 runs. The hook code is unchanged since 42fc5702, where its two red tests failed against the URL-check and least-wait mutations."
     },
     {
-      "criterion": "A1 and main-conversation only, after the merge",
+      "criterion": "A1 and main-conversation only",
       "surface": "real omp 18.12.2 with the checkout's pi-envoy against my build of the head's Dispatch (Postgres 17 + pgvector on 5444, nats-server 2.10.29) and a stand-in model gateway",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun driver.ts (logs/driver8.log)",
-      "observed": "ask.answered was published to notifications.agent.01a18275-e401-7132-92a3-177040a46f1a. The next turn's last message was the list, with the answer verbatim and no cache_control (anchors 5 and 7). 0 of 3 self-checks carried a list. `dispatch answers` for the session printed the answer.",
-      "headSha": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-      "negativeControl": "0 of the 4 requests before the answer carried a list. `dispatch answers` for another session printed `No person wrote to this session in the last 72 hours.`"
+      "command": "cd /legion/scratch/tmp/infra148-test && bun driver.ts (logs/driver9.log)",
+      "observed": "ask.answered was published to notifications.agent.01a182c0-a437-7526-90f0-bd346638dd1e. The next turn's last message was the list, with the answer verbatim and no cache_control (anchors 5 and 7). 0 of 3 self-checks carried a list. doc-read printed the open anchored comment, and the help has the sentence.",
+      "headSha": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+      "negativeControl": "0 of the 4 requests before the answer carried a list. Another session's `dispatch answers`: `No person wrote to this session in the last 72 hours.` The resolved anchored comment is not printed."
     },
     {
-      "criterion": "A4/A6/A10-A12 after the publisher.go/model.go merge: item kinds, doc-thread reply routing, window, exclusions, refusals, doc-read",
-      "surface": "the dispatch CLI as session 01a17c99-0000-7000-8000-01a1827602cc against the local Dispatch; the person is alice through the dev sign-in",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-dispatch.ts; psql: published_destinations of the person's doc comments",
-      "observed": "`dispatch answers` printed 10 items, the same kinds as round 8. The mention appeared once. The person's doc comment and doc-thread reply events went to {document topic, notifications.agent.<session>}, and the mention reply to the document topic only (its delivery is the mention). Doc-read of the project document printed the edited comment and the edited reply.",
-      "headSha": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-      "negativeControl": "Not listed: the 73 h answer, another agent's replies, the resolved unanswered ask and the replaced first answer. The route answers 400 for a bad session id, since 8 days back, since in the future and max_chars=0, and 401 with no bearer. The resolved anchored comment is absent from doc-read."
+      "criterion": "A4/A6/A10-A12: item kinds, window, exclusions, refusals, doc-read of a project document",
+      "surface": "the dispatch CLI as session 01a17c99-… against the local Dispatch",
+      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-dispatch.ts (logs/pd9.log)",
+      "observed": "10 items, the same kinds as rounds 8 and 9. The mention appeared once. Doc-read of the project document printed the edited comment and reply.",
+      "headSha": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+      "negativeControl": "Not listed: the 73 h answer, another agent's replies, the resolved unanswered ask and the replaced first answer. The route answers 400 for a bad session id, since 8 days back, since in the future and max_chars=0, and 401 with no bearer."
     },
     {
       "criterion": "A5 and A2/A3/A7/A8 on the real binaries",
       "surface": "real Claude Code 2.1.311 with --plugin-dir packages/claude-envoy; real omp 18.12.2 against the omp-harness stand-in",
-      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=/legion/scratch/tmp/claude-code-2.1.311/node_modules/.bin/claude bun test tests/answers-claude.test.ts (3 runs); cd packages/pi-envoy && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts",
-      "observed": "answers-claude: 4 pass in each of 3 runs. Real omp: 14 pass, 0 fail.",
-      "headSha": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
+      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=… bun test tests/answers-claude.test.ts (3 runs); bun-1.4.4 scripts/build.ts --check; cd packages/pi-envoy && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts",
+      "observed": "answers-claude: 4 pass in each of 3 runs. The build check printed `dist/ and legion/ match a fresh build`. Real omp: 14 pass, 0 fail.",
+      "headSha": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
       "negativeControl": "Round 1 at 7b53f622: answers-claude failed in 3 of 3 runs. With the deadline at 5 s, case (f) failed at 5050 ms."
     },
     {
       "criterion": "A9: a change in the list does not invalidate the cached conversation",
       "surface": "real omp 18.12.2 with the checkout's pi-envoy on the pod's model gateway route (anthropic/claude-sonnet-5)",
       "command": "cd /legion/scratch/tmp/infra148-test && bun cache-rig.ts original 3; bun cache-rig.ts altered 1",
-      "observed": "turn1 cacheRead 0 / write 25704; turn2 read 25704 / write 20; turn3 (list L1 -> L2) read 25724 (= turn 2's read + write); uncached input 136 -> 232",
-      "headSha": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-      "negativeControl": "A first message changed (altered): read 12145, write 14837"
+      "observed": "turn1 cacheRead 0 / write 25703; turn2 read 25703 / write 283; turn3 (list L1 -> L2) read 25986 (= turn 2's read + write); uncached input 136 -> 232",
+      "headSha": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+      "negativeControl": "A first message changed (altered): read 0, write 26985"
     }
   ],
   "observations": [
-    "Still standing from round 8: the five-source test accepts a missed fresh read at every hook, so the fresh list is pinned by the slow-start red test, A1 and answers-claude. A token command that is slow and also fails never shows its own error, only `had not finished`.",
-    "CI at 42fc5702 when read: build x2, changes, lint, test, typecheck and pr-title queued (one pr-title cancelled). Not read as green."
+    "Not re-run this round: the hook URL and failing-token probes. session-hook.ts and its dist are unchanged since 42fc5702, where they passed.",
+    "Still standing: the five-source test accepts a missed fresh read at every hook. A token command that is slow and also fails never shows its own error.",
+    "CI at d52a5e7f when read: build x2, changes, lint, test, typecheck and pr-title all queued. Not read as green."
   ]
 }
