@@ -68,8 +68,15 @@
 
 ### Changed
 
-- The linked `dispatch-writing-specs` skill tells a session to cite code by file and symbol, never a
-  line number, and to say, in each sentence that cites a gate passing, what the pass does not show.
+- The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
+  symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
+  does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:
+  the Legion reviewer names, design-gate pointer and description pointer that `legion-architect` and
+  `dispatch-first` hold, the approval Dispatch carries, "The spec is the issue's primary document",
+  "Name an issue by its `dispatch://` link", "resolve the ask it answers", "Write what is true now"
+  and "Length scales with the change" (`@sjawhar/pi-envoy`'s changelog says where each is held).
+  The generated `legion/skills/legion-architect/references/design-gate.md` has the approval
+  summary's review sentence also say what the reviews do not show.
 
 - The `dispatch` command (`dist/dispatch.js`) and the bundled tool descriptions take an ask
   question of up to 2,000 characters and ask for its concrete case first; the generated

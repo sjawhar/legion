@@ -1,6 +1,6 @@
 ---
 name: dispatch-writing-specs
-description: "Use in a session with Dispatch before you write or change a spec, and before an ask, comment or message a person reads. It replaces superpowers' brainstorming there. A Legion architect also follows skill://legion-architect."
+description: "Use in a session with Dispatch before you write or change a spec, and before an ask, comment or message a person reads. It replaces superpowers' brainstorming there."
 ---
 
 # Writing specs
@@ -11,7 +11,7 @@ Reach shared understanding with the person at the least cost of their time. A Le
 
 ## The outline
 
-The spec is the issue's primary document. Find its project with `dispatch projects` or `dispatch search`, never the environment. Its `##` parts, in order:
+Find the issue's project with `dispatch projects` or `dispatch search`, never the environment. The spec's `##` parts, in order:
 
 Part | Content
 --- | ---
@@ -23,7 +23,7 @@ Part | Content
 `Decisions` | Your own choices
 `Acceptance` | `**A1.**` on, each naming the requirements it tests
 
-Another agent can build and check the work from the spec alone. A small change gets a few sentences per part. Split a large design into child issues.
+Another agent can build and check the work from the spec alone. A small change gets a few sentences per part, no matrix. Split a large design into child issues.
 
 ## Rules for the text
 
@@ -31,13 +31,13 @@ For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
 - State the current design, never how people reached it.
-- Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL.
-- Cite code by file and symbol, never a line number, which goes stale at the next edit. A plan's task adds line numbers when it runs.
+- Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
+- In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (a test, review, check or proof) also says, in that sentence, what the pass does not show: "The tests pass; they catch a wrong verdict, not a proof of a contradiction."
 - Write about the design, never the person. Never quote people or upload their words.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
-- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader.
+- Explain each name or term a new reader may not know. Say in a clause what each issue you name does for this reader.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
@@ -50,7 +50,7 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Reply in a comment's thread; resolve the ask it answers.
+1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Never narrate an edit or what used to be here; versions and comments hold the history. Reply in a comment's thread.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent's assignment. It lists gaps, conflicts, uncheckable requirements, unclear text, and missing or needless questions. Fix or record each.
 3. Before each approval request, a read-only agent checks its facts: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.

@@ -51,12 +51,13 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>.'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
    ```
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
-   commentary and no open question), then one sentence with both reviews' results, for example
-   `Reviews: no open gap, 14 of 14 claims verified.` The primary document is the default; the
+   commentary and no open question), then one sentence with both reviews' results and what they do
+   not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
+   design works once built.` The primary document is the default; the
    command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
 5. Register that document version with the daemon:
 

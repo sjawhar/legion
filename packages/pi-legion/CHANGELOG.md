@@ -53,9 +53,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
   is a spec, for each factual claim. The architect verifies with a command, or removes, each claim
   either review marks unverified, and the request's `--summary` ends with one sentence that gives
-  both reviews' results. The root and sub-architect role prompts say the same. Self-review alone
-  did not stop false claims: an architect requested approval, then again minutes later because a
-  claim was false.
+  both reviews' results. The root and sub-architect role prompts say the same. `legion-architect`'s
+  template and example of that sentence also say what the reviews do not show, as
+  `dispatch-writing-specs` requires of a sentence that cites a gate: no open gap, every claim
+  verified, and neither shows that the design works once built. Self-review alone did not stop
+  false claims: an architect requested approval, then again minutes later because a claim was
+  false.
 - `plan-reviewer` reviews a spec as well as a plan. In its spec mode it checks each factual claim
   against the code, the docs or a read-only command, and marks each claim verified, false or
   unverified, with the file and line or the command and its output. It also checks that the spec
