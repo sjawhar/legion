@@ -19,6 +19,7 @@ the Dispatch specs behind the `dispatch` command:
 | Task | Location | Notes |
 | --- | --- | --- |
 | Envelope and subject contracts | `src/envelope.ts`, `src/subject.ts` | canonical TypeScript surface |
+| Push subject bound | `src/subject.ts`, `src/sha256.ts` | `SUBJECT_MAX_BYTES` (4,032) is the Envoy bus's `maxSubjectBytes` (`packages/envoy/internal/bus/nats.go`), which refuses a longer subject; `scripts/gen-go.ts` emits it as `contracts.SubjectMaxBytes`. `githubPushSubject` and the generated `GithubPushSubject` cut a ref segment that would take the subject past it, between characters, and end it in `~` and the first 16 hex digits of the whole ref name's SHA-256, so a push of any ref publishes and distinct refs keep distinct subjects. `sha256Hex` is synchronous and imports no `node:crypto`, because the Dispatch dashboard's browser bundle imports this package. Both languages' tests hold the same expected subjects (`src/envelope.test.ts`, `packages/envoy/internal/contracts/push_subject_test.go`). |
 | Dispatch tool specifications | `src/dispatch-tools.ts`, `src/tool-schema.ts` | builders over `zodSchemaApi(hostZod)` |
 | Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract and the shared constants into two files, one per Go module (`bun run gen:go`); `bun run check:go` (`--check`) compares a fresh render of each with its committed file without writing either, naming the one it finds stale, and CI runs it in place of regenerating |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |

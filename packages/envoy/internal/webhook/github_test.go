@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/testnats"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGitHubHandler(t *testing.T) {
@@ -794,5 +797,57 @@ func TestGitHubHandlerPublishesAPushOfSeveralMegabytes(t *testing.T) {
 	if payload["commit_count"] != "1000" || payload["changed_paths_truncated"] != "true" {
 		t.Fatalf("push payload commit_count = %q, changed_paths_truncated = %q; want 1000 and true",
 			payload["commit_count"], payload["changed_paths_truncated"])
+	}
+}
+
+// Git bounds no ref's length, and a push's subject names its ref, so a ref of a few thousand bytes
+// once made a subject past what the bus publishes: GitHub was answered 422 for that push on every
+// delivery, and the event was never stored. The subject now cuts such a ref to fit, and the push
+// is answered 200 and stored by a real NATS server.
+func TestGitHubHandlerStoresAPushWhoseRefIsFiveThousandBytes(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the bus: %v", err)
+	}
+	defer client.Close()
+
+	const secret = "s"
+	ref := "refs/heads/" + strings.Repeat("a", 5000)
+	body, err := json.Marshal(map[string]any{
+		"ref":        ref,
+		"before":     strings.Repeat("0", 40),
+		"after":      strings.Repeat("1", 40),
+		"pusher":     map[string]any{"name": "octocat"},
+		"commits":    []any{},
+		"repository": map[string]any{"name": "widgets", "full_name": "acme/widgets", "owner": map[string]any{"login": "acme"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal push: %v", err)
+	}
+	handler := GitHubHandler(secret, "@legion", "", client, &mockRecorder{})
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", "delivery-long-ref")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, body))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stored, err := client.NextStoredMessage(ctx, "notifications.github.acme.widgets.push.branch.>", 0)
+	if err != nil {
+		t.Fatalf("read the stored push: %v", err)
+	}
+	var envelope contracts.Envelope
+	if err := json.Unmarshal(stored.Data, &envelope); err != nil {
+		t.Fatalf("decode the stored push: %v", err)
+	}
+	if envelope.SourceEventID != "delivery-long-ref" || len(stored.Subject) > contracts.SubjectMaxBytes {
+		t.Fatalf("stored delivery %q on a %d-byte subject, want delivery-long-ref within %d bytes",
+			envelope.SourceEventID, len(stored.Subject), contracts.SubjectMaxBytes)
 	}
 }
