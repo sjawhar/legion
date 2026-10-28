@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-650",
-  "completed": "2026-10-27T18:17:00Z",
+  "completed": "2026-10-28T09:56:00Z",
   "verdict": "pass",
-  "headTested": "2b85acda522f (code head; PR head 3c335c8c7f6a adds only .legion/INFRA-650/implement.json)",
+  "headTested": "2b85acda522f (code head of round 1); round 2 is a rebase re-check at 5cac746b9cfb (PR head 35d56e87ff35 adds only .legion/INFRA-650/implement.json)",
+  "rebaseRecheck": {
+    "from": "2b85acda522fcd05ee25c9e5a02195233c04c15a",
+    "to": "5cac746b9cfb (forward merge of main b295a3fbcb42; PR head 35d56e87ff35e618aa4e989d2d30d4e61b6da825)",
+    "fingerprint": "e46c830b18b2d33608708876d1338efc3c05df95fa74505e140799907cd01dfe at both heads (jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)', hunk and index lines dropped)",
+    "result": "unchanged, bare gates only",
+    "ci": "Read on GitHub at 5cac746b9cfb at 09:54Z: every run lane success (lint, typecheck, test, build, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, envoy-e2e-local, envoy-smoke, pr-title); the rest skipped; one later pr-title queued",
+    "smoke": "LOADTEST_SRC=src-head (equal to the merged head's references.go) stack.sh setup, start, reset; refseed fetch of all 1,000 issues: 370,201,911 bytes, file sha256 e16a76bce39ad88e0a449fc121818dce3c50535c9ba78f354ee49bb8dd8550fe, equal to the implementer's round-2 answers-base.tsv and answers-head.tsv; GET without a bearer 401; stack stopped after"
+  },
   "evidence": "dispatch://INFRA-650/artifact/infra650-tester-evidence-tgz (sha256 4cdee19c1abe9f003175a10c9c0c38d576c7a8e4db703e7bb00d239822e2e261)",
   "implementerProof": {
     "verdict": "verified",
