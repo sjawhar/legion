@@ -21,11 +21,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/redact"
 )
@@ -218,58 +222,89 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 	}
 }
 
-// TestAMistypedIDIsNamedAndNotBlamedOnTheBroker: with a clean AGENT_SECRETS_URL, an id the
-// person typed is path-escaped into the call, so a '%' in it neither breaks the request nor is
-// reported as a bad broker address: the broker receives the id as typed, and an unreached broker's
-// message names the escaped call.
-func TestAMistypedIDIsNamedAndNotBlamedOnTheBroker(t *testing.T) {
+// TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName: against a broker that verifies the
+// proof as the real one does (proof.Verifier, with the htu rebuilt from the decoded path), a
+// request id url.PathEscape would change is refused before any call, naming the id and not the
+// broker's address, while an ordinary id still verifies and is answered.
+func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	keyDir := newKeyDir(t)
-	got := make(chan string, 1)
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDir := writeKeyDir(t, key, testEnrollmentID)
+	verifier := &proof.Verifier{Skew: time.Minute,
+		Lookup: func(_ context.Context, id string) (string, bool, error) {
+			return thumbprint, id == testEnrollmentID, nil
+		},
+		Replay: func(context.Context, string, time.Time) (bool, error) { return true, nil }}
+	var publicURL string
+	var reached, verified atomic.Int32
 	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/requests/"); ok {
-			select {
-			case got <- id:
-			default:
-			}
+		if !strings.HasPrefix(r.URL.Path, "/v1/requests/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		reached.Add(1)
+		if _, err := verifier.Verify(r.Context(), r.Header.Get("Proof"), r.Method, publicURL+r.URL.Path, time.Now()); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"PROOF_INVALID","error":"the proof does not verify"}`))
+			return
+		}
+		verified.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(approvedStatusJSON))
 	}))
 	defer broker.Close()
-	_, stderr, _ := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", "req%zz")
-	if strings.Contains(stderr, "not a valid URL") {
-		t.Fatalf("stderr %q blames the address", stderr)
-	}
-	select {
-	case id := <-got:
-		if id != "req%zz" {
-			t.Fatalf("the broker received id %q, want %q", id, "req%zz")
+	publicURL = broker.URL
+	for _, id := range []string{"req%zz", "a b", "a/b", "req%25zz"} {
+		_, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", id)
+		want := strconv.Quote(id) + " is not a request id"
+		if exit == 0 || !strings.Contains(stderr, want) || strings.Contains(stderr, "not a valid URL") || strings.Contains(stderr, "PROOF_INVALID") {
+			t.Errorf("status %q: exit %d, stderr %q; want a refusal naming %s", id, exit, stderr, want)
 		}
-	default:
-		t.Fatalf("the broker received no GET /v1/requests/{id}; stderr %q", stderr)
 	}
-	_, stderr, _ = runAgentSecrets(t, binary, "http://127.0.0.1:1", keyDir, nil, "status", "req%zz")
-	if want := "GET http://127.0.0.1:1/v1/requests/req%25zz (AGENT_SECRETS_URL names http://127.0.0.1:1): dial tcp"; !strings.Contains(stderr, want) || strings.Contains(stderr, "not a valid URL") {
-		t.Fatalf("stderr %q, want it to name %q and not blame the address", stderr, want)
+	if n := reached.Load(); n != 0 {
+		t.Fatalf("the broker was called %d times for ids the client must refuse", n)
+	}
+	for _, id := range []string{"0f9a6c1e-2b7d-4c3a-9e5f-8a1b2c3d4e5f", "req-approved"} {
+		_, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", id)
+		if exit != 0 {
+			t.Errorf("status %q: exit %d, stderr %q; want the broker's answer", id, exit, stderr)
+		}
+	}
+	if n := verified.Load(); n != 2 {
+		t.Fatalf("%d proofs verified, want 2: an ordinary id must sign the path the broker rebuilds", n)
 	}
 }
 
-// TestARedirectsQueryIsNotPrinted: a clean broker URL that redirects to a URL with a query (a
-// proxy's sign-in, say) that then fails prints the failure's class alone: net/http's error names
-// the redirect's target, whose query can carry a credential.
-func TestARedirectsQueryIsNotPrinted(t *testing.T) {
+// TestARedirectsTargetIsNotPrinted: a clean broker URL that redirects (a proxy's sign-in, say)
+// to a URL with a query, to another path, or through a malformed Location, and then fails,
+// prints the failure's class alone: net/http's error names the redirect's target.
+func TestARedirectsTargetIsNotPrinted(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://127.0.0.1:1/signin?state=qtok77SECRET", http.StatusFound)
-	}))
-	defer redirector.Close()
-	_, stderr, _ := runAgentSecrets(t, binary, redirector.URL, keyDir, nil, "self")
-	if strings.Contains(stderr, "qtok77SECRET") || strings.Contains(stderr, "/signin") {
-		t.Fatalf("stderr %q names the redirect's target", stderr)
-	}
-	if want := "(AGENT_SECRETS_URL names " + redirector.URL + "): connection refused"; !strings.Contains(stderr, want) {
-		t.Fatalf("stderr %q, want it to name %q", stderr, want)
+	for _, row := range []struct{ location, class string }{
+		{"http://127.0.0.1:1/signin?state=qtok77SECRET", "connection refused"},
+		{"/magic/AbCtok9f3SECRET", "the request failed"},
+		{"http://127.0.0.1:1/signin%zz?state=qtok77SECRET", "the request failed"},
+	} {
+		redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header()["Location"] = []string{row.location}
+			w.WriteHeader(http.StatusFound)
+		}))
+		_, stderr, _ := runAgentSecrets(t, binary, redirector.URL, keyDir, nil, "self")
+		redirector.Close()
+		if strings.Contains(stderr, "qtok77SECRET") || strings.Contains(stderr, "AbCtok9f3SECRET") || strings.Contains(stderr, "/signin") || strings.Contains(stderr, "/magic") {
+			t.Errorf("Location %q: stderr %q names the redirect's target", row.location, stderr)
+		}
+		if want := "(AGENT_SECRETS_URL names " + redirector.URL + "): " + row.class; !strings.Contains(stderr, want) {
+			t.Errorf("Location %q: stderr %q, want it to name %q", row.location, stderr, want)
+		}
 	}
 }
 

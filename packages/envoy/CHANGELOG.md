@@ -282,12 +282,14 @@
   `sign-launcher` refusal of a URL that is not its broker's (which `machine` and `grant` list and
   revoke print), `agent-secrets-helper install`'s refusal of a URL a unit line would need
   escaped, Dispatch's two boot errors about `DISPATCH_AGENT_SECRETS_URL`, and the broker's own
-  refusals of `BROKER_PUBLIC_URL` and `BROKER_MACHINE_LOGIN_URL`. An error whose request
-  followed a redirect names the redirect's target, so with a clean base it too prints its class
-  alone unless that target is clean. `agent-secrets` path-escapes the ids it puts in a call
-  (`status`, `cancel`, a grant's values and revoke, a renewal), so a `%` in a typed id reaches
-  the broker as typed and an unreached broker's message names the escaped call, rather than
-  blaming the broker's address.
+  refusals of `BROKER_PUBLIC_URL` and `BROKER_MACHINE_LOGIN_URL`. With a clean base, an error
+  prints as net/http wrote it only when the URL it names is that base followed by a plain `/v1/`
+  path and the error it wraps is a transport failure, an HTTP status answer, or text the
+  allow-list passes: a redirect's target (another host or path, a query, or a malformed
+  `Location` whose text quotes it) prints the class alone. `agent-secrets` refuses an id that
+  would not name one path segment as written - `"req%zz" is not a request id` - before any call,
+  since the proof signs the path as built and the broker checks it against the path it decoded;
+  before, such an id was blamed on the broker's address.
   `agent-secrets-devrelay --broker` no longer takes `AGENT_SECRETS_URL` as its flag default,
   which its usage text printed whole; it reads the variable after parsing. `agent-secrets-helper
   install` writes its unit `0600`, not `0644`, since the unit's `Environment=` line holds the

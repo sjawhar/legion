@@ -2690,12 +2690,16 @@ path of `[A-Za-z0-9._~/-]`), and as `redact.NotPrinted` otherwise, printing no p
 with user info prints as `NotPrinted` too, not as `xxxxx@host`: a host-less value whose password
 holds an `@` would print the password's tail as the host. An error net/http or net/url makes
 passes through `redact.Error(err, base)` (or `redact.Cause`, the same without net/http's
-`*url.Error` wrapper): it is err itself when base is clean and so is the URL that error names,
-which is base followed by a path the program escaped (`redact.Call`) or another clean URL; a
-redirect's target with a query is not. Otherwise its text is the class alone (`name resolution
-failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`, `not a
-valid URL`, `the request failed`), found with errors.Is and errors.As on err, and it unwraps to
-err so callers classify as before. `agent-secrets` path-escapes every id it puts in a call.
+`*url.Error` wrapper): it is err itself only when base is clean, the URL that error names is base
+followed by nothing or a plain `/v1/` path (`redact.Call`; a redirect's target on another host or
+path, or with a query, is not), and the error it wraps is a transport failure (`net.OpError`, name
+resolution, refused, timeout, TLS), an HTTP status answer, or text the allow-list passes (a
+malformed `Location`'s error quotes the target and is not). Otherwise its text is the class alone
+(`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered
+HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and errors.As on err,
+and it unwraps to err so callers classify as before. `agent-secrets` refuses an id that
+`url.PathEscape` would change (`pathID`) before any call, never escaping it: the proof signs the
+URL as built and the broker rebuilds the htu from the decoded path.
 Extend the allow-list
 only with a check a test proves, never a parser that prints part of a value it rejects.
 `agent-secrets-helper install` writes its unit `0600`, since its `Environment=` line holds the

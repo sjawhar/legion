@@ -140,58 +140,42 @@ func plainPath(path string) bool {
 	return true
 }
 
-// Call is callURL, a request URL a program built as base followed by a path, as a message may
-// print it: unchanged when base is clean and the rest of callURL is a path of the characters
-// plainPath allows and well-formed %XX escapes (an id the program path-escaped into it), and
-// URL(callURL) otherwise. The escapes come from the program's own escaping, never from the
-// configured value, which clean refuses any '%' in.
+// Call is callURL, a request URL a program built as base followed by a broker route, as a message
+// may print it: unchanged when base is clean and callURL is base (its scheme in any case, since
+// net/url lowers it) followed by nothing or a path under /v1/ of the characters plainPath allows,
+// and NotPrinted otherwise - a URL on another host or another path, such as a redirect's target,
+// included. Every route the broker serves is under /v1/.
 func Call(base, callURL string) string {
 	if callClean(base, callURL) {
 		return callURL
 	}
-	return URL(callURL)
+	return NotPrinted
 }
 
 // callClean reports whether Call prints callURL unchanged.
 func callClean(base, callURL string) bool {
-	if !clean(base) {
+	if !clean(base) || len(callURL) < len(base) {
 		return false
 	}
-	rest, ok := strings.CutPrefix(callURL, base)
-	if !ok || rest != "" && rest[0] != '/' && !strings.HasSuffix(base, "/") {
+	n := strings.Index(base, "://") + len("://")
+	if !strings.EqualFold(callURL[:n], base[:n]) || callURL[n:len(base)] != base[n:] {
 		return false
 	}
-	for i := 0; i < len(rest); i++ {
-		c := rest[i]
-		if c == '%' {
-			if i+2 >= len(rest) || !isHex(rest[i+1]) || !isHex(rest[i+2]) {
-				return false
-			}
-			i += 2
-			continue
-		}
-		if !plainPath(rest[i : i+1]) {
-			return false
-		}
+	rest := callURL[len(base):]
+	route := rest
+	if strings.HasSuffix(base, "/") {
+		route = "/" + rest
 	}
-	return true
-}
-
-func isHex(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+	return (rest == "" || strings.HasPrefix(route, "/v1/")) && plainPath(rest)
 }
 
 // Error is err as a message may print it, given raw, the configured URL err's request was built
-// from. When raw is clean and the URL the *url.Error in err names (if any) is too - raw itself
-// followed by an escaped path (Call), or another clean URL - it is err itself, so every message
-// reads as before. Otherwise no text of err is printed, since net/http's and net/url's errors
-// quote the URL and a cause can repeat any part of it: a configured URL can carry a credential,
-// and the URL of a call that followed a redirect is the redirect's target, which can carry a
-// query the broker or a proxy put there. The error's text then names only the class of the
-// failure (a URL that did not parse, failed name resolution, a refused connection, a timeout,
-// a TLS failure, an HTTP status, or a request that failed otherwise), found on err itself, and
-// the *url.Error's operation with its URL through Call. It unwraps to err, so errors.Is and
-// errors.As still classify the failure.
+// from. It is err itself, so every message reads as before, only when printable proves its text
+// holds nothing from a URL it may not print. Otherwise no text of err is printed: the error's
+// text names only the class of the failure (a URL that did not parse, failed name resolution, a
+// refused connection, a timeout, a TLS failure, an HTTP status, or a request that failed
+// otherwise), found on err itself, and the *url.Error's operation with its URL through Call. It
+// unwraps to err, so errors.Is and errors.As still classify the failure.
 func Error(err error, raw string) error {
 	if err == nil {
 		return nil
@@ -226,13 +210,47 @@ func Cause(err error, raw string) error {
 }
 
 // printable reports whether err's text may print, given raw (Error), with the *url.Error it
-// holds, if any.
+// holds, if any. All of these must hold:
+//   - raw is clean;
+//   - the URL the *url.Error names is raw followed by a plain path (callClean): net/http names a
+//     redirect's target there, which can sit on another host or path and carry a query;
+//   - the error the *url.Error wraps (err itself, with none) is one whose text names no URL: a
+//     transport failure class names (a dial or other net.OpError, name resolution, a refused
+//     connection, a timeout, TLS), an HTTP status answer, or text the allow-list passes. A
+//     malformed Location header, say, puts the whole target in its error's text.
 func printable(err error, raw string) (*url.Error, bool) {
 	var ue *url.Error
 	if !errors.As(err, &ue) {
 		ue = nil
 	}
-	return ue, raw != "" && clean(raw) && (ue == nil || callClean(raw, ue.URL) || clean(ue.URL))
+	if raw == "" || !clean(raw) {
+		return ue, false
+	}
+	inner := err
+	if ue != nil {
+		if !callClean(raw, ue.URL) {
+			return ue, false
+		}
+		inner = ue.Err
+	}
+	if inner == nil {
+		return ue, true
+	}
+	// A second *url.Error inside names a URL of its own, unchecked.
+	var nested *url.Error
+	return ue, !errors.As(inner, &nested) && (transport(inner) || clean(inner.Error()))
+}
+
+// transport reports whether err is a failure class names from the transport or an HTTP status
+// answer, none of whose text quotes a URL.
+func transport(err error) bool {
+	var op *net.OpError
+	var dns *net.DNSError
+	var timeout interface{ Timeout() bool }
+	var re *oauth2.RetrieveError
+	return errors.As(err, &op) || errors.As(err, &dns) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout() ||
+		tlsFailure(err) || errors.As(err, &re)
 }
 
 // classified is an error whose text is its class alone.

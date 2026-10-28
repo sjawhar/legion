@@ -224,20 +224,24 @@ func TestErrorLeavesACleanURLsErrorAsItIs(t *testing.T) {
 	}
 }
 
-// TestCallPrintsAnEscapedPathOnACleanBase: a call URL a program built on a clean base prints
-// unchanged when its path holds plain characters and well-formed escapes, and through URL
-// otherwise (a bad escape, a query, a base that is not clean, a URL not on the base).
-func TestCallPrintsAnEscapedPathOnACleanBase(t *testing.T) {
+// TestCallPrintsAPlainPathOnACleanBase: a call URL a program built on a clean base prints
+// unchanged when it is that base, its scheme in any case, followed by a plain path, and as
+// NotPrinted otherwise: an escape, a query, another host or path, a base that is not clean.
+func TestCallPrintsAPlainPathOnACleanBase(t *testing.T) {
 	const base = "http://127.0.0.1:1"
 	for _, row := range []struct{ base, call, want string }{
-		{base, base + "/v1/requests/req%25zz", base + "/v1/requests/req%25zz"},
 		{base, base + "/v1/enrollments//renew", base + "/v1/enrollments//renew"},
+		{base, base, base},
 		{base + "/", base + "/v1/x", base + "/v1/x"},
+		{"HTTP://Secrets.Example", "http://Secrets.Example/v1/x", "http://Secrets.Example/v1/x"},
+		{"HTTP://Secrets.Example", "http://secrets.example/v1/x", NotPrinted},
+		{base, base + "/v1/requests/req%25zz", NotPrinted},
 		{base, base + "/v1/requests/req%zz", NotPrinted},
-		{base, base + "/v1/requests/req%4", NotPrinted},
 		{base, base + "/v1/requests?state=qtok77", NotPrinted},
-		{base, base + "0/v1/x%41", NotPrinted},
-		{base, "http://other.example/v1/x", "http://other.example/v1/x"},
+		{base, base + "0/v1/x", NotPrinted},
+		{base, "http://other.example/v1/x", NotPrinted},
+		{base, base + "/magic/AbCtok9f3SECRET", NotPrinted},
+		{base, base + "/v1x/AbCtok9f3SECRET", NotPrinted},
 		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", "http://tokuser9f3:hunter2pw@127.0.0.1:1/v1/x", NotPrinted},
 		{"http://127.0.0.1:1%0A", "http://127.0.0.1:1%0A/v1/x", NotPrinted},
 	} {
@@ -247,31 +251,60 @@ func TestCallPrintsAnEscapedPathOnACleanBase(t *testing.T) {
 	}
 }
 
-// TestErrorPrintsOnlyTheClassAfterARedirectToAQuery: with a clean base, net/http's error for a
-// request that followed a redirect names the redirect's target; one with a query (a broker's or
-// a proxy's, which can carry a credential) prints the class alone, through Error and Cause.
-func TestErrorPrintsOnlyTheClassAfterARedirectToAQuery(t *testing.T) {
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://127.0.0.1:1/signin?state=qtok77SECRET", http.StatusFound)
+// redirectingTo is a server that answers every request with a 302 whose Location is location,
+// set as written.
+func redirectingTo(t *testing.T, location string) string {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Location"] = []string{location}
+		w.WriteHeader(http.StatusFound)
 	}))
-	defer redirector.Close()
-	_, err := http.Get(redirector.URL + "/v1/enrollments/self")
-	if err == nil || !strings.Contains(err.Error(), "qtok77SECRET") {
-		t.Fatalf("the fixture's error %v does not name the redirect's query", err)
+	t.Cleanup(s.Close)
+	return s.URL
+}
+
+// TestErrorPrintsOnlyTheClassAfterARedirect: with a clean base, net/http's error for a request
+// that followed a redirect names the redirect's target, on another host or another path, with a
+// query or none; a malformed Location puts the whole target in the wrapped error's text while the
+// *url.Error names the clean call. Each prints the class alone through Error and Cause, and the
+// same call that never redirected keeps its text.
+func TestErrorPrintsOnlyTheClassAfterARedirect(t *testing.T) {
+	for _, row := range []struct {
+		name, location, wantError, wantCause string
+		is                                   error
+	}{
+		{"a query on another port", "http://127.0.0.1:1/signin?state=qtok77SECRET", `Get "` + NotPrinted + `": connection refused`, "connection refused", syscall.ECONNREFUSED},
+		{"a path on another port", "http://127.0.0.1:1/magic/AbCtok9f3SECRET", `Get "` + NotPrinted + `": connection refused`, "connection refused", syscall.ECONNREFUSED},
+		{"another path on the same broker", "/magic/AbCtok9f3SECRET", `Get "` + NotPrinted + `": the request failed`, "the request failed", nil},
+		{"a malformed Location", "http://127.0.0.1:1/signin%zz?state=qtok77SECRET", "", "the request failed", nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			base := redirectingTo(t, row.location)
+			_, err := http.Get(base + "/v1/enrollments/self")
+			if err == nil || !strings.Contains(err.Error(), "SECRET") {
+				t.Fatalf("the fixture's error %v does not name the redirect's target", err)
+			}
+			wantError := row.wantError
+			if wantError == "" {
+				wantError = `Get "` + base + `/v1/enrollments/self": the request failed`
+			}
+			if got := Error(err, base); got.Error() != wantError || !errors.Is(got, err) || (row.is != nil && !errors.Is(got, row.is)) {
+				t.Fatalf("Error = %q, want %q, still unwrapping to the cause", got, wantError)
+			}
+			if got := Cause(err, base); got.Error() != row.wantCause {
+				t.Fatalf("Cause = %q, want %q", got, row.wantCause)
+			}
+		})
 	}
-	if got := Error(err, redirector.URL); got.Error() != `Get "`+NotPrinted+`": connection refused` || !errors.Is(got, syscall.ECONNREFUSED) {
-		t.Fatalf("Error = %q, want the class alone, still unwrapping to ECONNREFUSED", got)
-	}
-	if got := Cause(err, redirector.URL); got.Error() != "connection refused" || !errors.Is(got, syscall.ECONNREFUSED) {
-		t.Fatalf("Cause = %q, want the class alone", got)
-	}
-	// The same call that never redirected keeps its text.
-	_, err = http.Get("http://127.0.0.1:1/v1/enrollments/self")
+	_, err := http.Get("http://127.0.0.1:1/v1/enrollments/self")
 	if got := Error(err, "http://127.0.0.1:1"); got != err {
 		t.Fatalf("Error = %v, want the clean call's error as it is", got)
 	}
 	var ue *url.Error
 	if got := Cause(err, "http://127.0.0.1:1"); !errors.As(err, &ue) || got != ue.Err {
 		t.Fatalf("Cause = %v, want the error the *url.Error wraps", got)
+	}
+	if got := Error(err, "HTTP://127.0.0.1:1"); got != err {
+		t.Fatalf("Error = %v, want the clean call's error as it is with an upper-case scheme", got)
 	}
 }

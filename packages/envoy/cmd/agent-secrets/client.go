@@ -303,8 +303,22 @@ type RequestStatus struct {
 	Decision  *requestDecision `json:"decision"`
 }
 
+// pathID refuses id, naming it as kind, when it would not appear in a call's path as written: the
+// proof signs the URL this client builds, and the broker checks it against its public URL and the
+// path it decoded, so an id url.PathEscape would change (a '%', a space, a '/') could only be
+// escaped into a proof the broker refuses, or sent raw into a different path.
+func pathID(kind, id string) error {
+	if url.PathEscape(id) != id {
+		return fmt.Errorf("%q is not %s", id, kind)
+	}
+	return nil
+}
+
 func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (RequestStatus, []byte, error) {
-	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/requests/"+url.PathEscape(id), nil)
+	if err := pathID("a request id", id); err != nil {
+		return RequestStatus{}, nil, err
+	}
+	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/requests/"+id, nil)
 	if err != nil {
 		return RequestStatus{}, nil, err
 	}
@@ -316,7 +330,10 @@ func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (Requ
 }
 
 func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/requests/"+url.PathEscape(id)+"/cancel", nil)
+	if err := pathID("a request id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/requests/"+id+"/cancel", nil)
 	return err
 }
 
@@ -341,6 +358,9 @@ type GrantValues struct {
 // GrantValues releases grantID's values, asking the broker to narrow its GitHub App tokens when
 // narrowing is not nil; nil sends no body, the release as the grant holds it.
 func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string, narrowing *GitHubNarrowing) (GrantValues, error) {
+	if err := pathID("a grant id", grantID); err != nil {
+		return GrantValues{}, err
+	}
 	var body []byte
 	if narrowing != nil {
 		encoded, err := json.Marshal(struct {
@@ -351,7 +371,7 @@ func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string,
 		}
 		body = encoded
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/values", body)
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/values", body)
 	if err != nil {
 		return GrantValues{}, err
 	}
@@ -363,7 +383,10 @@ func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string,
 }
 
 func (c *client) RevokeGrant(ctx context.Context, signer Signer, grantID string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/revoke", nil)
+	if err := pathID("a grant id", grantID); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/revoke", nil)
 	return err
 }
 
@@ -403,6 +426,9 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 // payload. A pod's renewal carries its current projected token as pod_token; podToken "" sends no
 // body at all, a box's renewal.
 func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
+	if err := pathID("an enrollment id", enrollmentID); err != nil {
+		return time.Time{}, err
+	}
 	var body []byte
 	if podToken != "" {
 		var err error
@@ -410,7 +436,7 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 			return time.Time{}, err
 		}
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+url.PathEscape(enrollmentID)+"/renew", body)
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -511,9 +537,12 @@ func (c *client) OperatorMachines(ctx context.Context, signer proofSigner) (Oper
 }
 
 // RevokeOperatorMachine ends one of the calling machine login's operator's own machines' logins.
-// id goes into the path escaped, so whatever a person types names one path segment.
+// An id that would not name one path segment as written is refused (pathID).
 func (c *client) RevokeOperatorMachine(ctx context.Context, signer proofSigner, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+url.PathEscape(id)+"/revoke", nil)
+	if err := pathID("a machine id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+id+"/revoke", nil)
 	return err
 }
 
@@ -556,9 +585,12 @@ func (c *client) OperatorGrants(ctx context.Context, signer proofSigner) (Operat
 	return out, raw, nil
 }
 
-// RevokeOperatorGrant ends grant id as the calling machine login's operator. id goes into the path
-// escaped, so whatever a person types names one path segment.
+// RevokeOperatorGrant ends grant id as the calling machine login's operator. An id that would
+// not name one path segment as written is refused (pathID).
 func (c *client) RevokeOperatorGrant(ctx context.Context, signer proofSigner, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+url.PathEscape(id)+"/revoke", nil)
+	if err := pathID("a grant id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+id+"/revoke", nil)
 	return err
 }
