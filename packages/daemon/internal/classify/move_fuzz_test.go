@@ -3,16 +3,14 @@ package classify
 import (
 	"fmt"
 	"math/rand/v2"
-	"os"
-	"strconv"
-	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // moveStep is one push of a random history with moves made again, and whether its head arrives:
 // a head the daemon never sees synchronize is skipped, and the next arrival's synchronize names
-// the move from it.
+// the move from it. These histories name no sender; they are the ones the release before's digests
+// were made from (TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore), so they stay as they are.
 type moveStep struct {
 	push   record.ClassifiedPush
 	arrive bool
@@ -69,59 +67,6 @@ func containsHead(heads []string, head string) bool {
 		}
 	}
 	return false
-}
-
-// Random histories with moves made again - fresh commits, forced returns that undo the move
-// before them, the same two heads pushed again - each push a random pusher's, a red or green
-// settlement at every arrival, some synchronizes skipped, give the same judgement and close their
-// head run in every order GitHub may deliver the pushes in, outside R1: random orders, and orders
-// with no push before the arrival of the head before its own move and the pushes of the same two
-// heads in the order they were made. The reference delivers each push just before its head. R1 is
-// the floor: a history with two pushes of the same two heads that differ, which only their order
-// of delivery tells apart (unspentPushes), is left out. A history that arrives at the head the
-// record holds - a synchronize the daemon reads as moving nothing - is left out too. Each history
-// is also judged against an oracle, the same history with every move made again aimed at a fresh
-// commit, delivered in the reference's order; its misjudgements outside R1, a known residue of the
-// shortest chain the replay reads, are logged. LEGION_RUN_FUZZ_ITERS sets the number of histories
-// of each order (the long mode), LEGION_RUN_FUZZ_SEED the seed, as for the run's own fuzz.
-func TestEveryOrderOfMovesMadeAgainGivesTheSameJudgementOutsideR1(t *testing.T) {
-	iters, seed := 2000, uint64(11)
-	if s := os.Getenv("LEGION_RUN_FUZZ_ITERS"); s != "" {
-		iters, _ = strconv.Atoi(s)
-	}
-	if s := os.Getenv("LEGION_RUN_FUZZ_SEED"); s != "" {
-		seed, _ = strconv.ParseUint(s, 10, 64)
-	}
-	for _, bounded := range []bool{false, true} {
-		rng := rand.New(rand.NewPCG(seed, 3))
-		checked, r1, inOrderWrong, failures := 0, 0, 0, 0
-		for it := 0; it < iters && failures < 3; it++ {
-			steps := movesMadeAgain(rng)
-			history := deliveries(rng, steps, bounded)
-			if history.r1 {
-				r1++
-				continue
-			}
-			if history.noop {
-				continue
-			}
-			checked++
-			start := redAtH0()
-			start.PlannedRed = rng.IntN(2) == 0
-			want := delivered(t, start, history.reference...)
-			got := delivered(t, start, history.order...)
-			if JudgementChanged(want, got) || got.Run != nil || want.Run != nil {
-				failures++
-				t.Errorf("bounded %v, history %d: reference %v\n order %v\n got  %s\n want %s", bounded, it, history.reference, history.order, judged(got, "", ""), judged(want, "", ""))
-			}
-			truth := delivered(t, start, history.oracle...)
-			if want.FixAttempts != truth.FixAttempts || want.PlannedRed != truth.PlannedRed || HeadVerdict(want) != HeadVerdict(truth) ||
-				want.HeadCounted != history.named[truth.HeadCounted] {
-				inOrderWrong++
-			}
-		}
-		t.Logf("bounded %v: %d histories outside R1 judged alike in every order; %d in R1 left out; %d judged unlike the fresh-commit oracle", bounded, checked, r1, inOrderWrong)
-	}
 }
 
 // moveDeliveries is a history's facts: the reference (each push just before its head), one order

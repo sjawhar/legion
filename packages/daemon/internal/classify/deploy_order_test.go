@@ -31,6 +31,33 @@ var releaseBeforeDigests = map[string]string{
 	"move-7-bounded": "199af17d66f671cff86fc45007d6ef8f26de588892df0e865c2d16fb4a6063ed",
 }
 
+// The release before this one judged these histories, every arrival naming its before but no
+// sender, to these digests (made as releaseBeforeDigests were, at this pull request's e5c72dfb3,
+// design (c′) with the record keeping one push of each two heads as the release before did).
+var beforeAloneDigests = map[string]string{
+	"run-1":          "10d09bc5b7092579c106aa940b30dd959cdbde2d9ecd83e76f6707d01f8ee5d6",
+	"run-7":          "f670e5f0717d84a8ccd925a1eac0f308120ee2afe2725d078f406eeec3579d2b",
+	"move-1-random":  "0eb3cc26c5274f08d6a1dfc652e13200cea52dcdf9f0158a406b725994852993",
+	"move-1-bounded": "ef6d0f509f5901e3d9ee8c086b72047a6778173af097394a7df61cc404a614b4",
+	"move-7-random":  "d0ea35c954991b6d3ace2f076441e046f028c79f38ffd957dddba37761a498cb",
+	"move-7-bounded": "5c40f8ba3ff4ab32386be4a39fcef876cec1b7b6ded5eeb6d88ec9ed4e7591dd",
+}
+
+// A daemon of this release behind a listener that sends a synchronize's before but not its sender
+// judges every history of both fuzzes as design (c′) did: an arrival that names no sender takes no
+// push by it and names no move late (NameMove), so the sender is what changes the judgement.
+func TestAnArrivalThatNamesNoSenderIsJudgedAsBeforeAlone(t *testing.T) {
+	got := fuzzDigests(t, 2000, func(f runFact) runFact {
+		f.sender = ""
+		return f
+	})
+	for kind, want := range beforeAloneDigests {
+		if got[kind] != want {
+			t.Errorf("%s: histories with no sender named digest to %s, want design (c′)'s %s", kind, got[kind], want)
+		}
+	}
+}
+
 // A daemon of this release behind a listener that does not yet send a synchronize's before - an
 // arrival that names no move, everywhere - judges every history of both fuzzes exactly as the
 // release before did, and leaves the same head runs open: the daemon may deploy before the
@@ -51,13 +78,18 @@ func TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore(t *testing.T) {
 
 // noMoveDigests judges each fuzz's first iters histories with every arrival naming no move.
 func noMoveDigests(t *testing.T, iters int) map[string]string {
+	return fuzzDigests(t, iters, namingNoMove)
+}
+
+// fuzzDigests judges each fuzz's first iters histories with every fact as arrive makes it.
+func fuzzDigests(t *testing.T, iters int, arrive func(runFact) runFact) map[string]string {
 	digests := map[string]string{}
 	judge := func(kind string, histories func(it int) (record.PullRequest, []runFact)) {
 		h := sha256.New()
 		for it := range iters {
 			pr, facts := histories(it)
 			for _, f := range facts {
-				pr = stored(t, deliver(namingNoMove(f), pr))
+				pr = stored(t, deliver(arrive(f), pr))
 			}
 			j := judgementOf(pr)
 			j.Moves = nil
@@ -116,9 +148,10 @@ func noMoveDigests(t *testing.T, iters int) map[string]string {
 	return digests
 }
 
-// namingNoMove is f as a listener that does not send a synchronize's before delivers it.
+// namingNoMove is f as a listener that sends neither a synchronize's before nor its sender
+// delivers it.
 func namingNoMove(f runFact) runFact {
-	f.before = ""
+	f.before, f.sender = "", ""
 	return f
 }
 

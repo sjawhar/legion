@@ -119,18 +119,32 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // once either way, and the required-checks pass's compare carries the approval when only the
 // issue's handoffs changed (daemon's readApprovalCarry). A synchronize that moves nothing - a
 // redelivery, or one carrying no head - changes nothing the verdict or the round reads, and applies
-// and re-asks nothing. In implementing a head that arrives once the implementer has completed is
-// the pull request its completion waited for.
+// and re-asks nothing. A synchronize that moves no head because it is older than the newest applied
+// (classify.LateLifecycle), or because it returned the branch to the recorded head, still names the
+// push its move took, by its sender, while a head run is open (classify.NameMove): an arrival whose
+// synchronize said it moved from a head the record never held waits for it. That is all it records;
+// it wakes nobody, and the next fact or pass decides what the replay leaves. In implementing a head
+// that arrives once the implementer has completed is the pull request its completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.pullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
+	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
+	named := record.Named{Before: fact.Before, SHA: fact.HeadSHA, Sender: fact.Sender, At: fact.UpdatedAt}
+	if classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
+		if replayed := classify.NameMove(*pr, named); replayed.Run != pr.Run {
+			return intake.Result{}, e.store.PutPullRequest(ctx, tx, replayed)
+		}
+		return intake.Result{}, nil
+	}
 	prior := *pr
-	moved := fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA
+	arrival := classify.Arrival{Before: fact.Before, Sender: fact.Sender, At: fact.UpdatedAt}
+	moved := classify.MovesBy(*pr, arrival, fact.HeadSHA)
 	if moved {
-		*pr = classify.AdvancePullRequestHead(*pr, fact.Before, fact.HeadSHA)
+		*pr = classify.AdvancePullRequestHead(*pr, arrival, fact.HeadSHA)
 		e.stampRun(pr)
+	} else {
+		*pr = classify.NameMove(*pr, named)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
@@ -182,7 +196,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		ByReviewApp: e.byReviewApp(fact.Pusher),
 		// A push that does not say it was not forced - a listener that predates the field - is
 		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
-		Forced: fact.Forced == nil || *fact.Forced != "false"}
+		Forced: fact.Forced == nil || *fact.Forced != "false", Sender: fact.Sender}
 	var dropped classify.Dropped
 	*pr, dropped = classify.ApplyPushDropping(*pr, push)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
@@ -407,7 +421,7 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	}
 	repeated := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
-		*pr = classify.AdvancePullRequestHead(*pr, "", fact.HeadSHA)
+		*pr = classify.AdvancePullRequestHead(*pr, classify.Arrival{}, fact.HeadSHA)
 		e.stampRun(pr)
 	}
 	pr.State = record.PullRequestClosed

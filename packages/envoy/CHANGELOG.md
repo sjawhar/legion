@@ -5,9 +5,10 @@
 ### Added
 
 - A pull request's `synchronize` payload carries `before`, the head GitHub's webhook says the
-  branch moved from, beside `head_sha`. The Legion daemon reads the move a head arrives by from
-  it; a listener without it publishes none, and the daemon then judges that arrival as it did
-  before.
+  branch moved from, beside `head_sha`, and every pull request and push payload carries `sender`,
+  the login of the account GitHub says triggered the event. The Legion daemon reads the move a
+  head arrives by from `before`, and which push made it from `sender`; a listener without them
+  publishes none, and the daemon then judges that arrival as it did before.
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the

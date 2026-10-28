@@ -1,6 +1,10 @@
 package classify
 
-import "github.com/sjawhar/legion/daemon/internal/record"
+import (
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/record"
+)
 
 // maxRunSteps bounds a head run: a run longer than this is cut to its newest maxRunSteps steps,
 // its anchor moving to the judgement before the first head among them still waiting, and the run
@@ -50,8 +54,10 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 // drops (unspentPushes), so the run does not keep a copy of them; less every push whose move the
 // anchor had already made: a push delivered after its move was judged before the run opened is
 // spent there, as it is when it arrives first, and its move keeps it (pushedMoves). A head step
-// arrives by the move its synchronize named (record.RunStep.Before). The run stays open from its
-// first head judged with no chain of pushes, its anchor the judgement before that head, and closes
+// arrives by the move its synchronize named (record.RunStep.Before, Sender), with the moves late
+// synchronizes named (record.HeadRun.Names) whenever they were recorded, each spent by the arrival
+// that took it. The run stays open from its first head judged with no chain of pushes, or still
+// waiting for what its synchronize named, its anchor the judgement before that head, and closes
 // when there is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request
 // keeps its own pushes. BlockedAttempts is what was reported, so it stays, unless the count it
 // reported is no longer reached, as when a count is taken back.
@@ -72,15 +78,21 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	type state struct {
 		judgement record.Judgement
 		pushes    []record.ClassifiedPush
+		names     []record.Named
+		since     time.Time
 	}
+	names, since := clone(run.Names), run.Since
 	before := make([]state, len(run.Steps))
 	var unchained []int
 	for i, step := range run.Steps {
-		before[i] = state{judgementOf(at), withoutApprovalCarriers(at.Pushes)}
+		before[i] = state{judgementOf(at), withoutApprovalCarriers(at.Pushes), names, since}
 		var chained bool
-		at, chained = applyStep(at, step)
-		if step.Head != "" && !chained {
-			unchained = append(unchained, i)
+		at, chained, names = applyStep(at, step, names, since)
+		if step.Head != "" {
+			since = step.SyncedAt
+			if !chained {
+				unchained = append(unchained, i)
+			}
 		}
 	}
 	waiting := len(run.Steps)
@@ -91,7 +103,8 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 		}
 	}
 	if waiting < len(run.Steps) {
-		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Steps: clone(run.Steps[waiting:]), Decided: run.Decided}
+		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Names: clone(before[waiting].names),
+			Since: before[waiting].since, Steps: clone(run.Steps[waiting:]), Decided: run.Decided}
 	}
 	at.Pushes, at.BlockedAttempts = unspentPushes(live, at.Moves, false), blocked
 	if at.FixAttempts < blocked {
@@ -111,12 +124,13 @@ func withoutApprovalCarriers(pushes []record.ClassifiedPush) []record.Classified
 	return kept
 }
 
-// applyStep applies one step of a head run, and says, for a head, whether a chain of pushes led
-// to it (advance); any other step is chained.
-func applyStep(pr record.PullRequest, step record.RunStep) (record.PullRequest, bool) {
+// applyStep applies one step of a head run with the run's named moves and GitHub's clock of the
+// head before it (since), says, for a head, whether a chain of pushes led to it with nothing left to
+// wait for (advance) - any other step is chained - and returns the named moves the step left.
+func applyStep(pr record.PullRequest, step record.RunStep, names []record.Named, since time.Time) (record.PullRequest, bool, []record.Named) {
 	switch {
 	case step.Head != "":
-		return advance(pr, step.Before, step.Head)
+		return advance(pr, Arrival{Before: step.Before, Sender: step.Sender, At: step.SyncedAt, Since: since}, step.Head, names)
 	case step.Settlement != nil:
 		pr, _ = settle(pr, candidateOf(*step.Settlement))
 	case step.Required != nil:
@@ -128,7 +142,7 @@ func applyStep(pr record.PullRequest, step record.RunStep) (record.PullRequest, 
 	case step.Reopened:
 		pr.CheckedHead, pr.Failing, pr.Cancelled, pr.CheckRuns, pr.Generation, pr.Snapshot = "", []string{}, nil, nil, 0, ""
 	}
-	return pr, true
+	return pr, true, names
 }
 
 // withStep applies s to pr: as a step of its head run while one is open, and on its own otherwise.
@@ -136,7 +150,7 @@ func withStep(pr record.PullRequest, s record.RunStep) record.PullRequest {
 	if pr.Run != nil {
 		return runStep(pr, s)
 	}
-	pr, _ = applyStep(pr, s)
+	pr, _, _ = applyStep(pr, s, nil, time.Time{})
 	return pr
 }
 
@@ -145,7 +159,7 @@ func withStep(pr record.PullRequest, s record.RunStep) record.PullRequest {
 // is a step of it.
 func Reopen(pr record.PullRequest, head string) record.PullRequest {
 	if head != pr.HeadSHA {
-		pr = AdvancePullRequestHead(pr, "", head)
+		pr = AdvancePullRequestHead(pr, Arrival{}, head)
 	}
 	return withStep(pr, record.RunStep{Reopened: true})
 }

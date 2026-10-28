@@ -17,6 +17,9 @@ import (
 type runFact struct {
 	head       string
 	before     string
+	sender     string
+	at         time.Time
+	late       bool // a synchronize older than the newest applied: it moves no head (NameMove)
 	settlement *SettlementCandidate
 	required   []string
 	cleared    bool
@@ -26,8 +29,10 @@ type runFact struct {
 
 func (f runFact) String() string {
 	switch {
+	case f.head != "" && f.late:
+		return fmt.Sprintf("late %s>%s by %s", f.before, f.head, f.sender)
 	case f.head != "":
-		return "head " + f.head
+		return fmt.Sprintf("head %s>%s by %s", f.before, f.head, f.sender)
 	case f.settlement != nil:
 		return fmt.Sprintf("settle %s %v", f.settlement.Head, f.settlement.Failing)
 	case f.required != nil:
@@ -43,8 +48,14 @@ func (f runFact) String() string {
 
 func (f runFact) apply(pr record.PullRequest) record.PullRequest {
 	switch {
+	case f.head != "" && f.late:
+		pr = NameMove(pr, record.Named{Before: f.before, SHA: f.head, Sender: f.sender, At: f.at})
+		pr.HeadUpdatedAt = LatestClock(pr.HeadUpdatedAt, f.at)
+		return pr
 	case f.head != "":
-		return AdvancePullRequestHead(pr, f.before, f.head)
+		pr = AdvancePullRequestHead(pr, Arrival{Before: f.before, Sender: f.sender, At: f.at}, f.head)
+		pr.HeadUpdatedAt = LatestClock(pr.HeadUpdatedAt, f.at)
+		return pr
 	case f.settlement != nil:
 		pr, _ = ApplyCheckSettlement(pr, *f.settlement)
 		return pr
@@ -201,7 +212,7 @@ func TestEveryOrderOfThePushesGivesTheJudgementOfThePushesFirst(t *testing.T) {
 func TestAPushForAHeadNotYetArrivedChangesNoJudgement(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
-	prior := stored(t, AdvancePullRequestHead(red, "", "h3"))
+	prior := stored(t, AdvancePullRequestHead(red, Arrival{}, "h3"))
 	prior = stored(t, settles("h3", 2, "ci").apply(prior))
 	if prior.Run == nil || HeadVerdict(prior) != "red" {
 		t.Fatalf("h3 red before its push = %+v, want its run open and red", prior)
@@ -281,7 +292,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 				if tc.pushFirst {
 					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(i), Before: sha(i - 1), HandoffOnly: i%2 == 0})
 				}
-				pr = stampHead(AdvancePullRequestHead(pr, "", sha(i)), start.Add(time.Duration(i)*time.Minute))
+				pr = stampHead(AdvancePullRequestHead(pr, Arrival{}, sha(i)), start.Add(time.Duration(i)*time.Minute))
 				settlement := SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
 					Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}}
 				pr, _ = ApplyCheckSettlement(pr, settlement)
@@ -394,11 +405,11 @@ func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
 	fresh := func() record.PullRequest {
 		return record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{}, Required: []string{"ci"}}
 	}
-	first := AdvancePullRequestHead(ApplyPush(fresh(), push), "", "h1")
+	first := AdvancePullRequestHead(ApplyPush(fresh(), push), Arrival{}, "h1")
 	if !reflect.DeepEqual(first.Moves, want) {
 		t.Errorf("the push before its head left moves %+v, want %+v", first.Moves, want)
 	}
-	late := ApplyPush(AdvancePullRequestHead(fresh(), "", "h1"), push)
+	late := ApplyPush(AdvancePullRequestHead(fresh(), Arrival{}, "h1"), push)
 	if !reflect.DeepEqual(late.Moves, want) {
 		t.Errorf("the push after its head left moves %+v, want %+v", late.Moves, want)
 	}
@@ -462,7 +473,7 @@ func BenchmarkReplayAtTheBound(b *testing.B) {
 	pr := record.PullRequest{HeadSHA: sha(0), CheckedHead: sha(0), Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
 	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	for i := 1; pr.Run == nil || len(pr.Run.Steps) < maxRunSteps; i++ {
-		pr = stampHead(AdvancePullRequestHead(pr, "", sha(i)), start.Add(time.Duration(i)*time.Minute))
+		pr = stampHead(AdvancePullRequestHead(pr, Arrival{}, sha(i)), start.Add(time.Duration(i)*time.Minute))
 		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i),
 			Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}})
 	}
