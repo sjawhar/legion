@@ -33,6 +33,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -477,7 +479,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "", nil, issuers{})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -490,8 +492,12 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 	}
 }
 
+// A process whose NATS is not connected serves every request that does not need the bus, so the
+// probe answers 200 with `ok` true and reports the bus in `nats` alone: a readiness probe that
+// failed with the bus would take every server process out of service at once.
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, nil, nil, "")
+	database := storetest.Open(t)
+	handler := dispatchHandler(http.NewServeMux(), database, &bus.Client{}, nil, nil, "", nil, issuers{})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -499,8 +505,11 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
+	if response.Code != http.StatusOK || health["ok"] != true {
+		t.Fatalf("healthz with NATS disconnected = %d %v, want 200 with ok true", response.Code, health)
+	}
 	if nats, ok := health["nats"].(bool); !ok || nats {
-		t.Fatalf("healthz nats = %#v, want false", nats)
+		t.Fatalf("healthz nats = %#v, want false", health["nats"])
 	}
 }
 
@@ -516,7 +525,7 @@ func TestDispatchHandlerLivezAnswersWithoutDependencies(t *testing.T) {
 		t.Errorf("the router served %s %s", r.Method, r.URL.Path)
 	})
 	response := httptest.NewRecorder()
-	dispatchHandler(router, nil, nil, nil, untouchedFiles{}, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	dispatchHandler(router, nil, nil, nil, untouchedFiles{}, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("GET /livez status = %d, want %d", response.Code, http.StatusNoContent)
 	}
@@ -534,7 +543,7 @@ func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
 	probe := func(store files.Store) (int, map[string]any) {
 		t.Helper()
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), database, nil, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), database, nil, nil, store, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		var health map[string]any
 		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 			t.Fatalf("decode health response: %v", err)
@@ -556,6 +565,45 @@ func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
 	}
 }
 
+// /healthz reports each OIDC issuer the process discovers in the background: null where none is
+// configured, false until its discovery document has been read, true after. Neither decides `ok`:
+// a process whose issuer is down still serves agents and the people whose confirmation stands.
+func TestDispatchHandlerReportsEachIssuersDiscovery(t *testing.T) {
+	database := storetest.Open(t)
+	probe := func(configured issuers) (int, map[string]any) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		dispatchHandler(http.NewServeMux(), database, nil, nil, nil, "", nil, configured).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		return response.Code, health
+	}
+	if status, health := probe(issuers{}); status != http.StatusOK || health["signin"] != nil || health["service_tokens"] != nil {
+		t.Fatalf("healthz with no issuer configured: %d %v, want 200 with signin and service_tokens null", status, health)
+	}
+	signInIssuer, serviceTokenIssuer := oidctest.New(t), oidctest.New(t)
+	signInIssuer.EnableCodeFlow(signInIssuer.PublishKey(t, "signing-key"), "dispatch-client", "client-secret")
+	serviceTokenIssuer.PublishKey(t, "signing-key")
+	configured := issuers{
+		signIn:        oidc.NewCodeFlow(signInIssuer.URL(), "dispatch-client", "client-secret", ""),
+		serviceTokens: oidc.NewLazyVerifier(serviceTokenIssuer.URL(), "dispatch"),
+	}
+	if status, health := probe(configured); status != http.StatusOK || health["ok"] != true || health["signin"] != false || health["service_tokens"] != false {
+		t.Fatalf("healthz before either issuer is discovered: %d %v, want 200 ok with signin and service_tokens false", status, health)
+	}
+	if err := configured.signIn.Discover(context.Background()); err != nil {
+		t.Fatalf("discover the sign-in issuer: %v", err)
+	}
+	if err := configured.serviceTokens.Discover(context.Background()); err != nil {
+		t.Fatalf("discover the service-account token issuer: %v", err)
+	}
+	if status, health := probe(configured); status != http.StatusOK || health["signin"] != true || health["service_tokens"] != true {
+		t.Fatalf("healthz once both issuers are discovered: %d %v, want 200 with signin and service_tokens true", status, health)
+	}
+}
+
 // /healthz names what is deployed, for a deploy check to compare with what was meant to be:
 // the commit the image build stamped, and the highest migration the database has applied. The
 // schema version is the database's, read per probe, never the binary's own list: a row a later
@@ -564,7 +612,7 @@ func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
 func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	database := storetest.Open(t)
 	const commit = "0123456789abcdef0123456789abcdef01234567"
-	handler := dispatchHandler(http.NewServeMux(), database, nil, nil, nil, commit)
+	handler := dispatchHandler(http.NewServeMux(), database, nil, nil, nil, commit, nil, issuers{})
 	probe := func() map[string]any {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -596,18 +644,20 @@ func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	}
 }
 
-// A binary the image build did not stamp says so: null, never an empty string or a guess. Every
-// field is always present, the ones nothing filled as null, and outbox_publisher false: a process
-// with NATS disabled publishes nothing.
+// A binary the image build did not stamp says so: null, never an empty string or a guess. So does
+// a process with no announcement of the fleet's build to report. Every field is always present,
+// the ones nothing filled as null, and outbox_publisher false: a process with NATS disabled
+// publishes nothing.
 func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	response := httptest.NewRecorder()
-	dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	var health map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
 	want := map[string]any{
-		"ok": false, "db": false, "nats": nil, "files": nil, "commit": nil, "schema_version": nil, "outbox_publisher": false,
+		"ok": false, "db": false, "nats": nil, "files": nil, "signin": nil, "service_tokens": nil,
+		"commit": nil, "fleet_commit": nil, "schema_version": nil, "outbox_publisher": false,
 	}
 	for field, value := range want {
 		if got, found := health[field]; !found || got != value {
@@ -649,7 +699,7 @@ func TestHealthzReportsWhetherThisProcessPublishesTheOutbox(t *testing.T) {
 		go func() { publisher.Run(ctx); close(done) }()
 		stop := func() { cancel(); <-done }
 		t.Cleanup(stop)
-		return &process{outbox: publisher, handler: dispatchHandler(http.NewServeMux(), database, client, publisher, nil, ""), stop: stop}
+		return &process{outbox: publisher, handler: dispatchHandler(http.NewServeMux(), database, client, publisher, nil, "", nil, issuers{}), stop: stop}
 	}
 	probe := func(p *process) bool {
 		t.Helper()
@@ -743,7 +793,7 @@ func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
 		defer connection.Release()
 	}
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, nil, "", nil, issuers{}))
 	defer server.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	started := time.Now()
@@ -794,7 +844,7 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 		database.Pool.Close()
 	})
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, nil, "", nil, issuers{}))
 	defer server.Close()
 	// The shared pool's own round trip is the control: the link works right up to the outage.
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
@@ -854,7 +904,7 @@ func TestHealthzAnswersWhilePostgresAndTheBucketBothStopAnswering(t *testing.T) 
 		database.Pool.Close()
 	})
 	bucket := unansweringBucket{filestest.NewMemory()}
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, bucket, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, bucket, "", nil, issuers{}))
 	defer server.Close()
 
 	client := &http.Client{Timeout: 3 * time.Second}

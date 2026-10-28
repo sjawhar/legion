@@ -59,28 +59,40 @@ const drainPollInterval = 250 * time.Millisecond
 // unless its database has stopped answering.
 const outboxStopBudget = httpDrainBeforeDocuments + documentShutdownTimeout
 
-// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It logs the
-// address listener is bound to, whether main bound it or inherited it (DISPATCH_LISTEN_FD), so the
-// line names the port a kernel chose. It returns the error that ended serving when serving failed,
-// which cancels ctx.
+// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown), deregistering
+// it once HTTP has drained. It logs the address listener is bound to, whether main bound it or
+// inherited it (DISPATCH_LISTEN_FD), so the line names the port a kernel chose. Two things end
+// serving before the signal does, each logged at ERROR and returned once shutdown has run, so main
+// exits 1 and a supervisor never reads either as a clean stop: serving failed, or the registry
+// refused to count this process as live again beside a live process whose signing keys it does not
+// share (lost, processes.Registration.Lost). Either cancels ctx, so the stop is the one a signal
+// makes: the listener closes at once, the requests in flight are answered, and the registry's row
+// is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	documentService *docs.Service, pool *store.Pool, waitDelivery func(), outboxStopped <-chan struct{}) error {
+	documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error, outboxStopped <-chan struct{}) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("dispatch: serve", "error", err)
 			serveErr <- err
 			cancel()
 		}
 	}()
-	<-ctx.Done()
+	var refused error
+	select {
+	case <-ctx.Done():
+	case refused = <-lost:
+		slog.Error("dispatch: this server process no longer shares its signing keys with a live server process", "error", refused)
+		cancel()
+	}
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitDelivery, outboxStopped)
+	shutdown(server, documentService, pool, waitDelivery, deregister, outboxStopped)
 	select {
 	case err := <-serveErr:
 		return err
 	default:
-		return nil
+		return refused
 	}
 }
 
@@ -94,10 +106,14 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // waits for until outboxStopBudget after shutdown began: the outbox records its last batch and
 // releases the publisher hold through that pool. While the database answers, nothing but the
 // runtime's kill bounds the wait for the requests, so a write in flight commits and is answered if
-// it finishes before the kill. A database that has stopped answering (silentProbes) holds its
-// connections forever, so Dispatch exits without them, and the database rolls back whatever they
-// held open.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func(), outboxStopped <-chan struct{}) {
+// it finishes before the kill. Then deregister takes this process out of the registry of live
+// server processes: it runs only once HTTP has drained and the wait for the outbox is over, so a
+// draining process counts as live until its last request is answered, and before the pool closes. A
+// database that has stopped answering (silentProbes) holds its connections forever, so Dispatch
+// exits without them, and the database rolls back whatever they held open; it deregisters nothing
+// then, since the delete would wait on that database too, and its row's heartbeat stops with the
+// process instead.
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), outboxStopped <-chan struct{}) {
 	started := time.Now()
 	drained := make(chan struct{})
 	go func() {
@@ -119,6 +135,7 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 	waitDelivery()
 	if waitUntilIdle(drained, pool) {
 		waitForOutbox(outboxStopped, started.Add(outboxStopBudget))
+		deregister()
 		pool.Close()
 	}
 }
