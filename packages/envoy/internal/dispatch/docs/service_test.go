@@ -643,6 +643,45 @@ func TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList(t *testing.T) {
 	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", sent)
 }
 
+// The refusal above tells the caller to send options to rebuild them as one list. Sending every
+// option the block holds - the natural repair, keeping each option and joining the lists - must
+// rebuild them as one list too, with or without a new question.
+func TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds(t *testing.T) {
+	every := []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Defer", Description: "Wait a week"},
+	}
+	for name, question := range map[string]*string{
+		"options only":         nil,
+		"options and question": new("Should we ship today?"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+			settleCurrentGeneration(t, service, artifactID)
+			sent := slices.Clone(every)
+			err := joinedWrite(service, func(ctx context.Context) error {
+				_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Question: question, Options: &sent}, model.Actor{Kind: "user", ID: "alice"})
+				return err
+			})
+			if err != nil {
+				t.Fatalf("edit sending every option the two-list ask holds: %v", err)
+			}
+			ask := firstAsk(liveTree(t, service, artifactID))
+			if lists := countChildren(ask, "bullet_list"); lists != 1 {
+				t.Fatalf("repaired ask holds %d bullet lists, want 1", lists)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			wantQuestion := "Should we ship?"
+			if question != nil {
+				wantQuestion = *question
+			}
+			assertAskRepaired(t, service, artifactID, "ask-lists", wantQuestion, every)
+		})
+	}
+}
+
 // A decided ask given a second list is marked invalid and keeps its decided row; once the second
 // list is gone, settlement clears invalid and the block carries its decided wording again.
 func TestSettlementMarksADecidedAskWithASecondBulletListInvalid(t *testing.T) {
