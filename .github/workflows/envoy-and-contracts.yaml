@@ -692,6 +692,7 @@ jobs:
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/**'
               - 'packages/envoy/internal/pglisten/**'
+              - 'packages/envoy/internal/redact/**'
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'

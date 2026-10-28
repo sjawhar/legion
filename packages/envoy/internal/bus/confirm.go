@@ -148,12 +148,18 @@ func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	if sameError(after.lastError, before.lastError) {
 		return nil
 	}
-	if errors.Is(after.lastError, nats.ErrPermissionViolation) &&
-		strings.Contains(after.lastError.Error(), fmt.Sprintf("Publish to %q", subject)) {
+	if publishDenied(after.lastError, subject) {
 		return fmt.Errorf("bus: %w to %q: %w", ErrPublishDenied, subject, after.lastError)
 	}
 	return fmt.Errorf("bus: %w: NATS reported an error during the publish to %q: %w",
 		errPublishUnconfirmed, subject, after.lastError)
+}
+
+// publishDenied reports whether err is the server's permissions violation of a publish to subject:
+// nats.ErrPermissionViolation carrying the server's `Publish to "<subject>"` text.
+func publishDenied(err error, subject string) bool {
+	return errors.Is(err, nats.ErrPermissionViolation) &&
+		strings.Contains(err.Error(), fmt.Sprintf("Publish to %q", subject))
 }
 
 // sameError reports whether a and b are the same error value. nats.go records each permissions

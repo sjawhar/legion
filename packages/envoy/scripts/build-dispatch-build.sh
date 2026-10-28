@@ -2,10 +2,12 @@
 # Builds one Dispatch build from a commit of this repository into a directory: the server, its web
 # app, its `dispatch` command, and the test data the two-build test (cmd/dispatch/twobuild_test.go,
 # `go test -tags twobuild`) reads from it. It builds from `git archive` of the commit, so it makes
-# no worktree, branch or checkout, and it builds each part as that commit's own build does
-# (packages/envoy/docker/Dockerfile): `bun install --frozen-lockfile`, the contracts' Go codegen,
-# the contracts bundle, `bun run build:web`, the commit's own build-dispatch-cli.sh, and `go build`
-# with `GOTOOLCHAIN=auto`, so a commit that needs another Go toolchain gets it.
+# no worktree, branch or checkout. The server and its web app take the steps the commit's image
+# build takes (packages/envoy/docker/Dockerfile): `bun install --frozen-lockfile`, the contracts'
+# Go codegen, `bun run build:web`, and `go build` of ./cmd/dispatch with `-X main.buildCommit`.
+# The image does not build the `dispatch` command: the script builds the contracts bundle, then
+# runs the commit's own build-dispatch-cli.sh. `go build` runs with `GOTOOLCHAIN=auto`, so a
+# commit that needs another Go toolchain gets it.
 #
 #   packages/envoy/scripts/build-dispatch-build.sh --commit <sha|tag> --out <dir>
 #   packages/envoy/scripts/build-dispatch-build.sh --previous-release --out <dir>
@@ -136,9 +138,9 @@ mkdir -- "$out/src"
 git -C "$root" archive "$sha" | tar -x -C "$out/src" || fail "the archive of $sha did not extract into $out/src."
 readonly src=$out/src
 
-# The JavaScript parts, in the order the commit's own image build makes them: the install, the Go
-# contracts the server compiles (regenerated, never the copy in the tree), then the contracts
-# bundle, the web app and the command.
+# The JavaScript parts: the install, the Go contracts the server compiles (regenerated, never the
+# copy in the tree) and the contracts bundle, then the web app and the command. The install, the
+# codegen and the web app are in the order the commit's image build makes them.
 (cd -- "$src" && bun install --frozen-lockfile) || fail "bun install --frozen-lockfile failed in the archive of $sha."
 (cd -- "$src/packages/contracts" && bun run gen:go && bun run build) ||
   fail "the contracts build (gen:go, build) of $sha failed."

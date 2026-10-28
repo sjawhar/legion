@@ -484,8 +484,7 @@ func (c *Client) readDeployedSubjects(conn *nats.Conn, timeout time.Duration) bo
 			return true
 		}
 	}
-	if refused := conn.LastError(); errors.Is(refused, nats.ErrPermissionViolation) &&
-		strings.Contains(refused.Error(), fmt.Sprintf("Publish to %q", streamInfoSubject)) {
+	if publishDenied(conn.LastError(), streamInfoSubject) {
 		slog.Info("envoy nats may not read the stream's subjects; the client decides each topic's transport by the subjects it compiles",
 			slog.String("name", c.name), slog.String("subject", streamInfoSubject))
 		c.subjectsRefused.Store(true)

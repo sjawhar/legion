@@ -98,10 +98,10 @@ func TestTheManifestNamesEveryNodeAndMarkThisPackageKnows(t *testing.T) {
 	if !slices.Equal(marks, wantMarks) {
 		t.Errorf("manifest marks = %v, want %v", marks, wantMarks)
 	}
-	if got := slices.Sorted(maps.Keys(nodeTypes)); !slices.Equal(got, wantNodes) {
+	if got := slices.Sorted(maps.Keys(active.nodes)); !slices.Equal(got, wantNodes) {
 		t.Errorf("node types = %v, want %v", got, wantNodes)
 	}
-	if got := slices.Sorted(maps.Keys(markTypes)); !slices.Equal(got, wantMarks) {
+	if got := slices.Sorted(maps.Keys(active.marks)); !slices.Equal(got, wantMarks) {
 		t.Errorf("mark types = %v, want %v", got, wantMarks)
 	}
 }

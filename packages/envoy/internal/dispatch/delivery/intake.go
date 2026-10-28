@@ -138,12 +138,12 @@ var settingsPollInterval = 30 * time.Second
 // (githubIntakeSubject), CI settlements, comments and the events Envoy builds no payload for among
 // them. The payload is decoded once, into its fields. An empty payload, or one of a kind route does
 // not handle, is discarded before any GitHub call or write, whatever its other fields hold (a CI
-// settlement's hold arrays, cistore.Summary); only a pull request's or a workflow run's fields are
-// read as the flat string map its handler takes. handled reports whether the kind is one route
-// hands to a handler, whatever that handler then decides, so deliver records the event's time for
-// a pull request that was not merged or another repository's run as well. A payload that is not a
-// JSON object, a kind that is not a string, and a handled kind's payload holding anything but
-// strings are errMalformedPayload.
+// settlement's hold arrays, cistore.Summary); only a pull request's or a workflow run's string
+// fields are read, as the flat string map its handler takes (flatPayload), and every other member
+// is skipped. handled reports whether the kind is one route hands to a handler, whatever that
+// handler then decides, so deliver records the event's time for a pull request that was not
+// merged or another repository's run as well. A payload that is not a JSON object, and a kind that
+// is not a string, are errMalformedPayload.
 //
 // An envelope whose handler stored a fact the issue.deployed rule reads (a pull request's row, a
 // run, its jobs) ends with recordDeployed, whether or not the handler then failed: a run written
@@ -171,11 +171,7 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw stri
 	default:
 		return false, nil
 	}
-	payload, err := flatPayload(fields)
-	var wrote bool
-	if err == nil {
-		wrote, err = handle(ctx, settings, payload)
-	}
+	wrote, err := handle(ctx, settings, flatPayload(fields))
 	if wrote {
 		in.recordDeployed(ctx, settings)
 	}
@@ -217,23 +213,23 @@ func (in *Intake) routeWorkflowEnvelope(ctx context.Context, settings DeliverySe
 	}
 }
 
-// errMalformedPayload is an envelope payload route cannot read: not a JSON object, a kind that is
-// not a string, or a pull request's or workflow run's payload holding anything but strings.
+// errMalformedPayload is an envelope payload route cannot read: not a JSON object, or a kind that
+// is not a string.
 var errMalformedPayload = errors.New("malformed envelope payload")
 
-// flatPayload is a pull request's or workflow run's fields as the flat string map its handler
-// reads, or errMalformedPayload when a field is not a string. The field's name is left out of the
-// error, since an envelope's keys are its publisher's to choose.
-func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
+// flatPayload is a pull request's or workflow run's string fields as the flat string map its
+// handler reads. A field that is not a string is left out: payload members are additive, so a
+// newer publisher may add one, and no handler reads it. A handler reads a field left out as the
+// empty string, as it reads a field the payload does not carry.
+func flatPayload(fields map[string]json.RawMessage) map[string]string {
 	payload := make(map[string]string, len(fields))
 	for name, field := range fields {
 		var value string
-		if err := json.Unmarshal(field, &value); err != nil {
-			return nil, fmt.Errorf("%w: %w", errMalformedPayload, err)
+		if json.Unmarshal(field, &value) == nil {
+			payload[name] = value
 		}
-		payload[name] = value
 	}
-	return payload, nil
+	return payload
 }
 
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The

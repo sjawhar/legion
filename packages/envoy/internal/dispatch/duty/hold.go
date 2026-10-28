@@ -97,7 +97,7 @@ const (
 //     that stops when Lost closes, or that checks Deadline before each act, stops before any
 //     other process can take the name. A renewal that fails or gets no answer within Renew
 //     leaves the deadline where it was, and the next tick tries again; a renewal that affects no
-//     row means the name is another's, and the hold is lost at once.
+//     row means the row names another holder or none, and the hold is lost at once.
 //   - Release frees the name at once and wakes the standbys: it deletes the row and notifies
 //     HoldReleasedChannel in one transaction.
 //

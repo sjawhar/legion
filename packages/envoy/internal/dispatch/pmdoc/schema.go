@@ -75,13 +75,13 @@ func IsTypedBlock(name string) bool {
 }
 
 func typedBlock(name string) (BlockTypeSchema, bool) {
-	typ, ok := schemaTypes[name]
+	typ, ok := active.types[name]
 	return typ, ok
 }
 
 func typedBlockNames() []string {
-	names := make([]string, 0, len(schema.Types))
-	for _, typ := range schema.Types {
+	names := make([]string, 0, len(active.schema.Types))
+	for _, typ := range active.schema.Types {
 		names = append(names, typ.Name)
 	}
 	sort.Strings(names)

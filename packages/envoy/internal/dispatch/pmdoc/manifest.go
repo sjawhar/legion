@@ -71,14 +71,8 @@ type compiledManifest struct {
 }
 
 // active is the manifest this build reads by: the embedded one, or another one a test installs
-// (UseManifestForTest). schema, schemaTypes, nodeTypes and markTypes are its parts.
-var (
-	active      compiledManifest
-	schema      BlockSchema
-	schemaTypes map[string]BlockTypeSchema
-	nodeTypes   map[string]bool
-	markTypes   map[string]bool
-)
+// (UseManifestForTest).
+var active compiledManifest
 
 func init() {
 	compiled, err := compileManifest(blockSchemaJSON)
@@ -90,7 +84,6 @@ func init() {
 
 func (m compiledManifest) install() {
 	active = m
-	schema, schemaTypes, nodeTypes, markTypes = m.schema, m.types, m.nodes, m.marks
 }
 
 func compileManifest(raw []byte) (compiledManifest, error) {
@@ -243,7 +236,7 @@ func validateElementVersions(element Element, versions ElementVersions, version 
 // document admission. This build reads every element whose since is V or less, and creates every
 // element whose creatable_since is V or less.
 func SchemaVersion() int {
-	return schema.Version
+	return active.schema.Version
 }
 
 // SchemaCreatable returns R, the highest since among the elements this build may create: a build
@@ -252,8 +245,9 @@ func SchemaCreatable() int {
 	return active.creatable
 }
 
-// creatable reports whether this build may create element: its manifest declares it, and its
-// creatable_since is SchemaVersion or less.
+// creatable reports whether this build may create element: false only for an element its manifest
+// declares with a creatable_since above SchemaVersion. It reports true for an element the manifest
+// does not declare; its one caller, writtenDefault, asks it only of a declared attribute.
 func creatable(element Element) bool {
 	return !active.uncreatable[element]
 }
