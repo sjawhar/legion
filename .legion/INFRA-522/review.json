@@ -2,30 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-522",
-  "completed": "2026-10-27T14:40:00Z",
+  "completed": "2026-10-28T09:34:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "0fb74300a550c1a6176fb00189066b362df1f07d",
-  "critical": 1,
-  "important": 2,
-  "minor": 0,
+  "reviewedCodeHead": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+  "critical": 0,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": ".github/workflows/release-envoy-listener.yaml:216,267-268",
-      "description": "Security[untrusted-input]: main's attested build reads the registry cache envoy:buildcache-<arch>, which any run of this repository holding packages: write can write (a workflow_dispatch of an edited copy, or a same-repo pull_request run of worker-image.yaml, which holds packages: write). The tags today hold the versions branch run 40453177184 wrote (sha256:2b598417... amd64, sha256:d05175cf... arm64). Spec v4 requires type=gha, one scope per leg, mode=min, written only on main; GitHub never lets a main run restore a branch's Actions-cache entries."
+      "severity": "important",
+      "file": "docs/solutions/envoy/ghcr-docker-multiarch-ci.md:131-136; PR body Outcome and 'Does the Go build stage hit?'",
+      "description": "The text implies that a main run gets the 2-minute cache hit when its inputs did not change. But packages/envoy/docker/Dockerfile:76-84 takes LEGION_COMMIT (github.sha, passed by both builds) into the build stage's Go build ldflags. So every commit misses at that step, and with mode=min (no intermediate records) the whole build stage and the web stage it copies from run again. A push run on main gets about the miss time (4.2-6.9 min, still under 8). The 2.00/1.60 hit was a re-run at the same sha. Correct the doc bullet and the PR body: name LEGION_COMMIT, and give the miss figures as the expected time on main."
     },
     {
-      "severity": "important",
-      "file": ".github/workflows/release-envoy-listener.yaml:288",
-      "description": "retention-days: 1 on envoy-image-digest-<arch>: a re-run of a failed image_index, or of one failed leg, more than a day later finds no digests and stops ('expected 2 digests ... found 0'). The files are empty; keep them 7 days or more."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/AGENTS.md:3941-3943; docs/solutions/envoy/ghcr-docker-multiarch-ci.md:110-111,117-131; workflow comments 212-216, 258-266; PR body",
-      "description": "The prose states 'only a build on main writes' the registry cache as a guarantee the code does not enforce, and rejects type=gha for its mode=max size, not for the cache spec v4 asks for. Rewrite with the cache change. The PR body must restate the minutes with the new cache, hit and miss, and the Actions-cache size each main run adds (spec v4)."
+      "severity": "minor",
+      "file": "PR body Size line",
+      "description": "'+266/-70' does not match the diff at 99da66ef; restate it."
     }
   ],
-  "ci": "At code head 0fb74300 (newest pull_request run's head): lint, typecheck, test, pr-title success; compare 0fb74300...e5ff68f5 is .legion/ only (2 files).",
-  "thermonuclear": "Deep review and code quality pair ran at 0fb74300: both Verdict CHANGES, on the cache trust boundary; quality also suggests declaring the cache ref once in the docker job's env.",
-  "threads": "0 threads on the PR."
+  "roundOneThreads": "All 5 round-1 threads (PRRT_kwDORFy7ds6wucBM, ...BT, ...BY, ...Bf, ...Bh) were fixed at 98a88768/99da66ef. I replied 'Accepted' on each; the implementer had already resolved them.",
+  "forArchitect": "Whether to keep cache-to on main: each main run writes new mode=min blobs that only a same-sha re-run reads, and the repository's Actions cache is already over the 10 GB limit (12.06 GB on 2026-10-28).",
+  "ci": "At code head 99da66ef (newest pull_request run's head): lint, typecheck, test and pr-title succeeded; compare 99da66ef...a8d23130 is .legion/ only (2 files).",
+  "thermonuclear": "Pair at 99da66ef: deep review Verdict CHANGES (Medium: the LEGION_COMMIT cache miss on main is not stated; Minor: stale PR body), code quality Verdict APPROVE (round-1 BUILD_CACHE suggestion applied correctly).",
+  "reviewerBodyLines": "I rewrote 'Look at first' and 'Not proven / risk' for round 2."
 }
