@@ -2,69 +2,67 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-642",
-  "completed": "2026-10-28T15:42:58Z",
-  "round": 2,
-  "headTested": "9bac6d86f930e99354784b014d19089574beb113",
-  "base": "08572e0147b6 (main, the other parent of merge 19ff4162)",
-  "branchHead": "ab99ad047792882ef3ad030194017094599a24bc (adds only .legion/INFRA-642/implement.json to 9bac6d86)",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2448#issuecomment-6473507383",
-  "roundOneEvidence": "https://github.com/sjawhar/legion/pull/2448#issuecomment-6469539741",
-  "scope": "Full round: merge 19ff4162 moved main's no-change drop (forkHeld) into the shared liveOperation.change, a runtime change (architect's message 2026-10-28T14:10Z); 9bac6d86 is test-only.",
+  "completed": "2026-10-28T18:14:35Z",
+  "round": 3,
+  "headTested": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
+  "base": "08572e0147b6 (main, the merge parent; same binary as round 2)",
+  "branchHead": "26b90b269ccb72a7a92859e73b28ed99940c2898 (adds only .legion/INFRA-642/implement.json to f5035f9e)",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2448#issuecomment-6476946143",
+  "scope": "Full round: f5035f9e moves main's no-change check back into applyLive (runtime), moves the crafted-update helpers into the leaf package docs/crafted (linked into the server through testhooks.go), and fixes three comments.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "My own builds from git archive (base 08572e01 sha256 cd1200d8..., head 9bac6d86 sha256 5690ba29...). A3: re-ran the implementer's a3.sh base vs head, 0 diff lines. A2: TestAMarginWriteMatchesTheWholeDocumentWrite ok 160.3 s generated, ok 589.1 s with the 5-spec corpus (596 subtests passed, 0 failed); api 'Schema|OutsideSchema' ok over docs.OutsideSchemaCorruptionsForTest. Replay smoke: instead of one pair, re-ran A1 3+3 interleaved; the rule holds (max head 441.28 < min base 442.46 CPU-s)."
+    "how": "My own head build from git archive (f5035f9e, sha256 d98c3975...) against round 2's base build (08572e01, sha256 cd1200d8...). A3: a3.sh twice on head and twice more on base; head equals base with each step's events compared as a set, and base itself flips between the two anchor_refreshed orders (INFRA-640). Main's no-change test passes, and fails with the drop removed from applyLive, as the implementer reported. Replay: re-ran A1 with 3 base and 3 head runs instead of one smoke pair; the rule holds."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Merge resolution: applyLive behaves as on main (a write that leaves the fork unchanged appends nothing), and applyMargin never drops a real margin write",
-      "surface": "Local Dispatch server on Postgres 17.11 + pgvector with the INFRA-512 replay seed, driven over HTTP (agent token); doc_updates rows; docs package tests against the same Postgres",
-      "command": "/legion/scratch/tmp/tester/noop.sh <binary> <out> for base, head and a no-drop mutation (POST /api/v1/artifacts/<id>/edits replacing a sentence with itself, then two identical replies to one anchored comment, counting doc_updates); go test ./internal/dispatch/docs/ -run TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSettlementMark; a throwaway probe writing one margin record 3 times through applyMargin and a no-op transaction through change on an applyMargin-shaped operation",
-      "observed": "base and head: no-op edit 200 changed:false, rows 1 -> 1; replies 201/201, rows 1 -> 2 -> 3. Main's test passes at head. Probe at head: identical margin record 3 times -> updates 1->2->3->4; the no-op through change dropped, fork kept, store unchanged.",
-      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
-      "negativeControl": "Head with the forkHeld drop removed from liveOperation.change: main's test fails in both subtests (one extra update each), the real-route no-op edit appends a row (1 -> 2), and the probe's no-op is not dropped."
+      "criterion": "Main's no-change drop lives in applyLive again: a write that leaves the fork unchanged appends nothing, and a margin write is never dropped",
+      "surface": "Local Dispatch server on the INFRA-512 replay seed, driven over HTTP with the agent token; doc_updates rows; docs package against local Postgres",
+      "command": "/legion/scratch/tmp/tester/noop.sh <binary> <out> for head and a no-drop mutation (edits replace a sentence with itself, then two identical replies to one anchored comment); go test ./internal/dispatch/docs/ -run TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSettlementMark",
+      "observed": "head: no-op edit 200 changed:false, rows 1 -> 1; replies 201/201, rows 1 -> 2 -> 3. Main's test passes. Replay profiles: DeleteSetFromDoc under ProjectMark 0-0.02 s per run at head against 0.02-0.04 s at round 2's head.",
+      "headSha": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
+      "negativeControl": "Head with the forkHeld drop removed from applyLive: main's test fails in both subtests (one extra update each), and the real-route no-op edit appends a row (1 -> 2)."
     },
     {
       "criterion": "A3: behaviour kept on the real route (anchored comment create, reply, resolve, reopen, edit) between main and head",
       "surface": "Local Dispatch server (packages/envoy/cmd/dispatch, GOMAXPROCS=2) on the INFRA-512 replay seed, driven over HTTP as the CLI and a signed-in person send",
-      "command": "/legion/scratch/tmp/a3/a3.sh /legion/scratch/tmp/tester/r2/dispatch-{base,head} r2/a3/{base1,head1}; diff <(jq -S . base1/record.json) <(jq -S . head1/record.json)",
-      "observed": "0 diff lines over 10 steps (responses, comment.anchor_refreshed events with actor and order, /text and token, /blocks tokens, comments, anchor rows).",
-      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
-      "negativeControl": "LINUX-36's document put outside the schema with the test hook: /text, agent reply and agent resolve each answer 409 DOC_SCHEMA with the same message, byte-identical at base and head."
+      "command": "/legion/scratch/tmp/a3/a3.sh for head (head1, head2) and base (base2, base3); diff <(jq -S . a/record.json) <(jq -S . b/record.json); a set comparison of each step's events on raw.json",
+      "observed": "head1 vs head2 0 lines; head1 vs base2 0 lines; base3 vs round 2's base1 0 lines; head vs base3 1,262 lines, only the order of the first step's 5 comment.anchor_refreshed events (equal with each step's events compared as a set). Base varies between the same two orders from run to run, so the order is not this change.",
+      "headSha": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
+      "negativeControl": "LINUX-36's document put outside the schema with the test hook: /text, agent reply and agent resolve each answer 409 DOC_SCHEMA with the same message, byte-identical to base's."
     },
     {
-      "criterion": "Observer skip (X3b) stays exact after the merge: a margin-only publish keeps the room's rendering only where no recorded class changes",
+      "criterion": "Observer skip (X3b) stays exact",
       "surface": "Local Dispatch server with a websocket browser peer in LINUX-36's room; HTTP comment routes; stored doc_updates replayed by an oracle",
-      "command": "/legion/scratch/tmp/tester/probe.sh <binary> <out> for base, head and a skip-every-live-write build (probe binary built from head)",
-      "observed": "base and head: 27 rows, 7 changed by render, 0 content_changed mismatches, all 9 margin writes stored, peer markdown == /text, final /text == oracle render.",
-      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
+      "command": "/legion/scratch/tmp/tester/probe.sh <binary> <out> for head and a skip-every-live-write build (probe binary built from head)",
+      "observed": "head: 27 rows, 7 changed by render, 0 content_changed mismatches, all 9 margin writes stored, peer markdown == /text, final /text == oracle render (base gave the same in round 2).",
+      "headSha": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
       "negativeControl": "Head built to skip rendering every live-write publish: 1 mismatch (v49, the no-text browser edit after accept stored content_changed=true)."
     },
     {
-      "criterion": "A2: behaviour kept exactly on real-size documents after the test refactor; comment routes answer an outside-schema document as /text does",
-      "surface": "docs and api packages against local Postgres 17.11 + pgvector",
-      "command": "go test ./internal/dispatch/docs/ -run '^TestAMarginWriteMatchesTheWholeDocumentWrite$' -count=1 -v; again with DISPATCH_TEST_SPEC_CORPUS=/legion/scratch/tmp/linux-specs; go test ./internal/dispatch/api/ -run 'Schema|OutsideSchema' -count=1 -v",
-      "observed": "ok 160.3 s; corpus ok 589.1 s, 596 subtests passed, 0 failed; api schema tests ok (TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike among them).",
-      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
-      "negativeControl": "Round 1: applyMargin recording content_changed=true failed 15 equivalence subtests; this round the no-drop mutation fails main's no-change test (above)."
+      "criterion": "A2: behaviour kept exactly on real-size documents; the docs/crafted move keeps the tests that use it passing and links nothing new into the server",
+      "surface": "docs, pmdoc and api packages against local Postgres; go list of the server binary",
+      "command": "go test ./internal/dispatch/docs/ -run '^TestAMarginWriteMatchesTheWholeDocumentWrite$' (and with DISPATCH_TEST_SPEC_CORPUS); go test the 14 tests of pmdoc/nesting_test.go, TestAStateReadsBackOtherwiseWhenItsClocksDiffer, TestSettlementSkipsACraftedTreeOutsideTheSchema, api -run 'Schema|OutsideSchema'; go list -deps ./cmd/dispatch; go vet docs and pmdoc",
+      "observed": "equivalence ok 163.2 s; corpus ok 596.6 s, 596 passed, 0 failed; the named tests pass; vet clean; crafted imports neither testing nor a Dispatch package (testing is linked through ygo/persistence on base too).",
+      "headSha": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
+      "negativeControl": "The no-drop mutation above fails main's test; round 1's content_changed=true mutation failed 15 equivalence subtests."
     },
     {
       "criterion": "A1: merge rule on LINUX's replay (every head run uses less CPU than every base run)",
       "surface": "Local Dispatch server driven by the INFRA-512 replay (tools/load.py F=0.3, rho=1, minutes 27-35, 2 SSE, GOMAXPROCS=2), seed restored before each run",
-      "command": "/legion/scratch/tmp/a1/run.sh /legion/scratch/tmp/tester/r2/dispatch-{base,head} r2-{base,head}{1,2,3}, interleaved",
-      "observed": "base 464.43, 455.21, 442.46 CPU-s; head 420.66, 441.28, 422.62 over 480.9 s each: max head < min base by 1.18 CPU-s; base spread 21.97; mean gain 25.85 CPU-s = 0.054 cores (5.7%). Per request head 0.2346-0.2490, base 0.2518-0.2599. pprof ProjectMark 12.26/12.23/12.21% -> 10.51/10.57/10.00%.",
-      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
-      "negativeControl": "Base binary (the change absent) is the control: every base run used more CPU than every head run, in total and per completed request."
+      "command": "/legion/scratch/tmp/a1/run.sh <binary> r3-{base,head}{1,2,3}, interleaved",
+      "observed": "base 466.13, 455.31, 450.88 CPU-s; head 434.67, 434.87, 444.64 over 480.9 s each: max head < min base by 6.24; base spread 15.25; mean gain 19.38 CPU-s = 0.040 cores (4.2%). Per completed request the sets overlap this round (head 0.2456/0.2447/0.2538, base 0.2616/0.2562/0.2488; head run 3 completed 60 fewer requests than base run 3). pprof ProjectMark 11.99/12.25/12.19% -> 10.78/10.33/10.58%; updateChangesMarkdown 2.77/2.57/2.67% -> 2.41/2.43/2.49%.",
+      "headSha": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
+      "negativeControl": "Base binary (the change absent) is the control: every base run used more CPU than every head run."
     }
   ],
-  "ciAtHead": {
-    "green": ["build", "test", "typecheck", "lint", "pr-title", "envoy-go", "dispatch-memory", "dispatch-multiprocess", "envoy-e2e-local", "envoy-smoke"],
-    "redNotFromThisChange": [
-      "envoy-infra-go TestDispatchConnectionsPerPodIsTheServers: main's known red since #2233 (controller, via the architect).",
-      "dispatch recipients-claim.e2e.ts:310: main's known red since #2233, fixed by #2324 (controller, via the architect).",
-      "dispatch mermaid.e2e.ts:194 'a diagram too large to draw in time' in all 4 browser projects: the test posts an unanchored comment, which never reaches ProjectMark (api/comment_create.go:519 and :552 call it only when an anchor is set), and this PR changes no packages/dispatch file; the test came with main's #2311, and main's own runs of the lane were still queued, so main's result was not readable.",
-      "envoy-go-race TestEventStreamRelayRecoversWhenTheEventLogIsReset: flaky on main itself; go test -race -count=20 of that test failed 1/20 at base 08572e01 with the same message and passed 20/20 at head."
-    ]
+  "observations": [
+    "pmdoc's TS-engine tests (decode.ts needs @legion/proof-editor) and its timing tests cannot run in my module copy; CI's envoy-go lane runs that package in full.",
+    "The removed whole-store walks cost little in the CLI-only replay (0.02-0.04 s of DeleteSetFromDoc under ProjectMark per run); the change still removes them from every margin write."
+  ],
+  "ciAtHeadWhenRead": {
+    "green": ["build", "lint", "typecheck", "test", "pr-title", "envoy-infra-go", "dispatch-multiprocess", "envoy-e2e-local", "Broker Go suite on Postgres 16", "Daemon Go suite on Postgres 16"],
+    "running": ["dispatch", "dispatch-memory", "envoy-go", "envoy-go-race", "envoy-smoke", "Dispatch Go suite on Postgres 16"]
   }
 }
