@@ -1,4 +1,4 @@
--- 0136_related_checks.up.sql
+-- 0137_related_checks.up.sql
 -- The related-item check that runs on every issue create, ask and new decision block
 -- searches by meaning first and by the project's rarest words, and says what it did. These tables
 -- record each check, so how often it completed, how long it took and why it was not made can be

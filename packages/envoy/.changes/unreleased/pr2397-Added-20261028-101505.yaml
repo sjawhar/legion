@@ -19,11 +19,11 @@ body: |-
     together) and `POST` (a spec-length text) run the same check and write nothing.
     `GET /api/v1/related-checks?project=&source_kind=&from=&to=` counts the recorded checks by
     source, outcome, search mode and reason, with p50, p95, maximum and over-300 ms counts of their
-    keyword and total times. Migration `0136_related_checks` adds `related_checks` (one row per check
+    keyword and total times. Migration `0137_related_checks` adds `related_checks` (one row per check
     of a write) and `search_term_stats` / `search_term_totals`, the word statistics the new
     term-statistics refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`, so the
     lease pool holds 13 connections) rebuilds for every project at boot and every 10 minutes.
-    Migration `0137_issue_embedding_spec` makes an issue's meaning-search text its title and its
+    Migration `0138_issue_embedding_spec` makes an issue's meaning-search text its title and its
     spec, re-queued on a spec edit; the coverage pass re-embeds existing issues once an embedder
     runs. Both censuses answer `0`.
 time: 2026-10-28T10:15:05.768862558Z

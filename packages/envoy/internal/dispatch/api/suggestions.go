@@ -120,7 +120,7 @@ const (
 )
 
 // The reasons a check was not made, or searched by keywords alone: related_checks.reason's values
-// (0136_related_checks).
+// (0137_related_checks).
 const (
 	relatedReasonBlankText         = "blank_text"
 	relatedReasonTimeout           = "timeout"

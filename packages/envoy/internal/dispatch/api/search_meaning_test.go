@@ -104,7 +104,7 @@ func queryVector() []float32 { return angledVector(1, 1) }
 // queryVector(), comfortably below searchMeaningFloor.
 func defaultVector() []float32 { return angledVector(0, 1) }
 
-// issueEmbeddingText is the text an issue created with a one-paragraph spec embeds (0137's
+// issueEmbeddingText is the text an issue created with a one-paragraph spec embeds (0138's
 // issue_embedding_text): its title, a blank line and its spec as the primary document stores it,
 // serialized markdown ending in a newline. A test keys an issue's vector by this, not by the title
 // alone.
