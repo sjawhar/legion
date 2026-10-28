@@ -1608,3 +1608,133 @@ func TestARecoveryHeldPastItsBoundTellsItsReleaseWaitsOnce(t *testing.T) {
 		t.Fatalf("notices after the fault cleared = %q, want the one only", got)
 	}
 }
+
+// heldRecovery is a rig whose unread zeta/tools left the child C, under P (todo on acme/widgets,
+// never recorded, its event never sent), of the live tree T to the recovery. The boot's hold
+// poller runs throughout; the Dispatch consumer runs only between consume and pause, so an event
+// published while it is paused keeps it behind the stream and holds the recovery's listing, and
+// its run catches it up and releases the hold. (An apply that fails naks its event, and between
+// redeliveries the consumer reads as idle, which would release the hold at random; one that
+// blocks would hold the fact lock the recovery's listing takes.)
+type heldRecovery struct {
+	w         *workflowRuntime
+	client    *mappingDispatch
+	js        jetstream.JetStream
+	installs  *installations
+	admission *admit.Admission
+	cancel    context.CancelFunc
+	done      chan error
+	seq       int64
+}
+
+const heldTree, heldParent, heldChild = "LEGION-1900", "LEGION-1901", "LEGION-1902"
+
+// newHeldRecovery opens the rig with installReadRetry at backoff (initial and cap) and
+// recoveryHoldBound at bound, the consumer paused.
+func newHeldRecovery(t *testing.T, backoff, bound time.Duration) *heldRecovery {
+	t.Helper()
+	quickInstallReads(t)
+	installReadRetry.Initial, installReadRetry.Max = backoff, backoff
+	was := recoveryHoldBound
+	recoveryHoldBound = bound
+	t.Cleanup(func() { recoveryHoldBound = was })
+	h := &heldRecovery{installs: &installations{}}
+	h.installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	h.w, h.client, h.installs, _, h.js = mappingRigJS(t, h.installs)
+	_, h.admission = rigHandlers(h.w)
+	h.w.bootID, h.w.holdPollInterval = "held-clock-boot", 10*time.Millisecond
+	liveRoot(t, h.w, h.client, heldTree)
+	h.client.show(issue(heldParent, "acme/widgets", "todo", false, heldTree, 1), issue(heldChild, "zeta/tools", "todo", false, heldParent, 1))
+	h.w.awaitRecovery("zeta/tools", heldTree, heldChild, heldParent)
+	run, cancel := context.WithCancel(context.Background())
+	polled := make(chan struct{})
+	go func() { h.w.pollHoldRelease(run); close(polled) }()
+	t.Cleanup(func() { h.pause(); cancel(); <-polled })
+	return h
+}
+
+// behind publishes a todo event of key, a child of T on acme/widgets, for the paused consumer.
+func (h *heldRecovery) behind(t *testing.T, key string) {
+	t.Helper()
+	h.seq++
+	h.client.show(issue(key, "acme/widgets", "todo", false, heldTree, 1))
+	if _, err := h.js.Publish(context.Background(), "notifications.dispatch.issue."+key+".issue.updated", childEnvelope(t, key, heldTree, "acme/widgets", 2000+h.seq, 1)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// consume runs the Dispatch consumer until pause.
+func (h *heldRecovery) consume() {
+	run, cancel := context.WithCancel(context.Background())
+	h.cancel, h.done = cancel, make(chan error, 1)
+	go func() { h.done <- h.w.consumers.Run(run, h.w.pool, h.w.handlers...) }()
+}
+
+func (h *heldRecovery) pause() {
+	if h.cancel != nil {
+		h.cancel()
+		<-h.done
+		h.cancel = nil
+	}
+}
+
+// serve lets GitHub answer zeta/tools and asks for a read of the mapping at once.
+func (h *heldRecovery) serve() {
+	h.installs.setFailing(nil, "implement zeta/tools")
+	h.w.requestMappingRead()
+}
+
+func (h *heldRecovery) notices(t *testing.T) int {
+	t.Helper()
+	return len(treeNotices(t, h.w, heldTree))
+}
+
+// A recovery held with release waits is told at its bound, not at the refresher's next backoff:
+// with the backoff's cap at 2 s and the bound at 500 ms, the notice comes about 500 ms after the
+// hold begins. The refresher cut its wait to the time left to the bound; before, the bound was
+// checked only when the backoff next fired, up to its cap later.
+func TestARecoveryHeldWithReleaseWaitsIsToldAtItsBoundNotItsBackoff(t *testing.T) {
+	h := newHeldRecovery(t, 2*time.Second, 500*time.Millisecond)
+	before := h.notices(t)
+	h.behind(t, "LEGION-1950")
+	h.serve()
+	testwait.Eventually(t, "the recovery's listing held", func() bool { return served(h.w, "zeta/tools") && h.admission.Held() })
+	start := time.Now()
+	if !within(1500*time.Millisecond, func() bool { return h.notices(t) > before }) {
+		t.Fatalf("no notice %s after the hold began, want one at about the 500ms bound, before the 2s backoff", time.Since(start))
+	}
+	if n := h.notices(t) - before; n != 1 {
+		t.Fatalf("notices = %d, want one", n)
+	}
+}
+
+// A hold that is released and made again starts the bound's clock anew: the first hold lasts less
+// than the bound and is released, the next recovery run is held again, and no notice comes until
+// the bound has passed from that second hold. Before, the clock kept the first hold's start and
+// the second, short hold was told at once.
+func TestARecoveryHoldReleasedAndMadeAgainStartsANewClock(t *testing.T) {
+	h := newHeldRecovery(t, 4*time.Second, time.Second)
+	before := h.notices(t)
+	h.behind(t, "LEGION-1960")
+	h.serve()
+	testwait.Eventually(t, "the first hold", func() bool { return served(h.w, "zeta/tools") && h.admission.Held() })
+	first := time.Now()
+	time.Sleep(300 * time.Millisecond)
+	h.consume()
+	testwait.Eventually(t, "the first hold released", func() bool { return !h.admission.Held() })
+	h.pause()
+	h.behind(t, "LEGION-1961")
+	testwait.Eventually(t, "the second hold, made by the recovery's next run", func() bool { return h.admission.Held() })
+	second := time.Now()
+	time.Sleep(600 * time.Millisecond)
+	if n := h.notices(t) - before; n != 0 {
+		t.Fatalf("notices %s after the first hold began and %s into the second = %d, want none before the second's bound",
+			time.Since(first), time.Since(second), n)
+	}
+	if !within(3*time.Second, func() bool { return h.notices(t) > before }) {
+		t.Fatal("no notice once the second hold outlasted its bound")
+	}
+	if n := h.notices(t) - before; n != 1 {
+		t.Fatalf("notices = %d, want one", n)
+	}
+}
