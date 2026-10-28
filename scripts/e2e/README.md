@@ -2359,6 +2359,9 @@ and no route, claimed by P.
 
 Each mention case fails when the comment.created payload's mention does not carry the mentioned
 session's `session_id`: the cases are about a mention that resolved, whatever its send did.
+A comment answers its mention attempts `pending` and its sender settles them after the response,
+so each mention case reads the comment's delivery rows once none is `pending`, and fails when one
+still is 10 s after the 201 (two of the listener client's 5 s windows).
 
 Every case runs and prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>: <why>`; a
 summary follows, and any FAIL exits 1. The work directory, under `TMPDIR`, holds the binaries and
