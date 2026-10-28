@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-194",
+  "completed": "2026-10-28T09:04:49Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "bc359229482030f13b09432a6349237fdb05adda",
+  "reviewedBranchHead": "f759f3cc0919a763c88bdf43bbb1395da32a796c",
+  "critical": 0,
+  "important": 1,
+  "minor": 7,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/dispatch/meaning-search-check.ts:311-316",
+      "description": "A1 passes when meaning search never ran. Dispatch's runSearch answers a query with no tsquery node (a stopword-only query such as 'the') with {results: [], limit, offset} and no degraded field before it tries the embedder (packages/envoy/internal/dispatch/api/search.go:412-419 on main; Degraded is omitempty, model/model.go:332). judgeA1 reads only the field's absence, so it answers {degraded:false, results:0, verdict:'pass'} for that answer (reproduced with bun -e at bc359229). An empty answer cannot show which path ran: judge it unavailable with a fixed category, fix the comment at :311, add a test, and re-run the production proof at the new head."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/meaning-search-check.ts:264-272",
+      "description": "errorCategory reports every status other than 401/403/404 as 'transport'. A 400 refusal (a --pair query over contracts.SearchQueryMax, search.go 'q' cap) prints 'unavailable: transport' and sends the operator to the network. Add a fixed category for other 4xx refusals."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/meaning-search-check.ts:286-289,523-524",
+      "description": "exitCode has no production caller: runChecks computes EXIT_CODE[overallVerdict(...)] inline, so the exitCode tests (test :520-532) test a copy. Make runChecks use the one function, or test the exit code through runChecks only; drop exports nothing imports."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/__tests__/meaning-search-check.test.ts:318,331",
+      "description": "The failed issue read and failed search are faked with HttpStatusError, which only readJson (healthz, coverage) throws; the live search and issue reads go through DispatchClient, which throws DispatchServiceError/DispatchGatewayError. Fake the error the live path throws."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/meaning-search-check.ts:340-376",
+      "description": "Cleanup: checkPair tracks the issue side's outcome in shared, issueFailure, a nested issue variable and an empty catch, then rebuilds found at :375. One helper answering number | Category for the issue read plus lexer leaves two returns. Same output and categories."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/meaning-search-check.ts:496-531",
+      "description": "Cleanup: runChecks' whole-body catch and the err dependency duplicate the import.meta.main catch (:645-654), which prints the same 'unavailable: <category>' with exit 2; A2's loop and summary and A3's printing sit inline where build and A1 have check* functions."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/meaning-search-check.ts:127-130,545-549",
+      "description": "Cleanup: MalformedAnswer duplicates what the schemas do; readJson can return the text on a JSON parse failure, as DispatchClient does, and the schema parse reports 'malformed'."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/dispatch/README.md:102-103",
+      "description": "The per-pair line format omits the 'A2 <KEY> unavailable: <category>' form printed when the pair's search itself is unavailable (meaning-search-check.ts:442)."
+    }
+  ],
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. Newest pull_request CI head 83d3003f1d16fef9e0103d02a2d0bbe5fd319d98 (compare to f759f3cc: 1 file, handoffsOnly true): lint, typecheck, pr-title success, test in_progress at 2026-10-28T09:04Z. Code head bc359229: lint, typecheck, test, pr-title success. A request for changes does not wait on CI.",
+  "evidence": {
+    "e2eImplementer": "present in the PR body; proof array in implement.json (production Dispatch, build 9b92ac14, before run 2026-10-25 as negative control)",
+    "e2eTester": "present in the PR body; tester re-ran the implementer's command on production at 2026-10-28T08:50:57Z",
+    "threads": "0 review threads, 0 prior reviews (gh api graphql)",
+    "contractCensus": "Not required: the diff adds a new operator script and changes no refusal, field or signature at an existing process or package boundary."
+  },
+  "thermonuclear": {
+    "head": "f759f3cc (code head bc359229)",
+    "deepReview": "Verdict: CHANGES — the A1 finding (Medium) and the 4xx category (Minor); a third Minor (no-lexer key reported as lexeme-database) judged not a defect, since lexeme-database is the real cause there. Checked and holding: lexeme SQL matches migrations 0056/0087/0088 and search.go's websearch_to_tsquery; Object.hasOwn degraded detection; owned rows never count for A2; coverage total is the sum of kinds; no leak path in any catch.",
+    "codeQuality": "Verdict: CHANGES — checkPair state, runChecks duplicate catch-all, exitCode tested as a copy, MalformedAnswer, checkA2/checkA3 extraction, test fakes, README line format."
+  }
+}
