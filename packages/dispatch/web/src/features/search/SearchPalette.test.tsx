@@ -11,7 +11,7 @@ import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { SearchButton } from "./SearchButton";
-import { type PaletteMode, SearchPalette } from "./SearchPalette";
+import { ANSWER_PREVIEW_CHARS, type PaletteMode, SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
 
 const results: SearchResult[] = [
@@ -166,6 +166,107 @@ test("renders document-owned results under the document and opens their discussi
     expect(screen.getByTestId("current-route").textContent).toBe(
       "/projects/CORE/documents/navigation-design?comment=comment-2"
     );
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("an ask hit says where it stands and shows its latest answer", async () => {
+  const answer = {
+    at: "2026-10-01T00:00:00Z",
+    selected: ["Brass", "Steel"],
+    text: "Keep **both** frames.",
+    user: "alice",
+  };
+  const resolution = {
+    actor: { id: "bob", kind: "user" as const },
+    at: "2026-10-02T00:00:00Z",
+    kind: "resolved" as const,
+    reason: "Settled in the spec.",
+  };
+  const askHit = (id: string, ask: SearchResult["ask"]): SearchResult => ({
+    ask,
+    href: `/issues/LEGION-5/asks/${id}`,
+    id,
+    kind: "ask",
+    owner: { key: "LEGION-5", kind: "issue", status: "todo", title: "Orrery" },
+    rank: 1,
+    snippet: `Which <mark>orrery</mark> frame, ${id}?`,
+  });
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      askHit("open", { state: "open" }),
+      askHit("answered", { answer: { ...answer, selected: [], text: null }, state: "answered" }),
+      askHit("closed", { resolution, state: "resolved" }),
+      askHit("closed-answered", { answer, resolution, state: "resolved" }),
+    ])
+  );
+  const view = renderPalette();
+
+  try {
+    await searchFor("orrery");
+    const option = (id: string) =>
+      screen.getAllByRole("option").find((row) => row.textContent?.includes(`frame, ${id}?`));
+    await waitFor(() => expect(option("closed-answered")?.textContent).toContain("both"));
+
+    expect(option("open")?.textContent).toContain("Open");
+    expect(option("answered")?.textContent).toContain("Answered");
+    expect(option("answered")?.textContent).toContain("alice · ");
+    expect(option("answered")?.textContent).toContain("No option chosen");
+    expect(option("closed")?.textContent).toContain("Closed, no answer");
+    expect(option("closed")?.textContent).toContain("Resolved by bob · ");
+    expect(option("closed")?.textContent).not.toContain("alice");
+    expect(option("closed-answered")?.textContent).toContain("Closed after an answer");
+    expect(option("closed-answered")?.textContent).toContain("Resolved by bob · ");
+    expect(option("closed-answered")?.textContent).toContain("Chose Brass, Steel");
+    expect(screen.getAllByRole("option", { name: /^ask / })).toHaveLength(4);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+// The answer's three-line clamp is CSS only: whatever text reaches the option is its accessible
+// name, so a long answer is cut to its start before it renders.
+test("an ask hit shows only the start of a long answer, cut at a word with an ellipsis", async () => {
+  const text = `Keep **both** frames. ${"The meridian ring stays level. ".repeat(80)}zenithward`;
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      {
+        ask: {
+          answer: { at: "2026-10-01T00:00:00Z", selected: [], text, user: "alice" },
+          state: "answered",
+        },
+        href: "/issues/LEGION-5/asks/long",
+        id: "long",
+        kind: "ask",
+        owner: { key: "LEGION-5", kind: "issue", status: "todo", title: "Orrery" },
+        rank: 1,
+        snippet: "Which <mark>orrery</mark> frame?",
+      },
+    ])
+  );
+  const view = renderPalette();
+
+  try {
+    await searchFor("orrery");
+    const option = screen.getByRole("option");
+    await waitFor(() => expect(option.querySelector("strong")?.textContent).toBe("both"));
+
+    // 280 characters (ANSWER_PREVIEW_CHARS) end inside the ninth sentence's second word, so the
+    // cut falls after its first, with an ellipsis, and the shown answer stays within the bound.
+    const shown = option.textContent ?? "";
+    const shownAnswer = shown.slice(shown.indexOf("Keep both frames."));
+    expect(ANSWER_PREVIEW_CHARS).toBe(280);
+    expect(text.length).toBeGreaterThan(2000);
+    expect(shown).not.toContain("zenithward");
+    expect(shownAnswer).toBe(
+      `Keep both frames. ${"The meridian ring stays level. ".repeat(8)}The…`
+    );
+    expect(shownAnswer.length).toBeLessThanOrEqual(ANSWER_PREVIEW_CHARS + 1);
   } finally {
     search.mockRestore();
     view.unmount();

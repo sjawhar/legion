@@ -286,11 +286,12 @@ one. Three things have to be true first, and Dispatch can check none of them for
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
-- **Expect an issue's notifications out of order while two servers publish.** Each server's
-  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
-  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
-  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
-  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
+- **Concurrent servers claim durable work before they act.** The outbox claims each batch with
+  `FOR UPDATE SKIP LOCKED`, so two healthy servers do not publish one event twice. A page write's
+  `(login, Idempotency-Key)` row and its write transaction's commit mark keep one intent from
+  running twice, and the delivery sweep or a retry atomically claims each lapsed delivery attempt
+  before it sends. Several replicas can therefore serve the same keys and sweep the same backlog
+  without making a write or delivery twice.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
 to 64 connections for requests, up to 9 for the periodic work it runs once across the servers, up
@@ -348,12 +349,13 @@ never happening: the one that adds each issue's repository (migration `0113`) ho
 until you clear the parent of an ancestor that still loads. That release was deployed with the
 running server stopped first, and no server older than it has run against the database since.
 
-The release that moves live updates onto one WebSocket per tab (INFRA-258) is deployed the same
-way, for its API rather than a migration: its pages send a broadcast with its key in a header
-rather than in the body an older server requires, so a broadcast that reaches an older server
-while the release rolls is refused. Stop the running server before it starts. A tab opened before
-that deploy shows **Live updates unavailable**, and its broadcasts are refused, until it is
-reloaded.
+The release that moves live updates onto one WebSocket per tab (INFRA-258) is not a
+stop-the-world migration. At one replica the Deployment uses `Recreate`, so a tab opened before
+the new pod starts needs a reload: its event route is gone and it shows **Live updates unavailable**,
+and its broadcast body still carries a field the new server refuses. Above one replica the
+Deployment rolls: during the roll an old page reaching a new pod has those effects, while a new
+page reaching an old pod cannot open its live socket and its broadcast omits the body field that
+old server requires. Reload after the roll reaches one compatible page and server version.
 
 From that release on, every `POST` and `PATCH` a page or the `dispatch` command makes carries an
 `Idempotency-Key`, and Dispatch keeps each key's answer for 24 hours, so a change tried again after

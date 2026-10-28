@@ -50,7 +50,7 @@ import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AskBlockHost, installTypedBlocks } from "./ask-block";
+import { installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import type { EditorHandle } from "./editor";
@@ -67,6 +67,7 @@ import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
+import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 

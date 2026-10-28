@@ -25,7 +25,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("live: bob's ask updates alice's Inbox and project badges without reload", async ({
+test("live: bob's ask updates alice's Inbox and project badges without reload @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -72,7 +72,7 @@ test("live: bob's ask updates alice's Inbox and project badges without reload", 
   await alice.close();
 });
 
-test("live: answering an ask updates the Inbox and project badges immediately", async ({
+test("live: answering an ask updates the Inbox and project badges immediately @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -115,7 +115,9 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   await alice.close();
 });
 
-test("live: a message on another issue skips the Inbox refetch", async ({ browser }, testInfo) => {
+test("live: a message on another issue skips the Inbox refetch @phone", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
 
@@ -203,7 +205,7 @@ test("live: closing a grandchild updates every loaded ancestor's Children rollup
   }
 });
 
-test("live: resolving an ask updates its pinned issue's open-ask count", async ({
+test("live: resolving an ask updates its pinned issue's open-ask count @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -471,7 +473,7 @@ test("live: a change committed while the first live socket fails to open is show
   }
 });
 
-test("live: a fresh page load opens the socket and stays within a bounded request budget", async ({
+test("live: a fresh page load opens the socket at the current head and stays within a bounded request budget @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -543,7 +545,7 @@ test("live: a fresh page load opens the socket and stays within a bounded reques
   await alice.close();
 });
 
-test("live: the Reconnecting pill never covers the phone margin sheet toggle", async ({
+test("live: the Reconnecting pill never covers the phone margin sheet toggle @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(

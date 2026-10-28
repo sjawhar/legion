@@ -299,6 +299,18 @@ type SearchIssue struct {
 	Status string `json:"status"`
 }
 
+// SearchAsk is where an ask hit stands, read when the search ran, so a reader of the hit knows
+// whether the question still waits on a human and, once it does not, how it was settled.
+// Answer is the ask's current answer when it is answered; on a resolved ask it is the last
+// answer its ask.answered events recorded, the only place the answer survives on a row that
+// document settlement retracted while it was answered, and nil when nobody answered.
+// Answer.Selected is an empty list, never null, when the answer chose no option.
+type SearchAsk struct {
+	State      string         `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *AskAnswer     `json:"answer,omitempty"`
+	Resolution *AskResolution `json:"resolution,omitempty"`
+}
+
 // SearchResult is one ranked Dispatch search hit.
 type SearchResult struct {
 	Kind  string      `json:"kind"`
@@ -312,6 +324,9 @@ type SearchResult struct {
 	Snippet  string          `json:"snippet"`
 	Rank     float64         `json:"rank"`
 	Href     string          `json:"href"`
+	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
+	// the read of its state keeps it nil too.
+	Ask *SearchAsk `json:"ask,omitempty"`
 }
 
 // SearchResponse is one page of the fused search result list.
@@ -591,6 +606,22 @@ type ArtifactReviewEventPayload struct {
 	Actor      Actor   `json:"actor"`
 	Reason     *string `json:"reason"`
 	AskID      *string `json:"ask_id"`
+}
+
+// ArtifactHumanEditedEventPayload is the payload of artifact.human_edited, which Dispatch appends
+// once a document has been quiet for a while after a person's settled browser edit: the versions
+// the quiet window spans (FromVersion is the one before the window's first person's version,
+// ToVersion the window's last person's version), the people who wrote them, and the unified diff
+// of the two versions' stored markdown, cut at its last line end within 4,096 bytes, with
+// DiffTruncated saying it was cut.
+type ArtifactHumanEditedEventPayload struct {
+	ArtifactID    string   `json:"artifact_id"`
+	Name          string   `json:"name"`
+	FromVersion   int      `json:"from_version"`
+	ToVersion     int      `json:"to_version"`
+	Editors       []string `json:"editors"`
+	Diff          string   `json:"diff"`
+	DiffTruncated bool     `json:"diff_truncated"`
 }
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
@@ -950,6 +981,25 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
+// that chose no option sends `"selected":[]`, never null, though rows and ask.answered events
+// written before answers stored an empty list hold null there.
+func (a *AskAnswer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain AskAnswer
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Selected == nil {
+		value.Selected = []string{}
+	}
+	*a = AskAnswer(value)
+	return nil
 }
 
 // OpenAskOwner identifies the issue or standalone project document holding an ask.
@@ -1366,24 +1416,46 @@ type ArtifactReferences struct {
 // GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
 // agent's conversation owns has neither and is located by Ref alone
 // (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
-// for session nodes, which have none.
+// for session nodes, which have none. The edges into and out of a node are the reads `?to=` and
+// `?from=` of its Ref.
+//
+// Every node carries six facts, whatever its kind: MadeBy and MadeAt, who made it and when;
+// ChangedBy and ChangedAt, who last changed its own text or fields and when (its maker while
+// nothing has changed it since); Parent, the node it belongs to; and ParentVersion, the version of
+// the parent it belongs to. A fact Dispatch never recorded is empty: MadeBy and ChangedBy are then
+// `[]`, never null, and the others null.
 //
 // A block node (kind `block`, id `<document ref_key>#<block id>`) also carries BlockID, its
-// document's reference as Document, and ChangedVersion and ChangedAt, the document version in
-// which its text last changed. Text and Pin are set only on the node a reference read names:
-// Text is the block's whole current text, and Pin answers a reference pinned to a version.
+// document's reference as Document, and ChangedVersion, the document version in which its text
+// last changed (ChangedAt is that version's time). Text and Pin are set only on the node a
+// reference read names: Text is the block's whole current text, and Pin answers a reference pinned
+// to a version.
 type GraphNode struct {
-	Kind           string     `json:"kind"`
-	ID             string     `json:"id"`
-	BlockID        string     `json:"block_id,omitempty"`
-	IssueKey       *string    `json:"issue_key,omitempty"`
-	Project        string     `json:"project,omitempty"`
-	Ref            string     `json:"ref,omitempty"`
-	Document       string     `json:"document,omitempty"`
-	ChangedVersion int        `json:"changed_version,omitempty"`
-	ChangedAt      *time.Time `json:"changed_at,omitempty"`
-	Text           string     `json:"text,omitempty"`
-	Pin            *BlockPin  `json:"pin,omitempty"`
+	Kind           string      `json:"kind"`
+	ID             string      `json:"id"`
+	BlockID        string      `json:"block_id,omitempty"`
+	IssueKey       *string     `json:"issue_key,omitempty"`
+	Project        string      `json:"project,omitempty"`
+	Ref            string      `json:"ref,omitempty"`
+	Document       string      `json:"document,omitempty"`
+	ChangedVersion int         `json:"changed_version,omitempty"`
+	MadeBy         []Actor     `json:"made_by"`
+	MadeAt         *time.Time  `json:"made_at"`
+	ChangedBy      []Actor     `json:"changed_by"`
+	ChangedAt      *time.Time  `json:"changed_at"`
+	Parent         *NodeParent `json:"parent"`
+	ParentVersion  *int        `json:"parent_version"`
+	Text           string      `json:"text,omitempty"`
+	Pin            *BlockPin   `json:"pin,omitempty"`
+}
+
+// NodeParent names the node a graph node belongs to: its kind and its node id (an artifact's
+// uuid, an issue's key, a component's `<project>/<id>`), and Ref, its dispatch:// address,
+// absent for a parent that has none (a session, a direct message, a document no project owns).
+type NodeParent struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Ref  string `json:"ref,omitempty"`
 }
 
 // BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the

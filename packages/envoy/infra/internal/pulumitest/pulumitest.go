@@ -20,15 +20,18 @@ import (
 )
 
 // localRun is how to run the live tests by hand, from the repository root.
-const localRun = "From the repository root, build the listener image and fetch the docker provider " +
-	"plugin v" + DockerPluginVersion + ", checking it against the SHA-256 the envoy-smoke job of " +
+const localRun = "From the repository root, build the listener image, then the held-port image the " +
+	"live tests run on top of it, and fetch the docker provider plugin v" + DockerPluginVersion +
+	", checking it against the SHA-256 the envoy-smoke job of " +
 	".github/workflows/envoy-and-contracts.yaml pins:\n" +
 	"  docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .\n" +
+	"  docker buildx build --load --build-arg BASE=legion-envoy-smoke:local " +
+	"-t legion-envoy-smoke-heldport:local -f packages/envoy/infra/host/heldportwrapper/Dockerfile .\n" +
 	"  curl -fsSL -o /tmp/" + dockerPluginTarball + " " +
 	"https://github.com/pulumi/pulumi-docker/releases/download/v" + DockerPluginVersion + "/" +
 	dockerPluginTarball + "\n" +
 	"then, in packages/envoy/infra, with the pulumi CLI on PATH:\n" +
-	"  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local " +
+	"  ENVOY_SMOKE_HELD_PORT_IMAGE=legion-envoy-smoke-heldport:local " +
 	"ENVOY_INFRA_DOCKER_PLUGIN=/tmp/" + dockerPluginTarball + " " +
 	"go test -count=1 -tags pulumilive -v -timeout 15m ./host/\n" +
 	"-count=1 because go's test cache cannot see the image behind a fixed tag, and would " +
@@ -43,14 +46,16 @@ const DockerPluginVersion = "4.11.0"
 // release names it.
 const dockerPluginTarball = "pulumi-resource-docker-v" + DockerPluginVersion + "-linux-amd64.tar.gz"
 
-// SmokeImage returns ENVOY_SMOKE_IMAGE, the already-built listener image a live test runs. Unset,
-// it fails the test at once and prints the build command: a build inside go test spends the test's
-// deadline (LEGION-361), so no live test ever builds the image itself.
-func SmokeImage(t testing.TB) string {
+// HeldPortImage returns ENVOY_SMOKE_HELD_PORT_IMAGE, the already-built image a live test runs: the
+// smoke image with host/heldportwrapper as its envoy-listener, which serves on the socket HoldPort
+// holds for the container's port. Unset, it fails the test at once and prints the build commands:
+// a build inside go test spends the test's deadline (LEGION-361), so no live test ever builds an
+// image itself.
+func HeldPortImage(t testing.TB) string {
 	t.Helper()
-	image := os.Getenv("ENVOY_SMOKE_IMAGE")
+	image := os.Getenv("ENVOY_SMOKE_HELD_PORT_IMAGE")
 	if image == "" {
-		t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n" + localRun)
+		t.Fatal("ENVOY_SMOKE_HELD_PORT_IMAGE is unset, and this test never builds the image itself.\n" + localRun)
 	}
 	return image
 }

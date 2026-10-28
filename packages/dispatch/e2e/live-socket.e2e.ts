@@ -157,7 +157,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a tab holds one live socket for every live view", async ({ browser }) => {
+test("a tab holds one live socket for every live view @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
   await seedDeliveryFixture();
@@ -198,7 +198,7 @@ test("a tab holds one live socket for every live view", async ({ browser }) => {
 // Forty seconds of real idling: a page that holds a request open shows it here and nowhere else.
 // It runs in every engine of this spec's projects, since what it proves - that the live socket
 // replaced the long-lived request - is each engine's own connection behaviour.
-test("no request to Dispatch stays open while the page idles", async ({ browser }) => {
+test("no request to Dispatch stays open while the page idles @phone", async ({ browser }) => {
   test.setTimeout(60_000);
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
@@ -241,7 +241,7 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
 // The page rotates before it has seen any event, so its event feed resumes from the sign-in
 // check's head: the change committed while the next socket waits arrives on it, and the rotation
 // costs no request beyond what that change costs a page with no rotation (the control).
-test("a rotation loses no event and makes no extra request", async ({ browser }) => {
+test("a rotation loses no event and makes no extra request @phone", async ({ browser }) => {
   test.setTimeout(45_000);
   await createProject({ key: "CORE", name: "Core" });
   const baselineIssue = await createIssue({ project: "CORE", title: "Comment request control" });
@@ -335,7 +335,7 @@ test("a rotation loses no event and makes no extra request", async ({ browser })
   }
 });
 
-test("a change committed while the page loads is shown without a reload", async ({ browser }) => {
+test("a change committed while the page loads is shown without a reload @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Before the page load" });
 
@@ -372,7 +372,7 @@ test("a change committed while the page loads is shown without a reload", async 
   }
 });
 
-test("a first live socket opening without a change makes no API request", async ({ browser }) => {
+test("a first live socket opening without a change makes no API request @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Quiet page load" });
 
@@ -412,7 +412,7 @@ test("a first live socket opening without a change makes no API request", async 
   }
 });
 
-test("an agent live view survives a rotation in place", async ({ browser }) => {
+test("an agent live view survives a rotation in place @phone", async ({ browser }) => {
   await setLiveSessions([agent]);
   await publishAgentStreamFrame(agent.session_id, replay(agent.session_id), "replay");
 

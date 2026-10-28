@@ -78,7 +78,7 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 	eventTypes := []string{
 		"issue.created", "issue.updated", "issue.closed", "issue.reopened", "issue.claimed", "issue.released", "issue.deployed",
 		"child.added", "child.removed", "child.status",
-		"artifact.created", "artifact.version", "artifact.approved", "artifact.changes_requested",
+		"artifact.created", "artifact.version", "artifact.human_edited", "artifact.approved", "artifact.changes_requested",
 		"ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back",
 		"ask.follower_added", "ask.follower_removed",
 		"comment.created", "comment.delivery", "comment.answered", "comment.resolved", "comment.reopened",
@@ -201,4 +201,65 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 		}
 	}
 	checkServed("event feed replay", frames)
+}
+
+// TestAnsweredEventStoredWithNullSelectedServesEmptyLists: an ask.answered event written before
+// answers stored an empty list holds null in answer.selected and previous_answer.selected. The
+// issue event log and the stream's catch-up send [] there instead, the reading model.AskAnswer
+// gives an answer, so a client can read the list's length. A live frame is read through the same
+// attachAskEventFields (TestLiveAskEventFrameCarriesTheReadTimeFields).
+func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	handler, database := rig.handler, rig.database
+	issue := createInteractionIssue(t, handler, "TEST", "Null selected events", "A spec")
+	ask := createChangeableAsk(t, handler, issue.Key)
+	first := answerAskForChange(t, handler, ask.ID, "alice", "Ship", nil)
+	firstAt := timestampValue(first.Answer.At)
+	answerAskForChange(t, handler, ask.ID, "alice", "Hold", &firstAt)
+
+	var changedID int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		update events
+		set payload = jsonb_set(jsonb_set(payload, '{answer,selected}', 'null'), '{previous_answer,selected}', 'null')
+		where type = 'ask.answered' and payload->>'id' = $1 and payload->'previous_answer' is not null
+		returning id
+	`, ask.ID).Scan(&changedID); err != nil {
+		t.Fatalf("store null selected on the changed answer's ask.answered event: %v", err)
+	}
+
+	requireBothSelectedEmpty := func(where string, payload json.RawMessage) {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			t.Fatalf("%s: decode ask.answered payload %s: %v", where, payload, err)
+		}
+		requireEmptySelected(t, where+" answer", fields["answer"])
+		requireEmptySelected(t, where+" previous_answer", fields["previous_answer"])
+	}
+	type servedEvent struct {
+		ID      int64           `json:"id"`
+		Payload json.RawMessage `json:"payload"`
+	}
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read issue events: status=%d body=%s", response.Code, response.Body.String())
+	}
+	logged := false
+	for _, event := range decodeBody[[]servedEvent](t, response) {
+		if event.ID == changedID {
+			requireBothSelectedEmpty("issue event log", event.Payload)
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatalf("issue event log = %s, want event %d", response.Body.String(), changedID)
+	}
+	replay := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, replay, "events", new(changedID-1))
+	_, replayed := nextEvent(t, replay, "events")
+	if replayed.ID != changedID {
+		t.Fatalf("live replay sent ask.answered %d first, want %d", replayed.ID, changedID)
+	}
+	requireBothSelectedEmpty("live replay", replayed.Payload)
 }

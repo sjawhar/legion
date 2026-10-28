@@ -1,23 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- One WebSocket per browser tab at `GET /ws/live` (INFRA-258), with the common `Live*` frames and
-  `LiveView`: a `DeliveryLiveView`, the Dispatch event-feed `EventsLiveView`, or one session's
-  `AgentLiveView`. Delivery views resume with `DeliveryLiveResume` (`seq`, `revs`); events views
-  resume with `EventsLiveResume` (`since`) and begin with `LiveEventsStart`; agent views begin from
-  the session replay. `LiveEventFrame`, `LiveAgentFrame`, and `LiveEnded` complete the new frame
-  family; a `LiveAgentFrame`'s `data` is an `AgentStreamResponder` for its `responder` event and
-  `unknown` for `replay` and `frame`, the session's own JSON, which Dispatch relays unparsed and a
-  page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a
-  random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
-  `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64.
-- `AuthenticatedUser.event_head`, the decimal id of the newest event when `GET /auth/whoami`
-  answered (INFRA-292). It is required: a page of this release subscribes the event feed on
-  `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first
-  subscription there, so every read the page makes after the sign-in check is covered by a resume.
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
+
+- The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
+  `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
+  `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
+  seconds after a person's last browser edit.
 - Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
   carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
   read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:
@@ -40,6 +39,12 @@
   past them is its document, and one whose document or item is past them names nothing.
   `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
   `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. `GraphNode` gains them,
+  optional because a server older than them omits them (`changed_at` was a block's alone and may
+  now be `null`), and `GraphNodeParent` (`kind`, `id`, `ref?`) is `parent`'s type: `id` is the
+  parent node's own id and `ref` is absent when the parent has no reference. An actor list the
+  server never recorded is `[]`, any other fact `null`.
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
@@ -49,7 +54,6 @@
   not always a person's) once the wait was answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
   no backward move reaches the new phase. A contract-39 reader refuses a state carrying either
   addition.
-
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
@@ -133,6 +137,15 @@
   `dispatch_request_approval` tool description says the same rule: an edit outside the decision
   blocks stales the approval and the request after it carries a one-sentence summary of what
   changed, and the human's own answer carries it when it is the whole change (LEGION-573).
+- The Delivery and Pipeline pages' live frames on `GET /ws/delivery` (LEGION-690):
+  `DeliveryLiveView` and `DeliveryLiveWindow` (a preset, whose end stays at the present, or a
+  custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and
+  Dispatch's `DeliveryLiveSnapshot` (the matching GET route's body and a revision per key),
+  `DeliveryLiveDelta` (list items by id, map entries by key, counts by facet and value, null for a
+  key that left, and the other fields whole), `DeliveryLiveFreshness`, `DeliveryLiveError` and
+  `DeliveryLiveHeartbeat` (sent every heartbeat interval beside the socket's ping, which a browser
+  never shows the page). `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it,
+  an error and a heartbeat frame as the server writes them.
 - `githubJobSubject(owner, repo, runId, "completed")` and its type `GithubJobSubject`,
   `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
   default branch, of a run with no pull request, and the generated Go `GithubJobSubject`
@@ -203,38 +216,14 @@
 
 ### Changed
 
-- **Breaking:** a write names its intent by the `Idempotency-Key` request header
-  (`IDEMPOTENCY_KEY_HEADER`) on every `POST` and `PATCH` route, not by a body field (INFRA-258):
-  `CreateBroadcastInput.idempotency_key` is gone, and a body that still carries it is
-  `400 INVALID_JSON`. The key is optional; a repeat under it is answered with the first answer and
-  `IDEMPOTENCY_REPLAYED_HEADER`, a different request under it is `422 KEY_REUSED`
-  (`IDEMPOTENCY_KEY_REUSED`), and a repeat while the first still runs is `409 KEY_IN_FLIGHT`
-  (`IDEMPOTENCY_KEY_IN_FLIGHT`) with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not kept, so the
-  next attempt runs again, unless the first attempt had committed its write, which makes the next
-  attempt `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`): the write landed, Dispatch has no
-  answer to replay, and a client treats it as landed. A repeat of
-  `POST /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`,
-  `POST /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` or
-  `POST /api/v1/artifacts/{id}/comments` is answered from its recovery point: what it made, read
-  afresh, under the first's `201`. Added `IDEMPOTENCY_KEY_MAX`, `IDEMPOTENCY_KEY_PATTERN` (built
-  from the max), `IDEMPOTENCY_KEY_INVALID` (`KEY_INVALID`, beside its siblings'
-  unprefixed codes), `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`
-  (24 hours) and `IDEMPOTENCY_LEASE_MS` (60 seconds); `retriesUnderKey(status, code)`, the one
-  rule the page and the `dispatch` command retry a write by (a 5xx, 408, 429 or
-  `409 KEY_IN_FLIGHT`); `answerNotKept(status, replayed, body)`, whether a replayed 2xx reads
-  `ANSWER_NOT_KEPT`; and `IdempotencyLandedCode`, the two codes of a write made without its answer.
-  `DISPATCH_LOGIN_HEADER` (`Dispatch-Login`) names the login that pressed a page write and
-  `DISPATCH_LOGIN_CHANGED` (`LOGIN_CHANGED`) the `409` Dispatch answers, before anything runs, a
-  write whose caller is someone else or no person; both are generated into Go as
-  `contracts.DispatchLoginHeader` and `contracts.DispatchLoginChanged`.
-- **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`,
-  `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`,
-  `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`,
-  `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe` is a
-  union by view kind: a `DeliveryLiveView` resumes with a `DeliveryLiveResume`, an
-  `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the
-  only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames. The
-  frame fixtures move with them: `fixtures/delivery-live/` is now `fixtures/live/`.
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
@@ -254,6 +243,7 @@
   document or a project document) and the id's percent-encoding, and its description says what a
   block read prints; `dispatch_ask`'s `ref` names a block among what it takes; and
   `dispatch_doc_edit` says a `{#id}` over 256 bytes is stored but its block is no graph node.
+
 - The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
   `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
   fields, in place of one entry per role, and the `resource-limits` capability row's detail names

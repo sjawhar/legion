@@ -206,6 +206,12 @@ const IssueTitleMax = 1000
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = 32000
 
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = 2000
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.

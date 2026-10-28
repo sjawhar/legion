@@ -1,0 +1,3 @@
+kind: Fixed
+body: |-
+  An issue's `updated_at` never moves backwards: a `PATCH`, claim, or release now keeps the later of the stored value and its statement's clock time, so a dashboard cache does not drop a write that waited behind another issue update. Dispatch also marshals every JSON timestamp in UTC, whatever zone its process runs in.

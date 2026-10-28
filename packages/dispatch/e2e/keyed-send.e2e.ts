@@ -49,7 +49,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a send whose answer is lost is tried again under its key, and delivered once", async ({
+test("a send whose answer is lost is tried again under its key, and delivered once @phone", async ({
   browser,
 }) => {
   await seedAgents();
@@ -89,7 +89,7 @@ test("a send whose answer is lost is tried again under its key, and delivered on
   }
 });
 
-test("a send a server that is down answers 503 is tried again, not refused, and delivered once", async ({
+test("a send a server that is down answers 503 is tried again, not refused, and delivered once @phone", async ({
   browser,
 }) => {
   await seedAgents();
@@ -139,7 +139,7 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
 // to leave: it accepts the prompt, reloads while the first attempt's answer is still out, and the
 // reloaded page sends the message again under the same key, which Dispatch answers with the
 // message the first attempt made.
-test("a send held through a reload is resumed under its key, and delivered once", async ({
+test("a send held through a reload is resumed under its key, and delivered once @phone", async ({
   browser,
 }) => {
   await seedAgents();
@@ -186,7 +186,7 @@ test("a send held through a reload is resumed under its key, and delivered once"
 // A broadcast is keyed too, and the same loss of an answer is the same outcome: Dispatch made the
 // broadcast and sent every recipient their copy, and the repeat under that key is answered with it
 // rather than making a second one.
-test("a broadcast whose answer is lost is tried again under its key, and each agent hears it once", async ({
+test("a broadcast whose answer is lost is tried again under its key, and each agent hears it once @phone", async ({
   browser,
 }) => {
   await seedAgents();
@@ -231,7 +231,7 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
 // and the reloaded page sends the identical request under the same key, which Dispatch answers
 // with the broadcast the first attempt made. It was pressed before this visit, so the page stays
 // on Agents and its strip links the broadcast rather than opening it.
-test("a broadcast held through a reload is resumed under its key, and each agent hears it once", async ({
+test("a broadcast held through a reload is resumed under its key, and each agent hears it once @phone", async ({
   browser,
 }) => {
   await seedAgents();
@@ -284,7 +284,7 @@ test("a broadcast held through a reload is resumed under its key, and each agent
 // its own key, and the writes to one session go out in the order they were pressed. Two presses
 // while the network is down are both held, Send stays pressable, and once the network is back the
 // session hears the first and then the second, each once.
-test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout", async ({
+test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout @phone", async ({
   browser,
 }) => {
   test.setTimeout(90_000);
@@ -360,7 +360,7 @@ test("two live-view sends pressed during an outage go out in press order, each o
 // so the delivery runs from about 12 s to 16 s, and the page's attempt, silent all that time, is
 // cut off at 15 s, mid-delivery. The first run finishes the delivery regardless; the page's
 // repeat waits on it and is answered with the comment, and the session hears the mention once.
-test("a comment whose @-mention is cut off mid-delivery by the page is delivered once", async ({
+test("a comment whose @-mention is cut off mid-delivery by the page is delivered once @phone", async ({
   browser,
 }) => {
   test.setTimeout(120_000);

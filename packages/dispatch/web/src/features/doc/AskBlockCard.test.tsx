@@ -8,7 +8,7 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Ask, AskRead, Comment } from "../../api/types";
 import { AskBlockCard } from "./AskBlockCard";
-import type { AskBlockHost } from "./ask-block";
+import type { AskBlockHost } from "./typed-block-drawing";
 
 const schema = new Schema({
   nodes: {

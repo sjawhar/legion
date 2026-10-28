@@ -60,7 +60,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description", async ({
+test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";
@@ -192,7 +192,9 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
   }
 });
 
-test("a phone thread trap skips a held composer's disabled controls", async ({ browser }) => {
+test("a phone thread trap skips a held composer's disabled controls @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -251,7 +253,7 @@ test("a phone thread trap skips a held composer's disabled controls", async ({ b
 // The wrap's other end. Shift+Tab from the sheet's first control goes to its last enabled one,
 // past the held composer's disabled controls, which a trap that read the `disabled` attribute
 // counted as the last and could not focus, leaving focus where it was.
-test("a phone sheet trap wraps Shift+Tab from its first control past a held composer", async ({
+test("a phone sheet trap wraps Shift+Tab from its first control past a held composer @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -307,7 +309,7 @@ test("a phone sheet trap wraps Shift+Tab from its first control past a held comp
   }
 });
 
-test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet", async ({
+test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -344,7 +346,7 @@ test("a project document has no horizontal overflow, 44px controls, and a Commen
   }
 });
 
-test("inline @ autocomplete has touch-sized controls and no overflow on iPhone", async ({
+test("inline @ autocomplete has touch-sized controls and no overflow on iPhone @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
@@ -395,7 +397,7 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // to its newest turn lands well after a link first has a box, and the row measures what it
 // placed rather than trusting the page's own placement, since a turn left under the fixed comment
 // composer would have a hit test read the composer and not the link.
-test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
+test("an inline link keeps its line and grows its hit box without covering its neighbours @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
@@ -739,7 +741,7 @@ async function expectStacked(control: Locator): Promise<void> {
   }
 }
 
-test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
+test("a long name ends in an ellipsis wherever a link or control truncates it @phone", async ({
   browser,
 }, testInfo) => {
   test.setTimeout(90_000);

@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  **Breaking:** Dispatch's live routes before `GET /ws/live` are gone (INFRA-258): `GET /api/v1/events`, `GET /api/v1/agents/{session_id}/stream`, `GET /ws/delivery`, and their disconnect test hooks answer `404`. A tab opened before the deploy shows `Live updates unavailable` until it reloads.
+
+  **Breaking:** the body field `idempotency_key` is gone from `POST /api/v1/broadcasts`; the `Idempotency-Key` header names the send instead. A body that still carries the field is `400 INVALID_JSON`. At one replica the Deployment recreates; above one it rolls. During that roll an old page reaching a new pod sees the removed-route and body-field effects, while a new page reaching an old pod cannot open `/ws/live` and has its broadcast refused because the old server requires the body field.

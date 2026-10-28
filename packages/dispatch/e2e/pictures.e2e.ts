@@ -331,7 +331,7 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
     // is brought into view first, with the link still in it: `dragTo` scrolls its target into
     // view only as it moves there, after the press, and Chromium begins no drag when the page
     // scrolled between the press and the move (the desktop viewport puts the paragraph below the
-    // fold; the phone's does not).
+    // fold).
     const below = editor.getByText("Below the pictures.");
     await below.evaluate((paragraph) => paragraph.scrollIntoView({ block: "nearest" }));
     await expect(versionedLink).toBeInViewport();
@@ -365,7 +365,7 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
 // version's bytes and opens its document's dashboard page. The same document's page URL or
 // `dispatch://` reference left as text (bare, in angle brackets, or a link whose words are its
 // target) is text, which the server cites only within those bytes, so it stays the plain link it is.
-test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

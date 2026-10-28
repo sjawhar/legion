@@ -105,7 +105,7 @@ async function queueBehindAHeldStatus(page: Page, issue: string, label: string):
   await expect(pendingWrites(page)).toContainText(`Labels of ${issue} — Waiting to send`);
 }
 
-test("a comment whose answer is lost lands once, under one key", async ({ browser }) => {
+test("a comment whose answer is lost lands once, under one key @phone", async ({ browser }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A comment once" });
   const path = `/api/v1/issues/${issue.key}/comments`;
@@ -142,7 +142,7 @@ test("a comment whose answer is lost lands once, under one key", async ({ browse
 // tab's storage, asks before the tab is left, and the reloaded page sends it again under the same
 // key. The shell's pending-writes indicator names it while it is out and clears once Dispatch
 // answers it.
-test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears", async ({
+test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears @phone", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -186,7 +186,7 @@ test("a status change whose answer is lost survives a reload, lands once, and th
   }
 });
 
-test("an ask answer whose answer is lost lands once, under one key", async ({ browser }) => {
+test("an ask answer whose answer is lost lands once, under one key @phone", async ({ browser }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "An answer once" });
   const ask = await createAsk(
@@ -226,7 +226,7 @@ test("an ask answer whose answer is lost lands once, under one key", async ({ br
 // `409 KEY_IN_FLIGHT` with `Retry-After: 1`, and the page asks again under the same key. The
 // first attempt is held in Dispatch by a transaction that holds the issue's row, so the 409 is
 // the real server's.
-test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, and the page asks again until it lands once", async ({
+test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, and the page asks again until it lands once @phone", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -294,7 +294,7 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
 // and asks again under the same key, and the first run, which the page's leaving does not cancel,
 // still finishes. Every repeat while it runs is `409 KEY_IN_FLIGHT`; the one after is its answer.
 // A run that the leaving cancelled would never finish, since every run is held as long.
-test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first", async ({
+test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first @phone", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
@@ -347,7 +347,7 @@ test("a comment Dispatch takes 20 s to make lands once from the page, every repe
 // Chromium's DevTools protocol paces the page's own upload (`Network.emulateNetworkConditions`),
 // so the body goes up at the throttle's rate and the page sees its progress as it goes; no other
 // engine the suite runs can be throttled that way, so the row runs on Chromium's projects.
-test("an upload throttled to take 30 s is one attempt and lands once", async ({
+test("an upload throttled to take 30 s is one attempt and lands once @phone", async ({
   browser,
   browserName,
 }, testInfo) => {
@@ -422,7 +422,7 @@ test("an upload throttled to take 30 s is one attempt and lands once", async ({
 // 20 MB body each time, while that run still holds the key. On Chromium's projects the upload is
 // throttled to take 8 s; no other engine can be throttled from Playwright. The page's own
 // `XMLHttpRequest` is the witness of how each attempt ended.
-test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once", async ({
+test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once @phone", async ({
   browser,
   browserName,
 }, testInfo) => {
@@ -502,7 +502,7 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
 // one before asking again. The `chromium-plain-http-sign-out` project runs it on a page that is no
 // secure context, whose browser has no `navigator.locks`: there the other tab's hold is the lease
 // the signing-out tab renews, not its lock.
-test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab", async ({
+test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -584,7 +584,7 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
 // `chromium-plain-http-sign-out` project runs these on the lease a page without `navigator.locks`
 // holds by.
 for (const landed of [false, true]) {
-  test(`a sign-out ${landed ? "that landed" : "that never reached Dispatch"}, its tab closed before the answer, ${landed ? "discards" : "lets go on"} the write another tab held for it`, async ({
+  test(`a sign-out ${landed ? "that landed" : "that never reached Dispatch"}, its tab closed before the answer, ${landed ? "discards" : "lets go on"} the write another tab held for it @phone`, async ({
     browser,
   }, testInfo) => {
     test.skip(
@@ -677,7 +677,7 @@ for (const landed of [false, true]) {
 // of alice's writes are dropped, and nothing goes out after bob's sign-in: neither the label nor
 // another attempt of the held change. A page that advanced the line as it dropped it sent the
 // label under bob's cookie, which only Dispatch's `409 LOGIN_CHANGED` stopped.
-test("alice's write queued behind her held one sends nothing once bob signs in from another tab", async ({
+test("alice's write queued behind her held one sends nothing once bob signs in from another tab @phone", async ({
   browser,
 }) => {
   test.setTimeout(90_000);
@@ -731,7 +731,7 @@ test("alice's write queued behind her held one sends nothing once bob signs in f
 // shell's pending-writes indicator names it, and the reloaded page sends it again once the network
 // is back. The Conversation's pin on a turn goes through the pin queue; the issue header's pin is
 // a `PUT` of the issue's own state, which a reload resumes as it resumes a `POST` or a `PATCH`.
-test("a pin on a turn pressed during an outage survives a reload and lands once the network is back", async ({
+test("a pin on a turn pressed during an outage survives a reload and lands once the network is back @phone", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -765,7 +765,7 @@ test("a pin on a turn pressed during an outage survives a reload and lands once 
   }
 });
 
-test("the issue header's pin pressed during an outage survives a reload and lands once the network is back", async ({
+test("the issue header's pin pressed during an outage survives a reload and lands once the network is back @phone", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -803,7 +803,7 @@ test("the issue header's pin pressed during an outage survives a reload and land
 // sends. Alice's write is dropped, in memory and in the tab's storage, and nothing runs as bob: an
 // attempt that still reaches Dispatch names alice (`Dispatch-Login`), so Dispatch refuses it
 // `409 LOGIN_CHANGED` before anything runs.
-test("a write pending for alice is dropped when bob signs in from another tab, and nothing runs as bob", async ({
+test("a write pending for alice is dropped when bob signs in from another tab, and nothing runs as bob @phone", async ({
   browser,
 }) => {
   test.setTimeout(90_000);

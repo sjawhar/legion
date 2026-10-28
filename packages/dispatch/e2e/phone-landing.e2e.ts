@@ -133,7 +133,7 @@ test.beforeEach(async () => {
 // while one of them is still pending: a newest message known from the messages read before the
 // asks read answers otherwise lands the reader at the top of the page, the newest message under
 // the docked composer, and the asks answering later changes nothing that brings them back.
-test("on a phone, the Conversation opens with its newest message in view whichever read answers last", async ({
+test("on a phone, the Conversation opens with its newest message in view whichever read answers last @phone", async ({
   browser,
 }) => {
   test.setTimeout(240_000);
@@ -222,7 +222,7 @@ test("on a phone, the Conversation opens with its newest message in view whichev
 // path: if a 1012 stops marking a gap, or the whole-cache refresh throttle
 // (`WHOLE_CACHE_REFRESH_MS`) stops letting a gap's first refresh through at once, this row stops
 // seeing a refetch.
-test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list", async ({
+test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list @phone", async ({
   browser,
 }) => {
   const { issue, newest } = await seedConversation("Landing after a failed read");
@@ -271,7 +271,7 @@ test("on a phone, a Conversation whose read failed opens on its newest message o
 // the newest conversation. Returning to a tab they had scrolled still restores that scroll;
 // `doc.e2e.ts` 'tab round-trips keep one document connection, the typed text, and the
 // Conversation scroll position' holds that.
-test("on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back", async ({
+test("on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back @phone", async ({
   browser,
 }) => {
   const { issue, newest } = await seedConversation("Leaving while it loads");
