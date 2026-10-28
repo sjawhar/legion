@@ -2,27 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T12:47:00Z",
-  "round": 3,
+  "completed": "2026-10-28T09:13:48Z",
+  "round": 4,
   "decision": "changes_requested",
-  "reviewedHead": "d6f1c41c2693aea772e6b6920d32a592f39b5963",
-  "codeHead": "97e2b115645f8fc0304a4cb61a0a2d6b3fb14d0e",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 97e2b115 (newest pull_request run), compare to d6f1c41c handoffsOnly true; its checks queued. The required `test` check completed failure at the two earlier code heads 86599d45 (job 122114381270) and 9ac93a97 (job 122162950817), both from this PR's scripts/dispatch/__tests__/comment-delivery.test.ts:30-31: `mkdtemp(join(process.env.TMPDIR ?? \"/legion/scratch/tmp\", ...))` gives ENOENT on a runner with no TMPDIR. The line is unchanged at 97e2b115, so its `test` will fail the same way.",
-  "thermonuclear": "Pair ran once at d6f1c41c. deep-review: APPROVE, no Medium or High; considerDocument, the uuid-parse removal and the classes.ts first-match chain change no output (report.ts on the fixtures identical to 6943c0a0 but for the --pairs filename line). code-quality: CHANGES, minor cleanup and docs only.",
-  "roundTwoFindings": "Both fixed in e28a3d7c2ad0; threads replied to (4388819953, 4388820254) and accepted.",
+  "reviewedHead": "a42286c5956b1a676e145d22e755ef6fb947b745",
+  "codeHead": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head fb909998 (newest pull_request run), compare to a42286c5 handoffsOnly true. pr-title success; lint, typecheck, test queued at 09:13Z. The comment-delivery test now uses node:os tmpdir() (e1b1ab46), and test passed at e1b1ab46 per the PR body; no result yet at fb909998.",
+  "thermonuclear": "Pair ran once at a42286c5 (new round: the forward merges changed the fingerprint). deep-review: APPROVE; this PR's patch to publisher.go, recipients.go, comment_create.go, model.go, dispatch-execute.ts, dispatch-http.ts and dispatch-tools.ts is identical before and after the merges, and main's changes do not touch the recipient logic. code-quality: CHANGES, PR body text only.",
+  "roundThreeFindings": "Fixed in e1b1ab46: the test's temporary directory uses tmpdir(); describeCause returns CauseEntry and an unknown part throws. The skill change and its changelog entries moved to sjawhar/legion#2417 (577d1dc1), which I approved at af281845.",
   "critical": 0,
   "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/dispatch/__tests__/comment-delivery.test.ts:30-31",
-      "description": "The test falls back to the deployment's /legion/scratch/tmp when TMPDIR is unset, so the required `test` check is red on GitHub's runners (ENOENT on mkdtemp, an unhandled error that fails the suite) at 86599d45 and 9ac93a97. Use node:os tmpdir(), as ask-census-window.test.ts does; tmpdir() reads TMPDIR where it is set."
+      "file": "about 45 added lines in 20 files outside .legion/, and the PR body",
+      "description": "The rule relayed on this issue at 2026-10-27T17:00Z (event #52, 'Stop new leaks only') says nothing new lands on sjawhar/legion naming a Dispatch key or a dispatch:// link in author-written text, file contents, PR title or body, and that this issue's PR is cleaned before it merges. The PR adds keys in four CHANGELOGs, deliveryaudit README/.go/_test.go, outbox THROUGHPUT.md and publisher_comment_recipients_test.go comments, the envoy-client test, scripts/dispatch README, the report modules' comments and CAUSES text (classes.ts, inputs.ts, render.ts, report.ts), comment-delivery.test.ts, and the fixtures (BET-15, INFRA-1..12 in comments.csv); the PR body names 13 keys and 5 dispatch:// links. Commit messages and the title name none. Retro removes .legion/ and Legion's own Dispatch: line is exempt, so a reviewed commit must clean the rest: describe by role or by PR number, and use neutral keys (ACME-n) in fixtures."
     }
   ],
   "notADefect": [
-    "No test reaches resolveThreadSessions' non-uuid reply path since 'not-a-uuid' left the loader test: reply_to is read from the uuid column comments.reply_to, so no producer gives a non-uuid; behaviour unchanged."
+    "Until #2417 merges, skills/dispatch/SKILL.md still says a claim delivers no comments while the docs this PR changes say it does; an agent that follows the skill routes or subscribes and still gets the comments, and #2417 is approved to merge right after this PR."
   ],
-  "fastFollow": "Make describeCause return CauseEntry and drop render.ts's `?.`/`?? \"\"` and compareCauses' unknown-part rank, now unreachable; add the dispatch skill entry to packages/claude-envoy/CHANGELOG.md, which ships the same skill through its symlink.",
   "contractCensus": "Not required: unchanged from round 1."
 }
