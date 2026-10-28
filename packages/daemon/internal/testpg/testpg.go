@@ -1,6 +1,7 @@
 // Package testpg gives a test a Postgres database of its own on the devbox and CI Postgres that
-// LEGION_TEST_PG_DSN names, dropped when the test ends, so no test sees another's rows. A test is
-// skipped without it: there is nothing to run against.
+// LEGION_TEST_PG_DSN names, dropped when the test ends, so no test sees another's rows, and a way
+// to reach it across a network's delay (Delayed). A test is skipped without it: there is nothing
+// to run against.
 package testpg
 
 import (
