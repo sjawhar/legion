@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-643",
+  "completed": "2026-10-28T12:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2453",
+  "proof": [
+    {
+      "criterion": "Merge rule of the shared context on the production write replay",
+      "surface": "the Dispatch server (packages/envoy/cmd/dispatch), GOMAXPROCS=2, Postgres 17.11 + pgvector 0.8.7, NATS 2.12.1, under the INFRA-512 architect's replay (tools/load.py, F=0.3, one read per write, 2 SSE streams, minutes 27-35, fresh restore of run/seeded.dump per run)",
+      "command": "$TMPDIR/infra643/measure.sh b1:dispatch-base k1:dispatch-hits, then measure.sh h1:dispatch-head b2:dispatch-base h2:dispatch-head b3:dispatch-base h3:dispatch-head (each run: replay/tools643/restore-db.sh, run-dispatch.sh, drive.sh NAME 0.3 1 27 8 2); shares with go tool pprof -top -cum -show_from='docs\\.\\(\\*Service\\)\\.applyLive$' -focus='docs\\.documentMarkdown$' and -focus='docs\\.\\(\\*renderedReplica\\)\\.updateChangesMarkdown$'",
+      "observed": "CPU utime+stime base 454.78 / 456.57 / 464.40 s, head 423.70 / 428.03 / 429.37 s: every head run below every base run (spread 9.62 s, mean gain 31.55 s, 6.9%, 0.065 cores). W12 3.10-3.24% of samples at the base, 0.00% at the head; W6 1.87-2.01% -> 1.10-1.16%. Expected gain G = 4.06% and gate 3.21% recorded in dispatch://INFRA-643/artifact/merge-rule-md version 1 before the first head run. Hit counts (counter-logging build): observer reused 34, in room 214, rendered 0; before-render from replica 26, from previous operation 76, rendered 149. Same request errors both sides.",
+      "headSha": "85f2515596dee6ddffd99ed3e2678af454567008",
+      "negativeControl": "The base build 59f6647db9d7 on the same replay and inputs: every base run above every head run, and its profile holds the observer render (13.10-13.82 s) that the head never runs."
+    },
+    {
+      "criterion": "Equivalence: the observer's change records, every rendered markdown and every offset are identical to today's",
+      "surface": "the docs package's Service write and room observer path (the code every document write route runs), against a shadow replica that renders the room independently after every commit",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://legion@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -run '^(TestRenderReuse.*|TestAColdWriteLoadsNoRoomUntilItCommits)$' -v; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -count=1 (whole package)",
+      "observed": "14 tests (E1-E14 with subtests) PASS, each asserting the exact delta of all six path counters; whole docs package ok (886.7 s) and ok under -race (1491.5 s, no DATA RACE).",
+      "headSha": "b6e7764609575fc93338d69d9cc49dda10465165",
+      "negativeControl": "Each guard broken on purpose and restored: (a) reuse ignoring the foreign count -> browser insert, delete-only edit, service commits, foreign-commit cases fail ('after commit 3 the replica renders 410314 bytes and the shadow 410346 bytes'); (b) per-replica epoch -> reloaded-room case fails ('room 1 commit 1: classified content_changed=true, the shadow says false'); (c) cold forks record the replica's mark -> room-behind-the-head case fails ('after commit 1 the replica renders 410301 bytes and the shadow 410260 bytes'); (d) inRoom always true -> 9 cases fail, e.g. load-time append ('room 0 commit 0: classified content_changed=false, the shadow says true')."
+    },
+    {
+      "criterion": "Equivalence on real-size documents",
+      "surface": "the same package and harness, on 16 production specs fetched read-only with dispatch doc-read into $TMPDIR/infra643/specs",
+      "command": "INFRA643_SPECS=$TMPDIR/infra643/specs go test ./internal/dispatch/docs/ -run '^TestZZInfra643RealSpecs$' -count=1 -timeout 60m -v (throwaway file zz_infra643_realspec_test.go, deleted before the push)",
+      "observed": "ZZTOTAL specs found 16, specs run 16, cases passed 80 of 80 (warm replace, anchored comment, delete-only browser edit, cold one- and two-operation write per spec, each with the shadow check and the committed counter deltas); LINUX-129 (389,666 B) and LINUX-364 (149,411 B) among them; sizes 63,622-596,774 B.",
+      "headSha": "b6e7764609575fc93338d69d9cc49dda10465165",
+      "negativeControl": "The same harness on the generated document fails under each of the four sabotages above, so a spec run that passed is not vacuous; each case also asserts its counters moved (e.g. warm replace: before from replica 1, observer reused 1)."
+    },
+    {
+      "criterion": "No memory the server keeps resident is added",
+      "surface": "the same server under the replay, heap profile after a forced GC with no request in flight; the docs package's E13 test",
+      "command": "QUIET_HEAP=1 measure.sh mb:dispatch-base mh:dispatch-head (heap?gc=1 20 s after the step); go tool pprof -sample_index=inuse_space -top -cum -focus='envoy/internal/dispatch/docs\\.'; go test -run '^(TestRenderReuseACommittedWriteKeepsNoRendering|TestAColdWriteLoadsNoRoomUntilItCommits)$'",
+      "observed": "inuse_space under docs.*: 409.32 MB base, 396.07 MB head (-3.2%); all 645.38 vs 625.32 MB. After commit, write.fork, tree, updates, renderings and forkMarkdown are nil (warm and cold).",
+      "headSha": "85f2515596dee6ddffd99ed3e2678af454567008",
+      "negativeControl": "End-of-step heap profiles taken without a forced GC (b2 706 MB, h2 750 MB under docs.*) held in-flight request allocations (applyLive +151 MB, room loads -95 MB), showing the forced-GC profile is the one that measures resident memory."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/tree.go",
+    "packages/envoy/internal/dispatch/docs/livewrite.go",
+    "packages/envoy/internal/dispatch/docs/mutation.go",
+    "packages/envoy/internal/dispatch/docs/websocket.go",
+    "packages/envoy/internal/dispatch/docs/pending_authors.go",
+    "packages/envoy/internal/dispatch/docs/service.go",
+    "packages/envoy/internal/dispatch/docs/render_reuse_test.go",
+    "packages/envoy/internal/dispatch/docs/cold_edit_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "The fork read's mark (epoch, foreign) is taken inside srv.Apply before EncodeStateAsUpdateV1, and copied into a local in applyLive right after forkLive, so a later joined read cannot pair an operation's rendering with another read's counters.",
+    "ygo encodes the whole delete set in every update, so a write's rendering is reused only on the room instance its fork was read from: cold forks record no mark, and recover/keepReplica draw a process-unique epoch.",
+    "loadedHead is load.head, not the cursor start: versions roomLoad.took recorded during the load are durable but not in the loaded document.",
+    "The ranking's Appendix A ignore lists drop applyLive samples at this base (applyLive runs under MarkQuote.func1 and applyOpsUnconditional.func1), so shares are cumulative focus without them."
+  ],
+  "deviations": [
+    "The first implementation, its tests and the environment were lost with the pod's disk before any push; the production code was rebuilt by the implementer from the verified, simplified diffs of that first implementation (not delegated to a worker), and the tests were rewritten by a worker and re-verified, including all four negative controls.",
+    "Path counters live on Service (renderPathCounts) rather than split over renderedReplica and liveWrite.",
+    "The warm outside-schema repair takes path (A) (r.markdown nil counts as changed, as rendering would), not 'render' as the plan's table says; classification and WARN are as before.",
+    "Memory compared on a forced-GC heap profile from one extra base/head pair rather than the end-of-step profile of the median runs, which held in-flight request allocations.",
+    "W6/W12 shares measured without the ranking's ignore lists (see trickyParts)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "INFRA-642 also adds a field to liveWriteOrigin and a branch in renderedReplica.observe; its implementer was told the field names (rendering, inRoom); whichever merges second adapts."
+  ]
+}
