@@ -402,10 +402,14 @@ jobs:
               - 'deploy/kubernetes/daemon/legion.yaml.example'
               - 'deploy/kubernetes/operator-route/pod.yml'
               - 'docs/kubernetes.md'
-              # The tools the job installs: jj, mise and Oh My Pi, uv, and the NATS images.
+              # The tools the job installs: jj, mise and Oh My Pi, uv, changie, and the NATS images.
               - *omp_install
               - '.github/actions/install-uv/**'
+              - '.github/actions/install-changie/**'
               - '.github/actions/pull-test-images/**'
+              # changelog-fold.test.sh copies pi-legion's changie config and changelog (its line 53).
+              - 'packages/pi-legion/.changie.yaml'
+              - 'packages/pi-legion/CHANGELOG.md'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read.
             docs:
@@ -1212,6 +1216,11 @@ jobs:
 
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
+
+      - uses: ./.github/actions/install-changie
+
+      - name: Test the changelog fold with changie
+        run: .github/scripts/changelog-fold.test.sh
 
       - name: Test the release version bump
         run: .github/scripts/release-bump.test.sh

@@ -94,3 +94,7 @@ in use fails the run with `address already in use`. CI runs it as the
 
 The authoritative event contract lives in `packages/contracts/`.
 Run `bun run gen:go` in that package before validating or releasing `packages/envoy`.
+
+`.github/workflows/changelog-fold.yaml` folds this package's changelog fragments
+(`.changes/unreleased/`) into `CHANGELOG.md` under the `legion-envoy-v` release that first carried
+each one.
