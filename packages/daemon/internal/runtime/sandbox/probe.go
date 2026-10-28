@@ -65,6 +65,9 @@ const (
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
 	// save.
 	probeTerminationGrace = 5
+	// probeCommandReserve is kept after a probe-image command's deadline for the pod to report its
+	// exit, the daemon to read the log, and the probe Sandbox to delete.
+	probeCommandReserve = time.Minute
 )
 
 // definitiveWaiting are the container waiting reasons no retry changes: the image reference itself
@@ -170,6 +173,9 @@ type ImageProbe struct {
 	// Sandbox's shutdownTime is the budget and one API call after it, so the log of a pod that
 	// finished at the budget is still there to read.
 	Budget time.Duration
+	// Deadline is the time the probe-image command must stop by. probeAttempt derives it from each
+	// attempt's Budget; a direct manifest test leaves it zero and sends no flag.
+	Deadline time.Time
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
 	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
@@ -185,6 +191,10 @@ type ImageProbe struct {
 	// runs Oh My Pi three times, one at a time (pi.agents, the plugin's load, the session-storage
 	// setting), and exits, so it is sized for that and not for a role's work.
 	Resources corev1.ResourceRequirements
+}
+
+func probeCommandDeadline(now time.Time, budget time.Duration) time.Time {
+	return now.Add(budget - min(probeCommandReserve, budget/4))
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
@@ -310,9 +320,13 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	}); err != nil {
 		return unlessStopped(ctx, err, "probe sandbox "+name)
 	}
-	// Built at each create, so the shutdown is the budget from that moment, whatever came before it.
+	// Built at each create, so the shutdown and command deadline are each from that moment,
+	// whatever came before it.
 	manifest := func() (*unstructured.Unstructured, error) {
-		return encodeProbe(r.probeManifest(name, p, r.now().Add(p.Budget+apiTimeout)))
+		now := r.now()
+		commandProbe := p
+		commandProbe.Deadline = probeCommandDeadline(now, p.Budget)
+		return encodeProbe(r.probeManifest(name, commandProbe, now.Add(p.Budget+apiTimeout)))
 	}
 	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
 	if !created {
@@ -1212,6 +1226,9 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
 	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
+	if !p.Deadline.IsZero() {
+		command = append(command, "--probe-deadline", p.Deadline.UTC().Format(time.RFC3339Nano))
+	}
 	// The probe reads the providers directory as a worker's shim does, and only where its pod mounts
 	// the providers Secret there, which it does when something needs it (mountsProviders: a provider
 	// key, a providers secret, or a session database URL key); a directory it is told and cannot read

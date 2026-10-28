@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -153,6 +154,9 @@ func (c tlsCommandClient) name() string { return c.clientName }
 
 func (c tlsCommandClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 	stderr, err := c.run(ctx, site)
+	if tlsProbeDeadlineExceeded(ctx, err) {
+		return tlsOutcome{status: tlsNetworkUnavailable, detail: "probe deadline"}
+	}
 	message := tlsCommandMessage(err, stderr)
 	detail := trimTLSDetail(message)
 	switch {
@@ -179,6 +183,10 @@ func (c tlsCommandClient) run(ctx context.Context, site tlsSite) (string, error)
 	return stderr.String(), err
 }
 
+func tlsProbeDeadlineExceeded(ctx context.Context, err error) bool {
+	return err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
 // tlsChromiumClient reads Chromium's navigation result from stderr because its headless DOM dump
 // exits successfully after a failed navigation.
 type tlsChromiumClient struct {
@@ -187,6 +195,9 @@ type tlsChromiumClient struct {
 
 func (c tlsChromiumClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 	stderr, err := c.run(ctx, site)
+	if tlsProbeDeadlineExceeded(ctx, err) {
+		return tlsOutcome{status: tlsNetworkUnavailable, detail: "probe deadline"}
+	}
 	if failure := chromiumNavigationFailure(stderr); failure != "" {
 		detail := trimTLSDetail(failure)
 		if tlsCertificateError(failure) {

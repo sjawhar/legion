@@ -195,23 +195,33 @@ func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 	}
 }
 
-func TestTLSCommandPastItsBoundIsUnavailableAndFailsTheProbe(t *testing.T) {
+func TestTLSCommandPastTheProbeDeadlineIsUnavailableAndFailsTheProbe(t *testing.T) {
 	originalSites := tlsSites
-	tlsSites = []tlsSite{emSignTLSSite}
+	tlsSites = []tlsSite{emSignTLSSite, aaaTLSSite}
 	t.Cleanup(func() { tlsSites = originalSites })
 
 	client := tlsCommandClient{
 		clientName: "curl",
-		timeout:    time.Millisecond,
-		command: func(tlsSite) (string, []string, []string) {
+		timeout:    tlsDefaultProbeTimeout,
+		command: func(site tlsSite) (string, []string, []string) {
+			if site.name == emSignTLSSite.name {
+				return "sh", []string{"-c", "echo certificate verify failed >&2; exit 1"}, nil
+			}
 			return "sh", []string{"-c", "exec sleep 1"}, nil
 		},
 	}
-	if outcome := client.probe(context.Background(), emSignTLSSite); outcome.status != tlsNetworkUnavailable {
-		t.Fatalf("timed-out command status = %q, want unavailable", outcome.status)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	observations, err := probeTLSClients(ctx, []tlsClient{client})
+	if len(observations) != 2 {
+		t.Fatalf("probeTLSClients() returned %d observations, want the client to reach both sites", len(observations))
 	}
-	if _, err := probeTLSClients(context.Background(), []tlsClient{client}); err == nil || !strings.Contains(err.Error(), "curl cannot verify refusal of the emSign chain") {
-		t.Fatalf("probeTLSClients() = %v, want the timed-out command to fail the probe", err)
+	if got := observations[1]; got.status != tlsNetworkUnavailable || got.detail != "probe deadline" {
+		t.Fatalf("AAA outcome = %+v, want unavailable (probe deadline)", got.tlsOutcome)
+	}
+	if err == nil || !strings.Contains(err.Error(), "curl cannot verify refusal of the AAA chain: probe deadline") {
+		t.Fatalf("probeTLSClients() = %v, want the deadline to name curl and AAA", err)
 	}
 }
 func TestTLSPositiveControlsLineNamesEverySite(t *testing.T) {

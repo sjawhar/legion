@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -346,6 +347,36 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 		t.Fatalf("created %+v, want the Sandbox %s", created, probeSandboxName)
 	}
 	g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+}
+
+func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
+	g := newProbeRig(t, nil)
+	now := time.Date(2026, 10, 28, 13, 30, 0, 0, time.UTC)
+	g.r.now = func() time.Time { return now }
+	g.succeeds(okLine(3) + "\n")
+	probe := probeOptions(t)
+	probe.Budget = 300 * time.Second
+
+	if _, err := g.r.ProbeImage(g.ctx, probe); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass", err)
+	}
+	var created probeSandbox
+	for _, write := range g.writes() {
+		if write.verb != "create" || write.resource != "sandboxes" {
+			continue
+		}
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(write.object.(*unstructured.Unstructured).Object, &created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := created.Spec.PodTemplate.Spec.Containers[0].Command
+	flag := slices.Index(command, "--probe-deadline")
+	if flag < 0 || flag+1 == len(command) {
+		t.Fatalf("probe command = %q, want --probe-deadline", command)
+	}
+	if got, want := command[flag+1], now.Add(240*time.Second).Format(time.RFC3339Nano); got != want {
+		t.Fatalf("probe deadline = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
+	}
 }
 
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the
