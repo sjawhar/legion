@@ -26,6 +26,9 @@
 // where a line breaks inside text (not inside a code span, nor in the block whose HTML holds one of
 // the opens above or any block after it), and whether a list is loose (the blank lines R2 puts
 // between items). Only `--write` loads the parser, so check mode runs without `bun install`.
+// `--write` also refuses, before anything else, a file holding a vertical tab, a form feed or a
+// carriage return with no line feed after it, which GitHub's cmark-gfm reads where these rules do
+// not (ODD_WHITESPACE).
 //
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
 import { existsSync } from "node:fs";
@@ -63,7 +66,7 @@ const TITLE_CLOSERS: Partial<Record<string, string>> = { '"': '"', "'": "'", "("
 const DELIMITER_ROW = /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/;
 /** CommonMark HTML block kinds 1 to 5: what starts each and the text that ends it. */
 const HTML_BLOCKS: readonly (readonly [RegExp, RegExp])[] = [
-  [/^<(?:script|pre|style|textarea)(?:[ \t>]|$)/i, /<\/(?:script|pre|style|textarea)>/i],
+  [/^<(?:script|pre|style|textarea)(?:[ \t\v\f\r>]|$)/i, /<\/(?:script|pre|style|textarea)>/i],
   [/^<!--/, /-->/],
   [/^<\?/, /\?>/],
   [/^<![A-Za-z]/, />/],
@@ -75,7 +78,7 @@ const HTML_BLOCKS: readonly (readonly [RegExp, RegExp])[] = [
  * dropped it), and also CommonMark 0.31's `search`: reading a line as a block start leaves it alone.
  */
 const HTML_BLOCK_TAG =
-  /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)/i;
+  /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t\v\f\r]|\/?>|$)/i;
 /** HTML block kind 7: a complete open or closing tag alone on the line; a blank line ends it. */
 const HTML_TAG_LINE =
   /^<(?!\/?(?:script|pre|style|textarea)\b)(?:[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?|\/[A-Za-z][A-Za-z0-9-]*[ \t]*)>[ \t]*$/i;
@@ -993,27 +996,8 @@ async function loadParser(): Promise<Parse | undefined> {
   return undefined;
 }
 
-/**
- * A line that opens an HTML block for GitHub's cmark-gfm but not for micromark: a `source` tag,
- * which CommonMark 0.31 dropped from the kind-6 names. micromark reads such a line as paragraph
- * text, so the guard checks these lines itself.
- */
-const GFM_ONLY_HTML_BLOCK_LINE = /^ {0,3}<\/?source(?:[ \t>]|\/>|$)/i;
-
 /** The first top-level block whose rendering differs between the two texts, or undefined. */
 function renderDifference(parse: Parse, before: string, after: string): string | undefined {
-  const gfmOnly = (text: string) =>
-    text
-      .split("\n")
-      .map((line, index) => ({ line, index }))
-      .filter(({ line }) => GFM_ONLY_HTML_BLOCK_LINE.test(line));
-  const sourceBefore = gfmOnly(before);
-  const sourceAfter = gfmOnly(after);
-  const moved = sourceBefore.find(({ line }, n) => sourceAfter[n]?.line !== line);
-  if (moved !== undefined || sourceAfter.length !== sourceBefore.length) {
-    const at = moved === undefined ? "" : ` at line ${moved.index + 1}`;
-    return `a line that opens an HTML block on GitHub (\`<source\`)${at} would no longer start its line`;
-  }
   const blocksBefore = parse(before);
   const blocksAfter = parse(after);
   const exactBefore = exactBlocks(blocksBefore);
@@ -1139,6 +1123,13 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
   return status;
 }
 
+/**
+ * Whitespace GitHub's cmark-gfm reads where this script's rules do not: a vertical tab and a form
+ * feed count as spaces there, and a carriage return with no line feed after it ends a line. A file
+ * holding any of them is not written.
+ */
+const ODD_WHITESPACE = /[\v\f]|\r(?!\n)/;
+
 async function writeFiles(paths: readonly string[]): Promise<number> {
   const parse = await loadParser();
   if (parse === undefined) return 2;
@@ -1146,6 +1137,15 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
   for (const path of paths) {
     const text = await readText(path);
     if (text === undefined) return 2;
+    const odd = ODD_WHITESPACE.exec(text);
+    if (odd !== null) {
+      const line = text.slice(0, odd.index).split("\n").length;
+      process.stderr.write(
+        `${path}: refusing to write: line ${line} holds a vertical tab, a form feed or a carriage return with no line feed after it\n`
+      );
+      status = 2;
+      continue;
+    }
     const next = relayout(text);
     if (next === text) continue;
     const difference = foldedDifference(text, next);

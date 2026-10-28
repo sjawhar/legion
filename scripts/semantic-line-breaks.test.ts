@@ -483,3 +483,25 @@ for (const name of ["prefix", "codex"]) {
     expect(result.exitCode).toBe(0);
   });
 }
+
+// GitHub's cmark-gfm reads a vertical tab and a form feed as spaces and a carriage return with no
+// line feed after it as a line ending; --write refuses a file that holds one.
+for (const [what, text] of [
+  ["a form feed after <source", "Some words here\n<source\fsrc=x> more words.\n"],
+  ["a carriage return with no line feed", "Some words here\n<source\rmore words.\n"],
+  ["a vertical tab", "Some words here\n<source\vsrc=x> more words.\n"],
+]) {
+  test(`--write refuses a file that holds ${what}`, async () => {
+    const path = await markdownFile(text);
+    const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+    expect(result.stderr.toString()).toContain(`${path}: refusing to write: line 2 holds`);
+    expect(result.exitCode).toBe(2);
+    expect(await readFile(path, "utf8")).toBe(text);
+  });
+}
+
+test("check mode reads <source followed by a form feed as an HTML block start", async () => {
+  const path = await markdownFile("Some words here. More words\n<source\fsrc=x> one. Two.\n");
+  const { stdout } = run([path]);
+  expect(stdout).not.toContain(`${path}:2:`);
+});
