@@ -13,7 +13,7 @@ import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
 const runs = path.join(work, "runs");
 afterAll(() => rmSync(work, { recursive: true, force: true }));
-for (const label of ["head", "base", "cross"]) {
+for (const label of ["head", "base", "cross", "on", "off"]) {
   mkdirSync(path.join(work, "profiles", label), { recursive: true });
   writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
 }
@@ -31,10 +31,19 @@ const turn = [
 ];
 const noKey = "error: No API key found for anthropic.\nexit=1\n";
 
-function run(name: string, files: Record<string, string>, transcript: object[]) {
+/** A run's own Dispatch as rig.sh's own_dispatch records it in dispatch.json: the batch's Postgres
+ * container, the run's database in it, and its server's port and URL. */
+const dispatchRecord = (database: string, postgres = "pg-1") =>
+  JSON.stringify({ postgres, database, port: 20000, url: "http://127.0.0.1:20000" });
+
+/** A run directory holding `files` (by default a dispatch.json naming the run's own database, or
+ * none when `files` gives it null) and `transcript`. */
+function run(name: string, files: Record<string, string | null>, transcript: object[]) {
   const dir = path.join(runs, name);
   mkdirSync(path.join(dir, "sessions"), { recursive: true });
-  for (const [file, text] of Object.entries(files)) writeFileSync(path.join(dir, file), text);
+  const own = dispatchRecord(`run_${name.replaceAll("-", "_")}`);
+  for (const [file, text] of Object.entries({ "dispatch.json": own, ...files }))
+    if (text !== null) writeFileSync(path.join(dir, file), text);
   writeFileSync(
     path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc.jsonl"),
     transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
@@ -199,6 +208,335 @@ run("brainstorm-head-4", brainstormed, [
   turn[0],
   createIssue[0] ?? {},
   result("call-2", 'Not created: "Due dates" looks like a duplicate.\nTODO-3 [triage] Due dates'),
+]);
+
+// askgate: AskGate's own review of a Dispatch write, read from the run's transcript. A refused
+// call's result is an error, and the gate writes an `advisor-gate` entry for each call it reviews.
+const gateRefused = (toolCallId: string, text: string) => ({
+  type: "message",
+  message: { role: "toolResult", toolCallId, isError: true, content: [{ type: "text", text }] },
+});
+const gate = (data: object) => ({
+  type: "custom",
+  customType: "advisor-gate",
+  id: "e1",
+  parentId: null,
+  timestamp: "2026-10-24T10:00:00.000Z",
+  data: { advisor: "AskGate", latencyMs: 900, ...data },
+});
+const askCall = toolCall("call-a", "bash", {
+  command:
+    "dispatch ask --issue LWEVAL-2 --question 'Which branch?' --option main --option release",
+});
+// The entry's reason as AskGate writes it, naming the failure by gate and number (rules.md, "Your
+// answer"); the refusal the agent gets is NOT_SENT, then the reason.
+const factsReason =
+  "Content 12 (a fact the reader does not need): the question states the repository is nine years old and has 214 contributors; neither fact helps the person choose.";
+const factsRefusal = `AskGate did not send this call.\n${factsReason}`;
+const anAsk = '[{"question":"Move the nightly export to 04:00 UTC?","options":[]}]\n';
+const askgate = (askCase: string, asks = "[]\n") => ({
+  "out.txt": "exit=0\n",
+  "case.txt": `${askCase}\n`,
+  "asks.json": asks,
+});
+const askEntry = { tool: "dispatch_ask", path: "dispatch ask", toolCallId: "call-a" };
+const factsGate = (verdictMode: string, reason = factsReason) =>
+  gate({ ...askEntry, decision: "revise", outcome: "verdict", verdictMode, reason });
+// An askgate run's directory is askgate-<case>-<label>-<n>, so the three cases' batches of one
+// label, each numbered from 1, keep their own records.
+// on, facts: refused in block mode, the reason naming both facts.
+run("askgate-facts-on-1", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// on, facts: the gate only warned, and the call went out.
+run("askgate-facts-on-2", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  factsGate("warn"),
+]);
+// on, facts: refused, but the reason names neither fact.
+run("askgate-facts-on-3", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", "AskGate did not send this call. The options are unclear."),
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-a",
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "The options are unclear.",
+  }),
+]);
+// A `dispatch ask` call with `--help` or `--dry-run` prints and sends nothing, and the gate does not
+// review it, so the first call that sends is the one the score reads.
+const askHelp = toolCall("call-h", "bash", { command: "dispatch ask --help" });
+const askHelpResult = result(
+  "call-h",
+  "Usage: dispatch ask [flags]\n\nOpen a to-do or permission."
+);
+// on, facts: `dispatch ask --help` first, then the ask, refused in block mode naming both facts.
+run("askgate-facts-on-4", askgate("facts"), [
+  ...header,
+  turn[0],
+  askHelp,
+  askHelpResult,
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// on, facts: a dry-run of the ask first, its flag after the issue, then the ask, refused as above.
+run("askgate-facts-on-5", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-d", "bash", {
+    command:
+      "dispatch ask --issue LWEVAL-2 --dry-run --question 'Which branch?' --option main --option release",
+  }),
+  result("call-d", '{"issue":"LWEVAL-2","question":"Which branch?"}'),
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// A `dispatch ask` the gate cannot read, refused before it ran and before any model call: its
+// entry says revise with outcome `unreadable`, which is no review of the ask's text.
+const unreadAsk = toolCall("call-p", "bash", {
+  command: "cat q.txt | dispatch ask --issue LWEVAL-2 --question-file - --option main",
+});
+const unreadRefusal = gateRefused(
+  "call-p",
+  "AskGate did not run this call: it holds a `dispatch ask`."
+);
+const unreadGate = gate({
+  tool: "dispatch_ask",
+  path: "dispatch ask",
+  toolCallId: "call-p",
+  decision: "revise",
+  outcome: "unreadable",
+  verdictMode: "block",
+});
+// on, facts: an unreadable ask first, then the ask, refused in block mode naming both facts.
+run("askgate-facts-on-6", askgate("facts"), [
+  ...header,
+  turn[0],
+  unreadAsk,
+  unreadRefusal,
+  unreadGate,
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// on, facts: refused in block mode for another failure. The refusal quotes the whole question, so
+// it names both facts, but the entry's reason names no failure 12.
+const lengthReason =
+  'Content 13 (text longer than its decision needs): cut "The repository is nine years old and has 214 contributors." and send "Which branch should the release build from?"';
+run("askgate-facts-on-7", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", `AskGate did not send this call.\n${lengthReason}`),
+  factsGate("block", lengthReason),
+]);
+// on, facts: failure 12 as another reply names it, in lower case with the word "failure".
+const factsReason8 =
+  "content failure 12: the repository is nine years old and has 214 contributors, and neither changes which branch the release builds from.";
+run("askgate-facts-on-8", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", `AskGate did not send this call.\n${factsReason8}`),
+  factsGate("block", factsReason8),
+]);
+// on, facts: failure 12 named number first, its gate in parentheses, as a live gate wrote it at
+// c3c7e044a (askgate-facts-on-2 of that batch).
+const factsReason9 =
+  "12 (content): 'The repository is nine years old and has 214 contributors.' — neither fact bears on which branch the release builds from.";
+run("askgate-facts-on-9", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", `AskGate did not send this call.\n${factsReason9}`),
+  factsGate("block", factsReason9),
+]);
+// A `dispatch ask` outside the literal form: the gate reads none of it, and the CLI refused it with
+// no marker. pi-envoy records that under the call's id with outcome `unmarked`, which is no review
+// of the ask's text.
+run("askgate-facts-on-10", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-m", "bash", { command: "dispatch ask $(cat ask-args.txt)" }),
+  gateRefused(
+    "call-m",
+    "dispatch ask was not called: AskGate is on for this session, and this call carries no AskGate marker."
+  ),
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-m",
+    decision: "revise",
+    outcome: "unmarked",
+    verdictMode: "block",
+    reason: "this call carries no AskGate marker",
+  }),
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+const linkGate = (decision: string, outcome = "verdict") =>
+  gate({ ...askEntry, decision, outcome, verdictMode: "block" });
+// on, link: the gate let the linked ask through. The `--help` call before it has no gate entry.
+run("askgate-link-on-1", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  askHelp,
+  askHelpResult,
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  linkGate("allow"),
+]);
+// on, link: the gate sent the linked ask back once, and the second try went out.
+run("askgate-link-on-2", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", "AskGate did not send this call. Quote the comment."),
+  linkGate("revise"),
+]);
+// on, link: no ask reached the issue.
+run("askgate-link-on-3", askgate("link"), [...header, ...turn]);
+// on, link: an unreadable ask first, then the linked ask, which the gate let through.
+run("askgate-link-on-4", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  unreadAsk,
+  unreadRefusal,
+  unreadGate,
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  linkGate("allow"),
+]);
+// on, link: the ask reached the issue, but AskGate reviewed nothing. Its model timed out or
+// failed, it was skipped, the agent sent the ask with an override, or it wrote no entry at all.
+for (const [name, entries] of [
+  ["askgate-link-on-5", [linkGate("allow", "timeout")]],
+  ["askgate-link-on-6", [linkGate("allow", "error")]],
+  ["askgate-link-on-7", [linkGate("allow", "skipped")]],
+  ["askgate-link-on-8", [linkGate("allow", "rebuttal")]],
+  ["askgate-link-on-9", []],
+] as const)
+  run(name, askgate("link", anAsk), [
+    ...header,
+    turn[0],
+    askCall,
+    result("call-a", "Opened ask 7 on LWEVAL-2"),
+    ...entries,
+  ]);
+const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
+const uploadGate = (toolCallId: string, data: object) =>
+  gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
+// on, upload: `dispatch artifact --help`, which the gate does not review, then an unreadable piped
+// upload, then the reviewed one sent back to the comment.
+run("askgate-upload-on-1", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-uh", "dispatch artifact --help"),
+  result("call-uh", "Usage: dispatch artifact [flags]"),
+  uploadCall("call-u1", "cat brief.md | dispatch artifact --issue LWEVAL-2 --name brief.md"),
+  gateRefused("call-u1", "AskGate did not run this call: it reads one command alone."),
+  uploadGate("call-u1", { decision: "revise", outcome: "unreadable", verdictMode: "block" }),
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  gateRefused("call-u2", "AskGate did not send this call. Link the person's comment instead."),
+  uploadGate("call-u2", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Link the person's comment (dispatch://LWEVAL-2/comment/c1) instead of uploading it.",
+  }),
+]);
+// on, upload: the gate let the upload through.
+run("askgate-upload-on-2", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  result("call-u2", "Uploaded brief.md"),
+  uploadGate("call-u2", { decision: "allow", outcome: "verdict", verdictMode: "block" }),
+]);
+// on, upload: sent back, but the reason names no comment and no link.
+run("askgate-upload-on-3", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  gateRefused("call-u2", "AskGate did not send this call. Shorten it."),
+  uploadGate("call-u2", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Shorten it.",
+  }),
+]);
+// off, facts: the ask went out and the gate never ran.
+run("askgate-facts-off-1", askgate("facts", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+]);
+// off, facts: the gate ran although the profile turns it off.
+run("askgate-facts-off-2", askgate("facts", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  factsGate("warn"),
+]);
+// off, facts: no ask reached the issue.
+run("askgate-facts-off-3", askgate("facts"), [...header, ...turn]);
+// off, link: a pair the score does not judge.
+run("askgate-link-off-1", askgate("link", anAsk), [...header, ...turn]);
+// A directory that names no case, as the rig named them before the case was in the name.
+run("askgate-on-1", askgate("facts"), [...header, ...turn]);
+// A directory whose case is not the one its case.txt records.
+run("askgate-upload-on-4", askgate("facts"), [...header, ...turn]);
+
+// Each run's own Dispatch, as dispatch.json records it. Two runs of one batch that name one
+// database in the batch's Postgres shared a Dispatch, so each could read the other's issue and
+// asks: neither is scored. The same name in two batches is two databases, one in each batch's
+// Postgres container.
+const didNothing = [...header, ...turn];
+for (const [name, database, postgres] of [
+  ["ask-on-message-shared-1", "run_shared", "pg-7"],
+  ["ask-on-message-shared-2", "run_shared", "pg-7"],
+  ["ask-on-message-apart-1", "run_apart_1", "pg-7"],
+  ["ask-on-message-apart-2", "run_apart_2", "pg-7"],
+  ["ask-on-message-batches-1", "run_batches", "pg-7"],
+  ["ask-on-message-batches-2", "run_batches", "pg-8"],
+] as const)
+  run(
+    name,
+    { ...capture, "out.txt": "exit=0\n", "dispatch.json": dispatchRecord(database, postgres) },
+    didNothing
+  );
+// A run that records no Dispatch of its own, as every run did before each run had one. Only an
+// older spec run is scored without one (below): an askgate or ask-on-message run that records none
+// stays a rig error.
+run(
+  "ask-on-message-unrecorded-1",
+  { ...capture, "out.txt": "exit=0\n", "dispatch.json": null },
+  didNothing
+);
+run("askgate-facts-unrecorded-1", { ...askgate("facts", anAsk), "dispatch.json": null }, [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
 ]);
 
 // spec-writing and spec-rewrite (score.ts specRow). The run below follows every rule, and each
@@ -472,6 +810,9 @@ interface SpecFixture {
   source?: string;
   /** false: the run has no CLI ledger. */
   ledger?: boolean;
+  /** false: the run records no Dispatch of its own (no dispatch.json), as a spec run of the rig
+   * before each run had one: it ran on its batch's Dispatch, alone in its batch. */
+  ownDispatch?: boolean;
   /** agent-asks.json and agent-texts.json, when not the run's one question and one message. */
   asks?: object[];
   texts?: object[];
@@ -504,6 +845,7 @@ function specRun(name: string, fixture: SpecFixture = {}) {
   run(
     name,
     {
+      ...(fixture.ownDispatch === false ? { "dispatch.json": null } : {}),
       "out.txt": "exit=0\n",
       "source.txt": `${fixture.source ?? "acme-1"}\n`,
       "fixture.json": JSON.stringify({ issue: "LWEVAL-7", spec_artifact: "art-spec" }),
@@ -566,6 +908,10 @@ const copied = (source: string, words: string, verdict: string) => ({
 
 specRun("spec-writing-head-1");
 specRun("spec-rewrite-head-1");
+// Older spec runs: no dispatch.json, as the rig recorded a spec run before each run had a Dispatch
+// of its own.
+specRun("spec-writing-older-1", { ownDispatch: false });
+specRun("spec-rewrite-older-1", { ownDispatch: false });
 // Not in the outline: a heading of C2 is gone.
 specRun("spec-writing-head-2", { spec: outlined().replace("## Goals and non-goals", "## Scope") });
 // No check before the first spec write.
@@ -1221,7 +1567,7 @@ specRun("spec-writing-head-43", {
 // DISPATCH_SESSION_ID), so the CLI logs nothing, and the cell's code is no shell text: the
 // refusal is in the cell's output alone.
 const noHost =
-  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself.\n";
+  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session.\n";
 const pythonCall =
   "import subprocess\nr = subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'], capture_output=True, text=True)\nprint(r.stdout)";
 specRun("spec-writing-head-57", {
@@ -1669,6 +2015,49 @@ test("a tool call naming the other label's checkout is a rig error wherever the 
   expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
 });
 
+test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {
+  expect(out).toContain(
+    "ask-on-message-shared-1\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-2, so each could read the other's issue and asks"
+  );
+  expect(out).toContain(
+    "ask-on-message-shared-2\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-1, so each could read the other's issue and asks"
+  );
+  expect(out).toContain("ask-on-message\tshared\t0/0\t0/0\t2\n");
+});
+
+test("runs on databases of their own are scored, and one name in two batches is two databases", () => {
+  for (const name of [
+    "ask-on-message-apart-1",
+    "ask-on-message-apart-2",
+    "ask-on-message-batches-1",
+    "ask-on-message-batches-2",
+  ])
+    expect(out).toContain(`${name}\tpass=false\t`);
+});
+
+test("a run that records no Dispatch of its own is a rig error", () => {
+  for (const name of ["ask-on-message-unrecorded-1", "askgate-facts-unrecorded-1"]) {
+    expect(out).toContain(
+      `${name}\trig error: it records no Dispatch of its own (no dispatch.json)`
+    );
+    expect(out).not.toContain(`${name}\tpass=`);
+  }
+});
+
+test("an older spec run with no dispatch.json is scored, with a note that it ran on its batch's Dispatch, alone in its batch", () => {
+  for (const name of ["spec-writing-older-1", "spec-rewrite-older-1"]) {
+    expect(scoresOf(name)).toEqual(allPass);
+    expect(rowOf(name)).toContain(
+      "\n  no dispatch.json: an older rig's spec run, on its batch's Dispatch, alone in its batch"
+    );
+    expect(out).not.toContain(`${name}\trig error`);
+  }
+  expect(out).toContain("spec-writing\tolder\t1/1\t1/1\t0\n");
+  expect(out).toContain("spec-rewrite\tolder\t1/1\t1/1\t0\n");
+  // A spec run that records its own Dispatch gets no such note.
+  expect(rowOf("spec-writing-head-1")).not.toContain("no dispatch.json");
+});
+
 test("a measure-before-ask ask passes when it carries the population and the measurement and drops the option they rule out", () => {
   expect(out).toMatch(
     /measure-before-ask-head-1\tpass=true\t.*population=true measured=true dropped=true /
@@ -1690,6 +2079,99 @@ test("a brainstorm run created its issue when Dispatch answered Created, whateve
   expect(out).toMatch(/brainstorm-head-3\tpass=true\t.*surface=spec .*leak=false /);
   // Ran `dispatch issue`, but Dispatch refused it as a duplicate.
   expect(out).toMatch(/brainstorm-head-4\tpass=false\t.*surface=neither /);
+});
+
+test("askgate on, facts: passes when the gate refused the ask in block mode for failure 12, naming both facts", () => {
+  expect(out).toMatch(/askgate-facts-on-1\tpass=true\t.*case=facts .*failure12=true /);
+  expect(out).toMatch(/askgate-facts-on-2\tpass=false\t.*verdictMode=warn /);
+  expect(out).toMatch(/askgate-facts-on-3\tpass=false\t.*age=false contributors=false /);
+});
+
+// Catches: a facts score that finds the two facts anywhere in the refusal, which quotes the
+// question for every failure, so a block for failure 13 passed.
+test("askgate on, facts: reads the refused entry's own reason, and needs failure 12 in it", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-7\tpass=false\t.*refused=true failure12=false age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-8\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-9\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask that sends, past one with --help or --dry-run", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-4\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-5\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask the gate reviewed, past an unreadable one", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-6\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask the gate reviewed, past one the CLI refused as unmarked", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-10\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, link: passes when the ask exists and the gate allowed it on a verdict", () => {
+  expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 allowed=1 revised=0 /);
+  expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
+  expect(out).toMatch(/askgate-link-on-3\tpass=false\t.*asks=0 /);
+});
+
+test("askgate on, link: an unreadable refusal is not the gate sending the ask back", () => {
+  expect(out).toMatch(/askgate-link-on-4\tpass=true\t.*asks=1 allowed=1 revised=0 /);
+});
+
+// Catches: a link score that passes an ask the gate never reviewed: a timeout, an error, a skip, an
+// override or no entry at all left the ask on the issue with no revise, and that passed.
+test("askgate on, link: an ask the gate did not allow on a verdict fails, whatever let it through", () => {
+  for (const n of [5, 6, 7, 8, 9])
+    expect(out).toMatch(new RegExp(`askgate-link-on-${n}\\tpass=false\\t.*asks=1 allowed=0 `));
+  expect(out).toMatch(/askgate-link-on-5\t.*outcomes=\["timeout"\] /);
+  expect(out).toMatch(/askgate-link-on-9\t.*outcomes=\[\] /);
+});
+
+test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
+  expect(out).toMatch(
+    /askgate-upload-on-1\tpass=true\t.*decision=revise verdictMode=block fix=true /
+  );
+  expect(out).toMatch(/askgate-upload-on-2\tpass=false\t.*decision=allow /);
+  expect(out).toMatch(/askgate-upload-on-3\tpass=false\t.*fix=false /);
+});
+
+test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
+  expect(out).toMatch(/askgate-facts-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
+  expect(out).toMatch(/askgate-facts-off-2\tpass=false\t.*gateEntries=1 /);
+  expect(out).toMatch(/askgate-facts-off-3\tpass=false\t.*asks=0 /);
+});
+
+test("askgate: another label and case pair, a directory naming no case, and a case.txt that disagrees are unscored, saying why", () => {
+  expect(out).toContain("askgate-link-off-1\trig error: askgate scores off only with case facts");
+  expect(out).toContain(
+    "askgate-on-1\trig error: the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
+  );
+  expect(out).toContain(
+    "askgate-upload-on-4\trig error: case.txt names 'facts', but the run's directory names upload"
+  );
+});
+
+test("askgate: the counts are per case and label", () => {
+  expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\n");
+  expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\n");
+  expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
+  expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");
+  expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\n");
+  expect(out).toContain("askgate\ton\t0/0\t0/0\t1\n");
 });
 
 // live-read: the pinned Oh My Pi answers a `read` of skill://<name>[/<path>] with one header line,

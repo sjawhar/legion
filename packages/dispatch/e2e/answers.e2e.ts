@@ -49,7 +49,7 @@ async function expectFocusedAskTurn(page: Page, id: string): Promise<void> {
   await expect(turn).toBeInViewport();
 }
 
-test("the answers page lists a person's answers and replies, opens each ask, and changes an answer", async ({
+test("the answers page lists a person's answers and replies, opens each ask, and changes an answer @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";

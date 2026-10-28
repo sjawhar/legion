@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 func env(m map[string]string) func(string) string {
@@ -51,6 +52,32 @@ func TestLoadRequiresMachineLoginURL(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
 		t.Fatalf("Load = (%q, %v), want the machine login URL", cfg.MachineLoginURL, err)
+	}
+}
+
+// TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
+// that carries a credential and is refused names the variable and the value as
+// redact.NotPrinted, never the user name, password or query; a clean refused value is named as
+// written.
+func TestLoadRefusesAURLWithoutPrintingItsCredential(t *testing.T) {
+	for _, row := range []struct{ name, value, want string }{
+		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw@secrets.example/v1?token=qtok77", redact.NotPrinted},
+		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw%zz@secrets.example", redact.NotPrinted},
+		{"BROKER_PUBLIC_URL", "https://secrets.example/v1", `"https://secrets.example/v1"`},
+		{"BROKER_MACHINE_LOGIN_URL", "ftp://tokuser9f3:hunter2pw@dispatch.example/x", redact.NotPrinted},
+	} {
+		e := validEnv()
+		e[row.name] = row.value
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), row.name) || !strings.Contains(err.Error(), row.want) {
+			t.Errorf("Load(%s=%q) = %v, want a refusal naming it and %s", row.name, row.value, err, row.want)
+			continue
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("Load(%s=%q) = %v, names %q", row.name, row.value, err, secret)
+			}
+		}
 	}
 }
 
