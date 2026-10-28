@@ -772,7 +772,7 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
 });
 
-// The lag of the daemon's durable consumers (contract 41): the golden carries a caught-up consumer,
+// The lag of the daemon's durable consumers (contract 42): the golden carries a caught-up consumer,
 // one whose info NATS did not answer and one stalled with messages waiting; a state with no
 // workflow carries an empty list; the oldest and the last handled are null rather than absent, an
 // unknown field and a negative count are refused, and the list cannot be dropped: a plugin from
@@ -825,7 +825,7 @@ test("the state golden carries each durable consumer's lag, and the list cannot 
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// Each served repository Dispatch's GitHub App is not known to be installed on (contract 41): the
+// Each served repository Dispatch's GitHub App is not known to be installed on (contract 42): the
 // golden carries one with its reason, a state with none carries an empty list, an entry without
 // its reason is refused, and the list cannot be dropped: a plugin from before the field refuses
 // the state.

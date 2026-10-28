@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -587,15 +588,21 @@ func lostStandIn(t *testing.T, pulls map[int]string, open string, reads *pathRea
 // changed any of them.
 func recordSnapshot(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	var tables []string
-	for _, table := range []string{"issues", "phases", "pull_requests", "production_checks", "outbox"} {
+	return tablesSnapshot(t, pool, "issues", "phases", "pull_requests", "production_checks", "outbox")
+}
+
+// tablesSnapshot is every row of tables as JSON.
+func tablesSnapshot(t *testing.T, pool *pgxpool.Pool, tables ...string) string {
+	t.Helper()
+	var texts []string
+	for _, table := range tables {
 		var rows string
 		if err := pool.QueryRow(context.Background(), "select coalesce(json_agg(to_jsonb(t) order by to_jsonb(t)::text), '[]')::text from "+table+" t").Scan(&rows); err != nil {
 			t.Fatalf("read the %s: %v", table, err)
 		}
-		tables = append(tables, table+": "+rows)
+		texts = append(texts, table+": "+rows)
 	}
-	return strings.Join(tables, "\n")
+	return strings.Join(texts, "\n")
 }
 
 // lateWebhookChangesNothing applies fact as the webhook of the event the pass already applied from
@@ -608,6 +615,29 @@ func lateWebhookChangesNothing(t *testing.T, pool *pgxpool.Pool, w *workflowRunt
 	}
 	if after := recordSnapshot(t, pool); after != before {
 		t.Fatalf("the late webhook's %T changed the record:\nbefore %s\nafter  %s", fact, before, after)
+	}
+}
+
+// lateWebhookPushDecidesNothing applies push as the webhook of a push the pass already rebuilt
+// would carry it, arriving afterwards, and fails t when it changed the issues, their phases, the
+// production checks, the outbox, or the pull request's judgement, pushes or head run. The record's
+// moves may change: the copy is kept as its move's push or a repeat of it (classify.ApplyPush),
+// which only a head's next arrival by that move reads.
+func lateWebhookPushDecidesNothing(t *testing.T, pool *pgxpool.Pool, w *workflowRuntime, push intake.Push) {
+	t.Helper()
+	others := []string{"issues", "phases", "production_checks", "outbox"}
+	before := tablesSnapshot(t, pool, others...)
+	_, prBefore := capturePhase(t, pool)
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "late-webhook", push, w.handlers...); err != nil {
+		t.Fatalf("apply the late webhook: %v", err)
+	}
+	if after := tablesSnapshot(t, pool, others...); after != before {
+		t.Fatalf("the late push webhook %s..%s changed the records:\nbefore %s\nafter  %s", push.Before, push.After, before, after)
+	}
+	_, prAfter := capturePhase(t, pool)
+	if classify.JudgementChanged(*prBefore, *prAfter) || !slices.Equal(prAfter.Pushes, prBefore.Pushes) || (prAfter.Run == nil) != (prBefore.Run == nil) {
+		t.Fatalf("the late push webhook %s..%s changed the pull request: judgement or pushes %+v, run open %t; was %+v, run open %t",
+			push.Before, push.After, prAfter.Pushes, prAfter.Run != nil, prBefore.Pushes, prBefore.Run != nil)
 	}
 }
 
@@ -1123,7 +1153,7 @@ func webhookPush(before, after, paths string, forced bool, pusher string) intake
 // head to the recorded one (no further: the push that reached the recorded head is not compared),
 // and applies each push, oldest first, as its webhook would have carried it, then the synchronize.
 // The move is the review App's, so the record counts no fix attempt and the red the tests leave is
-// planned, as the webhooks would have left them. The push webhooks arriving afterwards change
+// planned, as the webhooks would have left them. The push webhooks arriving afterwards decide
 // nothing.
 func TestThePassRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
@@ -1154,15 +1184,15 @@ func TestThePassRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
 		counts["/repos/acme/widgets/compare/red-tests...tester-handoff"] != 1 || counts["/repos/acme/widgets/compare/base...code"] != 0 {
 		t.Fatalf("the pass read %v, want the activity once and each push past the recorded head compared once", counts)
 	}
-	lateWebhookChangesNothing(t, pool, w, webhookPush("code", "red-tests", "src/widget_test.go", false, reviewAppLogin))
-	lateWebhookChangesNothing(t, pool, w, webhookPush("red-tests", "tester-handoff", ".legion/CAPTURE-1/test.json", false, reviewAppLogin))
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "red-tests", "src/widget_test.go", false, reviewAppLogin))
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("red-tests", "tester-handoff", ".legion/CAPTURE-1/test.json", false, reviewAppLogin))
 }
 
 // The implementer pushes its fix onto the review App's planned red, and the push webhook is lost
 // with the synchronize. The pass rebuilds the push from the branch's activity: the implementer's
 // code clears the planned mark without counting the planned red. The fix's own red then stands
 // unplanned, so the implementer's next push, lost too, is a counted fix attempt. The fix's push
-// webhook arriving afterwards changes nothing.
+// webhook arriving afterwards decides nothing.
 func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
@@ -1186,7 +1216,7 @@ func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 		t.Fatalf("after the pass head %q plannedRed=%t fixAttempts=%d run %+v, want fix with the planned mark cleared, no attempt counted and no head run",
 			pr.HeadSHA, pr.PlannedRed, pr.FixAttempts, pr.Run)
 	}
-	lateWebhookChangesNothing(t, pool, w, webhookPush("red-tests", "fix", "src/widget.go", false, implementerLogin))
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("red-tests", "fix", "src/widget.go", false, implementerLogin))
 
 	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
 		pr.CheckedHead, pr.Failing = "fix", []string{"pr-checks-result"}
@@ -1206,7 +1236,7 @@ func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 // lists, only the issue's own handoffs, do not make it a handoff push: it is a counted fix attempt,
 // and an approval of the head it replaced does not stand for it. The same paths pushed without
 // rewriting history spare the attempt and carry the approval. Either way the head is judged with
-// its push, and the push webhook arriving afterwards changes nothing.
+// its push, and the push webhook arriving afterwards decides nothing.
 func TestThePassRebuildsAForcePushLost(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -1232,7 +1262,7 @@ func TestThePassRebuildsAForcePushLost(t *testing.T) {
 			if got := classify.ApprovalStands(*pr, "code"); got == tc.forced {
 				t.Fatalf("an approval of code stands for the head the %s left: %t, want %t (pushes %+v)", tc.kind, got, !tc.forced, pr.Pushes)
 			}
-			lateWebhookChangesNothing(t, pool, w, webhookPush("code", "rewritten", ".legion/CAPTURE-1/implement.json", tc.forced, implementerLogin))
+			lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "rewritten", ".legion/CAPTURE-1/implement.json", tc.forced, implementerLogin))
 		})
 	}
 }

@@ -431,7 +431,7 @@ func TestTheListenersLateSettlementOfAHeadThePassSettledChangesNothingItLearned(
 func TestTheListenersDuplicateOfThePassSettlementDecidesNothingInAHeadRun(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
-	pr := stored(t, AdvancePullRequestHead(red, "h3"))
+	pr := stored(t, AdvancePullRequestHead(red, Arrival{}, "h3"))
 	if pr.Run == nil {
 		t.Fatal("h3 arriving before its push opened no head run")
 	}

@@ -36,9 +36,9 @@ type Config struct {
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
 	// BuiltFrom is the repository the daemon's binary is built from (`sjawhar/legion` in a release
-	// build): a build the daemon boots on, or Dispatch starts on, is compared only against the
-	// open production checks of that repository, since no other repository's merge can be in it.
-	// Empty, no build is compared.
+	// build): a build the daemon boots on, or Dispatch announces every server process serves
+	// (server.started), is compared only against the open production checks of that repository,
+	// since no other repository's merge can be in it. Empty, no build is compared.
 	BuiltFrom string
 	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
 	// a completed run of one on the default branch of its repository is read from GitHub for each

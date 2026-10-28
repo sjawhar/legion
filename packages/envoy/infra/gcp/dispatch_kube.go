@@ -13,7 +13,6 @@ import (
 	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
 	networkingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/networking/v1"
 	policyv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/policy/v1"
-	rbacv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/rbac/v1"
 	schedulingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/scheduling/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -97,19 +96,104 @@ func outputString(value any) (string, error) {
 	return "", fmt.Errorf("resolved to a %T, not a string", value)
 }
 
-// safeToEvictAnnotation, set to "false" on the pod templates of all three Dispatch Deployments
-// (the app, <hostname>-tailnet and <hostname>-listener), keeps the cluster autoscaler from
-// evicting their pods to scale a node down. Without it the autoscaler evicts the one-replica front
-// door whenever it consolidates a node, and Dispatch drops off the tailnet until the replacement
-// pod is ready. Autopilot honours it as extended-duration protection: for up to seven days, from
+// safeToEvictAnnotation, set to "false" on the pod template of each Dispatch Deployment that no
+// PodDisruptionBudget covers, keeps the cluster autoscaler from evicting its pods to scale a node
+// down; without it the autoscaler evicts a pod whenever it consolidates the pod's node. A template
+// whose Deployment has a budget (appPdbMinAvailable, frontDoorPdbMinAvailable,
+// listenerPdbMinAvailable) carries no annotation: the budget bounds every voluntary eviction, the
+// autoscaler's among them, and lets the autoscaler move those pods as far as the budget allows.
+// Autopilot honours the annotation as extended-duration protection: for up to seven days, from
 // scale-down and node auto-upgrade only (node repair, maintenance and drains still evict), on a
 // node of the pod's own whenever possible, and with each pod raised to at least 500m CPU and 512Mi
-// memory, so no pod here requests less: the resolver refuses an appCpu or appMemory that would
-// take the app pod below that (newDispatchAppResources).
+// memory, the floor Autopilot also holds a pod with pod anti-affinity to, which every Dispatch pod
+// carries (dispatchSpread). So no pod here requests less: the resolver refuses an appCpu,
+// appMemory, proxyCpu or proxyMemory that would take the app pod below that
+// (newDispatchAppResources).
 const safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
+// dispatchSpread keeps the pods selector matches, a Deployment's own, apart at any replica count:
+// required pod anti-affinity on kubernetes.io/hostname, so a node holds one of them at most and a
+// node's loss takes one pod, and a spread over topology.kubernetes.io/zone with maxSkew 1 that
+// leaves a pod Pending (DoNotSchedule) rather than stacking a zone. minDomains 2 is what makes the
+// zone spread hold on Autopilot: Autopilot creates nodes on demand and the scheduler counts only
+// zones that already have nodes, so without it two pods could satisfy the spread in one zone.
+// Old and new revisions count together (no matchLabelKeys), so a surge pod lands in another zone
+// and on another node than the pods it replaces.
+func dispatchSpread(selector *metav1.LabelSelectorArgs) (*corev1.AffinityArgs, corev1.TopologySpreadConstraintArray) {
+	affinity := &corev1.AffinityArgs{PodAntiAffinity: &corev1.PodAntiAffinityArgs{
+		RequiredDuringSchedulingIgnoredDuringExecution: corev1.PodAffinityTermArray{corev1.PodAffinityTermArgs{
+			LabelSelector: selector,
+			TopologyKey:   pulumi.String("kubernetes.io/hostname"),
+		}},
+	}}
+	zones := corev1.TopologySpreadConstraintArray{corev1.TopologySpreadConstraintArgs{
+		LabelSelector:     selector,
+		TopologyKey:       pulumi.String("topology.kubernetes.io/zone"),
+		MaxSkew:           pulumi.Int(1),
+		MinDomains:        pulumi.Int(2),
+		WhenUnsatisfiable: pulumi.String("DoNotSchedule"),
+	}}
+	return affinity, zones
+}
+
+// secretChecksum is a component Secret's resourceVersion, stamped as checksum/<secret name> on the
+// pod template of every Deployment whose containers read that Secret through their environment,
+// which a running container never re-reads. The Kubernetes provider replaces a Secret whose data
+// changes (the component leaves enableSecretMutable off), and the replacement's new
+// resourceVersion changes the annotation, so the pods roll once the new Secret exists; an
+// unchanged Secret keeps its version, so the annotation never plans a roll by itself. Secrets the
+// component does not own (the NATS seed, the GitHub App key) carry no checksum.
+func secretChecksum(secret *corev1.Secret) pulumi.StringOutput {
+	return secret.Metadata.ResourceVersion().Elem()
+}
+
+// answersProbe is a startup or liveness probe of the HTTP server on the container's loopback port:
+// it fails only when the process does not answer at all. It asks /livez, which runs no dependency
+// check: envoy-dispatch answers it 204 with no I/O, and envoy-listener, which has no such route,
+// answers it 404 from its mux, outside the /v1 routes its bearer guards, with no I/O either. curl
+// without -f exits 0 whatever the status, so any HTTP answer passes, and neither a dependency
+// outage nor a slow Postgres or NATS restarts every pod; --max-time 8 makes curl give up inside the
+// probe's 9 s timeout.
+func answersProbe(port, periodSeconds, failureThreshold int) *corev1.ProbeArgs {
+	return &corev1.ProbeArgs{
+		Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{
+			pulumi.String("curl"), pulumi.String("-sS"), pulumi.String("-o"), pulumi.String("/dev/null"), pulumi.String("--max-time"), pulumi.String("8"),
+			pulumi.String("http://127.0.0.1:" + strconv.Itoa(port) + "/livez"),
+		}},
+		PeriodSeconds: pulumi.Int(periodSeconds), TimeoutSeconds: pulumi.Int(9), FailureThreshold: pulumi.Int(failureThreshold),
+	}
+}
+
+// readyProbe is a readiness probe of the HTTP server on the container's loopback port: curl -f of
+// its /healthz, which checks the process's dependencies, so a pod whose Postgres or NATS is
+// unreachable is taken out of its Service without being restarted.
+func readyProbe(port, periodSeconds, timeoutSeconds, failureThreshold int) *corev1.ProbeArgs {
+	return &corev1.ProbeArgs{
+		Exec:          &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + strconv.Itoa(port) + "/healthz")}},
+		PeriodSeconds: pulumi.Int(periodSeconds), TimeoutSeconds: pulumi.Int(timeoutSeconds), FailureThreshold: pulumi.Int(failureThreshold),
+	}
+}
+
+// sleepPreStop holds a stopping container open for seconds before the kubelet signals it, while
+// the pod's removal from its Service's endpoints reaches every node's proxy.
+func sleepPreStop(seconds int) *corev1.LifecycleArgs {
+	return &corev1.LifecycleArgs{PreStop: &corev1.LifecycleHandlerArgs{
+		Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("sleep"), pulumi.String(strconv.Itoa(seconds))}},
+	}}
+}
+
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
+	return sizedResources(cpu, memory, "")
+}
+
+// sizedResources is a container's equal requests and limits: its CPU and memory, and its
+// ephemeral storage when one is given. Without one none is rendered and Autopilot gives the
+// container its default.
+func sizedResources(cpu, memory, ephemeralStorage string) *corev1.ResourceRequirementsArgs {
 	values := pulumi.StringMap{"cpu": pulumi.String(cpu), "memory": pulumi.String(memory)}
+	if ephemeralStorage != "" {
+		values["ephemeral-storage"] = pulumi.String(ephemeralStorage)
+	}
 	return &corev1.ResourceRequirementsArgs{Requests: values, Limits: values}
 }
 
@@ -226,49 +310,37 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			return nil, err
 		}
 	}
+	// The app and the listener run as ServiceAccount <hostname>, which Workload Identity lets mount
+	// the NATS seed and whose token the app presents (serviceAccountSubject); the front door's pods
+	// run as an account of their own (newDispatchFrontDoor).
 	if _, err := corev1.NewServiceAccount(ctx, s.hostname, &corev1.ServiceAccountArgs{Metadata: metadata(s.hostname)}, child...); err != nil {
 		return nil, err
 	}
-	stateName := s.hostname + "-tailscale-state"
-	_, err = rbacv1.NewRole(ctx, stateName, &rbacv1.RoleArgs{
-		Metadata: metadata(stateName),
-		Rules: rbacv1.PolicyRuleArray{
-			rbacv1.PolicyRuleArgs{ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")}, Verbs: pulumi.StringArray{pulumi.String("create")}},
-			rbacv1.PolicyRuleArgs{ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")}, ResourceNames: pulumi.StringArray{pulumi.String(stateName)}, Verbs: pulumi.StringArray{pulumi.String("get"), pulumi.String("update"), pulumi.String("patch")}},
-		},
-	}, child...)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := rbacv1.NewRoleBinding(ctx, stateName, &rbacv1.RoleBindingArgs{
-		Metadata: metadata(stateName),
-		RoleRef:  rbacv1.RoleRefArgs{ApiGroup: pulumi.String("rbac.authorization.k8s.io"), Kind: pulumi.String("Role"), Name: pulumi.String(stateName)},
-		Subjects: rbacv1.SubjectArray{rbacv1.SubjectArgs{Kind: pulumi.String("ServiceAccount"), Name: pulumi.String(s.hostname), Namespace: pulumi.String(s.namespace)}},
-	}, child...); err != nil {
-		return nil, err
-	}
 	authKeyName := s.hostname + "-tailnet-auth-key"
-	if _, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...); err != nil {
+	authKeySecret, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...)
+	if err != nil {
 		return nil, err
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", cloud.password.Result)
-	if _, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: pulumi.StringMap{
+	dispatchSecret, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: pulumi.StringMap{
 		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret"),
-	}}, child...); err != nil {
+	}}, child...)
+	if err != nil {
 		return nil, err
 	}
 	// The listener's Deployment, Service and bearer share one name. The bearer is a Secret of its
 	// own: the listener's pod names this one and never the component's dispatch Secret, which
 	// holds DATABASE_URL and DISPATCH_SIGNING_KEY.
 	listenerName := s.hostname + "-listener"
-	if _, err := corev1.NewSecret(ctx, listenerName, &corev1.SecretArgs{
+	listenerSecret, err := corev1.NewSecret(ctx, listenerName, &corev1.SecretArgs{
 		Metadata: metadata(listenerName), StringData: pulumi.StringMap{"ENVOY_API_TOKEN": cloud.listenerToken.Result},
-	}, child...); err != nil {
+	}, child...)
+	if err != nil {
 		return nil, err
 	}
-	serveName := s.hostname + "-serve"
-	if _, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{Metadata: metadata(serveName), Data: pulumi.StringMap{"serve.json": pulumi.String(s.serveConfig)}}, child...); err != nil {
+	frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child)
+	if err != nil {
 		return nil, err
 	}
 	seedName := s.hostname + "-nats-seed"
@@ -295,9 +367,9 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		}
 	}
 
-	// Every pod reaches the front door's SOCKS5 proxy and the listener over the network now that
-	// each runs in a pod of its own: one tailnet node holds the hostname and the single-use auth
-	// key's state, and one listener binds the machine id's exclusive durable, while the app scales.
+	// Every pod reaches the front door's SOCKS5 proxy and the listener over the network, at their
+	// Services, since each workload runs in pods of its own and each scales by its own replica
+	// count.
 	tailnetName := s.hostname + "-tailnet"
 	socks5Port := strconv.Itoa(dispatchSOCKS5Port)
 	listenerPort := strconv.Itoa(core.DefaultListenerPort)
@@ -321,25 +393,70 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return env, nil
 	}).(corev1.EnvVarArrayOutput)
 
-	// deployment registers one of the component's three workloads. A pod wears app=<its own name>
-	// alone, which its Deployment's selector matches, so Service <hostname>, which selects
-	// app=<hostname>, sends user traffic to the app's pods and to no other workload's.
-	deployment := func(name string, replicas int, strategy *appsv1.DeploymentStrategyArgs, pod corev1.PodSpecArgs, opts ...pulumi.ResourceOption) (*appsv1.Deployment, error) {
-		return appsv1.NewDeployment(ctx, name, &appsv1.DeploymentArgs{
+	// Unset, the pods name no priority class. Set, the class is read once and every Deployment
+	// waits on the read: Kubernetes refuses every pod naming a class that does not exist, and at
+	// one replica Recreate would already have stopped the old pod, so a missing class fails the
+	// preview or update instead of leaving a workload down.
+	var priorityClass pulumi.Resource
+	if s.disruption.priorityClass != "" {
+		class, err := schedulingv1.GetPriorityClass(ctx, s.hostname+"-priority-class", pulumi.ID(s.disruption.priorityClass), nil, child...)
+		if err != nil {
+			return nil, err
+		}
+		priorityClass = class
+	}
+
+	// deployment registers one of the component's three workloads, and its PodDisruptionBudget
+	// when pdbMinAvailable is set. A pod wears app=<its own name> alone, which its Deployment's
+	// selector, its spreading (dispatchSpread) and its budget match, so Service <hostname>, which
+	// selects app=<hostname>, sends user traffic to the app's pods and to no other workload's.
+	// checksums names the component Secrets the pod's environment reads (secretChecksum). The
+	// template carries safe-to-evict only when no budget covers it (safeToEvictAnnotation).
+	deployment := func(name string, replicas int, pdbMinAvailable int, checksums map[string]*corev1.Secret, pod corev1.PodSpecArgs, opts ...pulumi.ResourceOption) (*appsv1.Deployment, error) {
+		selector := &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(name)}}
+		pod.Affinity, pod.TopologySpreadConstraints = dispatchSpread(selector)
+		annotations := pulumi.StringMap{}
+		for secretName, secret := range checksums {
+			annotations["checksum/"+secretName] = secretChecksum(secret)
+		}
+		if pdbMinAvailable == 0 {
+			annotations[safeToEvictAnnotation] = pulumi.String("false")
+		}
+		if priorityClass != nil {
+			pod.PriorityClassName = pulumi.String(s.disruption.priorityClass)
+			opts = append(opts, pulumi.DependsOn([]pulumi.Resource{priorityClass}))
+		}
+		workload, err := appsv1.NewDeployment(ctx, name, &appsv1.DeploymentArgs{
 			Metadata: metadata(name),
 			Spec: appsv1.DeploymentSpecArgs{
 				Replicas: pulumi.Int(replicas),
-				Strategy: strategy,
-				Selector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(name)}},
+				Strategy: deploymentStrategy(dispatchStrategyFor(replicas)),
+				Selector: selector,
 				Template: corev1.PodTemplateSpecArgs{
-					Metadata: &metav1.ObjectMetaArgs{
-						Labels:      pulumi.StringMap{"app": pulumi.String(name)},
-						Annotations: pulumi.StringMap{safeToEvictAnnotation: pulumi.String("false")},
-					},
-					Spec: pod,
+					Metadata: &metav1.ObjectMetaArgs{Labels: pulumi.StringMap{"app": pulumi.String(name)}, Annotations: annotations},
+					Spec:     pod,
 				},
 			},
 		}, append(opts, child...)...)
+		if err != nil {
+			return nil, err
+		}
+		// The budget covers its own Deployment's pods alone, by the label that Deployment's
+		// selector matches, under the Deployment's own name. It keeps the default
+		// unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that is not ready
+		// while the budget is not met: envoy-dispatch reports not ready whenever Postgres is
+		// briefly unreachable (a Cloud SQL failover, the proxy sidecar restarting) and
+		// envoy-listener whenever NATS is, a front-door pod's own eviction in the same drain among
+		// the causes, and evicting then would turn a blip into a cold restart.
+		if pdbMinAvailable > 0 {
+			if _, err := policyv1.NewPodDisruptionBudget(ctx, name, &policyv1.PodDisruptionBudgetArgs{
+				Metadata: metadata(name),
+				Spec:     &policyv1.PodDisruptionBudgetSpecArgs{MinAvailable: pulumi.Int(pdbMinAvailable), Selector: selector},
+			}, child...); err != nil {
+				return nil, err
+			}
+		}
+		return workload, nil
 	}
 	service := func(name string, port int) (*corev1.Service, error) {
 		return corev1.NewService(ctx, name, &corev1.ServiceArgs{
@@ -350,35 +467,16 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			},
 		}, child...)
 	}
-	// Both single-replica workloads are recreated, never rolled, whatever the app's replica count:
-	// a second tailnet node would contend for the one state Secret the Role names, and a second
-	// listener with the same machine id never binds its exclusive durable.
-	recreate := dispatchStrategyFor(minDispatchReplicas)
 
 	seedMount := corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}
 	seedVolume := corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}}}
-	tailnetHealth := func() *corev1.ProbeArgs {
-		return &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("wget"), pulumi.String("-qO-"), pulumi.String("http://127.0.0.1:9002/healthz")}}}
-	}
 
-	// The front door: the tailnet node every reader reaches Dispatch at, and the pod's SOCKS5
-	// proxy, which is how the app and the listener reach the NATS hub at its tailnet name. The
-	// proxy binds every address, since its callers are pods of their own now, not this pod's
-	// loopback.
-	tailnetStartup := tailnetHealth()
-	tailnetStartup.PeriodSeconds, tailnetStartup.FailureThreshold = pulumi.Int(5), pulumi.Int(36)
-	tailnetReady := tailnetHealth()
-	tailnetReady.PeriodSeconds = pulumi.Int(10)
-	tailnet, err := deployment(tailnetName, 1, deploymentStrategy(recreate), corev1.PodSpecArgs{
-		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
-		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("tailscale"), Image: pulumi.String(s.images.tailscale), Resources: resources("500m", "512Mi"), Env: corev1.EnvVarArray{
-				secretEnv("TS_AUTHKEY", authKeyName, "TS_AUTHKEY"),
-				valueEnv("TS_AUTH_ONCE", "true"), valueEnv("TS_KUBE_SECRET", stateName), valueEnv("TS_USERSPACE", "true"), valueEnv("TS_SOCKS5_SERVER", "0.0.0.0:"+socks5Port), valueEnv("TS_SERVE_CONFIG", "/etc/tailscale/serve.json"), valueEnv("TS_HOSTNAME", s.hostname), valueEnv("TS_EXTRA_ARGS", "--advertise-tags="+strings.Join(s.tags, ",")), valueEnv("TS_ENABLE_HEALTH_CHECK", "true"), valueEnv("TS_LOCAL_ADDR_PORT", "127.0.0.1:9002"),
-			}, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("serve"), MountPath: pulumi.String("/etc/tailscale")}}, StartupProbe: tailnetStartup, ReadinessProbe: tailnetReady},
-		},
-		Volumes: corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}}},
-	})
+	// The front door: frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name
+	// every reader reaches Dispatch at, each also running the SOCKS5 proxy the app and the listener
+	// reach the NATS hub through (newDispatchFrontDoor). Recreated at one pod and rolled above it, so
+	// by default a roll never leaves the name to a single pod. Only the auth key's checksum is on its
+	// template: a renewed certificate in its TLS Secret rolls no pod.
+	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -388,10 +486,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 
 	// Both other workloads dial the NATS hub through the front door's proxy, so each waits for its
-	// pod and its Service: envoy-dispatch exits 1 when it cannot reach NATS and answers 503 on
-	// /healthz until it connects, and envoy-listener exits on a failed initial connect
-	// (packages/envoy/cmd/listener/main.go), so a pod started before the proxy exists never goes
-	// ready and the rollout waits it out.
+	// pod and its Service, for a reason of its own. envoy-listener exits on a failed initial
+	// connect (packages/envoy/cmd/listener/main.go), so a listener pod started before the proxy
+	// exists never goes ready and the rollout waits it out. envoy-dispatch serves without NATS:
+	// its /healthz readiness reads only Postgres, reporting nats false meanwhile, and its bus
+	// clients connect in the background once the proxy answers. So an app pod started first would
+	// go ready and serve without the bus (no outbox publish, no delivery intake) until then; the app
+	// waits for the front door only so that it starts connected.
 	frontDoor := pulumi.DependsOn([]pulumi.Resource{tailnet, tailnetService})
 	// Both also mount the NATS seed, which the pod can read only once its principal holds
 	// roles/secretmanager.secretAccessor on the secret, so each waits for that grant too rather
@@ -399,11 +500,21 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	seedGrant := pulumi.DependsOn([]pulumi.Resource{cloud.seedAccessor})
 
 	// The listener runs under the app's ServiceAccount, which is what mounts the NATS seed through
-	// Workload Identity.
-	if _, err := deployment(listenerName, 1, deploymentStrategy(recreate), corev1.PodSpecArgs{
-		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
+	// Workload Identity, with listenerReplicas pods. Above one it needs an envoy image whose
+	// listener holds a delivery lease: there a standby pod is Ready and serves /v1 and the webhooks
+	// while only the lease holder delivers, a SIGTERM hands the lease over in about a second, and a
+	// killed holder's lease is taken over in about six. Readiness is /healthz, which answers within
+	// 5 s, so the probe allows 6; startup and liveness only ask that the listener answers
+	// (answersProbe). The pre-stop wait keeps a stopping pod answering /v1 while its removal from
+	// the Service propagates, and the 35 s grace period covers those 5 s, the listener's own stop
+	// of about 26 s, and a margin.
+	if _, err := deployment(listenerName, s.listenerReplicas, s.disruption.listenerPDBMinAvailable, map[string]*corev1.Secret{listenerName: listenerSecret}, corev1.PodSpecArgs{
+		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("500m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + listenerPort + "/healthz")}}}},
+			corev1.ContainerArgs{
+				Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("500m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount,
+				Lifecycle: sleepPreStop(5), StartupProbe: answersProbe(core.DefaultListenerPort, 5, 60), LivenessProbe: answersProbe(core.DefaultListenerPort, 10, 3), ReadinessProbe: readyProbe(core.DefaultListenerPort, 5, 6, 2),
+			},
 		},
 		Volumes: seedVolume,
 	}, frontDoor, seedGrant); err != nil {
@@ -428,12 +539,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// (stopGrace = 30 * time.Second). The two values are coupled and neither may be raised alone; a
 	// wait the grace period does not cover spends the document service's five-second reserve and
 	// kills a write still waiting on a lock mid-commit.
-	// Only the app's container waits: the front door and the listener are single-replica Recreate
-	// workloads with no second pod to route to, so a wait there would only lengthen their outage,
-	// and neither sets a grace period.
-	appPreStop := &corev1.LifecycleArgs{PreStop: &corev1.LifecycleHandlerArgs{
-		Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("sleep"), pulumi.String("5")}},
-	}}
+	// The listener's container waits the same 5 s for the same reason (sleepPreStop); the front
+	// door's tailscale container drains the Tailscale Service and logs its node out instead
+	// (tailnetPreStop).
+	appPreStop := sleepPreStop(5)
 	// The app's container alone carries the broker relay and the GitHub App: the listener and the
 	// front door take neither.
 	appEnv := corev1.EnvVarArray{
@@ -497,50 +606,48 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// an operator reaches it through kubectl port-forward.
 		appEnv = append(appEnv, valueEnv("DISPATCH_PPROF_PORT", strconv.Itoa(s.pprofPort)))
 	}
+	// cloud-sql-proxy serves its health endpoints on 9801 (--health-check): /startup once its
+	// listener is up, which gates envoy-dispatch's start, and /liveness while the process answers,
+	// so a hung proxy is restarted rather than leaving the pod unready for ever. The kubelet probes
+	// from the pod's own node, which the app's NetworkPolicy does not fence. envoy-dispatch
+	// migrates the database before it listens, and nothing bounds a migration's run time, so its
+	// startup probe allows 30 minutes (180 tries 10 s apart) before liveness takes over.
+	proxyStartup := &corev1.ProbeArgs{
+		HttpGet:       &corev1.HTTPGetActionArgs{Path: pulumi.String("/startup"), Port: pulumi.Int(9801)},
+		PeriodSeconds: pulumi.Int(1), TimeoutSeconds: pulumi.Int(5), FailureThreshold: pulumi.Int(60),
+	}
+	proxyLiveness := &corev1.ProbeArgs{
+		HttpGet:       &corev1.HTTPGetActionArgs{Path: pulumi.String("/liveness"), Port: pulumi.Int(9801)},
+		PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(5), FailureThreshold: pulumi.Int(3),
+	}
+	appReady := readyProbe(8766, 10, 3, 3)
+	appReady.InitialDelaySeconds = pulumi.Int(5)
 	appPod := corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources(dispatchProxyCPU, dispatchProxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
+			corev1.ContainerArgs{
+				Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"),
+				Args:      pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), pulumi.String("--health-check"), pulumi.String("--http-address=0.0.0.0"), pulumi.String("--http-port=9801"), cloud.instance.ConnectionName},
+				Resources: sizedResources(s.appResources.proxyCPU, s.appResources.proxyMemory, s.appResources.proxyEphemeralStorage), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
+				StartupProbe: proxyStartup, LivenessProbe: proxyLiveness,
+			},
 		},
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appCPU, s.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
+			corev1.ContainerArgs{
+				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: sizedResources(s.appResources.appCPU, s.appResources.appMemory, s.appResources.appEphemeralStorage), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
+				StartupProbe: answersProbe(8766, 10, 180), LivenessProbe: answersProbe(8766, 10, 3), ReadinessProbe: appReady,
+			},
 		},
 		Volumes: appVolumes,
 	}
-	// Unset, the pod names no priority class, so its template is the one it always had. Set, the
-	// class is read first and the Deployment waits on the read: Kubernetes refuses every pod naming
-	// a class that does not exist, and at one replica Recreate would already have stopped the old
-	// pod, so a missing class fails the preview or update instead of leaving Dispatch down.
-	appOpts := []pulumi.ResourceOption{frontDoor, pulumi.DependsOn(appGrants)}
-	if s.appPriorityClassName != "" {
-		class, err := schedulingv1.GetPriorityClass(ctx, s.hostname+"-priority-class", pulumi.ID(s.appPriorityClassName), nil, child...)
-		if err != nil {
-			return nil, err
-		}
-		appPod.PriorityClassName = pulumi.String(s.appPriorityClassName)
-		appOpts = append(appOpts, pulumi.DependsOn([]pulumi.Resource{class}))
-	}
-	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), appPod, appOpts...); err != nil {
+	// envoy-dispatch reads the dispatch Secret and ENVOY_TOKEN from the listener's, so a change to
+	// either rolls the app.
+	appChecksums := map[string]*corev1.Secret{dispatchSecretName: dispatchSecret, listenerName: listenerSecret}
+	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
 		return nil, err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {
 		return nil, err
-	}
-	// The budget covers the app's pods alone, by the label its Deployment and Service select on. It
-	// keeps the default unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that
-	// is not ready while the budget is not met: envoy-dispatch reports not ready whenever NATS or
-	// Postgres is briefly unreachable, the front door's own eviction in the same drain among the
-	// causes, and evicting the app then would turn a blip into a cold restart.
-	if s.appPDBMinAvailable > 0 {
-		if _, err := policyv1.NewPodDisruptionBudget(ctx, s.hostname, &policyv1.PodDisruptionBudgetArgs{
-			Metadata: metadata(s.hostname),
-			Spec: &policyv1.PodDisruptionBudgetSpecArgs{
-				MinAvailable: pulumi.Int(s.appPDBMinAvailable),
-				Selector:     &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
-			},
-		}, child...); err != nil {
-			return nil, err
-		}
 	}
 
 	podPeer := func(app string) networkingv1.NetworkPolicyPeerArgs {
@@ -583,8 +690,8 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if err := policy(s.hostname, appIngress); err != nil {
 		return nil, err
 	}
-	// Whatever reaches the proxy gets tailnet egress as this node, so only the two workloads that
-	// dial the hub through it may.
+	// Whatever reaches the proxy gets tailnet egress as a front-door node, on every front-door pod,
+	// so only the two workloads that dial the hub through it may.
 	if err := policy(tailnetName, networkingv1.NetworkPolicyIngressRuleArray{
 		ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}),
 	}); err != nil {

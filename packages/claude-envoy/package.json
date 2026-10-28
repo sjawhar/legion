@@ -18,7 +18,7 @@
     "AGENTS.md"
   ],
   "legion": {
-    "daemonApiVersion": 41
+    "daemonApiVersion": 42
   },
   "repository": {
     "type": "git",
@@ -28,6 +28,7 @@
     "channel": "bun bin/envoy-channel.ts",
     "build": "bun scripts/build.ts",
     "check-dist": "bun scripts/build.ts --check",
+    "verify-build": "bash scripts/verify-build.sh",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ hooks/ scripts/"

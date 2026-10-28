@@ -70,7 +70,7 @@ type State struct {
 	Settings Settings `json:"settings"`
 	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
-	// snapshot open. Never null: a daemon with no workflow has none (contract 41).
+	// snapshot open. Never null: a daemon with no workflow has none (contract 42).
 	Consumers []ConsumerLagView `json:"consumers"`
 }
 
@@ -113,7 +113,7 @@ func ConsumerLagViewsOf(lags []intake.ConsumerLag) []ConsumerLagView {
 // Refused, WithoutWebhookApp and Caches are sorted, and never null. Caches are the repository
 // caches of repositories the mapping no longer names, each kept until its RetainedUntil (contract
 // 32). WithoutWebhookApp is each served repository Dispatch's GitHub App is not known to be
-// installed on, with why (contract 41).
+// installed on, with why (contract 42).
 type RepositoriesView struct {
 	Owners            []string                `json:"owners"`
 	Mapped            []MappedRepositoryView  `json:"mapped"`

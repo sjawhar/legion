@@ -13927,7 +13927,10 @@ var IssueEventPayloadSchema = object({
   status: string2().optional(),
   priority: number2().int().min(0).max(3).nullable().optional(),
   rank: string2().optional(),
-  route: string2().nullish()
+  route: string2().nullish(),
+  changed: array(string2()).optional(),
+  ancestors: array(string2()).optional(),
+  thread_logins: array(string2()).optional()
 });
 var ArtifactCreatedEventPayloadSchema = object({
   artifact: object({ id: string2().optional(), slug: string2().optional(), name: string2().optional() }).optional()
@@ -13981,11 +13984,12 @@ var askEventPayloadFields = {
     primary: boolean2().optional()
   }).optional(),
   resolution: object({
-    kind: _enum2(["retracted", "resolved"]).optional(),
+    kind: _enum2(["retracted", "resolved", "withdrawn"]).optional(),
     reason: string2().optional(),
     actor: object({ kind: string2().optional(), id: string2().optional() }).passthrough().optional(),
     at: string2().optional()
-  }).nullish()
+  }).nullish(),
+  thread_logins: array(string2()).optional()
 };
 var AskEventPayloadSchema = intersection(object(askEventPayloadFields), object({
   previous: never().optional(),
@@ -14047,7 +14051,8 @@ var CommentEventPayloadSchema = object({
   author: object({ kind: string2(), id: string2() }).optional(),
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
-  deliveries: array(CommentDeliverySchema).optional()
+  deliveries: array(CommentDeliverySchema).optional(),
+  thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
   id: string2().optional(),
@@ -14056,7 +14061,8 @@ var MessageEventPayloadSchema = object({
   in_reply_to: string2().nullish(),
   reply_body: string2().optional(),
   thread_target: string2().optional(),
-  author: object({ kind: string2(), id: string2() }).optional()
+  author: object({ kind: string2(), id: string2() }).optional(),
+  thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
 var DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
@@ -14126,7 +14132,7 @@ var AskFollowerEventPayloadSchema = object({
 
 // ../contracts/src/actor-label.ts
 function shortSessionId(id) {
-  return `session:${id.slice(0, 8)}\u2026`;
+  return id.startsWith("legion-daemon:") ? id : `session:${id.slice(0, 8)}\u2026`;
 }
 function sessionLabel(sessionId, title) {
   const trimmed = title?.trim() ?? "";
@@ -14457,7 +14463,7 @@ var dispatchToolSpecs = [
       priority: 1,
       before: "DSP-2"
     },
-    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, attach it to " + "architecture components, set the repository it targets, or move it on its project's " + "board. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only a board move " + "(before, after), components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it. before and after move the issue on " + "its project's board: before puts it above that issue, after below, and both together " + "land it between them. A project's board order is one agent's to keep; in a Legion " + "deployment that is the controller. Never reassign an issue a person holds to get a " + "faster answer: who holds it is their call. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
+    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, attach it to " + "architecture components, set the repository it targets, or move it on its project's " + "board. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. Closing an issue withdraws every open ask " + "it holds (resolution kind withdrawn, naming the closer), and reopening it brings exactly " + "those asks back. A closed issue takes only a board move " + "(before, after), components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it. before and after move the issue on " + "its project's board: before puts it above that issue, after below, and both together " + "land it between them. A project's board order is one agent's to keep; in a Legion " + "deployment that is the controller. Never reassign an issue a person holds to get a " + "faster answer: who holds it is their call. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
@@ -14484,7 +14490,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, and the result names who moves the status: you, with " + "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " + "else is undone. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. While you hold it, a person's answers, " + "comments and messages on the issue reach your session directly (a new comment that mentions you " + "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " + "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " + "second copy is the same comment); an agent's events and every other change on the issue still " + "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " + "resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved " + "or reopened), reach you " + "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, and the result names who moves the status: you, with " + "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " + "else is undone. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       release: z.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -14571,7 +14577,7 @@ var dispatchToolSpecs = [
       kind: "retracted",
       reason: "A newer question supersedes this one."
     },
-    description: "Retract an open question that is moot or resolve one after finding the answer. This closes " + "the question without answering it. An ask that lives as an `ask` block in a document is " + 'closed in the document too. A reason beginning "removed from the document in version" is ' + "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " + "a newer one replaces or the design made moot, resolved for one whose answer you found; an " + "answered ask cannot be resolved, and resolving records no decision by a person.",
+    description: "Retract an open question that is moot or resolve one after finding the answer. This closes " + "the question without answering it. An ask that lives as an `ask` block in a document is " + 'closed in the document too. A reason beginning "removed from the document in version" is ' + "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " + "a newer one replaces or the design made moot, resolved for one whose answer you found; an " + "answered ask cannot be resolved, and resolving records no decision by a person. An issue's " + "close withdrew its open asks (kind withdrawn, which only Dispatch writes, never this tool); " + "an ask on a closed issue is refused (409 ISSUE_CLOSED): reopen the issue first.",
     arguments: (z) => ({
       ask: z.string().describe("Ask id (uuid) to close; an 8+ hex prefix unique among this session's own open asks " + "works too."),
       kind: z.enum(["retracted", "resolved"]).describe("Whether the ask is retracted or self-resolved."),
@@ -14752,7 +14758,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_search",
     example: { query: "astrolabe" },
-    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
+    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " + "when, the options chosen and its text; a closed one says it was closed with no answer, or " + "shows the last answer it had. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z) => ({
       query: z.string({
         min: 2,
@@ -15431,6 +15437,15 @@ function commandsHelp() {
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
+
+// ../envoy-client/src/actor-text.ts
+function actorText(actor) {
+  const service = actor.kind === "session" ? actor.service : undefined;
+  if (service === undefined) {
+    return `${actor.kind} ${actor.id}`;
+  }
+  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
+}
 
 // ../envoy-client/src/ask-answer.ts
 var HEAD_LENGTH = 120;
@@ -16760,7 +16775,7 @@ ${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
 }
-function searchResultLine(result, baseUrl) {
+function searchHitLine(result, baseUrl) {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
   if (owner.kind === "document") {
@@ -16770,6 +16785,42 @@ function searchResultLine(result, baseUrl) {
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
   const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+function indentedText(text) {
+  return text.split(/\r?\n/u).join(`
+    `);
+}
+function answerLines(lead, answer) {
+  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
+  return [
+    `  ${lead} by ${answer.user} at ${answer.at} \xB7 options chosen: ${selected}`,
+    `  Answer text: ${text}`
+  ];
+}
+function resolutionText(resolution) {
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${indentedText(resolution.reason)}`;
+}
+function askStateLines(ask) {
+  if (ask === undefined) {
+    return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
+  }
+  switch (ask.state) {
+    case "open":
+      return ["  Open: no answer yet."];
+    case "answered":
+      return answerLines("Answered", ask.answer);
+    case "resolved":
+      return ask.answer === undefined ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`] : [
+        `  Closed after an answer: ${resolutionText(ask.resolution)}`,
+        ...answerLines("Last answer", ask.answer)
+      ];
+  }
+}
+function searchResultLine(result, baseUrl) {
+  const line = searchHitLine(result, baseUrl);
+  return result.kind === "ask" ? [line, ...askStateLines(result.ask)].join(`
+`) : line;
 }
 function searchAnswer(search, query, offset, configUrl) {
   const results = search.results;
@@ -17963,13 +18014,6 @@ function eventHead(event) {
       return;
   }
 }
-function actorText(actor) {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
-}
 function eventRef(event) {
   const payload = event.payload;
   const id = typeof payload === "object" && payload !== null && "id" in payload ? payload.id : undefined;
@@ -18663,7 +18707,8 @@ async function executeDispatchTool(input) {
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
         const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
-        text = legionManaged ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.` : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+        const reaches = `A person's answers, comments and messages on ${issueKey} now reach you directly.`;
+        text = legionManaged ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop. ${reaches}` : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop. ${reaches}`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,

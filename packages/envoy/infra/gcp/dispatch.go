@@ -22,14 +22,29 @@ import (
 const dispatchType = "envoy-infra:gcp:Dispatch"
 
 const (
-	defaultDispatchDatabaseVersion = "POSTGRES_16"
-	defaultDispatchDatabaseTier    = "db-custom-1-3840"
-	defaultDispatchNamespace       = "dispatch"
-	defaultDispatchReplicas        = 1
+	defaultDispatchDatabaseVersion = "POSTGRES_18"
+	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
+	// 15 GB. During a roll, every app pod that holds connections (the replicas, the surge pod and
+	// pods still terminating, for up to their grace period) times dispatchConnectionsPerPod must
+	// fit in the instance's max_connections less PostgreSQL's 3 superuser-reserved slots, so a
+	// consumer sets databaseTier for its replica count.
+	defaultDispatchDatabaseTier = "db-custom-4-15360"
+	defaultDispatchNamespace    = "dispatch"
+	defaultDispatchReplicas     = 1
+
+	// defaultDispatchFrontDoorReplicas and defaultDispatchListenerReplicas are the front door's
+	// and the listener's pod counts when frontDoorReplicas and listenerReplicas are unset. The
+	// front door runs two by default, since with one pod every node drain, upgrade or scale-down
+	// that moves it takes Dispatch off the tailnet until its replacement is ready.
+	defaultDispatchFrontDoorReplicas = 2
+	defaultDispatchListenerReplicas  = 1
 
 	// minDispatchReplicas is the fewest pods a workload of this component may run, and the count
-	// at which a Deployment must be recreated rather than rolled: two processes of one pod's kind
-	// must not overlap. It is what an unset replicas happens to default to, not the same rule.
+	// at which its Deployment is recreated rather than rolled: a roll runs the outgoing build and
+	// the incoming one together, which is safe only once the outgoing build follows the rules for
+	// two builds running side by side and keeps its assets in the shared store. An operator who
+	// runs a workload above this count runs such builds. It is what an unset replicas happens to
+	// default to, not the same rule.
 	minDispatchReplicas = 1
 
 	// dispatchStrategyRecreate stops every running pod before starting the new one;
@@ -37,6 +52,12 @@ const (
 	// between them.
 	dispatchStrategyRecreate      = "Recreate"
 	dispatchStrategyRollingUpdate = "RollingUpdate"
+
+	// dispatchAvailabilityZonal and dispatchAvailabilityRegional are the two Cloud SQL
+	// availability types databaseAvailabilityType takes: one zone, the default, or a standby in a
+	// second zone that Cloud SQL fails over to.
+	dispatchAvailabilityZonal    = "ZONAL"
+	dispatchAvailabilityRegional = "REGIONAL"
 
 	// defaultAzureFederationAudience is the audience of the keyless form's projected token when
 	// azureFederationAudience is unset: the one Entra's federated credentials expect by default.
@@ -47,14 +68,37 @@ const (
 	defaultDispatchAppCPU    = "1"
 	defaultDispatchAppMemory = "4Gi"
 
-	// dispatchProxyCPU and dispatchProxyMemory size the app pod's cloud-sql-proxy sidecar, which
-	// Autopilot counts in the pod's request beside envoy-dispatch.
-	dispatchProxyCPU    = "200m"
-	dispatchProxyMemory = "256Mi"
+	// defaultDispatchProxyCPU and defaultDispatchProxyMemory size the app pod's cloud-sql-proxy
+	// sidecar when proxyCpu and proxyMemory are unset; Autopilot counts it in the pod's request
+	// beside envoy-dispatch. Every database call of the pod passes through the proxy's TLS: up
+	// to dispatchConnectionsPerPod connections at once. The proxy's own
+	// Kubernetes sidecar example requests 1 CPU, since its CPU use scales linearly with the IO
+	// between the database and the application, and 2Gi, since its memory scales linearly with
+	// the active connections
+	// (https://github.com/GoogleCloudPlatform/cloud-sql-proxy/blob/v2.26.3/examples/k8s-sidecar/README.md,
+	// "Run the Cloud SQL Auth Proxy as a sidecar"). One server pod's pools are that example's
+	// load, so these are its values. With the app's defaults the pod requests 2 CPU and 6Gi,
+	// inside Autopilot's bounds below.
+	defaultDispatchProxyCPU    = "1"
+	defaultDispatchProxyMemory = "2Gi"
+
+	// autopilotDefaultEphemeralStorage is the ephemeral storage Autopilot gives a container that
+	// names none, which each of the app pod's two containers does while appEphemeralStorage or
+	// proxyEphemeralStorage is unset
+	// (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests).
+	autopilotDefaultEphemeralStorage = "1Gi"
 )
 
-// Autopilot's bounds for the app pod's total request, the general-purpose compute class's under the
-// safe-to-evict annotation (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
+// dispatchConnectionsPerPod is the most connections one app pod opens to Postgres: envoy-dispatch's
+// store.ConnectionsPerProcess (packages/envoy/internal/dispatch/store/pool.go), the sum of its
+// counted pools and its permanent listeners. The listener's and the front door's pods open none.
+// TestDispatchConnectionsPerPodIsTheServers fails when a counted pool's size changes and this
+// does not.
+const dispatchConnectionsPerPod = 86
+
+// Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
+// with pod anti-affinity, which every Dispatch pod carries, or with the safe-to-evict annotation,
+// which a pod no budget covers carries (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
 // below the floor or outside the memory-per-CPU ratio Autopilot raises the pod's request, so the
 // container would not run at the size the component renders; above the ceiling it rejects the pod.
 var (
@@ -64,6 +108,11 @@ var (
 	autopilotPodMaxMemory = new(big.Rat).SetInt64(110 << 30)
 	autopilotMinGiBPerCPU = big.NewRat(1, 1)
 	autopilotMaxGiBPerCPU = big.NewRat(13, 2)
+	// The pod's ephemeral storage, the sum over its containers, must be from 10Mi to 10Gi in the
+	// general-purpose class: Autopilot raises a pod below the floor and rejects one above the
+	// ceiling.
+	autopilotPodMinEphemeralStorage = new(big.Rat).SetInt64(10 << 20)
+	autopilotPodMaxEphemeralStorage = new(big.Rat).SetInt64(10 << 30)
 )
 
 var (
@@ -85,10 +134,20 @@ type DispatchArgs struct {
 	TailnetDnsName string             `pulumi:"tailnetDnsName"`
 	Tags           []string           `pulumi:"tags"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey" provider:"secret"`
+	// TailnetService is the Tailscale Service the front door's pods host, as Tailscale's API names
+	// it: svc:<hostname>, and once resolved anything else is refused. The consumer declares the
+	// Service (with an auto-approval for the tags) and passes its name output here, so the serve
+	// ConfigMap, and through it the front door's Deployment, waits for the Service: a node that
+	// advertises a Service before it exists is not approved when it appears.
+	TailnetService pulumi.StringInput `pulumi:"tailnetService"`
 
 	EnvoyImage         string `pulumi:"envoyImage"`
 	TailscaleImage     string `pulumi:"tailscaleImage"`
 	CloudSqlProxyImage string `pulumi:"cloudSqlProxyImage"`
+	// FrontDoorToolsImage is the image the front door's cert-publish container runs on, pinned by
+	// digest: it needs /bin/sh, curl, openssl 3, base64, GNU date, sed, grep and tr, which the envoy
+	// image carries. An input of its own, so a release of the app's image never rolls the front door.
+	FrontDoorToolsImage string `pulumi:"frontDoorToolsImage"`
 
 	NatsUrl        pulumi.StringInput `pulumi:"natsUrl"`
 	NatsSeedSecret pulumi.StringInput `pulumi:"natsSeedSecret"`
@@ -121,7 +180,11 @@ type DispatchArgs struct {
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
-	Namespace          *string `pulumi:"namespace,optional"`
+	// DatabaseAvailabilityType is the Cloud SQL instance's availability type: ZONAL, one zone and
+	// the default, or REGIONAL, a standby in a second zone that Cloud SQL fails over to. Switching
+	// changes the instance in place, restarting it once.
+	DatabaseAvailabilityType *string `pulumi:"databaseAvailabilityType,optional"`
+	Namespace                *string `pulumi:"namespace,optional"`
 	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
@@ -129,13 +192,31 @@ type DispatchArgs struct {
 	// Replicas is the app Deployment's replica count, 1 by default. Above 1 the Deployment rolls
 	// its pods instead of being recreated.
 	Replicas *int `pulumi:"replicas,optional"`
+	// FrontDoorReplicas is the front door's (<hostname>-tailnet) replica count, 2 by default, and
+	// ListenerReplicas the listener's (<hostname>-listener), 1 by default; each at least 1. Each
+	// Deployment is recreated at one replica and rolls above one, by its own count.
+	FrontDoorReplicas *int `pulumi:"frontDoorReplicas,optional"`
+	ListenerReplicas  *int `pulumi:"listenerReplicas,optional"`
 
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
-	// cloud-sql-proxy sidecar keeps its own 200m and 256Mi, and the front door and the listener
-	// are unchanged.
+	// cloud-sql-proxy sidecar is sized by proxyCpu and proxyMemory, and the front door and the
+	// listener are unchanged.
 	AppCpu    *string `pulumi:"appCpu,optional"`
 	AppMemory *string `pulumi:"appMemory,optional"`
+	// ProxyCpu and proxyMemory size the app pod's cloud-sql-proxy sidecar, through whose TLS every
+	// database call of the pod passes, as Kubernetes quantities set as both its request and its
+	// limit: 1 CPU and 2Gi by default, sized for one server pod's connection pools. Autopilot's
+	// bounds apply to the pod's total, envoy-dispatch's and the proxy's together.
+	ProxyCpu    *string `pulumi:"proxyCpu,optional"`
+	ProxyMemory *string `pulumi:"proxyMemory,optional"`
+	// AppEphemeralStorage and proxyEphemeralStorage are the ephemeral-storage request and limit,
+	// as Kubernetes quantities, of envoy-dispatch and of the cloud-sql-proxy sidecar: the disk a
+	// container's writable layer, temporary files and logs may use before the kubelet evicts the
+	// pod. Each unset renders nothing, and Autopilot gives that container its default 1Gi.
+	// Autopilot's bounds apply to the pod's total, the two containers' together.
+	AppEphemeralStorage   *string `pulumi:"appEphemeralStorage,optional"`
+	ProxyEphemeralStorage *string `pulumi:"proxyEphemeralStorage,optional"`
 
 	// PprofPort turns on envoy-dispatch's Go profiler: DISPATCH_PPROF_PORT on its container alone,
 	// so it serves net/http/pprof on 127.0.0.1 at this port, reachable through kubectl
@@ -143,16 +224,22 @@ type DispatchArgs struct {
 	// listens.
 	PprofPort *int `pulumi:"pprofPort,optional"`
 
-	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
-	// already exists in the cluster, which this component reads but never creates: a missing class
-	// fails the preview or update before the app Deployment changes, since Kubernetes refuses every
-	// pod naming one. Unset, the pod names none and runs at the cluster's default priority. The
-	// front door and the listener are unchanged.
-	AppPriorityClassName *string `pulumi:"appPriorityClassName,optional"`
+	// PriorityClassName is the priorityClassName of every pod of the three Deployments (the app,
+	// the front door and the listener), the name of a PriorityClass that already exists in the
+	// cluster, which this component reads once but never creates: a missing class fails the
+	// preview or update before any Deployment changes, since Kubernetes refuses every pod naming
+	// one. Unset, the pods name none and run at the cluster's default priority.
+	PriorityClassName *string `pulumi:"priorityClassName,optional"`
 
 	// AppPdbMinAvailable turns on a PodDisruptionBudget, <hostname>, over the app's pods: its
-	// minAvailable, from 1 to replicas. Unset, the component creates no budget.
-	AppPdbMinAvailable *int `pulumi:"appPdbMinAvailable,optional"`
+	// minAvailable, from 1 to replicas. FrontDoorPdbMinAvailable turns on <hostname>-tailnet over
+	// the front door's pods, from 1 to frontDoorReplicas, and ListenerPdbMinAvailable
+	// <hostname>-listener over the listener's, from 1 to listenerReplicas. Unset, the component
+	// creates no budget for that Deployment, and its pods carry the cluster autoscaler's
+	// safe-to-evict "false" annotation instead.
+	AppPdbMinAvailable       *int `pulumi:"appPdbMinAvailable,optional"`
+	FrontDoorPdbMinAvailable *int `pulumi:"frontDoorPdbMinAvailable,optional"`
+	ListenerPdbMinAvailable  *int `pulumi:"listenerPdbMinAvailable,optional"`
 
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the app's NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster
@@ -199,6 +286,7 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 		{"envoyImage", args.EnvoyImage},
 		{"tailscaleImage", args.TailscaleImage},
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage},
 		{"signInClientId", args.SignInClientId},
 		{"signInDomain", args.SignInDomain},
 		{"agentSecretsUrl", args.AgentSecretsUrl},
@@ -223,14 +311,29 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.DatabaseTier != nil && bus.HoldsSeed(*args.DatabaseTier) {
 		return "databaseTier", true
 	}
+	if args.DatabaseAvailabilityType != nil && bus.HoldsSeed(*args.DatabaseAvailabilityType) {
+		return "databaseAvailabilityType", true
+	}
 	if args.AppCpu != nil && bus.HoldsSeed(*args.AppCpu) {
 		return "appCpu", true
 	}
 	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
 		return "appMemory", true
 	}
-	if args.AppPriorityClassName != nil && bus.HoldsSeed(*args.AppPriorityClassName) {
-		return "appPriorityClassName", true
+	if args.ProxyCpu != nil && bus.HoldsSeed(*args.ProxyCpu) {
+		return "proxyCpu", true
+	}
+	if args.ProxyMemory != nil && bus.HoldsSeed(*args.ProxyMemory) {
+		return "proxyMemory", true
+	}
+	if args.AppEphemeralStorage != nil && bus.HoldsSeed(*args.AppEphemeralStorage) {
+		return "appEphemeralStorage", true
+	}
+	if args.ProxyEphemeralStorage != nil && bus.HoldsSeed(*args.ProxyEphemeralStorage) {
+		return "proxyEphemeralStorage", true
+	}
+	if args.PriorityClassName != nil && bus.HoldsSeed(*args.PriorityClassName) {
+		return "priorityClassName", true
 	}
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
@@ -255,34 +358,32 @@ type Dispatch struct {
 	Kubeconfig       pulumi.StringOutput `pulumi:"kubeconfig"`
 	Principal        pulumi.StringOutput `pulumi:"principal"`
 	AgentToken       pulumi.StringOutput `pulumi:"agentToken" provider:"secret"`
-	// ServiceAccountIssuer and ServiceAccountSubject are the issuer and subject of the Dispatch
-	// pods' service-account tokens: the cluster's OIDC issuer, and the pods' Kubernetes service
-	// account. A federated credential trusting the pair (an Azure identity's, for the keyless
-	// form) admits exactly those pods.
+	// ServiceAccountIssuer and ServiceAccountSubject are the issuer and subject of the app's and
+	// the listener's service-account tokens: the cluster's OIDC issuer, and those pods' Kubernetes
+	// service account. A federated credential trusting the pair (an Azure identity's, for the
+	// keyless form) admits exactly those pods; the front door's pods run as an account of their own.
 	ServiceAccountIssuer  pulumi.StringOutput `pulumi:"serviceAccountIssuer"`
 	ServiceAccountSubject pulumi.StringOutput `pulumi:"serviceAccountSubject"`
 }
 
-// dispatchSettings are the plain inputs, validated, with the defaults applied, and the texts built
-// from them alone, so they are known at preview: the Serve configuration and the listener's
-// environment.
+// dispatchSettings are the plain inputs, validated, with the defaults applied, so they are known at
+// preview. images.tools is frontDoorToolsImage.
 type dispatchSettings struct {
 	hostname, tailnetDNSName, region, namespace string
 	tags                                        []string
-	images                                      struct{ envoy, tailscale, proxy string }
+	images                                      struct{ envoy, tailscale, proxy, tools string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
+	databaseAvailabilityType                    string
 	agentSecretsURL, agentSecretsAudience       string
 	appClientID, appID                          string
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
-	appCPU, appMemory                           string
+	frontDoorReplicas, listenerReplicas         int
+	appResources                                dispatchAppResources
 	pprofPort                                   int
-	appPriorityClassName                        string
-	appPDBMinAvailable                          int
-	strategy                                    dispatchStrategy
-	serveConfig                                 string
+	disruption                                  dispatchDisruption
 	azure                                       dispatchAzure
 }
 
@@ -362,19 +463,21 @@ type dispatchRollingUpdate struct {
 	maxUnavailable, maxSurge int
 }
 
-// dispatchStrategy is the app Deployment's update strategy. rollingUpdate is set only when
+// dispatchStrategy is one Deployment's update strategy. rollingUpdate is set only when
 // strategyType is dispatchStrategyRollingUpdate; a Recreate Deployment carries no such block.
 type dispatchStrategy struct {
 	strategyType  string
 	rollingUpdate *dispatchRollingUpdate
 }
 
-// dispatchStrategyFor turns a workload's replica count into its Deployment's update strategy. At
-// minDispatchReplicas two processes of that workload must never overlap, since a second
-// envoy-dispatch cannot bind the exclusive NATS push durable, so Recreate, which stops the old pod
-// before starting the new one, is the only safe strategy. Above that count the operator has
-// accepted the overlap and wants no gap in service, so the Deployment rolls: one new pod comes up
-// before any old one goes down.
+// dispatchStrategyFor turns a workload's replica count into its Deployment's update strategy; each
+// of the three Deployments takes it from its own count. At minDispatchReplicas the Deployment is
+// recreated, stopping the old pod before starting the new one: a roll would run the outgoing and
+// the incoming builds together, which is safe only once the outgoing build follows the rules for
+// two builds running side by side and keeps its assets in the shared store, and a one-pod release
+// cannot know that of the build it replaces. Above that count the operator runs such builds and
+// wants no gap in service, so the Deployment rolls: one new pod comes up before any old one goes
+// down.
 func dispatchStrategyFor(replicas int) dispatchStrategy {
 	if replicas <= minDispatchReplicas {
 		return dispatchStrategy{strategyType: dispatchStrategyRecreate}
@@ -409,6 +512,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		{"envoyImage", args.EnvoyImage},
 		{"tailscaleImage", args.TailscaleImage},
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage},
 	} {
 		if !imageRule.MatchString(image.ref) {
 			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", image.field, image.ref)
@@ -425,6 +529,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	if args.TailnetAuthKey == nil {
 		return dispatchSettings{}, errors.New("tailnetAuthKey is required")
+	}
+	if args.TailnetService == nil {
+		return dispatchSettings{}, errors.New("tailnetService is required")
 	}
 	if args.NatsUrl == nil {
 		return dispatchSettings{}, errors.New("natsUrl is required")
@@ -497,11 +604,11 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		databaseTier:       defaultDispatchDatabaseTier,
 		deletionProtection: true,
 		namespace:          defaultDispatchNamespace,
-		replicas:           defaultDispatchReplicas,
 	}
 	s.images.envoy = args.EnvoyImage
 	s.images.tailscale = args.TailscaleImage
 	s.images.proxy = args.CloudSqlProxyImage
+	s.images.tools = args.FrontDoorToolsImage
 	s.signIn.clientID = args.SignInClientId
 	s.signIn.domain = args.SignInDomain
 	s.agentSecretsURL = agentSecretsURL
@@ -523,23 +630,35 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		}
 		s.databaseTier = *args.DatabaseTier
 	}
+	s.databaseAvailabilityType = dispatchAvailabilityZonal
+	if args.DatabaseAvailabilityType != nil {
+		switch availability := *args.DatabaseAvailabilityType; availability {
+		case dispatchAvailabilityZonal, dispatchAvailabilityRegional:
+			s.databaseAvailabilityType = availability
+		default:
+			return dispatchSettings{}, fmt.Errorf("databaseAvailabilityType %q must be %s or %s; leave it unset for %s",
+				availability, dispatchAvailabilityZonal, dispatchAvailabilityRegional, dispatchAvailabilityZonal)
+		}
+	}
 	if args.DeletionProtection != nil {
 		s.deletionProtection = *args.DeletionProtection
 	}
-	if args.Replicas != nil {
-		if *args.Replicas < minDispatchReplicas {
-			return dispatchSettings{}, fmt.Errorf("replicas %d must be at least %d", *args.Replicas, minDispatchReplicas)
-		}
-		s.replicas = *args.Replicas
+	if s.replicas, err = dispatchReplicas("replicas", args.Replicas, defaultDispatchReplicas); err != nil {
+		return dispatchSettings{}, err
 	}
-	s.strategy = dispatchStrategyFor(s.replicas)
-	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
+	if s.frontDoorReplicas, err = dispatchReplicas("frontDoorReplicas", args.FrontDoorReplicas, defaultDispatchFrontDoorReplicas); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.listenerReplicas, err = dispatchReplicas("listenerReplicas", args.ListenerReplicas, defaultDispatchListenerReplicas); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.appResources, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
 	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
 		return dispatchSettings{}, err
 	}
-	if s.appPriorityClassName, s.appPDBMinAvailable, err = newDispatchAppDisruption(args, s.replicas); err != nil {
+	if s.disruption, err = newDispatchDisruption(args, s.replicas, s.frontDoorReplicas, s.listenerReplicas); err != nil {
 		return dispatchSettings{}, err
 	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
@@ -554,10 +673,6 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
 		}
 	}
-	// The tailnet node runs in a pod of its own now, so Serve proxies to the app's Service rather
-	// than to a container beside it. The Web key keeps the node's name and certificate domain.
-	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s:443":{"Handlers":{"/":{"Proxy":"http://%s:8766"}}}}}`,
-		core.TailnetHostName(s.hostname, s.tailnetDNSName), clusterLocal(s.hostname, s.namespace))
 	return s, nil
 }
 
@@ -601,100 +716,188 @@ func newDispatchPprofPort(args *DispatchArgs) (int, error) {
 	return port, nil
 }
 
-// newDispatchAppDisruption resolves appPriorityClassName and appPdbMinAvailable, the app pod's
-// priority class and its PodDisruptionBudget's minAvailable: "" and 0, rendering nothing, when
-// unset. It refuses a class name that is empty or not a DNS subdomain, and one with the system-
-// prefix, which Kubernetes reserves for its own system-cluster-critical and system-node-critical
-// classes: those outrank every workload so the cluster's own components are scheduled first, and
-// an application pod holding one could preempt them. It refuses a budget below 1, which protects
-// no pod, and above replicas, which no number of ready pods can meet.
-func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass string, pdbMinAvailable int, err error) {
-	if args.AppPriorityClassName != nil {
-		priorityClass = *args.AppPriorityClassName
+// dispatchReplicas resolves one Deployment's replica count, input, to fallback when it is unset,
+// refusing a count below minDispatchReplicas, which leaves the workload with no pod.
+func dispatchReplicas(input string, value *int, fallback int) (int, error) {
+	if value == nil {
+		return fallback, nil
+	}
+	if *value < minDispatchReplicas {
+		return 0, fmt.Errorf("%s %d must be at least %d", input, *value, minDispatchReplicas)
+	}
+	return *value, nil
+}
+
+// dispatchDisruption is the pods' resolved disruption protection: the one priority class every
+// pod of the three Deployments names, and each Deployment's PodDisruptionBudget minAvailable. ""
+// and 0, rendering nothing, are unset.
+type dispatchDisruption struct {
+	priorityClass                                string
+	appPDBMinAvailable, frontDoorPDBMinAvailable int
+	listenerPDBMinAvailable                      int
+}
+
+// newDispatchDisruption resolves priorityClassName and the three budgets, appPdbMinAvailable,
+// frontDoorPdbMinAvailable and listenerPdbMinAvailable, each refusal naming its own input. It
+// refuses a class name that is empty or not a DNS subdomain, and one with the system- prefix,
+// which Kubernetes reserves for its own system-cluster-critical and system-node-critical classes:
+// those outrank every workload so the cluster's own components are scheduled first, and an
+// application pod holding one could preempt them. It refuses a budget below 1, which protects no
+// pod, and above its Deployment's replica count, which no number of ready pods can meet.
+func newDispatchDisruption(args *DispatchArgs, replicas, frontDoorReplicas, listenerReplicas int) (dispatchDisruption, error) {
+	var d dispatchDisruption
+	if args.PriorityClassName != nil {
+		d.priorityClass = *args.PriorityClassName
 		switch {
-		case priorityClass == "":
-			return "", 0, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
-		case !dnsSubdomain(priorityClass):
-			return "", 0, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", priorityClass)
-		case strings.HasPrefix(priorityClass, "system-"):
-			return "", 0, fmt.Errorf("appPriorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", priorityClass)
+		case d.priorityClass == "":
+			return dispatchDisruption{}, errors.New("priorityClassName is empty; leave it unset for no priority class")
+		case !dnsSubdomain(d.priorityClass):
+			return dispatchDisruption{}, fmt.Errorf("priorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", d.priorityClass)
+		case strings.HasPrefix(d.priorityClass, "system-"):
+			return dispatchDisruption{}, fmt.Errorf("priorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", d.priorityClass)
 		}
 	}
-	if args.AppPdbMinAvailable != nil {
-		pdbMinAvailable = *args.AppPdbMinAvailable
-		if pdbMinAvailable < 1 || pdbMinAvailable > replicas {
-			return "", 0, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", pdbMinAvailable, replicas)
+	for _, budget := range []struct {
+		input, replicasInput string
+		value                *int
+		replicas             int
+		into                 *int
+	}{
+		{"appPdbMinAvailable", "replicas", args.AppPdbMinAvailable, replicas, &d.appPDBMinAvailable},
+		{"frontDoorPdbMinAvailable", "frontDoorReplicas", args.FrontDoorPdbMinAvailable, frontDoorReplicas, &d.frontDoorPDBMinAvailable},
+		{"listenerPdbMinAvailable", "listenerReplicas", args.ListenerPdbMinAvailable, listenerReplicas, &d.listenerPDBMinAvailable},
+	} {
+		if budget.value == nil {
+			continue
 		}
+		if *budget.value < 1 || *budget.value > budget.replicas {
+			return dispatchDisruption{}, fmt.Errorf("%s %d must be from 1 to %s (%d); leave it unset for no PodDisruptionBudget",
+				budget.input, *budget.value, budget.replicasInput, budget.replicas)
+		}
+		*budget.into = *budget.value
 	}
-	return priorityClass, pdbMinAvailable, nil
+	return d, nil
+}
+
+// dispatchAppResources is the app pod's resolved container sizes: envoy-dispatch's request and
+// limit, appCPU and appMemory, and the cloud-sql-proxy sidecar's, proxyCPU and proxyMemory; and
+// each container's ephemeral storage, "" (rendering nothing) when its input is unset.
+type dispatchAppResources struct {
+	appCPU, appMemory, proxyCPU, proxyMemory   string
+	appEphemeralStorage, proxyEphemeralStorage string
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
-// and limit, and refuses a size at which Autopilot would not run the app pod as rendered: the
-// pod's total, with the cloud-sql-proxy sidecar's, below autopilotPodMinCPU or
-// autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot raises it), or above
-// autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it).
-func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error) {
-	cpu, memory = defaultDispatchAppCPU, defaultDispatchAppMemory
-	if args.AppCpu != nil {
-		if *args.AppCpu == "" {
-			return "", "", errors.New("appCpu is empty; leave it unset for " + defaultDispatchAppCPU)
-		}
-		cpu = *args.AppCpu
-	}
-	if args.AppMemory != nil {
-		if *args.AppMemory == "" {
-			return "", "", errors.New("appMemory is empty; leave it unset for " + defaultDispatchAppMemory)
-		}
-		memory = *args.AppMemory
-	}
-	appCPU, err := appQuantity("appCpu", cpu, "1, 1500m or 2")
+// and limit, and proxyCpu and proxyMemory, the cloud-sql-proxy sidecar's, and refuses a size at
+// which Autopilot would not run the app pod as rendered: the two containers' total below
+// autopilotPodMinCPU or autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot
+// raises it), or above autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it). Each
+// refusal names the inputs whose sum it judges.
+func newDispatchAppResources(args *DispatchArgs) (dispatchAppResources, error) {
+	cpu, appCPU, err := appQuantity("appCpu", args.AppCpu, defaultDispatchAppCPU, "1, 1500m or 2")
 	if err != nil {
-		return "", "", err
+		return dispatchAppResources{}, err
 	}
-	appMemory, err := appQuantity("appMemory", memory, "4Gi or 6144Mi")
+	memory, appMemory, err := appQuantity("appMemory", args.AppMemory, defaultDispatchAppMemory, "4Gi or 6144Mi")
 	if err != nil {
-		return "", "", err
+		return dispatchAppResources{}, err
 	}
-	proxyCPU, _ := quantityValue(dispatchProxyCPU)
-	proxyMemory, _ := quantityValue(dispatchProxyMemory)
-	podCPU := new(big.Rat).Add(appCPU, proxyCPU)
-	podMemory := new(big.Rat).Add(appMemory, proxyMemory)
+	proxyCPU, proxyCPUValue, err := appQuantity("proxyCpu", args.ProxyCpu, defaultDispatchProxyCPU, "1, 1500m or 2")
+	if err != nil {
+		return dispatchAppResources{}, err
+	}
+	proxyMemory, proxyMemoryValue, err := appQuantity("proxyMemory", args.ProxyMemory, defaultDispatchProxyMemory, "2Gi or 1536Mi")
+	if err != nil {
+		return dispatchAppResources{}, err
+	}
+	podCPU := new(big.Rat).Add(appCPU, proxyCPUValue)
+	podMemory := new(big.Rat).Add(appMemory, proxyMemoryValue)
 	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
-			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, proxyCPU)), dispatchProxyCPU, milliCPU(autopilotPodMinCPU))
+		return dispatchAppResources{}, fmt.Errorf("appCpu %q and proxyCpu %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
+			cpu, proxyCPU, milliCPU(autopilotPodMinCPU))
 	}
 	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above %s CPU, and Autopilot rejects such a pod",
-			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, proxyCPU)), dispatchProxyCPU, autopilotPodMaxCPU.RatString())
+		return dispatchAppResources{}, fmt.Errorf("appCpu %q and proxyCpu %q must make at most %s CPU together: Autopilot rejects an app pod that requests more",
+			cpu, proxyCPU, autopilotPodMaxCPU.RatString())
 	}
 	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
-			memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, proxyMemory)), dispatchProxyMemory, mebibytes(autopilotPodMinMemory))
+		return dispatchAppResources{}, fmt.Errorf("appMemory %q and proxyMemory %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
+			memory, proxyMemory, mebibytes(autopilotPodMinMemory))
 	}
 	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above 110Gi, and Autopilot rejects such a pod",
-			memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, proxyMemory)), dispatchProxyMemory)
+		return dispatchAppResources{}, fmt.Errorf("appMemory %q and proxyMemory %q must make at most 110Gi together: Autopilot rejects an app pod that requests more",
+			memory, proxyMemory)
 	}
 	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
 	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
 	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 || gibPerCPU.Cmp(autopilotMaxGiBPerCPU) > 0 {
-		return "", "", fmt.Errorf("appCpu %q and appMemory %q: with cloud-sql-proxy's %s and %s the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
-			cpu, memory, dispatchProxyCPU, dispatchProxyMemory)
+		return dispatchAppResources{}, fmt.Errorf("appCpu %q, appMemory %q, proxyCpu %q and proxyMemory %q: the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
+			cpu, memory, proxyCPU, proxyMemory)
 	}
-	return cpu, memory, nil
+	appEphemeral, proxyEphemeral, err := newDispatchEphemeralStorage(args)
+	if err != nil {
+		return dispatchAppResources{}, err
+	}
+	return dispatchAppResources{appCPU: cpu, appMemory: memory, proxyCPU: proxyCPU, proxyMemory: proxyMemory,
+		appEphemeralStorage: appEphemeral, proxyEphemeralStorage: proxyEphemeral}, nil
 }
 
-// appQuantity is the exact value of input's quantity, or a refusal naming input.
-func appQuantity(input, value, examples string) (*big.Rat, error) {
-	quantity, err := quantityValue(value)
+// newDispatchEphemeralStorage resolves appEphemeralStorage and proxyEphemeralStorage, each "" when
+// unset, and refuses a pair at which Autopilot would not run the app pod as rendered: their sum,
+// an unset container counted at the autopilotDefaultEphemeralStorage Autopilot gives it, below
+// autopilotPodMinEphemeralStorage (Autopilot raises it) or above autopilotPodMaxEphemeralStorage
+// (Autopilot rejects it). The refusal names both inputs, an unset one as Autopilot's default.
+func newDispatchEphemeralStorage(args *DispatchArgs) (app, proxy string, err error) {
+	resolve := func(input string, value *string) (rendered, named string, quantity *big.Rat, err error) {
+		if value == nil {
+			quantity, _ = quantityValue(autopilotDefaultEphemeralStorage)
+			return "", fmt.Sprintf("%s unset (Autopilot's %s)", input, autopilotDefaultEphemeralStorage), quantity, nil
+		}
+		rendered, quantity, err = appQuantity(input, value, "Autopilot's default of "+autopilotDefaultEphemeralStorage, "4Gi or 4096Mi")
+		return rendered, fmt.Sprintf("%s %q", input, rendered), quantity, err
+	}
+	app, appNamed, appValue, err := resolve("appEphemeralStorage", args.AppEphemeralStorage)
+	if err != nil {
+		return "", "", err
+	}
+	proxy, proxyNamed, proxyValue, err := resolve("proxyEphemeralStorage", args.ProxyEphemeralStorage)
+	if err != nil {
+		return "", "", err
+	}
+	pod := new(big.Rat).Add(appValue, proxyValue)
+	if pod.Cmp(autopilotPodMinEphemeralStorage) < 0 {
+		return "", "", fmt.Errorf("%s and %s must make at least %s together: below it Autopilot raises the app pod's ephemeral storage, and each container's logs count against its own",
+			appNamed, proxyNamed, mebibytes(autopilotPodMinEphemeralStorage))
+	}
+	if pod.Cmp(autopilotPodMaxEphemeralStorage) > 0 {
+		return "", "", fmt.Errorf("%s and %s must make at most 10Gi together: Autopilot rejects an app pod with more ephemeral storage; a larger working set belongs in a generic ephemeral volume",
+			appNamed, proxyNamed)
+	}
+	return app, proxy, nil
+}
+
+// appQuantity resolves one container size input of the app pod: fallback when it is unset, and
+// its exact value, or a refusal naming input. It refuses an empty value, which is no quantity,
+// and one of 0 or less, which sizes no container: the pod's floor is judged on the two
+// containers' sum, so a negative size beside a large one would otherwise pass it.
+func appQuantity(input string, value *string, fallback, examples string) (string, *big.Rat, error) {
+	resolved := fallback
+	if value != nil {
+		if *value == "" {
+			return "", nil, errors.New(input + " is empty; leave it unset for " + fallback)
+		}
+		resolved = *value
+	}
+	quantity, err := quantityValue(resolved)
 	switch {
 	case errors.Is(err, errQuantityExponent):
-		return nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, value, minQuantityExponent, maxQuantityExponent, examples)
+		return "", nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, resolved, minQuantityExponent, maxQuantityExponent, examples)
 	case err != nil:
-		return nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, value, examples)
+		return "", nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, resolved, examples)
+	case quantity.Sign() <= 0:
+		return "", nil, fmt.Errorf("%s %q must be more than 0, such as %s", input, resolved, examples)
 	}
-	return quantity, nil
+	return resolved, quantity, nil
 }
 
 var (
@@ -802,8 +1005,9 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	comp.AgentToken = cloud.agentToken.Result
 	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
 	comp.ServiceAccountIssuer = cloud.issuer
-	// Every Dispatch pod runs as ServiceAccount <hostname> in the component's namespace, the
-	// account newDispatchKubernetes registers, and Kubernetes names a token's subject after it.
+	// The app's and the listener's pods run as ServiceAccount <hostname> in the component's
+	// namespace, the account newDispatchKubernetes registers, and Kubernetes names a token's subject
+	// after it. The front door's pods run as <hostname>-tailnet, which this subject never names.
 	comp.ServiceAccountSubject = pulumi.String("system:serviceaccount:" + s.namespace + ":" + s.hostname).ToStringOutput()
 	return comp, nil
 }

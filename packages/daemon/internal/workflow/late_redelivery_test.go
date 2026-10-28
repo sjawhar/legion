@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,15 +31,21 @@ import (
 // fact.
 func recordTables(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	var tables []string
-	for _, table := range []string{"issues", "phases", "pull_requests", "production_checks", "outbox"} {
+	return tablesText(t, pool, "issues", "phases", "pull_requests", "production_checks", "outbox")
+}
+
+// tablesText is every row of tables as text.
+func tablesText(t *testing.T, pool *pgxpool.Pool, tables ...string) string {
+	t.Helper()
+	var texts []string
+	for _, table := range tables {
 		var rows string
 		if err := pool.QueryRow(t.Context(), "select coalesce(json_agg(to_jsonb(t) order by to_jsonb(t)::text), '[]')::text from "+table+" t").Scan(&rows); err != nil {
 			t.Fatalf("read the %s: %v", table, err)
 		}
-		tables = append(tables, table+": "+rows)
+		texts = append(texts, table+": "+rows)
 	}
-	return strings.Join(tables, "\n")
+	return strings.Join(texts, "\n")
 }
 
 // githubFacts applies a fact under source github and the event id given, as the daemon's GitHub
@@ -60,6 +67,26 @@ func lateChangesNothing(t *testing.T, pool *pgxpool.Pool, apply func(string, int
 	apply(id, fact)
 	if after := recordTables(t, pool); after != before {
 		t.Fatalf("the late %T changed the record:\nbefore %s\nafter  %s", fact, before, after)
+	}
+}
+
+// latePushDecidesNothing applies push as a late webhook under an event id of its own and fails t
+// when it changed the issues, their phase rows, the production checks, the outbox, or the pull
+// request's judgement, pushes or head run. The record's moves may change: a push of a move the
+// record made is kept as that move's push or as a repeat of it (classify.ApplyPush), which only a
+// head's next arrival by that move reads.
+func latePushDecidesNothing(t *testing.T, pool *pgxpool.Pool, apply func(string, intake.Fact), id string, push intake.Push) {
+	t.Helper()
+	others := []string{"issues", "phases", "production_checks", "outbox"}
+	before, prBefore := tablesText(t, pool, others...), latePullRequest(t, pool)
+	apply(id, push)
+	after, prAfter := tablesText(t, pool, others...), latePullRequest(t, pool)
+	if after != before {
+		t.Fatalf("the late push %s..%s changed the records:\nbefore %s\nafter  %s", push.Before, push.After, before, after)
+	}
+	if classify.JudgementChanged(prBefore, prAfter) || !slices.Equal(prAfter.Pushes, prBefore.Pushes) || (prAfter.Run == nil) != (prBefore.Run == nil) {
+		t.Fatalf("the late push %s..%s changed the pull request: judgement or pushes %+v, run open %t; was %+v, run open %t",
+			push.Before, push.After, prAfter.Pushes, prAfter.Run != nil, prBefore.Pushes, prBefore.Run != nil)
 	}
 }
 
@@ -309,10 +336,11 @@ func latePush(before, after, paths, pusher string) intake.Push {
 
 // The review App pushes the tester's red tests and its handoff onto the implementer's red code, and
 // the pass rebuilds both pushes from the branch's activity and applies the head it read, so the
-// move counts no fix attempt and plans the red. The push webhooks arriving late change nothing:
+// move counts no fix attempt and plans the red. The push webhooks arriving late decide nothing -
 // the push the chain began from, whose move the record made before the pass read, and a copy of
-// each push the pass rebuilt, recorded once under its two heads.
-func TestALatePushAfterThePassRebuiltItsChainChangesNothing(t *testing.T) {
+// each push the pass rebuilt: the judgement, the pushes waiting for a link, the phase and the
+// outbox stand, and the record keeps each as its move's push or a repeat of it.
+func TestALatePushAfterThePassRebuiltItsChainDecidesNothing(t *testing.T) {
 	const implementer = "legion-implementer[bot]"
 	pr := redRecord(record.PullRequestOpen, "code", lateApplied.Add(-2*time.Hour))
 	pr.Moves = []record.Move{{Before: "base", SHA: "code"}}
@@ -336,7 +364,7 @@ func TestALatePushAfterThePassRebuiltItsChainChangesNothing(t *testing.T) {
 		{"the red tests' webhook", tests},
 		{"the handoff's webhook", handoff},
 	} {
-		lateChangesNothing(t, pool, apply, late.id, late.push)
+		latePushDecidesNothing(t, pool, apply, late.id, late.push)
 	}
 	assertPhase(t, pool, phase.Testing)
 }

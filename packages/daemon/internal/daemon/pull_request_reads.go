@@ -202,7 +202,8 @@ func (w *workflowRuntime) headPushes(ctx context.Context, github githubrest.Clie
 // of its pushes, so one push from the recorded head to head, compared whole, would judge it wrong.
 // Each push's event id names the project, the repository, the branch and the push's two commits,
 // so a later pass skips it before any transaction, and the push webhook arriving later is the same
-// push recorded again, which changes nothing (classify.ApplyPush).
+// push recorded again, which the record keeps as its move's push or a repeat of it and which
+// changes no judgement (classify.ApplyPush).
 //
 // unfollowed says why the pushes cannot be rebuilt, and then there are none: the page does not
 // lead back from head to the recorded head, an entry on the way is no push, or GitHub answered a
@@ -221,16 +222,16 @@ func (w *workflowRuntime) lostPushes(ctx context.Context, github githubrest.Clie
 	if unfollowed != "" {
 		return nil, unfollowed, nil
 	}
-	recorded := map[record.Move]bool{}
+	recorded := map[[2]string]bool{}
 	for _, p := range pr.Pushes {
-		recorded[record.Move{Before: p.Before, SHA: p.SHA}] = true
+		recorded[[2]string{p.Before, p.SHA}] = true
 	}
 	for _, m := range pr.Moves {
-		recorded[m] = true
+		recorded[[2]string{m.Before, m.SHA}] = true
 	}
 	var pushes []passPush
 	for _, entry := range chain {
-		if recorded[record.Move{Before: entry.Before, SHA: entry.After}] {
+		if recorded[[2]string{entry.Before, entry.After}] {
 			continue
 		}
 		read, cancel := context.WithTimeout(ctx, requiredChecksRead)

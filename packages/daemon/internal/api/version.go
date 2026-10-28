@@ -373,7 +373,20 @@ package api
 // on main before this change, so this change takes the number above it, as the collision note
 // says.)
 //
-// 41: api.State gains `consumers`, the lag of the daemon's three durable consumers
+// 41: `legion controller start` passes `/legion-controller-start`
+// (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
+// controller's start message from that extension command rather than from session_start: Oh My Pi
+// drains every session_start send at the end of its startup, so the start turn ran inside the
+// startup wait, with no TUI and no input, while a command-line word runs as a prompt after startup
+// and once the TUI listens. Under this CLI a pi-legion before 41 sends from session_start and then
+// gets the word as a prompt, and a pi-legion at 41 under an older CLI never sends the start, so the
+// controller probe refuses either pair before the mint. The daemon-launched controller is unchanged
+// on the wire. (This branch took 40; main then landed the awaiting_person change at 40 and released
+// pi-legion v11.1.0 declaring it, without these shapes, so this branch takes the number above it,
+// as the collision note says. Other open branches may declare 41 too: whichever merges after
+// another takes the next free number, as the collision note says.)
+//
+// 42: api.State gains `consumers`, the lag of the daemon's three durable consumers
 // (api.ConsumerLagView), read from NATS after the state's transaction commits: each consumer's
 // `name`, `waiting` (JetStream's NumPending plus NumAckPending), `oldestAt` and
 // `oldestAgeSeconds` (the stream time of the first message after its ack floor on one of its
@@ -383,12 +396,12 @@ package api
 // (messages waiting and none handled for 60 seconds, counted from the consumer's open before the
 // first) and `unavailable` (what NATS did not answer within the read's 2-second bound or refused,
 // absent when every read answered: a failed CONSUMER.INFO leaves `waiting` 0 and `stalled` false,
-// a failed STREAM.MSG.GET only the oldest null). Never null, so a 40 plugin's strict reader
+// a failed STREAM.MSG.GET only the oldest null). Never null, so a 41 plugin's strict reader
 // refuses the state, and the boot gate and `legion probe-image` refuse the mixed pair. The state's
 // `repositories` gains `withoutWebhookApp` in the same contract: each served repository, as
 // Dispatch maps it, that Dispatch's GitHub App (the one GitHub sends its webhook events through)
 // is not known to be installed on, `{repo, reason}` sorted by repo, the reason naming whether the
 // App is not installed, the check failed, or Dispatch does not answer the check; never null, and
-// the repository is served all the same. (40 is declared by the released pi-legion without
-// `consumers`, so this change takes the number above it, as the collision note says.)
-const DaemonAPIVersion = 41
+// the repository is served all the same. (This branch took 41; 41 is declared by main's
+// controller-start change, so this change takes the number above it, as the collision note says.)
+const DaemonAPIVersion = 42
