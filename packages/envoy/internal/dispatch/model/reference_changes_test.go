@@ -6,12 +6,13 @@ import (
 )
 
 // A typed payload spells the reference keys in its struct tags and a map payload spells them in
-// NameReferenceChanges. They are the same two keys on the wire, so a reader cannot be right for
-// one producer and wrong for another.
+// NameReferenceChanges. They are the same three keys on the wire, so a reader cannot be right for
+// one producer and wrong for another; a truncated write sets the flag an older reader reads beside
+// the kinds it cut.
 func TestTypedAndMapPayloadsNameTheSameReferenceKeys(t *testing.T) {
 	changes := ReferenceChanges{
-		Targets:   []ChangedReference{{Kind: "issue", ID: "CORE-1"}},
-		Truncated: true,
+		Targets:        []ChangedReference{{Kind: "issue", ID: "CORE-1"}},
+		TruncatedKinds: []string{"artifact"},
 	}
 	encoded, err := json.Marshal(NewAskEventPayload(Ask{ID: "ask-1"}, changes))
 	if err != nil {
@@ -24,7 +25,7 @@ func TestTypedAndMapPayloadsNameTheSameReferenceKeys(t *testing.T) {
 	mapped := map[string]any{}
 	NameReferenceChanges(mapped, changes)
 
-	for _, key := range []string{ReferencesChangedKey, ReferencesChangedTruncatedKey} {
+	for _, key := range []string{ReferencesChangedKey, ReferencesChangedTruncatedKey, ReferencesChangedTruncatedKindsKey} {
 		if _, named := typed[key]; !named {
 			t.Fatalf("typed payload does not carry %q: %s", key, encoded)
 		}
@@ -32,8 +33,11 @@ func TestTypedAndMapPayloadsNameTheSameReferenceKeys(t *testing.T) {
 			t.Fatalf("map payload does not carry %q: %#v", key, mapped)
 		}
 	}
-	if len(mapped) != 2 {
-		t.Fatalf("map payload keys = %#v, want exactly the two reference keys", mapped)
+	if typed[ReferencesChangedTruncatedKey] != true || mapped[ReferencesChangedTruncatedKey] != true {
+		t.Fatalf("truncated flag typed=%#v mapped=%#v, want true on both", typed[ReferencesChangedTruncatedKey], mapped[ReferencesChangedTruncatedKey])
+	}
+	if len(mapped) != 3 {
+		t.Fatalf("map payload keys = %#v, want exactly the three reference keys", mapped)
 	}
 }
 
