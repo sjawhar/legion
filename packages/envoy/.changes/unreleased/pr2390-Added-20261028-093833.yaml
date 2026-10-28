@@ -8,7 +8,7 @@ body: |-
     So the key rotates without signing anyone out, in three steps each rolled to every server
     process: add the new key second, move it first, then remove the old key no sooner than 30 days
     later, the cookie's lifetime; a refresh token sealed under the old key is sealed again under the
-    new one at its person's next hourly confirmation (INFRA-555).
+    new one at its person's next hourly confirmation.
 time: 2026-10-28T09:38:33.086683634Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

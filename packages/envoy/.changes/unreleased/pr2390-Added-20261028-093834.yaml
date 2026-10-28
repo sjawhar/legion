@@ -21,8 +21,7 @@ body: |-
     its keys again before it counts as live once more, and beside a live process whose keys it does
     not share logs `dispatch: this server process no longer shares its signing keys with a live
     server process` at ERROR, stops serving after its HTTP drain, and exits 1. The registry's pool
-    is one more Postgres connection per process, and its prune one more lease connection, eleven
-    (INFRA-555).
+    is one more Postgres connection per process, and its prune one more lease connection, eleven.
 time: 2026-10-28T09:38:34.202645659Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

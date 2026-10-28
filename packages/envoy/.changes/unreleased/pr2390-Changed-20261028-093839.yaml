@@ -6,7 +6,7 @@ body: |-
     the connection lost at two pings outstanding, so `nats` reads `false` within two to three
     seconds of a silent cut, where it took minutes. The probe is a readiness probe and never a
     liveness probe: it fails while the database is unreachable, so a liveness probe on it would
-    restart every server process during a database failover (INFRA-555).
+    restart every server process during a database failover.
 time: 2026-10-28T09:38:39.771119453Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

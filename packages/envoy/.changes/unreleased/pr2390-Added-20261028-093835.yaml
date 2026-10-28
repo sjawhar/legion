@@ -5,7 +5,7 @@ body: |-
     announcer has first read it; up to one five-second pass behind), and `signin` and
     `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery
     documents have been read (`null` where that issuer is not configured). None of the three
-    decides the status (INFRA-555).
+    decides the status.
 time: 2026-10-28T09:38:35.316603226Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

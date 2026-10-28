@@ -7,7 +7,7 @@ body: |-
     `envoy-infra:gcp:Dispatch` component's 64-character alphanumeric value, or the data dir's
     base64url file, which is read whole) is unchanged. This release is never the release of a first
     rotation: an earlier build reads `"K1 K0"` as one key, so no build older than this one is rolled
-    back to while the setting holds two values (INFRA-555).
+    back to while the setting holds two values.
 time: 2026-10-28T09:38:37.543790334Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

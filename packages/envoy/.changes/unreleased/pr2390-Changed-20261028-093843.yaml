@@ -6,7 +6,7 @@ body: |-
     logged at ERROR at most once a minute) or by the first request that needs it. Until then
     `/auth/start` and the callback answer `503 SIGNIN_UNAVAILABLE`, a JWT-shaped bearer
     `503 OIDC_ISSUER_UNAVAILABLE` rather than `401`, and agent tokens are served; a plain-text
-    refresh token the boot cannot revoke yet stays for the next boot (INFRA-555).
+    refresh token the boot cannot revoke yet stays for the next boot.
 time: 2026-10-28T09:38:43.112251682Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

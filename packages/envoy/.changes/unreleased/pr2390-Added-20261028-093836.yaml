@@ -6,7 +6,7 @@ body: |-
     URL>/_dev/sign-in-as` (a JSON object of ID token claims), or `--sign-in-as <email>`'s person when
     none is queued, a member of `--sign-in-group <group>`'s group when that is given. Dispatch takes
     `DISPATCH_SIGNIN_DOMAIN` only under Google's issuer, so a local Dispatch signs in through this
-    issuer with `DISPATCH_SIGNIN_GROUP` (INFRA-555).
+    issuer with `DISPATCH_SIGNIN_GROUP`.
 time: 2026-10-28T09:38:36.429151322Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

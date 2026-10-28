@@ -8,7 +8,7 @@ body: |-
     `dispatch-server-started-<commit>-<seq>`. The subject and the payload's two fields are unchanged,
     so the schema still parses every envelope; a shared fixture
     (`packages/daemon/internal/intake/testdata/dispatch/server-started.json`) holds the Dispatch
-    writer, the daemon's intake and this schema to one envelope (INFRA-555).
+    writer, the daemon's intake and this schema to one envelope.
 time: 2026-10-28T09:38:48.676791411Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

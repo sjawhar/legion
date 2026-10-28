@@ -6,7 +6,7 @@ body: |-
     `429`, another OAuth error, an answer without an ID token that verifies, an issuer not yet
     discovered) refuses the request `503 SIGNIN_UNAVAILABLE` and keeps the sign-in, so the first
     request after the issuer answers refreshes and is served. Before, any failed refresh ended every
-    session of the person as their hour lapsed (INFRA-555).
+    session of the person as their hour lapsed.
 time: 2026-10-28T09:38:46.451790276Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

@@ -6,7 +6,7 @@ body: |-
     `Dispatch's start on build <sha>`; the recorded cause keeps the name `dispatch start`. The
     daemon's boot reads the build Dispatch's fleet serves from `/healthz`'s `fleet_commit`, falling
     back to `commit` for a Dispatch older than the field. The `legion-worker` merge-gate reference and
-    the implementer's role prompt say so (INFRA-555).
+    the implementer's role prompt say so.
 time: 2026-10-28T09:38:50.902305456Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

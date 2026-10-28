@@ -5,7 +5,7 @@ body: |-
     the same 90 seconds. Dispatch now serves while its NATS connection fails, so a `200` alone would
     keep an image whose NATS credential is refused; such an image is rolled back, as it was when it
     exited at boot. A NATS outage fails the previous image's check too, so its rollback then reports
-    that it did not become healthy (INFRA-555).
+    that it did not become healthy.
 time: 2026-10-28T09:38:41.999111839Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390

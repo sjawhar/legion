@@ -12,7 +12,7 @@ body: |-
     own, where they ended in the start's Unix time. Builds before this one do not register: the
     first release that carries it announces as soon as its own processes agree, and a process of an
     earlier release started meanwhile still publishes its own start, so that release is deployed with
-    no earlier process serving beside it (INFRA-555).
+    no earlier process serving beside it.
 time: 2026-10-28T09:38:38.657230833Z
 custom:
-    Issue: INFRA-555
+    Issue: pr2390
