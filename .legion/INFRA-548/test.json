@@ -2,36 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T11:30:00Z",
-  "testedHead": "d26157e2b8c3fa266e453c71b2734ff30a27fc49",
-  "round": "Full round after the conflict merge of main aeeee6c0 (d26157e2). The fingerprint at my round-5 head c2db0543 is 86ee20ea…, and at d26157e2 it is d4c90c02…: changed. A per-file interdiff of this issue's own change (old: fork point b295a3fb → c2db0543; new: aeeee6c0 → d26157e2, --context 0, hunk headers and index lines dropped) shows exactly three kinds of difference. (1) The five CHANGELOG.md edits left the diff (each CHANGELOG.md now equals main's). (2) 12 changie fragments were added under packages/{claude-envoy,envoy-client,envoy-plugin,envoy,pi-envoy}/.changes/unreleased/pr2331-*. (3) .dispatch/architecture/claude-envoy-bridge.md and envoy-client.md keep main's new sentence with this issue's text appended. Every source, test, workflow and patch file has identical hunks. The base moved, so I re-ran the product surfaces on the merged tree.",
+  "completed": "2026-10-28T12:20:00Z",
+  "testedHead": "5384eb840c2d",
+  "round": "Full round after the conflict merge of main 2d872499 (5384eb84). The fingerprint changed (d4c90c02… → 9e0d4632…). A per-file interdiff of this issue's own change against round 6 (old: fork point aeeee6c0 → d26157e2; new: 2d872499 → 5384eb84, --context 0, hunk headers and index lines dropped) lists the same files on both sides, with one file differing: .github/workflows/release.yaml. Main's #2358 restructured it, and this issue's patches/ release input now sits in PI_ENVOY_VERSION_ARGS (--patch-path patches/, patches/ in the path list, and the comment). Every source, test, patch, fragment and other workflow hunk is identical. The base moved, so I re-ran the product surfaces on the merged tree.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "On Bun 1.4.4 at d26157e2, after `bun install --frozen-lockfile` (patched nats installed), I ran the envoy-session-stall job's steps. Contracts build, then envoy-client stall: 3 pass (A 30.0 s; B 50.0 s, hung redial closed 20.0 s after the accept; C with 32 MiB 30.1 s). pi-envoy stall: 1 pass (30.0 s). claude-envoy stall: 2 pass (29.8 s; SIGTERM → exited after 0.0 s). claude-envoy check-dist: 'dist/ and legion/ match a fresh build'. Go listener and session tests: ok 18.2 s and 5.8 s. The plugin_version and '10 s' greps each match once in every named architecture file."
+    "how": "On Bun 1.4.4 at 5384eb84, after `bun install --frozen-lockfile` (both patch hunks installed), I ran the envoy-session-stall job's steps. envoy-client stall: 3 pass (A 30.0 s; B 50.0 s, hung redial closed 20.0 s after the accept; C with 32 MiB 30.0 s). pi-envoy: 1 pass (30.0 s). claude-envoy: 2 pass (29.9 s; SIGTERM → exited after 0.0 s). check-dist: 'dist/ and legion/ match a fresh build'. Go listener and session tests: ok 18.1 s and 6.0 s. The implementer's release.yaml resolution I drove through release-push.sh (proof 2)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s, also with data the frozen path never acknowledged, and a redial nats.js gives up on leaves no socket open; the plugins recover and show the missed message once, replayed; registration carries the plugin version",
-      "surface": "The merged tree, on Bun 1.4.4: real natsd and listener built from it, real nats.js with patches/nats@2.29.3.patch, the stall proxy, the real pi-envoy extension and the real claude-envoy channel server process",
-      "command": "LEGION_E2E_ENVOY_STACK=1: (cd packages/contracts && bun run build); (cd packages/envoy-client && bun test src/__tests__/nats-stall.test.ts); (cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"NATS path freezes\"); (cd packages/claude-envoy && bun test tests/envoy-channel-stall.test.ts && bun run check-dist); (cd packages/envoy && go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry' -count=1)",
-      "observed": "envoy-client 3 pass (A 30.0 s; B 50.0 s, hung redial closed after 20.0 s; C 30.1 s). pi-envoy 1 pass (resubscribed 30.0 s, missed message shown 30.0 s). claude-envoy 2 pass (29.8 s; SIGTERM → exited after 0.0 s). check-dist matches. Go ok.",
-      "headSha": "d26157e2b8c3fa266e453c71b2734ff30a27fc49",
-      "negativeControl": "With the installed nats's protocol.js hunk reverted for one run (copied aside, restored afterwards), row C printed 'reconnect none, first publish received never after the freeze' and failed [60340.82ms]. Afterwards bun's cache holds nats@2.29.3@@@1 unpatched and nats@2.29.3@@@1_patch_hash=257c91f8b5726726 patched."
+      "criterion": "This round's resolution: on main's restructured release.yaml, a change only to patches/ (the nats patch the pi-envoy bundle inlines) still triggers the release workflow and gets pi-envoy a patch release",
+      "surface": "release.yaml's own version step: .github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS, with the argument list read from the workflow's env block, run in a scratch git clone of the merged head with the repository's tags",
+      "command": "Scratch clone at 5384eb84 with tags. Tag HEAD pi-envoy-v99.0.0 (local only), commit 'chore: touch the nats patch' changing only patches/nats@2.29.3.patch, then run `GITHUB_STEP_SUMMARY='' .github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS`. Repeat with patches/ removed from the arguments (main's list before this PR). Also read release.yaml's push paths.",
+      "observed": "With this PR's arguments: 'Bumping pi-envoy-v99.0.0 -> pi-envoy-v99.0.1', version=99.0.1, skip=false. release.yaml's push trigger lists \"patches/**\" (line 9), so such a commit on main starts the workflow. On the merged head as it stands, the same step prints 'Bumping pi-envoy-v11.5.3 -> pi-envoy-v11.6.0' (this PR's feat commits). The scratch clone was deleted afterwards.",
+      "headSha": "5384eb840c2d",
+      "negativeControl": "The same patches/-only commit with patches/ removed from the arguments: 'No commits in the release's paths since pi-envoy-v99.0.0', skip=true. So without this PR's entry, a nats patch change would ship no pi-envoy release."
     },
     {
-      "criterion": "This round's own change: the pull request's changelog entries are changie fragments that the main-only fold renders (main's #2419 rule), with no Dispatch key, and no CHANGELOG.md is edited",
-      "surface": "changie v1.26.0, installed as .github/actions/install-changie installs it (the same tarball and sha256), rendering each package's fragments as release-push.sh's render_notes does (the package's .changie.yaml plus its fragments in a scratch directory, `changie batch 0.0.0`)",
-      "command": "for each of claude-envoy, envoy-client, envoy-plugin, envoy and pi-envoy: copy .changie.yaml and .changes/unreleased/pr2331-*.yaml to a scratch dir and run changie batch 0.0.0; grep for INFRA-/dispatch:// in the fragments; jj diff --stat --from aeeee6c0 --to d26157e2 'glob:\"packages/*/CHANGELOG.md\"'",
-      "observed": "claude-envoy: 3 fragments → 3 bullets (Added, Fixed). envoy-client: 4 → 4 (Added, Changed, Fixed). envoy-plugin: 1 → 1 (Added). envoy: 1 → 1 (Added). pi-envoy: 3 → 3 (Added, Fixed). No fragment names a Dispatch key. The CHANGELOG.md diff against main: 0 files. The envoy-client Fixed fragment names the 32 MiB row C. release-push.sh fold-notes run in a scratch clone wrote claude-envoy's and envoy-client's notes (3 and 4 fragments). Its plan for the tagged packages needs release history my clone lacked, so I rendered those directly as above.",
-      "headSha": "d26157e2b8c3fa266e453c71b2734ff30a27fc49",
-      "negativeControl": "A copy of pi-envoy's Added fragment with `kind: Improved`: changie refused it, 'kind not found but configuration expects one: 'Improved'', exit 1."
+      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s, also with unacknowledged data, and a redial nats.js gives up on leaves no socket open; both plugins recover and show the missed message once, replayed; registration carries the plugin version",
+      "surface": "The merged tree on Bun 1.4.4: a real natsd and listener built from it, real nats.js with patches/nats@2.29.3.patch, the stall proxy, the real pi-envoy extension and the real claude-envoy channel server process",
+      "command": "LEGION_E2E_ENVOY_STACK=1: (cd packages/contracts && bun run build); (cd packages/envoy-client && bun test src/__tests__/nats-stall.test.ts); (cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"NATS path freezes\"); (cd packages/claude-envoy && bun test tests/envoy-channel-stall.test.ts && bun run check-dist); (cd packages/envoy && go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry' -count=1)",
+      "observed": "envoy-client 3 pass (A 30.0 s; B 50.0 s, hung redial closed after 20.0 s; C 30.0 s). pi-envoy 1 pass (missed message shown 30.0 s after the freeze). claude-envoy 2 pass (29.9 s; SIGTERM → exited after 0.0 s). check-dist matches. Go ok.",
+      "headSha": "5384eb840c2d",
+      "negativeControl": "With the installed nats's protocol.js hunk reverted for one run (copied aside, restored), row C printed 'reconnect none, first publish received never after the freeze' and failed [60112.95ms]."
     }
   ],
   "observations": [
-    "CI at bb869e98 (the PR head, which carries d26157e2): PR Title, Docs, Tests, Worker Image and Legion Envoy and Contracts were all queued when I read them.",
-    "changie batch accepted a fragment whose custom Issue was an empty string: minLength is enforced only by `changie new`. The pr2331 fragments all carry Issue pr2331, so this does not affect them.",
-    "Round 4's two-session run of the committed Claude Code dist from a plugin-cache path still applies: the bundle is unchanged (check-dist matches a fresh build of a tree whose claude-envoy source is identical)."
+    "CI at 90142b43 (the PR head, which carries 5384eb84) when I read it: PR Title, Worker Image, Docs and Tests queued, Legion Envoy and Contracts pending, one PR Title run cancelled. GitHub reports the PR MERGEABLE."
   ]
 }
