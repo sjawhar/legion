@@ -423,7 +423,6 @@ const LIFECYCLE = {
 /** Step 4. The checker does not read quotes, so the closing quote's second sentence is cut here. */
 const BLOCKQUOTE = {
   id: "blockquote-historical",
-  guide: "agents" as Guide,
   old: "contain Python-era references. These are marked",
   new: "contain Python-era references.\n> These are marked",
 };
@@ -761,6 +760,10 @@ function isBlank(line: string | undefined): boolean {
   return line === undefined || line.trim() === "";
 }
 
+function indentLength(line: string): number {
+  return /^[ \t]*/.exec(line)?.[0].length ?? 0;
+}
+
 function occurrences(haystack: string, needle: string): number {
   let count = 0;
   for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
@@ -858,7 +861,7 @@ function itemEnd(text: string, from: number, column: number): number {
     if (isBlank(line)) {
       blank = true;
     } else {
-      const indent = /^[ \t]*/.exec(line)?.[0].length ?? 0;
+      const indent = indentLength(line);
       if (indent < column && (blank || ITEM_START.test(line) || HEADING.test(line))) return at;
       blank = false;
     }
@@ -1109,22 +1112,31 @@ interface FoundTable {
   header: string[];
 }
 
-/** Every pipe table outside fences, with the heading it sits under. */
-function findTables(lines: readonly string[]): FoundTable[] {
-  const tables: FoundTable[] = [];
-  let section = "";
+/** Whether each line opens, sits inside or closes fenced code. */
+function fencedLines(lines: readonly string[]): boolean[] {
+  const fenced: boolean[] = [];
   let fence: string | undefined;
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index] ?? "";
+  for (const line of lines) {
     const run = FENCE.exec(line)?.[1];
     if (fence !== undefined) {
+      fenced.push(true);
       if (run?.startsWith(fence) && line.trim() === run) fence = undefined;
       continue;
     }
-    if (run !== undefined) {
-      fence = run;
-      continue;
-    }
+    if (run !== undefined) fence = run;
+    fenced.push(run !== undefined);
+  }
+  return fenced;
+}
+
+/** Every pipe table outside fences, with the heading it sits under. */
+function findTables(lines: readonly string[]): FoundTable[] {
+  const tables: FoundTable[] = [];
+  const fenced = fencedLines(lines);
+  let section = "";
+  for (let index = 0; index < lines.length; index++) {
+    if (fenced[index]) continue;
+    const line = lines[index] ?? "";
     if (HEADING.test(line)) section = line.trim();
     if (!TABLE_LINE.test(line) || !DELIMITER_ROW.test(lines[index + 1] ?? "")) continue;
     let last = index + 1;
@@ -1366,8 +1378,8 @@ function applyItemBreaks(editor: Editor, problems: Problem[]): void {
 function applyLifecycle(editor: Editor, problems: Problem[]): void {
   const lines = editor.text.split("\n");
   const at = LIFECYCLE.labels.map((label) => lines.findIndex((line) => line.startsWith(label)));
-  for (const [n, label] of LIFECYCLE.labels.entries()) {
-    if ((at[n] ?? -1) === -1 || lines.filter((line) => line.startsWith(label)).length !== 1) {
+  for (const label of LIFECYCLE.labels) {
+    if (lines.filter((line) => line.startsWith(label)).length !== 1) {
       problems.push({ id: LIFECYCLE.id, anchor: label, message: "not one line starting so" });
       return;
     }
@@ -1375,8 +1387,8 @@ function applyLifecycle(editor: Editor, problems: Problem[]): void {
   const starts = lineStarts(editor.text);
   const spans: Span[] = [];
   for (const index of at.slice(1)) {
-    if (isBlank(lines[(index ?? 0) - 1])) continue;
-    const start = starts[index ?? 0] ?? 0;
+    if (isBlank(lines[index - 1])) continue;
+    const start = starts[index] ?? 0;
     spans.push({
       start: start - 1,
       end: start,
@@ -1488,22 +1500,10 @@ function applyRewordings(editor: Editor, guide: Guide, problems: Problem[]): voi
  * the last line's text.
  */
 function itemStartAbove(lines: readonly string[]): number | string {
-  const fenced: boolean[] = [];
-  let fence: string | undefined;
-  for (const line of lines) {
-    const run = FENCE.exec(line)?.[1];
-    if (fence !== undefined) {
-      fenced.push(true);
-      if (run?.startsWith(fence) && line.trim() === run) fence = undefined;
-      continue;
-    }
-    if (run !== undefined) fence = run;
-    fenced.push(run !== undefined);
-  }
+  const fenced = fencedLines(lines);
   const from = lines.length - 1;
   const last = ITEM_START.exec(lines[from] ?? "");
-  const column =
-    last === null ? (/^[ \t]*/.exec(lines[from] ?? "")?.[0].length ?? 0) : last[0].length;
+  const column = last === null ? indentLength(lines[from] ?? "") : last[0].length;
   for (let index = from; index >= 0; index--) {
     if (fenced[index]) continue;
     const line = lines[index] ?? "";

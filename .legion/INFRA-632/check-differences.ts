@@ -4,16 +4,17 @@
 //   bun .legion/INFRA-632/check-differences.ts [--file <report file>] <base.md> <head.md> <report.json>
 //
 // Both files are folded: every run of whitespace (tr's [:space:]: space, tab, newline, vertical
-// tab, form feed, carriage return) becomes one space, and the ends are trimmed, as restructure.ts
-// folds. The report is the JSON array `restructure.ts --report` writes, in the order the edits were
-// made: { id, kind, file, old, new }. Its entries for this file (`file` is the output path as given
-// on the restructure command line: the entries whose `file` is the head path, else the report file
-// whose path shares the most trailing components with the head path; --file names it outright)
-// are applied in order to the folded base, each folded `old` replaced by its folded `new`. Each
-// `old` must occur exactly once in the text at that point; an entry that does not is a failure,
-// named by its index in the report and its id. The result is then compared with the folded head,
-// and every word-level hunk left between them (git diff --no-index --word-diff=porcelain on
-// scratch files under $TMPDIR) is printed as unexplained.
+// tab, form feed, carriage return) becomes one space, and the ends are trimmed. restructure.ts
+// folds JavaScript's `\s`, a superset of these six characters; the two folds agree on the three
+// guides, which hold no other whitespace. The report is the JSON array `restructure.ts --report`
+// writes, in the order the edits were made: { id, kind, file, old, new }. Its entries for this file
+// (`file` is the output path as given on the restructure command line: the entries whose `file` is
+// the head path, else the report file whose path shares the most trailing components with the head
+// path; --file names it outright) are applied in order to the folded base, each folded `old`
+// replaced by its folded `new`. Each `old` must occur exactly once in the text at that point; an
+// entry that does not is a failure, named by its index in the report and its id. The result is
+// then compared with the folded head, and every word-level hunk left between them (git diff
+// --no-index --word-diff=porcelain on scratch files under $TMPDIR) is printed as unexplained.
 //
 // For evidence, the word-level hunks between the folded base and the folded head are printed one
 // per line, each with the report entries whose changed text it overlaps (an entry's changed text is

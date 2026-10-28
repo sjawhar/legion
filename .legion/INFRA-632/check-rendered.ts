@@ -424,23 +424,22 @@ async function main(argv: string[]): Promise<number> {
         if (word === null || runs[index]) continue;
         const context = `…${baseWords.slice(Math.max(0, at - CONTEXT), at).join(" ")} [${word}] ${baseWords.slice(at + 1, at + 1 + CONTEXT).join(" ")}…`;
         const header = headerWord.get(at);
-        const allowance =
-          header === undefined
-            ? allowances.find(
-                (candidate) =>
-                  !candidate.used &&
-                  candidate.list.every(
-                    (listed, offset) =>
-                      listed.replace(/^\[|\]$/g, "") === baseWords[at - candidate.index + offset]
-                  )
-              )
-            : undefined;
         if (header !== undefined) {
           allowed++;
           out.push(
             `  removed, base word ${at}: ${context} (the header row "${header}" of a converted table)`
           );
-        } else if (allowance !== undefined) {
+          continue;
+        }
+        const allowance = allowances.find(
+          (candidate) =>
+            !candidate.used &&
+            candidate.list.every(
+              (listed, offset) =>
+                listed.replace(/^\[|\]$/g, "") === baseWords[at - candidate.index + offset]
+            )
+        );
+        if (allowance !== undefined) {
           allowance.used = true;
           allowed++;
           out.push(`  removed, base word ${at}: ${context} (${allowance.reason})`);
