@@ -647,6 +647,50 @@ test("deleting an image-only paragraph of a broken ask the selection does not to
   );
 });
 
+for (const [kind, refused] of [
+  ["hr", true],
+  ["paragraph", false],
+] as const) {
+  test(`deleting ${refused ? "a divider" : "an empty paragraph"} a peer put in a broken ask outside the selection ${refused ? "is refused" : "applies"}`, async () => {
+    await withMarksEditor(
+      "Intro\n\n:::ask{#a1}\nWhich one?\n\n- Option A\n:::\n",
+      ({ view, ydoc }) => {
+        // A collaborator adds a leaf divider (or an empty paragraph) after the options.
+        const peer = peerOf(ydoc);
+        const block = new Y.XmlElement(kind);
+        block.setAttribute(BLOCK_ID_ATTR, crypto.randomUUID());
+        const yAsk = requireYAsk(peer);
+        yAsk.insert(yAsk.length, [block]);
+        deliver(peer, ydoc);
+        const ask = requireAsk(view.state.doc);
+        expect(ask.lastChild?.type.name).toBe(kind);
+
+        const question = textblockStart(view.state.doc, "Which one?") + 2;
+        view.dispatch(
+          view.state.tr.setSelection(TextSelection.create(view.state.doc, question, question + 3))
+        );
+        let askPos = -1;
+        view.state.doc.descendants((node, pos) => {
+          if (node === ask) askPos = pos;
+          return askPos === -1;
+        });
+        const last = askPos + ask.nodeSize - 1 - (ask.lastChild?.nodeSize ?? 0);
+        const before = view.state.doc;
+        view.dispatch(view.state.tr.delete(last, askPos + ask.nodeSize - 1));
+        if (refused) {
+          expect(view.state.doc).toBe(before);
+          expect(requireAsk(view.state.doc).lastChild?.type.name).toBe(kind);
+          expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list", kind]);
+        } else {
+          expect(requireAsk(view.state.doc).childCount).toBe(2);
+          expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list"]);
+        }
+      },
+      { blockSchema }
+    );
+  });
+}
+
 test("undo and redo of a letter typed in the second option list apply with the selection in the question", async () => {
   await withMarksEditor(
     ASK_DOC,

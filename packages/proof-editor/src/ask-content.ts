@@ -201,11 +201,12 @@ export const brokenAskInputGuards: EditorProps = {
  * Whether `tr` drops, from the ask at `askPos` in `state.doc` that its content rule refuses, a
  * child block that lies wholly outside the selection: every step of `tr` replaces a range inside
  * the ask's content, and some step deletes a leaf of the block, one character of its text or a
- * leaf node such as an image or a hard break, so a block holding only an image is kept as one
- * holding text is. Inserting into the block deletes none of its leaves, nor does deleting only
- * node boundaries, as a Backspace joining the block to the one before it or a node's attributes
- * being set does, and neither drops it. A block with no leaf at all (an empty paragraph) holds
- * nothing a collaborator wrote, so a Backspace that removes it applies.
+ * leaf node such as an image or a hard break, or the block itself when it is a leaf (a divider),
+ * so a block holding only an image, or a divider, is kept as one holding text is. Inserting into
+ * the block deletes none of its leaves, nor does deleting only node boundaries, as a Backspace
+ * joining the block to the one before it or a node's attributes being set does, and neither drops
+ * it. A non-leaf block with no leaf in it (an empty paragraph) holds nothing a collaborator wrote,
+ * so a Backspace that removes it applies.
  */
 function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: number): boolean {
   const ask = state.doc.nodeAt(askPos);
@@ -227,13 +228,12 @@ function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: nu
   ask.forEach((block, offset) => {
     const start = askPos + 1 + offset;
     if (dropped || (start + block.nodeSize > from && start < to)) return;
-    block.descendants((node, pos) => {
+    state.doc.nodesBetween(start, start + block.nodeSize, (node, pos) => {
       if (dropped || !node.isLeaf) return !dropped;
       // A leaf unit `[at, at + 1]` is deleted when a step's deleted range ends at or spans its
       // end (`deletedBefore`, the end mapped to the left); an insertion at either side, which
       // `deletedAfter` also reports at the insertion point, deletes nothing.
-      const leafStart = start + 1 + pos;
-      for (let at = leafStart; at < leafStart + node.nodeSize && !dropped; at++) {
+      for (let at = pos; at < pos + node.nodeSize && !dropped; at++) {
         dropped = tr.mapping.mapResult(at + 1, -1).deletedBefore;
       }
       return false;
