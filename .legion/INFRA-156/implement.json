@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-156",
-  "completed": "2026-10-28T10:43:09Z",
+  "completed": "2026-10-28T15:33:45Z",
   "proof": [
     {
       "criterion": "A3 (server): a test block type declaring a block-pointer attribute accepts a valid block reference and refuses a malformed one",
       "surface": "the real Dispatch server process (packages/dispatch/e2e/run-server.sh, go build of the working copy) on a local Postgres 17 with pgvector and real migrations, built with a scratch blocks.json adding requirement and claim{serves: block[], targets [requirement]}; driven over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh (script posted on the pull request), steps 2 and 4",
       "observed": "upload of checks.md holding :::claim{#c1 serves=\"dispatch://CORE-1/spec#b-r1\"} -> 201; serves=\"dispatch://CORE-1/spec#x\", \"...#b-r%311\" (over-encoded), \"dispatch://CORE-1/artifact/spec#b-r1\" (non-canonical spec spelling), a doubled space and a leading space -> each 400 INVALID_MARKDOWN naming typed block \"claim\" attribute \"serves\" and the bad value",
-      "headSha": "c5e2f63c93e0cc807f20b973f008438fa6abab2f",
+      "headSha": "233a8d614b19aaa73c86b268abb0230071a72542",
       "negativeControl": "the malformed values above, each refused 400 INVALID_MARKDOWN with no version written"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "same real server process over HTTP (upload route and POST /api/v1/artifacts/{id}/edits)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 4",
       "observed": "serves naming the spec's paragraph -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-<paragraph id>, a \"paragraph\" block; it points only at requirement'; naming callout k1 -> 400 INVALID_MARKDOWN naming \"callout\"; an edit op inserting a claim pointing at k1 -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "c5e2f63c93e0cc807f20b973f008438fa6abab2f",
+      "headSha": "233a8d614b19aaa73c86b268abb0230071a72542",
       "negativeControl": "the same pointer at requirement r1 -> 201 (the allowed type is accepted)"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "same real server process, read over HTTP and with the real dispatch CLI (bun packages/envoy-client/bin/dispatch.ts read)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 3",
       "observed": "dispatch read --ref dispatch://CORE-1/spec#b-r1 prints 'Referenced by: - serves block dispatch://CORE-1/artifact/checks-md#b-c1'; GET /api/v1/references?to=...#b-r1&kind=serves -> [{kind: serves, node: dispatch://CORE-1/artifact/checks-md#b-c1}]; &kind=mentions -> []; GET /api/v1/block-links?from=checks.md&to=spec -> [{kind: serves, from: c1, to: r1}]",
-      "headSha": "c5e2f63c93e0cc807f20b973f008438fa6abab2f",
+      "headSha": "233a8d614b19aaa73c86b268abb0230071a72542",
       "negativeControl": "?kind=nope -> 400 INVALID_KIND naming the structural kinds and the declared block[] names (serves); checks.md re-uploaded with serves=\"\" -> 201 and ?to=...#b-r1 lists no edge"
     },
     {
@@ -33,7 +33,7 @@
       "surface": "same real server process over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, retype steps",
       "observed": "edit op retype r1 -> callout on the spec -> 200, then ?to=...#b-r1 lists no edge; retype back to requirement -> 200, the serves edge from c1 is listed again",
-      "headSha": "c5e2f63c93e0cc807f20b973f008438fa6abab2f",
+      "headSha": "233a8d614b19aaa73c86b268abb0230071a72542",
       "negativeControl": "while r1 is a callout the serves edge is absent from ?to= (a target of a disallowed type is not listed)"
     },
     {
@@ -41,7 +41,7 @@
       "surface": "same real server process over HTTP, with a scratch type loose{serves: block[] with no targets} beside claim{serves: block[] targets [requirement]}",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, 'review finding 1' steps",
       "observed": "loose.md holding :::loose{#c1 serves=\"dispatch://CORE-1/spec#b-k1\"} -> 201; the same document re-uploaded as :::claim{#c1 serves=...k1} -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-k1, a \"callout\" block; it points only at requirement'; edit op {op: retype, block: c1, type: claim, attributes: {serves: [k1]}} -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "c5e2f63c93e0cc807f20b973f008438fa6abab2f",
+      "headSha": "233a8d614b19aaa73c86b268abb0230071a72542",
       "negativeControl": "the same retype op with serves at requirement r1 -> 200, and an unrelated insert into loose.md -> 200"
     },
     {
@@ -49,7 +49,7 @@
       "surface": "the real Dispatch server built from the head with a scratch schema (requirement; claim{serves: block[] targets [requirement], cites: block[]}), on local Postgres 17 + pgvector; the tester's rig: a browser write gives claim c1 the paragraph's id, the server is killed before it settles, then rebuild-refs and the block index pass re-index the stored state",
       "command": "bash $TMPDIR/infra156/dup2.sh $TMPDIR/infra156/r5-bin infra156_impl_dup_new 8811 $TMPDIR/infra156-tester/src5 (the tester's dup2.sh with its log, jar and client paths moved under $TMPDIR/infra156)",
       "observed": "stored blocks [paragraph f1a508e6, claim f1a508e6, paragraph]; after rebuild-refs and the block index pass block_refs holds only 'f1a508e6 mentions -> DUP-1/spec#r1', and GET /api/v1/references?to=r1 lists [mentions #f1a508e6]",
-      "headSha": "c5e2f63c93e0cc807f20b973f008438fa6abab2f",
+      "headSha": "233a8d614b19aaa73c86b268abb0230071a72542",
       "negativeControl": "the same rig on the code before the type check in pointerPairs (BlockPointers' skip alone): block_refs held 'serves' from the paragraph and the paragraph's mention was lost; the tester reproduced the same at f5cc766b"
     }
   ],
@@ -91,5 +91,6 @@
     ,"Review round 8 (48a891d4, narrowed by the architect). (1) The dispatch request-approval preflight (envoy-client dispatch-execute.ts) looked only for `ask{#<id>`, so it never found an ask whose id Go now writes `id=\"…\"` and refused every request. @legion/contracts now exports typedBlockIdAttribute and TYPED_BLOCK_ID_SHORTCUT_EXCLUDED, ported from Go, and DISPATCH_TYPED_BLOCK_ID_SPELLINGS (25 rows). The table's Go copy pmdoc/testdata/typed-block-id-spellings.json is read by TestTypedBlockIDAttributeWritesTheSharedTable and checked by dispatch-block-ref.test.ts, and its path is in the contracts CI filter. The preflight builds both needles from the writer. New dispatch-execute.test.ts cases for `a b` and `R&D` fail at 7c11b41c ('which version 4 does not hold yet') and pass. packages/claude-envoy/dist was rebuilt under the pinned Bun 1.4.4 and `scripts/build.ts --check` passes; it was already stale at 7c11b41c (the PR's earlier contracts work), so the rebuild carries that too. (2) pmdoc/directive.go has one constant, typedBlockIDShortcutExcluded, for the reader and the writer. (3) packages/envoy/AGENTS.md says no space, tab or line ending. Real server: ask.md holding :::ask{id=\"a b\"} is stored as written, and `dispatch request-approval` finds the block (refused over an open block, 'block a b, whose ask Dispatch has not opened yet'), not 'does not hold yet'."
     ,"Conflict round after round 8: forward merge 10bc21e1 against main aeeee6c0 (contains 460facf5), changelog conflicts only (contracts and envoy, both entries kept). Fingerprint unchanged at 3830ccc1 (the tester's 97b1e2c8), so bare gates only: go build and vet, store Migration, pmdoc, docs and api block-pointer tests, contracts and envoy-client tests and tsc, claude-envoy dist check under Bun 1.4.4, biome. Main's highest migration is still 0134."
     ,"Review round 9 (c5e2f63c, upkeep the architect narrowed; no product behaviour change). (1) Main's #2419 makes changelog entries fragments: the four CHANGELOG.md files are reset to main's text and the six entries are packages/{contracts,envoy,envoy-client,claude-envoy}/.changes/unreleased/pr2394-<slug>.yaml (kind Added or Fixed, body |-, custom Issue pr2394, per the controller's key ruling the architect relayed, no Dispatch key anywhere); each package's fragments render through `changie batch 0.0.0` beside its .changie.yaml as the fold does. (2) packages/envoy/AGENTS.md separates the characters that end the `#` shortcut (space, tab, line ending, #, ., }) from those that make the editor read no directive (quotes, <, =, >, backtick). (3) The fast-follow tidy: TestATypedBlockIDReadsBackAsWritten reads the shared JSON table (six rows added to DISPATCH_TYPED_BLOCK_ID_SPELLINGS, 31 rows; the NUL case stays in the test since U+FFFD comes from writeNulsAsReplacement, and the empty id is checked against the writer alone), TestTypedBlockIDAttributeWritesTheSharedTable is gone, and TYPED_BLOCK_ID_SHORTCUT_EXCLUDED is module-local. With TypedBlockIDAttribute forced to `#`+id the read-back test fails. claude-envoy dist still matches a fresh build; the a3 E2E at c5e2f63c matches round 8's output."
+    ,"Conflict round (forward merge 233a8d61 against main 690c0136, fingerprint 847de598 -> d44f78a6). Main's 0135_server_processes took this PR's number, so the migration is now 0136_block_pointer_links (SQL unchanged but each file's header comment), with every reference moved (packages/envoy/AGENTS.md x2, cmd/dispatch/README.md x2, cmd/dispatch/AGENTS.md, the envoy changelog fragment). The architect asked for 0139 (after #2463's 0136-0138), but store's TestMigrationSetIsNumberedOneToN refuses a gap: at 0139 it fails ('numbered 139 where 136 comes next'). The architect agreed to keep 0136, and this PR renumbers again when #2463 lands, carrying its graph_edges arms and the block[] refusal of an item-block reference. Three prose conflicts kept both sides: cmd/dispatch/README.md (both migration paragraphs), docs/rebuild.go's doc comment (main's closed-issue rebuild plus refuseBlockPointers), proof-editor/AGENTS.md (fourteen own files: main's two mermaid files plus block-pointers.ts). Checks: the whole store package, refs, the filtered pmdoc/docs/api tests, go build/vet/gofmt, proof-editor, contracts, envoy-client, dispatch, the claude-envoy dist check, biome; the a3 E2E output is identical to the previous round's."
   ]
 }
