@@ -1036,9 +1036,12 @@ export function replaySuppressed(
   return rendered.skip || rendered.malformedDelivery === true;
 }
 
+/** What a replayed frame's text ends with (`replayedText`); a live frame's text has no such line. */
+export const REPLAYED_SUFFIX = "while this session's connection was down.";
+
 /** A replayed frame's text: the rendered frame, then when it was published. */
 export function replayedText(content: string, publishedAt: string): string {
-  return `${content}\nPublished at ${publishedAt} while this session's connection was down.`;
+  return `${content}\nPublished at ${publishedAt} ${REPLAYED_SUFFIX}`;
 }
 
 /** What the notice shown in place of a frame the session could not be shown says, field by field. */
