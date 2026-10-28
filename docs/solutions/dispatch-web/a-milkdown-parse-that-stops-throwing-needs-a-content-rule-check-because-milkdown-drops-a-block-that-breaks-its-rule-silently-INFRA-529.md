@@ -44,15 +44,22 @@ trigger goes away. Then look for input that is now lost without any error.
 
 ## Evidence
 
-- `packages/proof-editor/src/read-only-directives.ts:48-77`: `placeholders`, with the mark case at `:55`, and `fitsContentRule`, with the `createAndFill` call at `:76`; `:145-157` is the innermost-first decision.
+- `packages/proof-editor/src/typed-block-drawing.ts:69-97` (moved there from `read-only-directives.ts` by INFRA-565): `placeholders`, with the mark case at `:76`, and `fitsContentRule`, with the `createAndFill` call at `:97`; `:166-188` is the innermost-first decision.
+- INFRA-565 found the same loss in the editor's default mode, where nothing had stopped throwing:
+  the headless engine without `readOnly` and the live editor dropped an `:::ask` holding a
+  heading, pasted or imported, with all its text. Default mode now runs the same check after
+  `remarkTypedBlocks` (`remarkUnfitTypedBlocks`) and, in the live editor, after the mark plugins
+  (`unfitTypedBlocksRemarkPlugin` in `src/lib.ts`); `packages/dispatch/e2e/typed-block-content-rule.e2e.ts`
+  pastes the block in a browser and keeps every word.
 - The tester's red test (commit `ee272bb6`) used an ask that holds a list and then an unknown
   `:::note`. Round 1's read-only parse rendered only `Lead` from it. Round 1's unit tests used a
   `callout`-only schema and passed.
 - Review round 1 found that a block-level `<span data-dispatch>` wraps the following blocks in a
   mark node. The first fit check treated that child as fitting, and the ask still vanished
   (`createNodeInParserFail … heading(dispatchAsk("Heading words"))`). Fixed in `75cd715e`.
-- `packages/proof-editor/tests/read-only-directives.test.ts:282` loads the server schema.
-  `:401-424` stubs `console.error` for the byte-order-mark row.
+- `packages/proof-editor/tests/block-schema-fixture.ts` loads the server schema, which
+  `tests/read-only-directives.test.ts` and `tests/typed-block-drawing.test.ts` both import.
+  `read-only-directives.test.ts:372-398` stubs `console.error` for the byte-order-mark row.
 - Related rules: `docs/solutions/integration-patterns/a-value-a-library-consumes-is-validated-with-that-librarys-own-parser-read-back-whole-INFRA-271.md`
   (check with the library's own rule) and
   `docs/solutions/testing/evidence-can-be-absent-rather-than-wrong-and-absence-reads-exactly-like-success-INFRA-31.md`.

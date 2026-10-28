@@ -33,8 +33,8 @@ interface ThreadListProps {
   onToggleResolved(): void;
   pendingActionIds: ReadonlySet<string>;
   resolvedThreads: Thread[];
-  /** Hidden retracted asks; counted in the toggle so a reader can reveal them too. */
-  retractedAskCount: number;
+  /** Hidden retracted and withdrawn asks; counted in the toggle so a reader can reveal them too. */
+  foldedAskCount: number;
   selectedItemId?: string;
   showResolved: boolean;
   threads: Thread[];
@@ -117,7 +117,7 @@ export function ThreadList({
   owner,
   pendingActionIds,
   resolvedThreads,
-  retractedAskCount,
+  foldedAskCount,
   selectedItemId,
   showResolved,
   threads,
@@ -258,7 +258,7 @@ export function ThreadList({
           {discussion.map((thread) => card(thread))}
         </section>
       )}
-      {resolvedThreads.length + retractedAskCount === 0 ? null : (
+      {resolvedThreads.length + foldedAskCount === 0 ? null : (
         <>
           <button
             aria-expanded={showResolved}
@@ -266,7 +266,7 @@ export function ThreadList({
             onClick={onToggleResolved}
             type="button"
           >
-            Resolved ({resolvedThreads.length + retractedAskCount})
+            Resolved ({resolvedThreads.length + foldedAskCount})
           </button>
           {showResolved ? (
             <section aria-label="Resolved" className="space-y-3">

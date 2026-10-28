@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
+  ASK_QUESTION_MAX,
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
@@ -457,18 +458,19 @@ describe("executeDispatchTool", () => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
 
-    // 790 + "\n\nRef: " (7) + 24 = 821 UTF-16 units.
+    // The question at the cap less 10, plus "\n\nRef: " (7) and the 24-unit ref, is 21 over.
     await expect(
       executeAsk(
         {
           issue: "DSP-41",
-          question: "x".repeat(790),
+          question: "x".repeat(ASK_QUESTION_MAX - 10),
           ref: "dispatch://DSP-41/ask/ab",
         },
         fetchImpl
       )
     ).rejects.toThrow(
-      "question plus ref is 21 characters over the 800-character limit (821/800); shorten the question or drop the ref"
+      `question plus ref is 21 characters over the ${ASK_QUESTION_MAX}-character limit ` +
+        `(${ASK_QUESTION_MAX + 21}/${ASK_QUESTION_MAX}); shorten the question or drop the ref`
     );
   });
 
@@ -2171,6 +2173,10 @@ describe("executeDispatchTool", () => {
     });
     expect(claimed.text).toContain("DSP-1: claimed by you since 2026-09-24T06:00:00Z");
     expect(claimed.text).toContain("move it to in_progress");
+    // The claim itself delivers a person's answers, comments and messages on the issue.
+    expect(claimed.text).toContain(
+      "A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
     expect(claimed.details).toMatchObject({ issue: "DSP-1", status: "todo", claim });
 
     const released = await run({ issue: "DSP-1", release: true });
@@ -2214,12 +2220,16 @@ describe("executeDispatchTool", () => {
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(claimed.text).not.toContain("issue-update");
+    expect(claimed.text).toContain(
+      "Release the claim when you stop. A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
 
     const released = await run({ issue: "DSP-1", release: true });
     expect(released.text).toContain(
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(released.text).not.toContain("issue-update");
+    expect(released.text).not.toContain("now reach you directly");
   });
 
   test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {
@@ -4374,7 +4384,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_ask",
-        args: { issue: "DSP-41", question: "x".repeat(801) },
+        args: { issue: "DSP-41", question: "x".repeat(ASK_QUESTION_MAX + 1) },
         cwd: "/workspace",
         host: "omp",
         config,

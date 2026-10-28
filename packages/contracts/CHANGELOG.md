@@ -1,8 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
 
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
@@ -206,6 +215,14 @@
   (INFRA-44).
 
 ### Changed
+
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
 
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
