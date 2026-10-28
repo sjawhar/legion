@@ -102,20 +102,14 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 		transact(func(txn *crdt.Transaction) {
 			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, nil, mark)
 		})
-		if markErr != nil {
-			return markErr
-		}
-		return nil
+		return markErr
 	}, func(tree *pmdoc.Node) error {
 		var err error
 		anchored, err = readAnchored(tree, mark.Kind, mark.ID)
 		if errors.Is(err, ErrAnchorMissing) {
 			return fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
 		}
-		if err != nil {
-			return err
-		}
-		return nil
+		return err
 	})
 	if err != nil {
 		return Anchored{}, err
