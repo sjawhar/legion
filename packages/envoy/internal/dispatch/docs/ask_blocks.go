@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type askBlock struct {
@@ -169,10 +170,8 @@ func (r *settlementReconciliation) nameVersion(
 		if err != nil {
 			return fmt.Errorf("retract deleted ask block: %w", err)
 		}
-		if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-			if err := writeAskResolution(ctx, tx, ask.ID, encoded); err != nil {
-				return fmt.Errorf("retract deleted ask block: %w", err)
-			}
+		if err := write(ctx, tx, func(b *store.WriteBatch) error {
+			queueAskResolution(b, "retract deleted ask block", ask.ID, encoded)
 			return nil
 		}); err != nil {
 			return err
@@ -756,14 +755,13 @@ func createAskBlock(
 		return model.Ask{}, err
 	}
 	id, createdAt := ask.ID, ask.CreatedAt
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("create ask block row", `
 			insert into asks (id, issue_key, artifact_id, block_id, block_artifact_id, author, question, options, multiple, urgency, kind, created_at)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'question', $11)
-		`, id, owner.IssueKey, ownerArtifactID, block.id, artifactID, authorJSON, block.question, options, block.multiple, block.urgency, createdAt); err != nil {
-			return fmt.Errorf("create ask block row: %w", err)
-		}
-		return asks.FollowAuthor(ctx, tx, id, author)
+		`, id, owner.IssueKey, ownerArtifactID, block.id, artifactID, authorJSON, block.question, options, block.multiple, block.urgency, createdAt)
+		asks.QueueFollowAuthor(b, id, author)
+		return nil
 	}); err != nil {
 		return model.Ask{}, err
 	}

@@ -8,10 +8,12 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // lockedComment is the prologue of every comment mutation: read the comment, take its owner's lock
@@ -69,7 +71,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Everything up to Commit is the read phase (Docs.Join): this route and ProjectMark queue their
-	// writes on the ledger, in the order made, and Commit runs them back to back.
+	// writes on the ledger, in the order made, and Commit sends them as one batch.
 	if err := queueExec(r.Context(), tx, ledger, `
 		update comments
 		set resolved = false, resolved_by = null, resolved_at = null
@@ -169,7 +171,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Everything up to Commit is the read phase (Docs.Join): this route and ProjectMark queue their
-	// writes on the ledger, in the order made, and Commit runs them back to back. edited_at is the
+	// writes on the ledger, in the order made, and Commit sends them as one batch. edited_at is the
 	// transaction's now(), which the queued update writes, read here so the projection and the
 	// event carry it before that update runs.
 	editedAt, err := ledger.Now(r.Context())
@@ -214,16 +216,12 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.queueEvent(r.Context(), tx, ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+	event, err := s.queueStampedEvent(r.Context(), tx, ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.edited",
 		actor,
 		payload,
-	))
+	), "comment", comment.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := queueStamp(r.Context(), tx, ledger, "comment", comment.ID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -278,7 +276,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	// Everything up to Commit is the read phase (Docs.Join): this route and the document operations
-	// queue their writes on the ledger, in the order made, and Commit runs them back to back.
+	// queue their writes on the ledger, in the order made, and Commit sends them as one batch.
 	// resolved_at is the transaction's now(), which the queued update writes, read here so the
 	// projection and the event carry it before that update runs.
 	switch action {
@@ -381,20 +379,19 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			return
 		}
 		// The owner's lock this transaction holds keeps the suggestion as it was read above, so the
-		// guard finds it undecided; were it decided, the step refuses as the read refused it, and
-		// Commit returns that refusal.
-		if err := queueWrite(r.Context(), tx, ledger, func(ctx context.Context, tx pgx.Tx) error {
-			tag, err := tx.Exec(ctx, `
+		// guard finds it undecided; were it decided, the update's callback refuses as the read
+		// refused it, and Commit returns that refusal.
+		if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+			b.Queue("", `
 				update comments
 				set resolved = true, resolved_by = $2, resolved_at = $3, suggestion = $4
 				where id = $1 and suggestion->>'accepted' is null
-			`, comment.ID, resolvedBy, resolvedAt, suggestion)
-			if err != nil {
-				return err
-			}
-			if tag.RowsAffected() == 0 {
-				return errorf(http.StatusConflict, "ALREADY_ACTIONED", "suggestion has already been actioned")
-			}
+			`, comment.ID, resolvedBy, resolvedAt, suggestion).Exec(func(tag pgconn.CommandTag) error {
+				if tag.RowsAffected() == 0 {
+					return errorf(http.StatusConflict, "ALREADY_ACTIONED", "suggestion has already been actioned")
+				}
+				return nil
+			})
 			return nil
 		}); err != nil {
 			s.writeHandlerError(w, err)

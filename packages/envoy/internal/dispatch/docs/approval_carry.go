@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A human's answer to a decision block carries his approval forward. He approved the document at
@@ -133,13 +135,10 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if err != nil {
 		return err
 	}
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		_, event, err := WriteReview(ctx, tx, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID)
-		if err != nil {
-			return err
-		}
-		sink(event)
-		return nil
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		return QueueReview(b, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID, func(_ model.ArtifactReview, event model.Event) {
+			sink(event)
+		})
 	})
 }
 
@@ -419,11 +418,12 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // answerApprovalAsk answers the open approval request ask of artifactID with Approve in actor's
 // name, giving reason as the answer's text, as a human's answer through the answer route is
 // written, and hands sink the ask.answered event it appends on the ask's owner. The write names the
-// open state it answers from: a request that is no longer open is an error, not a second answer.
-// The update and the append are one step (write); the event carries the row as it stands when the
-// step runs, after the move this version write queued before it, whose step filled in the
-// request's edited_at (rewriteApprovalAsk). Where the step is queued, the ledger records the
-// request closed, so nothing later in the transaction answers it again.
+// open state it answers from: a request that is no longer open is an error, not a second answer,
+// which the update's callback returns, so the write phase stops there. The update and the append
+// are one step (write); the event carries the row as the step leaves it, after the move this
+// version write queued before it, which set the request's edited_at (rewriteApprovalAsk). Where
+// the step is queued, the ledger records the request closed, so nothing later in the transaction
+// answers it again.
 func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason string, sink func(model.Event)) error {
 	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: time.Now().UTC()}
 	encoded, err := json.Marshal(answer)
@@ -431,25 +431,25 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 		return fmt.Errorf("encode approval answer: %w", err)
 	}
 	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask, closed: true})
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		answered, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded)
-		if err != nil {
-			return fmt.Errorf("answer approval ask: %w", err)
-		}
-		if answered.RowsAffected() != 1 {
-			return fmt.Errorf("answer approval ask %s: it is no longer open", ask.ID)
-		}
-		ask.State = "answered"
-		ask.Answer = &answer
-		event, err := broker.Append(ctx, tx, model.Event{
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		answered := *ask
+		answered.State = "answered"
+		answered.Answer = &answer
+		b.Queue("answer approval ask", `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded).Exec(func(tag pgconn.CommandTag) error {
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("answer approval ask %s: it is no longer open", ask.ID)
+			}
+			ask.State = answered.State
+			ask.Answer = answered.Answer
+			return nil
+		})
+		if err := broker.QueueAppend(b, model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 			Type: "ask.answered", Actor: actor,
-			Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(*ask, model.ReferenceChanges{})},
-		})
-		if err != nil {
+			Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(answered, model.ReferenceChanges{})},
+		}, sink); err != nil {
 			return fmt.Errorf("append approval ask answer: %w", err)
 		}
-		sink(event)
 		return nil
 	})
 }

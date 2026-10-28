@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -57,81 +58,100 @@ func (b *Broker) LockOwners(ctx context.Context, tx pgx.Tx, owners ...model.Even
 	return store.LockOwners(ctx, tx, locks...)
 }
 
-// Append assigns the next sequence of the event's owner, writes e in tx, and
-// returns the database-assigned event ID. The caller must call Publish only
-// after tx commits.
+// Append assigns the next sequence of the event's owner, writes e in tx, and returns the appended
+// event with its database-assigned ID, sequence and time. Its statements go to the server as one
+// batch (QueueAppend). The caller must call Publish only after tx commits.
 func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Event, error) {
+	var appended model.Event
+	if err := store.RunWrite(ctx, tx, func(batch *store.WriteBatch) error {
+		return b.QueueAppend(batch, e, func(written model.Event) { appended = written })
+	}); err != nil {
+		return model.Event{}, err
+	}
+	return appended, nil
+}
+
+// QueueAppend queues e's append on a write phase's batch: its owner's lock and row
+// (lockEventOwner), the commit-order lock, and the insert, which takes the next sequence from
+// the owner row as it stands when the insert runs and advances the row's last_seq (and an issue's
+// updated_at) to the row it inserted, in the same statement. An ask.opened event's payload then
+// records the event's own id (opened_event_id) through the id sequence's currval, the id the
+// insert just took. So no value of one statement is read in Go before the next one is sent.
+// appended receives the event as written - its id, sequence, time, the owner's project and the
+// payload as stored - once the batch has read those statements' results, before any statement
+// queued after them is read. A statement queued right after these may name the event's id as
+// store.LatestEventID.
+func (b *Broker) QueueAppend(batch *store.WriteBatch, e model.Event, appended func(model.Event)) error {
 	if b == nil {
-		return model.Event{}, fmt.Errorf("event broker required")
+		return fmt.Errorf("event broker required")
 	}
 	if _, err := eventOwnerKey(e); err != nil {
-		return model.Event{}, err
-	}
-	lastSeq, err := lockEventOwner(ctx, tx, &e)
-	if err != nil {
-		return model.Event{}, err
-	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, commitOrderAdvisoryLock); err != nil {
-		return model.Event{}, fmt.Errorf("acquire event commit order lock: %w", err)
-	}
-
-	if e.IssueKey == nil && e.ArtifactID == nil && e.ProjectKey == nil {
-		e.Seq = 0
-	} else {
-		e.Seq = lastSeq + 1
+		return err
 	}
 	e.Notify = b.Notify(e)
-
 	actor, err := json.Marshal(e.Actor)
 	if err != nil {
-		return model.Event{}, fmt.Errorf("encode event actor: %w", err)
+		return fmt.Errorf("encode event actor: %w", err)
 	}
 	payload, err := json.Marshal(e.Payload)
 	if err != nil {
-		return model.Event{}, fmt.Errorf("encode event payload: %w", err)
+		return fmt.Errorf("encode event payload: %w", err)
 	}
-	if err := tx.QueryRow(ctx, `
-		insert into events (issue_key, artifact_id, project_key, seq, type, actor, payload, notify)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
-		returning id, created_at
-	`, e.IssueKey, e.ArtifactID, e.ProjectKey, e.Seq, e.Type, actor, payload, e.Notify).Scan(&e.ID, &e.CreatedAt); err != nil {
-		return model.Event{}, fmt.Errorf("insert event: %w", err)
-	}
+	var opened model.AskEventPayload
 	if e.Type == "ask.opened" {
-		opened, ok := e.Payload.(model.AskEventPayload)
-		if !ok {
-			return model.Event{}, fmt.Errorf("ask.opened payload must be model.AskEventPayload")
-		}
-		opened.OpenedEventID = &e.ID
-		payload, err = json.Marshal(opened)
-		if err != nil {
-			return model.Event{}, fmt.Errorf("encode ask.opened payload: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `update events set payload = $2 where id = $1`, e.ID, payload); err != nil {
-			return model.Event{}, fmt.Errorf("record ask.opened event identity: %w", err)
-		}
-		e.Payload = opened
-	}
-	if e.IssueKey != nil {
-		if _, err := tx.Exec(ctx, `
-			update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1
-		`, *e.IssueKey, e.Seq, e.CreatedAt); err != nil {
-			return model.Event{}, fmt.Errorf("advance issue event sequence: %w", err)
-		}
-	} else if e.ArtifactID != nil {
-		if _, err := tx.Exec(ctx, `
-			update artifacts set last_seq = $2 where id = $1
-		`, *e.ArtifactID, e.Seq); err != nil {
-			return model.Event{}, fmt.Errorf("advance artifact event sequence: %w", err)
-		}
-	} else if e.ProjectKey != nil {
-		if _, err := tx.Exec(ctx, `
-			update projects set last_seq = $2 where key = $1
-		`, *e.ProjectKey, e.Seq); err != nil {
-			return model.Event{}, fmt.Errorf("advance project event sequence: %w", err)
+		var ok bool
+		if opened, ok = e.Payload.(model.AskEventPayload); !ok {
+			return fmt.Errorf("ask.opened payload must be model.AskEventPayload")
 		}
 	}
-	return e, nil
+	event := &e
+	lockEventOwner(batch, event)
+	batch.Queue("acquire event commit order lock", `select pg_advisory_xact_lock($1)`, commitOrderAdvisoryLock)
+	// One statement takes the next sequence from the owner row and advances the row to the event
+	// it inserted. Every statement of a data-modifying CTE reads one snapshot, so the insert reads
+	// last_seq as the statements before it left it, and the owner's update writes the very
+	// sequence the insert took. Only the owner the event names matches a row: the other two keys
+	// are null, and an ownerless event (a session-addressed message) takes sequence 0 and advances
+	// nothing.
+	batch.Queue("", `
+		with appended as (
+			insert into events (issue_key, artifact_id, project_key, seq, type, actor, payload, notify)
+			values ($1, $2, $3, coalesce(
+				(select last_seq from issues where key = $1) + 1,
+				(select last_seq from artifacts where id = $2) + 1,
+				(select last_seq from projects where key = $3) + 1,
+				0), $4, $5, $6, $7)
+			returning id, seq, created_at
+		), issue as (
+			update issues set last_seq = appended.seq, updated_at = greatest(issues.updated_at, appended.created_at)
+			from appended where issues.key = $1
+		), artifact as (
+			update artifacts set last_seq = appended.seq from appended where artifacts.id = $2
+		), project as (
+			update projects set last_seq = appended.seq from appended where projects.key = $3
+		)
+		select id, seq, created_at from appended
+	`, e.IssueKey, e.ArtifactID, e.ProjectKey, e.Type, actor, payload, e.Notify).QueryRow(func(row pgx.Row) error {
+		if err := row.Scan(&event.ID, &event.Seq, &event.CreatedAt); err != nil {
+			return fmt.Errorf("insert event: %w", err)
+		}
+		if event.Type != "ask.opened" {
+			appended(*event)
+		}
+		return nil
+	})
+	if e.Type == "ask.opened" {
+		batch.Queue("record ask.opened event identity", `
+			update events set payload = jsonb_set(payload, '{opened_event_id}', to_jsonb(id))
+			where id = `+store.LatestEventID+`
+		`).Exec(func(pgconn.CommandTag) error {
+			opened.OpenedEventID = &event.ID
+			event.Payload = opened
+			appended(*event)
+			return nil
+		})
+	}
+	return nil
 }
 
 // eventOwnerKey requires exactly one of IssueKey/ArtifactID/ProjectKey (or a session-addressed
@@ -210,45 +230,42 @@ func eventOwnerLock(e model.Event) (store.Owner, bool) {
 	return store.Owner{}, false
 }
 
-// lockEventOwner takes e's owner lock (store.LockOwner), which returns at once when the
+// lockEventOwner queues e's owner lock (store.QueueLockOwner), which returns at once when the
 // transaction took it in its read phase, as every writer does, and then its owner's row `for no
-// key update`, which reads the sequence the append continues. The row lock is a write-phase lock:
-// it is the statement that gives a transaction appending its first event its transaction id, and
-// every Dispatch writer of an owner row takes the owner lock first, so the row is never contended
-// among them. The lock and the row read go in one round trip as two statements
-// (store.LockOwnerAndRead): the read's snapshot is taken after the lock is granted.
-func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error) {
+// key update`, whose callback records the owner's project on e. The row lock is a write-phase lock:
+// it is the statement that gives a transaction appending its first event its transaction id, before
+// the insert takes an id from the events sequence, and every Dispatch writer of an owner row takes
+// the owner lock first, so the row is never contended among them. The two stay two statements: the
+// row's read takes its snapshot once the lock is granted. An ownerless event locks nothing.
+func lockEventOwner(batch *store.WriteBatch, e *model.Event) {
 	owner, ok := eventOwnerLock(*e)
 	if !ok {
-		return 0, nil
+		return
 	}
-	var lastSeq int
 	var what, row string
-	var scan []any
 	switch owner.Kind {
 	case store.OwnerIssue:
 		what = "issue"
-		row = `select last_seq, project_key from issues where key = $1 for no key update`
-		scan = []any{&lastSeq, &e.Project}
+		row = `select project_key from issues where key = $1 for no key update`
 	case store.OwnerArtifact:
 		what = "unlinked artifact"
 		row = `
-			select last_seq, project_key
+			select project_key
 			from artifacts
 			where id = $1 and issue_key is null
 			for no key update
 		`
-		scan = []any{&lastSeq, &e.Project}
 	default:
 		what = "project"
-		row = `select last_seq from projects where key = $1 for no key update`
-		scan = []any{&lastSeq}
-		e.Project = owner.Key
+		row = `select key from projects where key = $1 for no key update`
 	}
-	if err := store.LockOwnerAndRead(ctx, tx, owner, row, []any{owner.Key}, scan...); err != nil {
-		return 0, fmt.Errorf("lock %s for event: %w", what, err)
-	}
-	return lastSeq, nil
+	store.QueueLockOwner(batch, owner)
+	batch.Queue("", row, owner.Key).QueryRow(func(row pgx.Row) error {
+		if err := row.Scan(&e.Project); err != nil {
+			return fmt.Errorf("lock %s for event: %w", what, err)
+		}
+		return nil
+	})
 }
 
 // Notify reports whether an event should wake agents and receive routed delivery.

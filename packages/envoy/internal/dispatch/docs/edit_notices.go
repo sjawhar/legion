@@ -202,15 +202,28 @@ func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 	return sent, nil
 }
 
+// errEditNoticeUnclaimed is a claim of a due notice that did not delete the notice the sweep read
+// (sendEditNotice): nothing is sent for it, and the sweep reports no failure.
+var errEditNoticeUnclaimed = errors.New("the due edit notice is no longer the one read")
+
+// ignoreUnclaimed is err, nil when it is errEditNoticeUnclaimed.
+func ignoreUnclaimed(err error) error {
+	if errors.Is(err, errEditNoticeUnclaimed) {
+		return nil
+	}
+	return err
+}
+
 // sendEditNotice claims artifactID's due notice and appends its artifact.human_edited event in one
 // transaction, then publishes the event once it commits, and reports whether it sent one. It takes
 // the document owner's lock (lockArtifactOwner), under which it reads the notice, both versions it
 // names, tells a server-state-only change from a person's edit and cuts the diff, all before its
 // first write; then it claims the notice (claimEditNotice) and appends the event
-// (events.Broker.Append, which takes the owner's lock again, the owner's row and the commit-order
-// lock) back to back, so the transaction holds a transaction id only for those and the commit. The
-// claim still decides: a notice it does not delete as read is not sent. No statement here locks
-// `for update`.
+// (events.Broker.QueueAppend, which takes the owner's lock again, the owner's row and the
+// commit-order lock) in one batch, so the transaction holds a transaction id only for those and
+// the commit. The claim still decides: a notice it does not delete as read is not sent, which the
+// claim's callback reports (errEditNoticeUnclaimed), stopping the batch before the append is read,
+// and the transaction rolls back. No statement here locks `for update`.
 //
 // A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
 // one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's
@@ -237,25 +250,31 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("read due edit notice: %w", err)
 	}
-	// claim deletes the notice read above, and reports false when the row is no longer the one
-	// read, which no writer holding the owner's lock leaves, so nothing is sent for it.
-	claim := func() (bool, error) {
+	if s.afterEditNoticeRead != nil {
+		s.afterEditNoticeRead(artifactID)
+	}
+	// claimed checks what the claim deleted against the notice read above: errEditNoticeUnclaimed
+	// when the row is no longer the one read, which no writer holding the owner's lock leaves, so
+	// nothing is sent for it.
+	claimed := func(row pgx.Row) error {
 		var from, to int
-		err := tx.QueryRow(ctx, claimEditNotice, artifactID).Scan(&from, &to)
+		err := row.Scan(&from, &to)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
+			return errEditNoticeUnclaimed
 		}
 		if err != nil {
-			return false, fmt.Errorf("claim edit notice: %w", err)
+			return fmt.Errorf("claim edit notice: %w", err)
 		}
-		return from == payload.FromVersion && to == payload.ToVersion, nil
+		if from != payload.FromVersion || to != payload.ToVersion {
+			return errEditNoticeUnclaimed
+		}
+		return nil
 	}
 	// drop claims the notice and sends nothing: a closed issue's, or a change only the server's
 	// own attributes made.
 	drop := func() (bool, error) {
-		claimed, err := claim()
-		if err != nil || !claimed {
-			return false, err
+		if err := claimed(tx.QueryRow(ctx, claimEditNotice, artifactID)); err != nil {
+			return false, ignoreUnclaimed(err)
 		}
 		return false, tx.Commit(ctx)
 	}
@@ -292,13 +311,15 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 	if owner.IssueKey == nil {
 		event.ArtifactID = &artifactID
 	}
-	claimed, err := claim()
-	if err != nil || !claimed {
-		return false, err
-	}
-	appended, err := s.events.Append(ctx, tx, event)
-	if err != nil {
-		return false, fmt.Errorf("append edit notice: %w", err)
+	var appended model.Event
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("", claimEditNotice, artifactID).QueryRow(claimed)
+		if err := s.events.QueueAppend(b, event, func(written model.Event) { appended = written }); err != nil {
+			return fmt.Errorf("append edit notice: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return false, ignoreUnclaimed(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit edit notice: %w", err)

@@ -106,10 +106,14 @@ type Service struct {
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
 	afterEditNoticeIDs func(ids []string)
-	rooms              sync.Map
-	shutdownRooms      sync.Map
-	nextConnection     atomic.Uint64
-	stopping           atomic.Bool
+	// afterEditNoticeRead runs once a sweep has read a due notice under its document owner's lock,
+	// before its write phase claims it. Nil outside tests; tests use it to move the notice on behind
+	// the sweep, which no writer holding the owner's lock can do.
+	afterEditNoticeRead func(artifactID string)
+	rooms               sync.Map
+	shutdownRooms       sync.Map
+	nextConnection      atomic.Uint64
+	stopping            atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool
@@ -1525,7 +1529,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// lock this transaction holds until then, so nothing reads the cursor in between; a
 		// rollback here fails the room, which reloads the document (abandon).
 		advanceRoomCursor(cursor, repaired)
-		if err := ledger.runQueue(ctx); err != nil {
+		if err := ledger.runQueue(ctx, nil); err != nil {
 			abandon(err)
 			return
 		}
@@ -1629,26 +1633,23 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// Each event that carries a reconciled source's text stamps that source's new mention edges
 	// with the event that introduced them: the version event for the document itself, and each
 	// ask's own opened/edited event. writeVersionTx reconciled the edges earlier in this
-	// transaction, so stamping runs after the append and never touches sequence allocation. The
-	// appends and stamps are one step of the write phase; what it appends joins the ledger's events,
-	// after those the version write appended, which the settlement publishes once it commits.
+	// transaction, so stamping runs after the append, naming the event's id as the id sequence
+	// left it (refs.QueueStamp), and never touches sequence allocation. The appends and stamps are
+	// one step of the write phase; what it appends joins the ledger's events, after those the
+	// version write appended, which the settlement publishes once it commits.
 	sink := eventSink(ctx)
 	appendEvents := func(events []model.Event) error {
 		if len(events) == 0 {
 			return nil
 		}
-		return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		return write(ctx, tx, func(b *store.WriteBatch) error {
 			for _, planned := range events {
-				appended, appendErr := s.events.Append(ctx, tx, planned)
-				if appendErr != nil {
-					return appendErr
+				if err := s.events.QueueAppend(b, planned, sink); err != nil {
+					return err
 				}
 				if sourceKind, sourceID, ok := referenceSource(planned, room); ok {
-					if err := refs.Stamp(ctx, tx, sourceKind, sourceID, appended.ID); err != nil {
-						return err
-					}
+					refs.QueueStamp(b, sourceKind, sourceID)
 				}
-				sink(appended)
 			}
 			return nil
 		})
@@ -1736,7 +1737,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	// The write phase: every statement this settlement decided on, in the order it made them.
-	if err := ledger.runQueue(ctx); err != nil {
+	if err := ledger.runQueue(ctx, nil); err != nil {
 		abandon(err)
 		return
 	}

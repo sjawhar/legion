@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -55,13 +56,17 @@ func ReplaceCounted(
 // longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
 // edges moved — deleted or inserted, oldest state first — so ReplaceCounted can resolve the
-// ones whose readers carry a batched backlink count. It is PlanReplace and Apply back to back.
+// ones whose readers carry a batched backlink count. It is PlanReplace and Queue back to back, the
+// queued statements run at once as a batch of their own.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
 	replacement, err := PlanReplace(ctx, tx, fromKind, fromID, found, insertedAt)
 	if err != nil {
 		return nil, err
 	}
-	if err := replacement.Apply(ctx, tx); err != nil {
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return replacement.Changed(), nil
@@ -70,8 +75,8 @@ func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found 
 // Replacement is one source's references reconciled with found, the references its text now
 // cites, as replaceRefs reconciles them. It is planned against the edges the source holds
 // (PlanReplace, PlanReplaceFrom), so the targets it moves are known before anything is written,
-// and written by Apply, which runs its statements and nothing else: a writer that decides
-// everything first and writes last plans in its read phase and applies in its write phase.
+// and written by Queue, which puts its statements on a write phase's batch: a writer that decides
+// everything first and writes last plans in its read phase and queues in its write phase.
 type Replacement struct {
 	fromKind, fromID string
 	kinds, ids       []string
@@ -140,31 +145,27 @@ func (r Replacement) Held() []Target {
 	return r.held
 }
 
-// Apply writes the replacement: it deletes the edges found no longer names and inserts the new
-// ones. A surviving edge keeps its created_at and source_seq.
-func (r Replacement) Apply(ctx context.Context, q Execer) error {
-	if _, err := q.Exec(ctx, `
+// Queue queues the replacement's writes on a write phase's batch: the delete of the edges found no
+// longer names and the insert of the new ones. A surviving edge keeps its created_at and
+// source_seq.
+func (r Replacement) Queue(b *store.WriteBatch) {
+	b.Queue("clear references", `
 		delete from refs
 		where from_kind = $1 and from_id = $2
 		  and not exists (
 		    select 1 from unnest($3::text[], $4::text[]) as target(kind, id)
 		    where target.kind = refs.to_kind and target.id = refs.to_id
 		  )
-	`, r.fromKind, r.fromID, r.kinds, r.ids); err != nil {
-		return fmt.Errorf("clear references: %w", err)
-	}
+	`, r.fromKind, r.fromID, r.kinds, r.ids)
 	if len(r.kinds) == 0 {
-		return nil
+		return
 	}
-	if _, err := q.Exec(ctx, `
+	b.Queue("write reference", `
 		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
 		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
 		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-	`, r.fromKind, r.fromID, r.kinds, r.ids, r.insertedAt); err != nil {
-		return fmt.Errorf("write reference: %w", err)
-	}
-	return nil
+	`, r.fromKind, r.fromID, r.kinds, r.ids, r.insertedAt)
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
@@ -213,24 +214,40 @@ func refTargets(found []text.Ref) ([]string, []string) {
 // Stamp records eventID as the write that introduced every edge of one source that has no
 // provenance yet: the source's own refs and, for a document, the mentions its blocks hold. It runs
 // after the source's event is appended, in the same transaction, and leaves edges that survived a
-// reconcile untouched.
+// reconcile untouched. Its statements run at once, as a batch of their own.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
-	if _, err := tx.Exec(ctx, `
-		update refs set source_seq = $3
-		where from_kind = $1 and from_id = $2 and source_seq is null
-	`, fromKind, fromID, eventID); err != nil {
-		return fmt.Errorf("stamp references: %w", err)
-	}
-	if fromKind != "artifact" {
+	return store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		queueStamp(b, fromKind, fromID, &eventID)
 		return nil
+	})
+}
+
+// QueueStamp queues Stamp on a write phase's batch, right after the source's event, whose id the
+// statements take as store.LatestEventID: the id the event's insert took, which nothing in Go
+// reads before they are sent.
+func QueueStamp(b *store.WriteBatch, fromKind, fromID string) {
+	queueStamp(b, fromKind, fromID, nil)
+}
+
+// queueStamp queues Stamp's statements with eventID, or with store.LatestEventID when it is nil.
+func queueStamp(b *store.WriteBatch, fromKind, fromID string, eventID *int64) {
+	refsID, refsArgs := store.LatestEventID, []any{fromKind, fromID}
+	blocksID, blocksArgs := store.LatestEventID, []any{fromID}
+	if eventID != nil {
+		refsID, refsArgs = "$3", append(refsArgs, *eventID)
+		blocksID, blocksArgs = "$2", append(blocksArgs, *eventID)
 	}
-	if _, err := tx.Exec(ctx, `
-		update block_refs set source_seq = $2
+	b.Queue("stamp references", `
+		update refs set source_seq = `+refsID+`
+		where from_kind = $1 and from_id = $2 and source_seq is null
+	`, refsArgs...)
+	if fromKind != "artifact" {
+		return
+	}
+	b.Queue("stamp block references", `
+		update block_refs set source_seq = `+blocksID+`
 		where artifact_id = $1 and source_seq is null
-	`, fromID, eventID); err != nil {
-		return fmt.Errorf("stamp block references: %w", err)
-	}
-	return nil
+	`, blocksArgs...)
 }
 
 // CountedChangeLimit bounds the targets one event names. A body citing more counted nodes than

@@ -17,10 +17,10 @@ import (
 
 // A write transaction runs a read phase holding no transaction id - its owner's advisory lock
 // (store.LockOwner), its reads, its document work - and then a write phase of back-to-back
-// statements (docs.Ledger's queue). The tests here pin what a caller sees of that split: a close
-// committed while a writer waited still refuses it, a thread read still waits for a writer it
-// would otherwise race, writers of one owner still run one at a time, and a write phase that fails
-// leaves nothing behind.
+// statements, sent as one pipelined batch (docs.Ledger's queue, store.WriteBatch). The tests here
+// pin what a caller sees of that split: a close committed while a writer waited still refuses it,
+// a thread read still waits for a writer it would otherwise race, writers of one owner still run
+// one at a time, and a write phase that fails anywhere in its batch leaves nothing behind.
 
 // gatedProjectMark holds the first ProjectMark called once the test arms it, inside the writer's
 // read phase: its handler holds the owner's lock and has queued its writes, none of which has run.
@@ -396,5 +396,66 @@ func TestAFailedWritePhaseLeavesNothing(t *testing.T) {
 		}
 		assertUnchanged(t, "an accept whose event append failed in its write phase", before, databaseFingerprint(t, database))
 		assertDocumentUnchanged(t, service, artifactID)
+	})
+
+	// takeNextSeq inserts a row at the issue's next sequence number, which its counter does not
+	// know of, so the next event appended on the issue is a unique violation.
+	takeNextSeq := func(t *testing.T, database *store.Store, issueKey string) {
+		t.Helper()
+		if _, err := database.Pool.Exec(context.Background(), `
+			insert into events (issue_key, seq, type, actor, payload, notify)
+			select key, last_seq + 1, 'test.seq_taken', '{"kind":"session","id":"seq-taken"}'::jsonb, '{}'::jsonb, false
+			from issues where key = $1
+		`, issueKey); err != nil {
+			t.Fatalf("take the issue's next sequence number: %v", err)
+		}
+	}
+
+	// An anchored comment's write phase is one batch: the document's update, the comment row, its
+	// references, then comment.created and its stamp. The event's insert collides, after every
+	// other statement of the batch ran on the server, and the whole transaction goes.
+	t.Run("a comment whose event collides", func(t *testing.T) {
+		var service *docs.Service
+		handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+			service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+			t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+			return service
+		})
+		handler = withDeadline(handler)
+		issue := createInteractionIssue(t, handler, "TEST", "Failed comment write phase", "foo")
+		takeNextSeq(t, database, issue.Key)
+		before := databaseFingerprint(t, database)
+
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "See dispatch://" + issue.Key + ".", "anchor": map[string]any{"artifact": "spec", "quote": "foo"},
+			"actor": sessionActor(),
+		})
+		if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"code":"INTERNAL"`) {
+			t.Fatalf("comment whose event append collides: status=%d body=%s, want 500 INTERNAL", response.Code, response.Body.String())
+		}
+		assertUnchanged(t, "a comment whose event append failed in its write phase", before, databaseFingerprint(t, database))
+		assertDocumentUnchanged(t, service, issue.PrimaryArtifactID)
+	})
+
+	// A message writes without a document ledger, its insert, references, event and stamp one batch
+	// of their own (store.RunWrite): the event's collision takes the message's row with it.
+	t.Run("a message whose event collides", func(t *testing.T) {
+		handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+			service := docs.New(docs.Deps{Store: database, Settle: time.Hour})
+			t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+			return service
+		})
+		handler = withDeadline(handler)
+		issue := createInteractionIssue(t, handler, "TEST", "Failed message write phase", "foo")
+		takeNextSeq(t, database, issue.Key)
+		before := databaseFingerprint(t, database)
+
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+			"body": "Status: see dispatch://" + issue.Key + ".", "actor": sessionActor(),
+		})
+		if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"code":"INTERNAL"`) {
+			t.Fatalf("message whose event append collides: status=%d body=%s, want 500 INTERNAL", response.Code, response.Body.String())
+		}
+		assertUnchanged(t, "a message whose event append failed in its write phase", before, databaseFingerprint(t, database))
 	})
 }

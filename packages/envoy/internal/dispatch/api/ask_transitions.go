@@ -13,12 +13,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // askTransition is one way of closing or changing an ask's answer. Its writes are the
 // transaction's (ledger): Apply and After make them in the order they run, each queued on
 // ledger when the caller joined one, and the events After returns are filled in once Commit has run
-// their steps (queueEvent).
+// the write phase (queueEvent).
 type askTransition struct {
 	EventType      string
 	ReplacesAnswer *time.Time
@@ -235,13 +236,10 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		event := new(model.Event)
-		if err := queueWrite(ctx, tx, ledger, func(ctx context.Context, tx pgx.Tx) error {
-			_, written, err := docs.WriteReview(ctx, tx, s.deps.Events, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID))
-			if err != nil {
-				return err
-			}
-			*event = written
-			return nil
+		if err := queueWrite(ctx, tx, ledger, func(b *store.WriteBatch) error {
+			return docs.QueueReview(b, s.deps.Events, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID), func(_ model.ArtifactReview, written model.Event) {
+				*event = written
+			})
 		}); err != nil {
 			return nil, err
 		}

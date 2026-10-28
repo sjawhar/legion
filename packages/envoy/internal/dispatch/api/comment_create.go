@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type commentInput struct {
@@ -450,8 +451,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		markKind = docs.MarkSuggestion
 	}
 	// Everything up to Commit is the read phase (Docs.Join): the document operations and this
-	// route queue their writes on the ledger, in the order made, and Commit runs them back to
-	// back. Write advice is read here, before the first write is queued, so its queries hold no
+	// route queue their writes on the ledger, in the order made, and Commit sends them as one
+	// batch. Write advice is read here, before the first write is queued, so its queries hold no
 	// transaction id, and counts the comment.created this comment appends (writeAdvice).
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
@@ -518,8 +519,9 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	waitingOn := threadTarget.waitingOnAfter(turn)
 	if input.AskID != nil {
 		askID := *input.AskID
-		if err := queueWrite(r.Context(), tx, ledger, func(ctx context.Context, tx pgx.Tx) error {
-			return asks.FollowAuthor(ctx, tx, askID, actor)
+		if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+			asks.QueueFollowAuthor(b, askID, actor)
+			return nil
 		}); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -660,16 +662,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	payload.SuppressedAuthors = suppressedAuthors
 	payload.SuppressedRoute = suppressedRoute
 	payload.SuppressedRouteSessionID = suppressedRouteSessionID
-	event, err := s.queueEvent(r.Context(), tx, ledger, owner.event(
+	event, err := s.queueStampedEvent(r.Context(), tx, ledger, owner.event(
 		"comment.created",
 		actor,
 		payload,
-	))
+	), "comment", comment.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := queueStamp(r.Context(), tx, ledger, "comment", comment.ID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

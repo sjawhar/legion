@@ -403,16 +403,12 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// The issue.created event and its stamp of the spec's new edges follow the spec's queued
 	// writes: the stamp needs the index's edges written, and the document's pending-settlement row
 	// comes before the events' commit-order lock.
-	event, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(key).event(
+	event, err := s.queueStampedEvent(r.Context(), tx, ledger, issueOwner(key).event(
 		"issue.created",
 		actor,
 		model.NewIssueEventPayload(issue, specChanges),
-	))
+	), "artifact", artifactID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := queueStamp(r.Context(), tx, ledger, "artifact", artifactID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

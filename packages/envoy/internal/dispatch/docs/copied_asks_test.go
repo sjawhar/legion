@@ -11,11 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -1193,9 +1194,10 @@ func answerSource(ctx context.Context, service *Service, original string, source
 // which takes the project's copy lock and queues the copies' pending rows, then the source's
 // block, the ask row and the ask.answered or ask.resolved event, queued as a route joined to the
 // ledger queues its own writes, and commits: the write phase writes the copies' pending rows first.
-// between, when set, runs in the write phase right after those rows, while the transaction holds
-// the copy lock and the copies' pending rows. It returns its error rather than failing the test,
-// so it can run off the test's goroutine.
+// between, when set, runs while the write phase stands right after those rows, holding the copy
+// lock and the copies' pending rows: the batch waits there on a gate lock this helper holds
+// (closeSourceGate) until between has returned, so the statements after the rows run only then.
+// It returns its error rather than failing the test, so it can run off the test's goroutine.
 func closeSource(ctx context.Context, service *Service, original, blockID string, source model.Ask, answer *model.AskAnswer, between func()) error {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	tx, err := service.store.Pool.Begin(ctx)
@@ -1216,12 +1218,31 @@ func closeSource(ctx context.Context, service *Service, original, blockID string
 	if err := service.SettleCopiesOf(closing, source); err != nil {
 		return fmt.Errorf("mark the copies owed: %w", err)
 	}
+	var gate *pgxpool.Conn
+	openGate := func() error { return nil }
 	if between != nil {
-		if err := ledger.Queue(func(context.Context, pgx.Tx) error {
-			between()
+		if gate, err = service.store.Pool.Acquire(ctx); err != nil {
+			return fmt.Errorf("acquire the gate's connection: %w", err)
+		}
+		defer gate.Release()
+		if _, err := gate.Exec(ctx, `select pg_advisory_lock($1)`, closeSourceGate); err != nil {
+			return fmt.Errorf("hold the gate: %w", err)
+		}
+		opened := false
+		openGate = func() error {
+			if opened {
+				return nil
+			}
+			opened = true
+			_, err := gate.Exec(context.Background(), `select pg_advisory_unlock($1)`, closeSourceGate)
+			return err
+		}
+		defer openGate()
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
+			b.Queue("pass the gate", `select pg_advisory_xact_lock($1) as close_source_gate`, closeSourceGate)
 			return nil
 		}); err != nil {
-			return fmt.Errorf("queue the hook: %w", err)
+			return fmt.Errorf("queue the gate: %w", err)
 		}
 	}
 	eventType, attributes := "ask.resolved", map[string]any{"state": "resolved"}
@@ -1238,30 +1259,73 @@ func closeSource(ctx context.Context, service *Service, original, blockID string
 	if err := service.SetBlockAttributes(closing, original, blockID, attributes, alice); err != nil {
 		return fmt.Errorf("write the source's block: %w", err)
 	}
-	if err := ledger.Queue(func(ctx context.Context, tx pgx.Tx) error {
-		if answer != nil {
-			encoded, _ := json.Marshal(answer)
-			if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
-				return fmt.Errorf("answer the source ask: %w", err)
-			}
-			source.State, source.Answer = "answered", answer
-		} else if source, err = WriteAskResolution(ctx, tx, source, "resolved", "Waived.", alice); err != nil {
-			return fmt.Errorf("resolve the source ask: %w", err)
+	if answer != nil {
+		encoded, _ := json.Marshal(answer)
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
+			b.Queue("answer the source ask", `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("queue the source's answer: %w", err)
 		}
-		if _, err := service.events.Append(ctx, tx, documentAskEvent(
+		source.State, source.Answer = "answered", answer
+	} else if source, err = WriteAskResolution(closing, tx, source, "resolved", "Waived.", alice); err != nil {
+		return fmt.Errorf("resolve the source ask: %w", err)
+	}
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		return service.events.QueueAppend(b, documentAskEvent(
 			owner, original, eventType, alice, model.NewAskEventPayload(source, model.ReferenceChanges{}),
-		)); err != nil {
-			return fmt.Errorf("append the source's %s event: %w", eventType, err)
-		}
-		return nil
+		), func(model.Event) {})
 	}); err != nil {
 		return fmt.Errorf("queue the source's close: %w", err)
 	}
-	if err := ledger.Commit(ctx); err != nil {
-		return fmt.Errorf("commit closing the source: %w", err)
+	if between == nil {
+		if err := ledger.Commit(ctx); err != nil {
+			return fmt.Errorf("commit closing the source: %w", err)
+		}
+		return nil
+	}
+	committed := make(chan error, 1)
+	go func() { committed <- ledger.Commit(ctx) }()
+	reached := func() error {
+		for {
+			waiting, err := storetest.CountLockWaits(ctx, service.store, "%close_source_gate%")
+			if err != nil {
+				return err
+			}
+			if waiting > 0 {
+				return nil
+			}
+			select {
+			case err := <-committed:
+				committed <- err
+				return fmt.Errorf("the close committed (%v) before its write phase reached the gate", err)
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Millisecond):
+			}
+		}
+	}
+	// Whatever happens here, the gate opens and the commit returns before this does, so nothing
+	// rolls the transaction back under the commit.
+	reachErr := reached()
+	if reachErr == nil {
+		between()
+	}
+	openErr := openGate()
+	commitErr := <-committed
+	switch {
+	case reachErr != nil:
+		return reachErr
+	case openErr != nil:
+		return fmt.Errorf("open the gate: %w", openErr)
+	case commitErr != nil:
+		return fmt.Errorf("commit closing the source: %w", commitErr)
 	}
 	return nil
 }
+
+// closeSourceGate is the advisory lock closeSource's write phase waits on while between runs.
+const closeSourceGate int64 = 0x434C4F5345474154
 
 // A copy settling while its source is answered, with the copy's block still in it, so both take the
 // project's copy lock (the copy's settlement to read its source, the answer to mark the copy owed),

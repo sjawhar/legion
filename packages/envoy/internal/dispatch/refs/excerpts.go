@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -73,6 +74,21 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []te
 // version would have stored. StoredExcerpts hides an owed row, and the reconciliation's non-null
 // version makes that same excerpt current again.
 func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) error {
+	sql, args := recordExcerpts(fromID, version, excerpts)
+	if _, err := q.Exec(ctx, sql, args...); err != nil {
+		return fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
+	}
+	return nil
+}
+
+// QueueRecordExcerpts queues RecordExcerpts' statement on a write phase's batch.
+func QueueRecordExcerpts(b *store.WriteBatch, fromID string, version int, excerpts map[Target]model.GraphExcerpt) {
+	sql, args := recordExcerpts(fromID, version, excerpts)
+	b.Queue("record reference excerpts of "+fromID, sql, args...)
+}
+
+// recordExcerpts is RecordExcerpts' statement and its arguments.
+func recordExcerpts(fromID string, version int, excerpts map[Target]model.GraphExcerpt) (string, []any) {
 	kinds := make([]string, 0, len(excerpts))
 	ids := make([]string, 0, len(excerpts))
 	blockIDs := make([]string, 0, len(excerpts))
@@ -85,17 +101,14 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 	}
 	// The target's excerpt is one row-valued subquery, so a mention whose target excerpts lacks
 	// (no block holds it) is still updated, with no excerpt, and leaves the drift index.
-	if _, err := q.Exec(ctx, `
+	return `
 		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[]))
 		update refs r
 		set excerpt_version = $2,
 		    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
 		where r.from_kind = 'artifact' and r.from_id = $1
 		  and coalesce(r.excerpt_version, 0) <= $2
-	`, fromID, version, kinds, ids, blockIDs, texts); err != nil {
-		return fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
-	}
-	return nil
+	`, []any{fromID, version, kinds, ids, blockIDs, texts}
 }
 
 // StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a
@@ -177,17 +190,15 @@ func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift,
 	return drifted, nil
 }
 
-// ClearExcerpts marks every mention the document fromID writes as owed an excerpt, keeping the
-// payload each holds for the reconciliation to overwrite. StoredExcerpts does not serve it while
-// excerpt_version is null, so the route uses the document's name until the reconciliation stores
-// the latest excerpt: what a version write that cannot cut its excerpts leaves.
-func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
-	if _, err := q.Exec(ctx, `
+// ClearExcerpts queues, on a write phase's batch, the mark of every mention the document fromID
+// writes as owed an excerpt, keeping the payload each holds for the reconciliation to overwrite.
+// StoredExcerpts does not serve it while excerpt_version is null, so the route uses the
+// document's name until the reconciliation stores the latest excerpt: what a version write that
+// cannot cut its excerpts leaves.
+func ClearExcerpts(b *store.WriteBatch, fromID string) {
+	b.Queue("mark the reference excerpts of "+fromID+" owed", `
 		update refs set excerpt_version = null where from_kind = 'artifact' and from_id = $1
-	`, fromID); err != nil {
-		return fmt.Errorf("mark the reference excerpts of %s owed: %w", fromID, err)
-	}
-	return nil
+	`, fromID)
 }
 
 // MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest

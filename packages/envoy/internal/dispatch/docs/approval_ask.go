@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // OpenApprovalAsk returns the open approval ask on artifactID, or nil. The caller holds the document
@@ -123,11 +124,11 @@ func RewriteApprovalAsk(
 }
 
 // rewriteApprovalAsk is RewriteApprovalAsk handing the event it appends to sink. The new question,
-// the approval it encodes and the references it cites are worked out where it is called; the
-// update, the references' writes, the append and the stamp are one step (write). edited_at is
-// clock_timestamp(), a value only that step learns: the step sets it on ask, which a later step of
-// the same transaction reads (carryApproval's answer), and on the event's copy of the row, and
-// nothing before the write phase reads it.
+// the approval it encodes, the references it cites and its edited_at are worked out where it is
+// called; the update, the references' writes, the append and the stamp are one step (write).
+// edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
+// row carries it before the write phase runs, and so does ask, which a later step of the same
+// transaction queues from (carryApproval's answer).
 func rewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -155,35 +156,30 @@ func rewriteApprovalAsk(
 	if err != nil {
 		return fmt.Errorf("index approval ask: %w", err)
 	}
+	var editedAt time.Time
+	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&editedAt); err != nil {
+		return fmt.Errorf("read approval ask edit time: %w", err)
+	}
+	ask.EditedAt = askTimestamp(&editedAt)
 	row := *ask
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		var editedAt time.Time
-		if err := tx.QueryRow(ctx, `
+	payload := model.NewAskEditEventPayload(row, previous, actor, changes)
+	payload.Quiet = quiet
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("rewrite approval ask", `
 			update asks
-			set question = $2, approval = $3, edited_at = clock_timestamp()
+			set question = $2, approval = $3, edited_at = $4
 			where id = $1
-			returning edited_at
-		`, ask.ID, row.Question, approval).Scan(&editedAt); err != nil {
-			return fmt.Errorf("rewrite approval ask: %w", err)
-		}
-		ask.EditedAt = askTimestamp(&editedAt)
-		row.EditedAt = ask.EditedAt
-		if err := index(ctx, tx); err != nil {
+		`, ask.ID, row.Question, approval, editedAt)
+		if err := index(b); err != nil {
 			return fmt.Errorf("index approval ask: %w", err)
 		}
-		payload := model.NewAskEditEventPayload(row, previous, actor, changes)
-		payload.Quiet = quiet
-		event, err := broker.Append(ctx, tx, model.Event{
+		if err := broker.QueueAppend(b, model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 			Type: "ask.edited", Actor: actor, Payload: payload,
-		})
-		if err != nil {
+		}, sink); err != nil {
 			return fmt.Errorf("append approval ask edit: %w", err)
 		}
-		if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
-			return fmt.Errorf("stamp approval ask references: %w", err)
-		}
-		sink(event)
+		refs.QueueStamp(b, "ask", ask.ID)
 		return nil
 	})
 }

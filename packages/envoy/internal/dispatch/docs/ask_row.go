@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // AskColumns selects one ask row, aliased a, in the order ScanAsk reads it.
@@ -77,8 +78,9 @@ func WriteAskResolution(ctx context.Context, tx pgx.Tx, ask model.Ask, kind, rea
 	if err != nil {
 		return model.Ask{}, err
 	}
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		return writeAskResolution(ctx, tx, ask.ID, encoded)
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
+		queueAskResolution(b, "", ask.ID, encoded)
+		return nil
 	}); err != nil {
 		return model.Ask{}, err
 	}
@@ -98,12 +100,14 @@ func askResolution(ask model.Ask, kind, reason string, actor model.Actor) (model
 	return ask, encoded, nil
 }
 
-// writeAskResolution writes a resolution askResolution encoded onto ask id's row.
-func writeAskResolution(ctx context.Context, tx pgx.Tx, id string, encoded []byte) error {
-	if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, id, encoded); err != nil {
-		return fmt.Errorf("write ask resolution: %w", err)
+// queueAskResolution queues the write of a resolution askResolution encoded onto ask id's row, its
+// failure wrapped as within failed when within is not empty.
+func queueAskResolution(b *store.WriteBatch, within, id string, encoded []byte) {
+	what := "write ask resolution"
+	if within != "" {
+		what = within + ": " + what
 	}
-	return nil
+	b.Queue(what, `update asks set state = 'resolved', resolution = $2 where id = $1`, id, encoded)
 }
 
 // askTimestamp formats a nullable ask timestamp as the wire's RFC 3339 UTC text, nil for nil.

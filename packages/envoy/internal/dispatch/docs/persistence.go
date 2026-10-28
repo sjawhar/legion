@@ -232,23 +232,18 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	}
 	version := persistence.Version(latest + 1)
 	// The insert announces the change itself (documentChangedChannel), as a data-modifying CTE
-	// rather than a statement of its own, so a durable append is one round trip under the
+	// rather than a statement of its own, so a durable append is one statement under the
 	// document's advisory lock instead of two: every browser update is its own append
 	// (PersistCoalesceWindow = -1). Why the announcement belongs inside this transaction is
-	// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
+	// queueNotifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
 	// twice because its two parameters are different types: doc_updates.artifact_id is a uuid,
 	// and pg_notify takes text.
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
-			with appended as (
-				insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
-			)
-			select pg_notify('`+documentChangedChannel+`', $5)
-		`, room, int64(version), update, contentChanged, room); err != nil {
-			return fmt.Errorf("append document update: %w", err)
-		}
-		return nil
-	}); err != nil {
+	if err := writeExec(ctx, tx, "append document update", `
+		with appended as (
+			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+		)
+		select pg_notify('`+documentChangedChannel+`', $5)
+	`, room, int64(version), update, contentChanged, room); err != nil {
 		return 0, err
 	}
 	if pending != nil {
@@ -656,23 +651,20 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 		return RebuildReport{}, err
 	}
 	report.Head = head + 1
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
 		for _, deletion := range []string{
 			`delete from doc_updates where artifact_id = $1`,
 			`delete from doc_checkpoints where artifact_id = $1`,
 			`delete from doc_snapshots where artifact_id = $1`,
 		} {
-			if _, err := tx.Exec(ctx, deletion, room); err != nil {
-				return fmt.Errorf("delete rebuilt document data: %w", err)
-			}
+			b.Queue("delete rebuilt document data", deletion, room)
 		}
-		if _, err := tx.Exec(ctx, `
+		b.Queue("seed rebuilt document", `
 			insert into doc_updates (artifact_id, version, update, content_changed)
 			values ($1, $2, $3, true)
-		`, room, report.Head, seed); err != nil {
-			return fmt.Errorf("seed rebuilt document: %w", err)
-		}
-		return notifyDocumentChanged(ctx, tx, room)
+		`, room, report.Head, seed)
+		queueNotifyDocumentChanged(b, room)
+		return nil
 	}); err != nil {
 		return RebuildReport{}, err
 	}
@@ -769,13 +761,9 @@ func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string
 	if err != nil {
 		return 0, false, fmt.Errorf("read document prune checkpoint: %w", err)
 	}
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `delete from doc_updates where artifact_id = $1 and version > $2`, room, ceiling); err != nil {
-			return fmt.Errorf("recover pruned document updates: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `delete from doc_checkpoints where artifact_id = $1`, room); err != nil {
-			return fmt.Errorf("clear recovered document checkpoint: %w", err)
-		}
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("recover pruned document updates", `delete from doc_updates where artifact_id = $1 and version > $2`, room, ceiling)
+		b.Queue("clear recovered document checkpoint", `delete from doc_checkpoints where artifact_id = $1`, room)
 		return nil
 	}); err != nil {
 		return 0, false, err

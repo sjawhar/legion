@@ -865,14 +865,21 @@
 
 ### Changed
 
-- A Dispatch write holds its transaction id only for its database statements, the last few round
-  trips before its commit, where it held one from its first lock through its document work
-  (rendering, anchor walks, version capture, reference extraction) and its write advice. A live
-  update that waits for every older transaction id to end before it is published (INFRA-591's
-  event horizon) therefore waits only for other writes' statements, so live updates publish
-  promptly under load. Writers of one issue or document still take turns, now on a transaction
-  advisory lock (`pg_advisory_xact_lock`, namespace `0x4F574E52`) in place of a lock of the
-  owner's row; a write still holds its pooled connection while it does its document work.
+- A Dispatch write holds its transaction id only for its database statements, where it held one
+  from its first lock through its document work (rendering, anchor walks, version capture,
+  reference extraction) and its write advice. Its write phase is one pipelined batch: every write
+  statement goes to Postgres at once and runs back to back, and Dispatch reads their results once,
+  so the transaction holds its id for the server's work, a client wake or two and the commit,
+  never while Dispatch waits to be scheduled between two statements, which under CPU load cost
+  10-140 ms per statement. Values one statement took from the one before - an event's sequence,
+  its owner's `last_seq` and `updated_at`, an `ask.opened` payload's `opened_event_id`, the event
+  a write's references and a review are stamped with - are now derived in SQL, with the same
+  stored results. A live update that waits for every older transaction id to end before it is
+  published (INFRA-591's event horizon) therefore waits only for other writes' statements, so
+  live updates publish promptly under load. Writers of one issue or document still take turns,
+  now on a transaction advisory lock (`pg_advisory_xact_lock`, namespace `0x4F574E52`) in place of
+  a lock of the owner's row; a write still holds its pooled connection while it does its document
+  work.
   Rollout: a pod of this release and a pod of an earlier one do not exclude each other's writes
   to the same issue or document, so roll this release out with the `Recreate` strategy at one
   pod, and ship it before any release that runs Dispatch on more than one pod (INFRA-636).

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -36,7 +37,8 @@ import (
 // for that target, when one exists. The version is recorded as indexed, and as the version the
 // document's blocks stand at (document_block_versions). It returns the targets of the pairs it
 // inserted or deleted, whose counts moved: a node is counted once for each block citing it. It is
-// ReadBlockIndex, PlanBlocks and Apply back to back.
+// ReadBlockIndex, PlanBlocks and Queue back to back, the queued statements run at once as a batch
+// of their own.
 func IndexBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -52,7 +54,10 @@ func IndexBlocks(
 		return nil, err
 	}
 	indexing := PlanBlocks(index, artifactID, version, versionAt, markdown, blocks, located)
-	if err := indexing.Apply(ctx, tx); err != nil {
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return indexing.Moved(), nil
@@ -93,7 +98,7 @@ func ReadBlockIndex(ctx context.Context, q Queryer, artifactID string) (BlockInd
 
 // BlockIndexing is one version's block index (IndexBlocks), planned against what the index holds
 // (PlanBlocks), so the targets it moves are known before anything is written, and written by
-// Apply, which runs its statements and nothing else.
+// Queue, which puts its statements on a write phase's batch and does nothing else.
 type BlockIndexing struct {
 	artifactID    string
 	version       int
@@ -185,19 +190,18 @@ func (b BlockIndexing) Held() BlockIndex {
 	return b.held
 }
 
-// Apply writes the indexing: the blocks the version deleted and changed, their texts, the links
-// its blocks hold, and the version recorded as indexed and as the one the blocks stand at.
-func (b BlockIndexing) Apply(ctx context.Context, q Execer) error {
+// Queue queues the indexing's writes on a write phase's batch: the blocks the version deleted and
+// changed, their texts, the links its blocks hold, and the version recorded as indexed and as the
+// one the blocks stand at.
+func (b BlockIndexing) Queue(batch *store.WriteBatch) {
 	artifactID, version := b.artifactID, b.version
 	if len(b.deleted) > 0 {
-		if _, err := q.Exec(ctx, `
+		batch.Queue(fmt.Sprintf("delete the blocks version %d of %s no longer holds", version, artifactID), `
 			delete from document_blocks where artifact_id = $1 and block_id = any($2)
-		`, artifactID, b.deleted); err != nil {
-			return fmt.Errorf("delete the blocks version %d of %s no longer holds: %w", version, artifactID, err)
-		}
+		`, artifactID, b.deleted)
 	}
 	if len(b.ids) > 0 {
-		if _, err := q.Exec(ctx, `
+		batch.Queue(fmt.Sprintf("record the blocks version %d of %s changed", version, artifactID), `
 			insert into document_blocks (artifact_id, block_id, node_id, type, text_sha256, excerpt, changed_version, changed_at)
 			select $1::uuid, b.id, a.ref_key || '#' || b.id, b.type, b.sum, b.excerpt, $2, $3
 			from unnest($4::text[], $5::text[], $6::text[], $7::text[]) as b (id, type, sum, excerpt)
@@ -208,37 +212,26 @@ func (b BlockIndexing) Apply(ctx context.Context, q Execer) error {
 				excerpt = excluded.excerpt,
 				changed_version = excluded.changed_version,
 				changed_at = excluded.changed_at
-		`, artifactID, version, b.versionAt, b.ids, b.types, b.sums, b.excerpts); err != nil {
-			return fmt.Errorf("record the blocks version %d of %s changed: %w", version, artifactID, err)
-		}
+		`, artifactID, version, b.versionAt, b.ids, b.types, b.sums, b.excerpts)
 	}
 	if len(b.textIDs) > 0 {
-		if _, err := q.Exec(ctx, `
+		batch.Queue(fmt.Sprintf("record the block texts of version %d of %s", version, artifactID), `
 			insert into document_block_texts (artifact_id, block_id, version, text)
 			select $1::uuid, t.id, $2, t.text from unnest($3::text[], $4::text[]) as t (id, text)
 			on conflict (artifact_id, block_id, version) do update set text = excluded.text
-		`, artifactID, version, b.textIDs, b.texts); err != nil {
-			return fmt.Errorf("record the block texts of version %d of %s: %w", version, artifactID, err)
-		}
+		`, artifactID, version, b.textIDs, b.texts)
 	}
-	if err := b.replaceBlockRefs(ctx, q); err != nil {
-		return err
-	}
-	if _, err := q.Exec(ctx, `
+	b.queueBlockRefs(batch)
+	batch.Queue(fmt.Sprintf("record version %d of %s indexed", version, artifactID), `
 		insert into document_indexed_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id, version) do nothing
-	`, artifactID, version); err != nil {
-		return fmt.Errorf("record version %d of %s indexed: %w", version, artifactID, err)
-	}
+	`, artifactID, version)
 	// Migration 0122's trigger marked the document owed when this version's row was inserted;
 	// this transaction's own index settles it.
-	if _, err := q.Exec(ctx, `
+	batch.Queue(fmt.Sprintf("record the blocks of %s indexed at version %d", artifactID, version), `
 		insert into document_block_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id) do update set version = excluded.version
-	`, artifactID, version); err != nil {
-		return fmt.Errorf("record the blocks of %s indexed at version %d: %w", artifactID, version, err)
-	}
-	return nil
+	`, artifactID, version)
 }
 
 // storedBlockSums is each block the document's index holds, by id, with its text's sha256.
@@ -294,9 +287,9 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located) []blockPair
 	return pairs
 }
 
-// replaceBlockRefs reconciles the document's block_refs with the indexing's pairs, matching on the
-// five columns of its key.
-func (b BlockIndexing) replaceBlockRefs(ctx context.Context, q Execer) error {
+// queueBlockRefs queues the reconciliation of the document's block_refs with the indexing's pairs,
+// matching on the five columns of its key.
+func (b BlockIndexing) queueBlockRefs(batch *store.WriteBatch) {
 	pairs := b.pairs
 	blockIDs := make([]string, len(pairs))
 	kinds := make([]string, len(pairs))
@@ -305,18 +298,16 @@ func (b BlockIndexing) replaceBlockRefs(ctx context.Context, q Execer) error {
 	for i, pair := range pairs {
 		blockIDs[i], kinds[i], toKinds[i], toIDs[i] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
 	}
-	if _, err := q.Exec(ctx, `
+	batch.Queue(fmt.Sprintf("delete the block mentions version %d of %s dropped", b.version, b.artifactID), `
 		delete from block_refs r
 		where r.artifact_id = $1 and not exists (
 			select 1 from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
 			where p.block_id = r.block_id and p.kind = r.kind and p.to_kind = r.to_kind and p.to_id = r.to_id)
-	`, b.artifactID, blockIDs, kinds, toKinds, toIDs); err != nil {
-		return fmt.Errorf("delete the block mentions version %d of %s dropped: %w", b.version, b.artifactID, err)
-	}
+	`, b.artifactID, blockIDs, kinds, toKinds, toIDs)
 	if len(pairs) == 0 {
-		return nil
+		return
 	}
-	if _, err := q.Exec(ctx, `
+	batch.Queue(fmt.Sprintf("record the block mentions of version %d of %s", b.version, b.artifactID), `
 		insert into block_refs (artifact_id, block_id, from_node, to_kind, to_id, kind, created_version, created_at, source_seq)
 		select $1::uuid, p.block_id, a.ref_key || '#' || p.block_id, p.to_kind, p.to_id, p.kind, $6,
 		       coalesce(case when $8 then r.created_at end, $7), case when $8 then r.source_seq end
@@ -325,10 +316,7 @@ func (b BlockIndexing) replaceBlockRefs(ctx context.Context, q Execer) error {
 		left join refs r on r.from_kind = 'artifact' and r.from_id = $1::uuid::text
 		                and r.to_kind = p.to_kind and r.to_id = p.to_id
 		on conflict (artifact_id, block_id, to_kind, to_id, kind) do nothing
-	`, b.artifactID, blockIDs, kinds, toKinds, toIDs, b.version, b.versionAt, b.firstIndexing); err != nil {
-		return fmt.Errorf("record the block mentions of version %d of %s: %w", b.version, b.artifactID, err)
-	}
-	return nil
+	`, b.artifactID, blockIDs, kinds, toKinds, toIDs, b.version, b.versionAt, b.firstIndexing)
 }
 
 // BlockLinks lists each link from a block of document fromArtifact to a block of document

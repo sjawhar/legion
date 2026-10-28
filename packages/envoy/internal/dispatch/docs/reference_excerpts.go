@@ -90,8 +90,9 @@ func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactI
 		return model.ReferenceChanges{}, err
 	}
 	excerpts := refs.MentionExcerpts(markdown, blocks, located)
-	return changes, write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		return refs.RecordExcerpts(ctx, tx, artifactID, version, excerpts)
+	return changes, write(ctx, tx, func(b *store.WriteBatch) error {
+		refs.QueueRecordExcerpts(b, artifactID, version, excerpts)
+		return nil
 	})
 }
 
@@ -104,8 +105,9 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return changes, write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		return refs.ClearExcerpts(ctx, tx, artifactID)
+	return changes, write(ctx, tx, func(b *store.WriteBatch) error {
+		refs.ClearExcerpts(b, artifactID)
+		return nil
 	})
 }
 
@@ -155,7 +157,10 @@ func planBlockIndex(
 		}
 		ledger.blockIndexes[artifactID] = indexing.Held()
 	}
-	return indexing.Moved(), func(ctx context.Context, tx pgx.Tx) error { return indexing.Apply(ctx, tx) }, nil
+	return indexing.Moved(), func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}, nil
 }
 
 // planReplaceCounted is refs.ReplaceCounted split in two: it plans the reconciliation of
@@ -196,7 +201,10 @@ func planReplaceCounted(
 	if err != nil {
 		return model.ReferenceChanges{}, nil, err
 	}
-	return changes, func(ctx context.Context, tx pgx.Tx) error { return replacement.Apply(ctx, tx) }, nil
+	return changes, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		return nil
+	}, nil
 }
 
 // planAskReferences is planReplaceCounted for ask askID, whose references are the ones its

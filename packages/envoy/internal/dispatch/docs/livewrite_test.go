@@ -109,8 +109,9 @@ func TestFailedLiveWritesReloadTheDurableDocument(t *testing.T) {
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
 	}
-	// The commit Ledger.commit makes: its write phase, then the transaction's commit.
-	if err := ledger.runQueue(ctx); err != nil {
+	// The commit Ledger.commit makes: its write phase, with the settlement credit, then the
+	// transaction's commit.
+	if err := ledger.runQueue(ctx, ledger.recordSettlementCredit); err != nil {
 		t.Fatalf("run the edit's write phase: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

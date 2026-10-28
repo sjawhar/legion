@@ -532,16 +532,14 @@ func (s *server) storeArtifact(
 	}
 	var published []*model.Event
 	if target.ownsEvents() {
-		event, err := s.queueEvent(r.Context(), tx, ledger, ownerForArtifact(artifact).event(eventType, actor, payload))
+		stampKind := ""
+		if kind == "doc" {
+			stampKind = "artifact"
+		}
+		event, err := s.queueStampedEvent(r.Context(), tx, ledger, ownerForArtifact(artifact).event(eventType, actor, payload), stampKind, artifact.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
-		}
-		if kind == "doc" {
-			if err := queueStamp(r.Context(), tx, ledger, "artifact", artifact.ID, event); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
 		}
 		published = append(published, event)
 	}
@@ -769,9 +767,9 @@ func deref(value *string) string {
 }
 
 // commitArtifactVersionEvent queues the artifact.version event of a version the transaction wrote
-// and the stamp of the document's new mention edges with it (refs.Stamp), after the append so
-// stamping never touches sequence allocation. The event is filled in once Commit has run its step
-// (queueEvent).
+// and the stamp of the document's new mention edges with it (refs.QueueStamp), after the append so
+// stamping never touches sequence allocation. The event is filled in once Commit has run the write
+// phase (queueStampedEvent).
 func (s *server) commitArtifactVersionEvent(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -782,18 +780,11 @@ func (s *server) commitArtifactVersionEvent(
 	written docs.VersionResult,
 	diff *string,
 ) (*model.Event, error) {
-	event, err := s.queueEvent(ctx, tx, ledger, eventOwner.event(
+	return s.queueStampedEvent(ctx, tx, ledger, eventOwner.event(
 		"artifact.version",
 		actor,
 		docs.ArtifactVersionEventPayload(artifactID, name, written.Version, diff, written.Changes),
-	))
-	if err != nil {
-		return nil, err
-	}
-	if err := queueStamp(ctx, tx, ledger, "artifact", artifactID, event); err != nil {
-		return nil, err
-	}
-	return event, nil
+	), "artifact", artifactID)
 }
 
 func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {

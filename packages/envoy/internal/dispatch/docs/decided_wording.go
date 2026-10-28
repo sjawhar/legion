@@ -132,7 +132,7 @@ func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies 
 	if err != nil {
 		return 0, 0, err
 	}
-	if err := ledger.runQueue(ctx); err != nil {
+	if err := ledger.runQueue(ctx, nil); err != nil {
 		return 0, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -269,21 +269,20 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 		steps[index] = step
 	}
 	slices.Sort(planned)
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, decidedWordingRestore, planned)
-		if err != nil {
-			return fmt.Errorf("restore decided asks' wordings: %w", err)
-		}
-		written, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			return fmt.Errorf("restore decided asks' wordings: %w", err)
-		}
-		slices.Sort(written)
-		if !slices.Equal(written, planned) {
-			return fmt.Errorf("%w: planned %v, restored %v", errDecidedWordingsMoved, planned, written)
-		}
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("restore decided asks' wordings", decidedWordingRestore, planned).Query(func(rows pgx.Rows) error {
+			written, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				return fmt.Errorf("restore decided asks' wordings: %w", err)
+			}
+			slices.Sort(written)
+			if !slices.Equal(written, planned) {
+				return fmt.Errorf("%w: planned %v, restored %v", errDecidedWordingsMoved, planned, written)
+			}
+			return nil
+		})
 		for _, step := range steps {
-			if err := step(ctx, tx); err != nil {
+			if err := step(b); err != nil {
 				return err
 			}
 		}

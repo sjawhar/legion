@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // queueProbe makes the table the queue's tests write their steps' rows to, so what a commit left is
@@ -34,12 +36,15 @@ func probedSteps(t *testing.T, service *Service) []int {
 	return steps
 }
 
-// probeStep is a step that records n as it runs, in ran and in the probe table.
+// probeStep is a step that queues the insert of n into the probe table and records n in ran once
+// the statement has run, as the batch reads its result.
 func probeStep(n int, ran *[]int) WriteStep {
-	return func(ctx context.Context, tx pgx.Tx) error {
-		*ran = append(*ran, n)
-		_, err := tx.Exec(ctx, `insert into ledger_queue_probe (step) values ($1)`, n)
-		return err
+	return func(b *store.WriteBatch) error {
+		b.Queue("probe", `insert into ledger_queue_probe (step) values ($1)`, n).Exec(func(pgconn.CommandTag) error {
+			*ran = append(*ran, n)
+			return nil
+		})
+		return nil
 	}
 }
 
@@ -72,7 +77,7 @@ func TestLedgerQueueRunsItsStepsInOrderAtCommit(t *testing.T) {
 		t.Fatalf("steps ran when queued: %v", ran)
 	}
 	var lateErr error
-	if err := ledger.Queue(func(context.Context, pgx.Tx) error {
+	if err := ledger.Queue(func(*store.WriteBatch) error {
 		lateErr = ledger.Queue(probeStep(9, &ran))
 		return nil
 	}); err != nil {
@@ -96,7 +101,8 @@ func TestLedgerQueueRunsItsStepsInOrderAtCommit(t *testing.T) {
 }
 
 // The first failing step stops the write phase: Commit returns its error as the step returned it,
-// no later step runs, and the transaction rolls back what the earlier steps wrote.
+// once the statements queued before it have run, no later step's statement runs, and the
+// transaction rolls back what the earlier steps wrote.
 func TestLedgerQueueStopsAtTheFirstFailingStepAndRollsBack(t *testing.T) {
 	service, _ := newTestService(t)
 	queueProbe(t, service)
@@ -105,7 +111,7 @@ func TestLedgerQueueStopsAtTheFirstFailingStepAndRollsBack(t *testing.T) {
 	var ran []int
 	for _, step := range []WriteStep{
 		probeStep(1, &ran),
-		func(context.Context, pgx.Tx) error { return refused },
+		func(*store.WriteBatch) error { return refused },
 		probeStep(2, &ran),
 	} {
 		if err := ledger.Queue(step); err != nil {
@@ -125,6 +131,70 @@ func TestLedgerQueueStopsAtTheFirstFailingStepAndRollsBack(t *testing.T) {
 	}
 	if err := ledger.Queue(probeStep(3, &ran)); !errors.Is(err, ErrQueueSealed) {
 		t.Fatalf("a step queued after a failed Commit: %v, want ErrQueueSealed", err)
+	}
+}
+
+// refusingStep queues a statement whose callback refuses its result with refused, as a guarded
+// update refuses the row count it finds (an accept's ALREADY_ACTIONED, an edit-notice claim).
+func refusingStep(refused error) WriteStep {
+	return func(b *store.WriteBatch) error {
+		b.Queue("refused probe", `update ledger_queue_probe set step = step where step < 0`).Exec(func(pgconn.CommandTag) error {
+			return refused
+		})
+		return nil
+	}
+}
+
+// A callback that refuses its statement's result stops the write phase there: Commit returns the
+// callback's error unchanged, no later statement's callback runs, and the statements after it,
+// which the server ran in the same batch, roll back with every earlier one.
+func TestLedgerBatchStopsAtARefusingCallbackAndRollsBack(t *testing.T) {
+	service, _ := newTestService(t)
+	queueProbe(t, service)
+	_, ledger := joinProbe(t, service)
+	refused := &ErrInvalidOp{Field: "probe", Reason: "the callback's refusal"}
+	var ran []int
+	for _, step := range []WriteStep{probeStep(1, &ran), refusingStep(refused), probeStep(2, &ran)} {
+		if err := ledger.Queue(step); err != nil {
+			t.Fatalf("queue: %v", err)
+		}
+	}
+	err := ledger.Commit(context.Background())
+	if err != error(refused) {
+		t.Fatalf("commit returned %v, want the callback's typed error unchanged", err)
+	}
+	if !slices.Equal(ran, []int{1}) {
+		t.Fatalf("callbacks that ran: %v, want only the one before the refusal", ran)
+	}
+	if got := probedSteps(t, service); len(got) != 0 {
+		t.Fatalf("a refused write phase left rows %v", got)
+	}
+}
+
+// The first failure of the batch is the one Commit returns: a statement that fails - a unique
+// violation - stops the server there, so a refusing callback queued after it never runs, and the
+// caller tells the violation apart as it would a statement run on its own.
+func TestLedgerBatchReturnsItsFirstFailingStatement(t *testing.T) {
+	service, _ := newTestService(t)
+	queueProbe(t, service)
+	_, ledger := joinProbe(t, service)
+	refused := &ErrInvalidOp{Field: "probe", Reason: "a later refusal"}
+	var ran []int
+	for _, step := range []WriteStep{probeStep(1, &ran), probeStep(1, &ran), refusingStep(refused), probeStep(2, &ran)} {
+		if err := ledger.Queue(step); err != nil {
+			t.Fatalf("queue: %v", err)
+		}
+	}
+	err := ledger.Commit(context.Background())
+	var violation *pgconn.PgError
+	if !errors.As(err, &violation) || violation.Code != "23505" || errors.Is(err, refused) {
+		t.Fatalf("commit returned %v, want the duplicate insert's unique violation", err)
+	}
+	if !slices.Equal(ran, []int{1}) {
+		t.Fatalf("callbacks that ran: %v, want only the first insert's", ran)
+	}
+	if got := probedSteps(t, service); len(got) != 0 {
+		t.Fatalf("a failed write phase left rows %v", got)
 	}
 }
 

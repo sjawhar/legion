@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // Ledger is what the document operations joined to one database transaction produce until it
@@ -28,14 +29,16 @@ import (
 // A joined transaction runs in two phases. Its read phase takes the locks it needs - advisory
 // locks, none of which gives it a transaction id - reads, and does every operation's document
 // work; each operation queues its writes (write) instead of running them, and the caller queues
-// its own beside them (Queue). The write phase is Commit: the queue runs, statement after
-// statement in the order the writes were made, so the events they append keep their order, and
-// the commit follows. The transaction holds a transaction id from the queue's first write to its
-// commit, and no document work runs in between. What a queued write leaves that a later read of
-// the same transaction would have seen - a document's head, a version's number and time, an
-// anchor's quote, an approval request's state, a source's references - the ledger holds in memory
-// (pendingRoom, NextVersion, RegisterPendingAnchor, pendingApproval, referenced), and the read
-// takes it from there.
+// its own beside them (Queue). The write phase is Commit: every queued write puts its statements
+// on one batch, in the order the writes were made, so the events they append keep their order,
+// and the batch goes to the server pipelined, in one round trip (store.WriteBatch), with the
+// statements recording the transaction's settlement credit after them; the commit follows. The
+// transaction holds a transaction id from the batch's first write to its commit, and neither
+// document work nor a wait for this process to read a result runs in between. What a queued write
+// leaves that a later read of the same transaction would have seen - a document's head, a
+// version's number and time, an anchor's quote, an approval request's state, a source's
+// references - the ledger holds in memory (pendingRoom, NextVersion, RegisterPendingAnchor,
+// pendingApproval, referenced), and the read takes it from there.
 //
 // Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
 // carries no `tx` and marks itself `settling` instead; it queues its writes all the same (writer),
@@ -69,11 +72,13 @@ type Ledger struct {
 	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
 	copies []string
 	// queue is the transaction's write phase (WriteStep): every write its operations and its
-	// caller made, in the order they made them, which Commit runs before it commits. sealed is set
-	// once the write phase has begun or the ledger was discarded, after which nothing more is
-	// queued (Queue).
+	// caller made, in the order they made them, which Commit sends as one batch before it commits.
+	// sealed is set once the write phase has begun or the ledger was discarded, after which
+	// nothing more is queued (Queue). batch is the write phase's batch while runQueue builds it, on
+	// which a write made meanwhile in the ledger's transaction puts its statements (write).
 	queue  []WriteStep
 	sealed bool
+	batch  *store.WriteBatch
 	// rooms holds, per document whose stored history this transaction has queued a write to, the
 	// state its queued writes leave it in (pendingRoom).
 	rooms map[string]*pendingRoom
@@ -100,14 +105,18 @@ type Ledger struct {
 	askBlocks map[string]map[string]model.Ask
 }
 
-// WriteStep is one step of a transaction's write phase: the statements of one write and the light
-// Go that binds their arguments and reads their results. Everything the write decides on - its
-// locks, its reads, the document work - runs before it is queued, in the transaction's read
-// phase, so a step renders nothing, walks no tree and encodes no document. A value a later step,
-// or the caller once Commit has returned, needs from a step - an appended event's id, a row's
-// generated timestamp - is written through a variable the step captured, and only those read it.
-// ctx is Commit's, and tx the joined transaction.
-type WriteStep func(ctx context.Context, tx pgx.Tx) error
+// WriteStep is one step of a transaction's write phase: it puts the statements of one write on the
+// phase's batch, with the callbacks that read their results (store.WriteBatch), and runs nothing.
+// Everything the write decides on - its locks, its reads, the document work - runs before it is
+// queued, in the transaction's read phase, so a step renders nothing, walks no tree and encodes no
+// document, and it reads no result: the batch is sent once every step has queued its statements.
+// A value a later statement needs from an earlier one is derived in the later statement's SQL (an
+// event's sequence from its owner row, its id as store.LatestEventID). A value the caller needs
+// once Commit has returned - an appended event's id, a row's generated timestamp - is written by
+// the statement's callback through a variable the step captured, and only that caller reads it. A
+// step's own error - an argument it cannot encode - ends the write phase as a failed statement
+// would, after the statements queued before it.
+type WriteStep func(b *store.WriteBatch) error
 
 // ErrQueueSealed refuses a write queued once the ledger's write phase has begun (Commit) or the
 // ledger was discarded: it would run after statements it was meant to precede, or in no
@@ -116,8 +125,8 @@ type WriteStep func(ctx context.Context, tx pgx.Tx) error
 var ErrQueueSealed = errors.New("docs: the transaction's write queue is sealed: Commit has begun or the ledger was discarded")
 
 // Queue appends step to the transaction's write phase, after every write queued so far: a route
-// joined to the ledger queues each of its own writes here at the point it makes it, so the queue
-// replays the transaction's statements, the document operations' and the route's, in the order
+// joined to the ledger queues each of its own writes here at the point it makes it, so the batch
+// carries the transaction's statements, the document operations' and the route's, in the order
 // they were made. It refuses a ledger no caller joined and a sealed one (ErrQueueSealed).
 func (l *Ledger) Queue(step WriteStep) error {
 	if l.tx == nil {
@@ -132,8 +141,8 @@ func (l *Ledger) Queue(step WriteStep) error {
 
 // queueFor is the ledger whose write queue a write made in tx joins: ctx's, when it queues tx's
 // writes (writer) and its write phase has not begun. Nil means the write runs at once: in a
-// transaction no ledger queues (a durable writer's own, a test's), or inside a step of the write
-// phase itself, whose nested writes run where the step runs them.
+// transaction no ledger queues (a durable writer's own, a test's), or while the write phase's
+// batch is being built (batchFor).
 func queueFor(ctx context.Context, tx pgx.Tx) *Ledger {
 	ledger := ledgerFrom(ctx)
 	if ledger == nil || ledger.writer == nil || ledger.sealed || ledger.writer != tx {
@@ -142,24 +151,36 @@ func queueFor(ctx context.Context, tx pgx.Tx) *Ledger {
 	return ledger
 }
 
-// write runs step in tx: queued on ctx's ledger (queueFor), so it runs in the write phase in the
-// order the transaction made its writes, or at once where nothing queues it. Every write a
-// document operation makes goes through it.
+// batchFor is the write phase's batch of the ledger that queues tx's writes while runQueue builds
+// it, nil at any other time.
+func batchFor(ctx context.Context, tx pgx.Tx) *store.WriteBatch {
+	ledger := ledgerFrom(ctx)
+	if ledger == nil || ledger.writer != tx {
+		return nil
+	}
+	return ledger.batch
+}
+
+// write runs step in tx: queued on ctx's ledger (queueFor), so its statements join the write
+// phase's batch in the order the transaction made its writes; on that batch at once while the
+// write phase builds it (batchFor); or else at once, as a batch of its own (store.RunWrite), where
+// nothing queues it. Every write a document operation makes goes through it.
 func write(ctx context.Context, tx pgx.Tx, step WriteStep) error {
 	if ledger := queueFor(ctx, tx); ledger != nil {
 		ledger.queue = append(ledger.queue, step)
 		return nil
 	}
-	return step(ctx, tx)
+	if batch := batchFor(ctx, tx); batch != nil {
+		return step(batch)
+	}
+	return store.RunWrite(ctx, tx, step)
 }
 
 // execStep is a write step of one statement whose result nothing reads, its failure wrapped as
 // what failed.
 func execStep(what, sql string, args ...any) WriteStep {
-	return func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, sql, args...); err != nil {
-			return fmt.Errorf("%s: %w", what, err)
-		}
+	return func(b *store.WriteBatch) error {
+		b.Queue(what, sql, args...)
 		return nil
 	}
 }
@@ -178,20 +199,34 @@ func queueWrites(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger) {
 	return withLedger(ctx, ledger), ledger
 }
 
-// runQueue runs the write phase: each queued step in order, stopping at the first that fails and
-// returning its error as the step returned it, so a caller still tells a typed error - a unique
-// violation, ErrDocumentTooLarge - apart with errors.Is and errors.As. It seals the queue first, so
-// a write a step makes runs where the step runs it.
-func (l *Ledger) runQueue(ctx context.Context) error {
+// runQueue runs the write phase. Each queued step puts its statements on one batch, in order, and
+// then, when the caller passes it, after runs with a context under which the writes it makes in
+// the ledger's transaction join the same batch (write, batchFor): Commit's settlement credit. The
+// batch then goes to the server in one round trip (store.WriteBatch.Send), so the statements run
+// back to back, and its results are read in order. The first statement or callback that fails -
+// or a step that fails before it has queued its statements, once those queued before it have run
+// - stops it, and runQueue returns that error as it came, so a caller still tells a typed error -
+// a unique violation, ErrDocumentTooLarge, a guarded update's refusal - apart with errors.Is and
+// errors.As. It seals the queue first.
+func (l *Ledger) runQueue(ctx context.Context, after func(context.Context) error) error {
 	l.sealed = true
 	queue := l.queue
 	l.queue = nil
+	var batch store.WriteBatch
 	for _, step := range queue {
-		if err := step(ctx, l.writer); err != nil {
-			return err
+		if err := step(&batch); err != nil {
+			return batch.SendFailed(ctx, l.writer, err)
 		}
 	}
-	return nil
+	if after != nil {
+		l.batch = &batch
+		err := after(withLedger(ctx, l))
+		l.batch = nil
+		if err != nil {
+			return batch.SendFailed(ctx, l.writer, err)
+		}
+	}
+	return batch.Send(ctx, l.writer)
 }
 
 // eventSink is where an event a document operation appends goes once appended: ctx's ledger, which
@@ -413,9 +448,8 @@ func pendingAnchorsOf(ctx context.Context, artifactID string) []*PendingAnchor {
 }
 
 // pendingApproval is a document's open approval request as the writes this transaction has queued
-// leave it: ask is the row as moved to the transaction's version (moveApprovalAsk), whose
-// edited_at the move's step fills in when it runs, and closed says a queued answer closes it
-// (carryApproval).
+// leave it: ask is the row as moved to the transaction's version (moveApprovalAsk), edited_at
+// included, and closed says a queued answer closes it (carryApproval).
 type pendingApproval struct {
 	ask    *model.Ask
 	closed bool
@@ -492,12 +526,14 @@ func txFromContext(ctx context.Context) (pgx.Tx, bool) {
 	return ledger.tx, true
 }
 
-// Commit runs the transaction's write phase (its queue) and commits it, then credits, releases
-// and publishes what its document operations recorded (see Ledger), and last publishes the events
-// they appended, so a caller's own events, published after Commit returns, follow them. A queued
-// write that fails stops the write phase: the transaction rolls back, nothing reaches a room, and
-// Commit returns that write's error unchanged. When the commit itself returns an error its outcome
-// is unknown, so the rooms the transaction wrote are failed and reload the durable document.
+// Commit runs the transaction's write phase (its queue, one batch with the settlement credit's
+// statements after it) and commits it, then credits, releases and publishes what its document
+// operations recorded (see Ledger), and last publishes the events they appended, so a caller's
+// own events, published after Commit returns, follow them. A statement of the write phase that
+// fails, or a callback that refuses its result, stops it: the transaction rolls back, nothing
+// reaches a room, and Commit returns the first such error unchanged. When the commit itself
+// returns an error its outcome is unknown, so the rooms the transaction wrote are failed and
+// reload the durable document.
 func (l *Ledger) Commit(ctx context.Context) error {
 	if err := l.commit(ctx); err != nil {
 		return err
@@ -521,17 +557,11 @@ func (l *Ledger) publishEvents() {
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
 func (l *Ledger) commit(ctx context.Context) error {
-	if err := l.runQueue(ctx); err != nil {
+	if err := l.runQueue(ctx, l.recordSettlementCredit); err != nil {
 		// The transaction rolls back, so its writes reached neither the store nor a room: what it
 		// leaves behind is what a transaction that never committed leaves (Discard).
 		_ = l.tx.Rollback(context.Background())
 		l.Discard()
-		return err
-	}
-	if err := l.recordSettlementCredit(ctx); err != nil {
-		_ = l.tx.Rollback(context.Background())
-		l.endRebuilds()
-		l.fail(err)
 		return err
 	}
 	captures := make([]roomCapture, 0, len(l.versions))
@@ -733,7 +763,9 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
 // document's pending-settlement row. Deleting first means the write's own authors are recorded
 // after the delete that would otherwise take them out. Both commit or roll back with the content,
-// before the request context can be canceled after commit.
+// before the request context can be canceled after commit. Commit runs it as its write phase's
+// last part (runQueue), so its statements join that batch after every queued write: everything
+// they write is known in memory by then.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {

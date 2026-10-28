@@ -3,7 +3,6 @@ package docs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -26,10 +25,10 @@ const documentChangedChannel = "dispatch_doc_changed"
 // reads as what it is; the artifact id is the parameter, because it is a value.
 const notifyDocumentChangedStatement = `select pg_notify('` + documentChangedChannel + `', $1)`
 
-// notifyDocumentChanged announces room's durable change inside tx, the transaction that made it,
-// which holds the document's advisory lock (lockDocumentRoom). It is a rebuild's announcement,
-// one per rebuild; an append folds the same pg_notify into its own insert rather than spending a
-// second round trip on it under that lock (appendUpdateTxClass).
+// queueNotifyDocumentChanged queues the announcement of room's durable change on the write phase
+// of the transaction that made it, which holds the document's advisory lock (lockDocumentRoom). It
+// is a rebuild's announcement, one per rebuild; an append folds the same pg_notify into its own
+// insert rather than spending a second statement on it under that lock (appendUpdateTxClass).
 //
 // Inside that transaction for two reasons. Postgres delivers a notification only if the
 // transaction that sent it commits, so an append the gate refused (ErrRoomBehindHead), or one
@@ -43,11 +42,8 @@ const notifyDocumentChangedStatement = `select pg_notify('` + documentChangedCha
 // table at or above 1 GiB, which doc_updates is. Nothing durable is wanted either. What a process
 // does with this - close the room it holds - is worth nothing once that process is gone, so rows
 // nobody would ever read back are the whole cost of a table.
-func notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room string) error {
-	if _, err := tx.Exec(ctx, notifyDocumentChangedStatement, room); err != nil {
-		return fmt.Errorf("notify the document's change: %w", err)
-	}
-	return nil
+func queueNotifyDocumentChanged(b *store.WriteBatch, room string) {
+	b.Queue("notify the document's change", notifyDocumentChangedStatement, room)
 }
 
 // staleRoomEvictInterval is the least time between two evictions of one room. Every browser

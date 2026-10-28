@@ -141,6 +141,15 @@ func LockOwnersAndRead(ctx context.Context, tx pgx.Tx, owners []Owner, read stri
 	return err
 }
 
+// QueueLockOwner queues owner's lock (LockOwner) on a write phase's batch, for a statement after it
+// in the same batch that the lock guards: a write that takes its owner's lock again where the
+// transaction took it in its read phase, which returns at once. Its failure is wrapped as
+// LockOwner wraps it.
+func QueueLockOwner(b *WriteBatch, owner Owner) {
+	lock, args := lockOwnersStatement([]Owner{owner})
+	b.Queue(fmt.Sprintf("lock %s %s", owner.Kind, owner.Key), lock, args...)
+}
+
 // lockOwnersStatement is the statement that takes the locks of owners, at least one, and its
 // arguments: ownerLock for one owner, ownersLock for several.
 func lockOwnersStatement(owners []Owner) (string, []any) {

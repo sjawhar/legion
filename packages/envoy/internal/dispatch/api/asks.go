@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 const (
@@ -185,8 +186,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	rowID := ask.ID
 	// Everything up to Commit is the read phase (Docs.Join): the document operations and this
-	// route queue their writes on the ledger, in the order made, and Commit runs them back to
-	// back. Write advice is read here, before the first write is queued, so its queries hold no
+	// route queue their writes on the ledger, in the order made, and Commit sends them as one
+	// batch. Write advice is read here, before the first write is queued, so its queries hold no
 	// transaction id, and counts the ask.opened this ask appends (writeAdvice).
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
@@ -225,8 +226,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := queueWrite(r.Context(), tx, ledger, func(ctx context.Context, tx pgx.Tx) error {
-		return asks.FollowAuthor(ctx, tx, rowID, actor)
+	if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+		asks.QueueFollowAuthor(b, rowID, actor)
+		return nil
 	}); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -262,14 +264,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		}
 		events = append(events, snapshotEvent)
 	}
-	event, err := s.queueEvent(r.Context(), tx, ledger, owner.event(
+	event, err := s.queueStampedEvent(r.Context(), tx, ledger, owner.event(
 		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	), "ask", ask.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := queueStamp(r.Context(), tx, ledger, "ask", ask.ID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -477,16 +475,12 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.queueEvent(documentCtx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	event, err := s.queueStampedEvent(documentCtx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.edited",
 		actor,
 		model.NewAskEditEventPayload(ask, previous, actor, askChanges),
-	))
+	), "ask", ask.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := queueStamp(documentCtx, tx, ledger, "ask", ask.ID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

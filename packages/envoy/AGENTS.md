@@ -389,28 +389,41 @@ it takes its locks, reads, runs every document operation's work (renders, anchor
 capture, reference extraction, approval carry) and its write advice, and writes nothing. Every
 document operation's write and every write of the handler's own is queued on the ledger instead
 (`docs.WriteStep`: `Ledger.Queue`, and in package `api` `queueWrite`, `queueExec`, `queueEvent`
-and `queueStamp`, `api/write_queue.go`), at the point the transaction makes it, so the queue holds
-the transaction's statements, the document operations' and the handler's, in the order they were
-made, and so its events append in the order they were made. A read that would have seen one of
-the transaction's own writes reads it from the ledger: a pending append counts toward the
-document's head (`withOwnAppends`), a pending anchor toward the anchors a refresh walks
+and `queueStampedEvent`, `api/write_queue.go`), at the point the transaction makes it, so the
+queue holds the transaction's statements, the document operations' and the handler's, in the
+order they were made, and so its events append in the order they were made. A read that would
+have seen one of the transaction's own writes reads it from the ledger: a pending append counts
+toward the document's head (`withOwnAppends`), a pending anchor toward the anchors a refresh walks
 (`RegisterPendingAnchor`), a pending version's number, time and markdown (`NextVersion`, `Now`,
 `PendingVersionMarkdown`).
-`ledger.Commit` first runs the queue back to back, the transaction's write phase: its first write
-gives the transaction its transaction id, so the id lives only for those statements and the
-commit. A step that fails stops the write phase, the transaction rolls back, nothing reaches a
-room, and `Commit` returns that step's error unchanged, so the handler answers what it answers
-for that error (`TestAFailedWritePhaseLeavesNothing`). `Commit` then records each settlement
-credit with the document content and takes each version's authors back out of that record,
-commits, credits the writes' actor to their rooms, releases the authors a version the
+`ledger.Commit` first runs the transaction's write phase: every queued step puts its statements on
+one `store.WriteBatch`, the settlement credit's statements join it last, and the batch goes to
+Postgres as one pipelined `pgx.Batch`. The server runs the statements back to back and the client
+reads their results once, so the transaction holds its id for the server's work, a client wake or
+two and the commit, never while this process waits to be scheduled between two statements (under
+CPU load that wait was 10-140 ms per round trip). A step reads no result: a value a later
+statement needs from an earlier one is derived in SQL - an event's sequence from its owner row and
+the owner's `last_seq` and `updated_at` from the row inserted (one CTE statement per append,
+`events.Broker.QueueAppend`), an `ask.opened` payload's `opened_event_id` and a stamp's
+`source_seq` from the events id sequence's `currval` (`store.LatestEventID`, `refs.QueueStamp`), a
+review's `event_seq` from the event just appended - or read in the read phase (a row's
+`now()`/`clock_timestamp()`, its id); a value the handler needs after `Commit` (the appended event)
+is filled by the statement's callback. The first statement that fails, or the first callback that
+refuses its result (a guarded update's `ALREADY_ACTIONED`, an edit-notice claim that no longer
+matches), stops the write phase, the transaction rolls back, nothing reaches a room, and `Commit`
+returns that error unchanged, so the handler answers what it answers for that error
+(`TestAFailedWritePhaseLeavesNothing`, `TestWritePhaseSendsItsStatementsAsOneBatch`). `Commit`
+then commits, credits the writes' actor to their rooms, releases the authors a version the
 transaction wrote named, then applies and broadcasts the updates, and last publishes the events
 its document operations appended, ahead of the handler's own; the handler defers
 `ledger.Discard`, which drops the queue, so a transaction that does not commit leaves the room,
-every connected browser, every version and the durable document as they were. Settlement and the
-background passes (block-index backfill, decided-wording restoration, task-progress
-reconciliation, the edit-notice sweep) likewise do every read and all their work before their
-first write; settlement, the block-index backfill and the decided-wording restoration queue
-their writes on a ledger of their own and run it right before they commit.
+every connected browser, every version and the durable document as they were. A write outside
+any ledger runs its statements as a batch of their own (`store.RunWrite`): `events.Broker.Append`,
+a message's insert, references, event and stamp. Settlement and the background passes
+(block-index backfill, decided-wording restoration, task-progress reconciliation, the edit-notice
+sweep) likewise do every read and all their work before their first write; settlement, the
+block-index backfill and the decided-wording restoration queue their writes on a ledger of their
+own and send them as one batch right before they commit.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
@@ -1211,14 +1224,15 @@ row as it stood before the wait and let a write land on an issue closed meanwhil
 phase is a row lock, so a write transaction holds no transaction id until its first write: its
 read phase - the owner lock, its reads, every document operation's work and its write advice -
 holds none, a writer waiting its turn on the owner lock holds none
-(`TestTwoWritersOfOneOwnerSerializeWithoutATransactionID`), and its write phase runs its
-statements back to back and commits (`ledger.Commit`, above). A reader that waits for every older
-transaction id to end therefore waits only for other writes' statements. Two costs remain: the
-read phase still holds its pooled connection, idle in transaction; and `refreshAnchors`' writes,
-an update and a `*.anchor_refreshed` append per changed anchor, run in the write phase one round
-trip each (batching them is INFRA-605's). A process of a release that serialised on the owner row
-and a process of this one do not exclude each other's writes to one owner, so the release that
-moved owners onto the advisory lock rolls out with `Recreate` at one replica.
+(`TestTwoWritersOfOneOwnerSerializeWithoutATransactionID`), and its write phase sends its
+statements as one pipelined batch and commits (`ledger.Commit`, above). A reader that waits for
+every older transaction id to end therefore waits only for other writes' statements. One cost
+remains: the read phase still holds its pooled connection, idle in transaction. `refreshAnchors`'
+writes, an update and a `*.anchor_refreshed` append per changed anchor, ride in the same batch,
+so they add statements to the server's work but no round trip (folding them into one statement is
+INFRA-605's). A process of a release that serialised on the owner row and a process of this one
+do not exclude each other's writes to one owner, so the release that moved owners onto the
+advisory lock rolls out with `Recreate` at one replica.
 
 **One caller, one connection.** Nothing holding a connection of the shared pool (`store.Pool`)
 - a transaction, an open cursor, which holds its connection until it closes, or a connection
@@ -1450,10 +1464,12 @@ and refuses the deletion; an unaccounted mark with no committed ask/comment row 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into
 `refs` by `refs.ReplaceCounted`, or by a `refs.Replacement` a write plans in its read phase
-(`refs.PlanReplace`, `refs.PlanReplaceFrom`) and applies in its write phase. Both reconcile
-rather than rewrite: an edge that survives keeps its
-`created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
-after the source's event is appended, in the same transaction). Structural relations stay in the
+(`refs.PlanReplace`, `refs.PlanReplaceFrom`) and queues in its write phase
+(`refs.Replacement.Queue`). Both reconcile rather than rewrite: an edge that survives keeps its
+`created_at` and `source_seq` (the `events.id` that introduced it, stamped right after the
+source's event is appended, in the same transaction: by `refs.Stamp` with the id in hand, or in a
+write phase's batch by `refs.QueueStamp`, which names the id as `store.LatestEventID`, the events
+id sequence's `currval`, so nothing between the event and its stamp may append another event).
 columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
 relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`),
 `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`

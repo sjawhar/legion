@@ -350,7 +350,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	if err := stampVersionEvent(queued, tx, owner, document.id, version, versionAt); err != nil {
 		return false, false, err
 	}
-	if err := ledger.runQueue(ctx); err != nil {
+	if err := ledger.runQueue(ctx, nil); err != nil {
 		return false, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -385,19 +385,15 @@ func stampVersionEvent(ctx context.Context, tx pgx.Tx, owner artifactOwner, arti
 	if err != nil {
 		return fmt.Errorf("read the event that recorded version %d of %s: %w", version, artifactID, err)
 	}
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue(fmt.Sprintf("stamp the block mentions of version %d of %s", version, artifactID), `
 			update block_refs set source_seq = $3
 			where artifact_id = $1 and created_version = $2 and source_seq is null
-		`, artifactID, version, eventID); err != nil {
-			return fmt.Errorf("stamp the block mentions of version %d of %s: %w", version, artifactID, err)
-		}
-		if _, err := tx.Exec(ctx, `
+		`, artifactID, version, eventID)
+		b.Queue(fmt.Sprintf("stamp the references of version %d of %s", version, artifactID), `
 			update refs set source_seq = $3
 			where from_kind = 'artifact' and from_id = $1 and source_seq is null and created_at = $2
-		`, artifactID, versionAt, eventID); err != nil {
-			return fmt.Errorf("stamp the references of version %d of %s: %w", version, artifactID, err)
-		}
+		`, artifactID, versionAt, eventID)
 		return nil
 	})
 }

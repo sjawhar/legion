@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // MarkKind identifies the Proof or Dispatch mark type written into a document tree.
@@ -586,29 +587,25 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		return nil
 	}
 	sink := eventSink(ctx)
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+	return write(ctx, tx, func(b *store.WriteBatch) error {
 		for _, refresh := range refreshes {
 			// Only the two fields this refresh owns are written. The row was read before the
 			// events and lookups, so writing the whole anchor column back would erase what
 			// another writer - the one-time block-id backfill - put in it in between (LEGION-149).
-			if _, err := tx.Exec(ctx, fmt.Sprintf(`
+			b.Queue("update "+refresh.table+" anchor", fmt.Sprintf(`
 				update %s
 				set anchor = jsonb_set(
 					jsonb_set(anchor, '{quote}', to_jsonb($2::text)),
 					'{orphaned}', to_jsonb($3::boolean))
 				where id = $1
-			`, refresh.table), refresh.id, refresh.anchor.Quote, refresh.anchor.Orphaned); err != nil {
-				return fmt.Errorf("update %s anchor: %w", refresh.table, err)
-			}
+			`, refresh.table), refresh.id, refresh.anchor.Quote, refresh.anchor.Orphaned)
 			event, err := refresh.event()
 			if err != nil {
 				return err
 			}
-			appended, err := s.events.Append(ctx, tx, event)
-			if err != nil {
+			if err := s.events.QueueAppend(b, event, sink); err != nil {
 				return fmt.Errorf("append anchor refresh event: %w", err)
 			}
-			sink(appended)
 		}
 		return nil
 	})

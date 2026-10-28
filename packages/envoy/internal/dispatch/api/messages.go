@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -14,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -153,11 +155,13 @@ func (s *server) createStoredMessage(
 		return model.Message{}, nil, err
 	}
 	// The message's references and the advice are read here, before its first write, so neither
-	// holds a transaction id (INFRA-636). Its id, which the references are planned for, is taken
-	// before the insert (gen_random_uuid assigns none), and the advice counts the message.created
-	// this write appends after it (writeAdvice).
+	// holds a transaction id (INFRA-636). Its id, which the references are planned for, and its
+	// created_at, the transaction's now() its column defaults to, are taken before the insert
+	// (neither assigns one), and the advice counts the message.created this write appends after it
+	// (writeAdvice).
 	var messageID string
-	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text`).Scan(&messageID); err != nil {
+	var createdAt time.Time
+	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text, now()`).Scan(&messageID, &createdAt); err != nil {
 		return model.Message{}, nil, err
 	}
 	eventType := "message.created"
@@ -176,27 +180,33 @@ func (s *server) createStoredMessage(
 			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status, eventType,
 		)
 	}
-	message, err := scanMessage(tx.QueryRow(ctx, `
-		insert into messages (id, issue_key, author, body, target, in_reply_to)
-		values ($1, $2, $3, $4, $5, $6)
-		returning `+messageColumns+`
-	`, messageID, issueKey, author, input.Body, input.Target, input.InReplyTo))
+	message, err := insertedMessage(messageID, issueKey, author, input, createdAt)
 	if err != nil {
 		return model.Message{}, nil, err
 	}
-	if issueKey != nil {
-		if err := references.Apply(ctx, tx); err != nil {
-			return model.Message{}, nil, err
+	// The insert, the references, the event and its stamp go in one batch (store.WriteBatch): the
+	// message is known before the insert runs, and the stamp names the event's id as the id
+	// sequence left it.
+	var event model.Event
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("", `
+			insert into messages (id, issue_key, author, body, target, in_reply_to, created_at)
+			values ($1, $2, $3, $4, $5, $6, $7)
+		`, messageID, issueKey, author, input.Body, input.Target, input.InReplyTo, createdAt)
+		if issueKey != nil {
+			references.Queue(b)
 		}
-	}
-	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)))
-	if err != nil {
+		if err := s.deps.Events.QueueAppend(b, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)), func(appended model.Event) {
+			event = appended
+		}); err != nil {
+			return err
+		}
+		if issueKey != nil {
+			refs.QueueStamp(b, "message", message.ID)
+		}
+		return nil
+	}); err != nil {
 		return model.Message{}, nil, err
-	}
-	if issueKey != nil {
-		if err := refs.Stamp(ctx, tx, "message", message.ID, event.ID); err != nil {
-			return model.Message{}, nil, err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.Message{}, nil, err
@@ -722,6 +732,28 @@ func (s *server) loadMessage(ctx context.Context, q queryer, issueKey, id string
 		args = append(args, issueKey)
 	}
 	return scanMessage(q.QueryRow(ctx, query, args...))
+}
+
+// insertedMessage is the message createStoredMessage inserts as messageColumns reads it back: its
+// author as the jsonb column decodes, its in_reply_to in the uuid type's text form, and its
+// created_at the transaction's now(), its column's default. The insert runs in a batch with the
+// event that carries this message, so nothing reads the row back before that event is queued.
+func insertedMessage(id string, issueKey *string, author []byte, input createMessageInput, createdAt time.Time) (model.Message, error) {
+	message := model.Message{
+		ID: id, IssueKey: issueKey, Body: input.Body, Target: input.Target, CreatedAt: createdAt,
+		Deliveries: []model.MessageDelivery{},
+	}
+	if input.InReplyTo != nil {
+		parent, err := uuid.Parse(*input.InReplyTo)
+		if err != nil {
+			return model.Message{}, fmt.Errorf("message in_reply_to: %w", err)
+		}
+		message.InReplyTo = new(parent.String())
+	}
+	if err := json.Unmarshal(author, &message.Author); err != nil {
+		return model.Message{}, fmt.Errorf("decode message author: %w", err)
+	}
+	return message, nil
 }
 
 // messageColumns is the messages select list scanMessage reads, in scan order.
