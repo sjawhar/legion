@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -224,6 +225,101 @@ func TestAPendingEventIsNeverClaimed(t *testing.T) {
 	}
 	if nextAttempt != nil {
 		t.Fatalf("the claim moved the pending command's next_attempt_at to %v, want it untouched", *nextAttempt)
+	}
+}
+
+// reopeningPublisher accepts every publish, recording it, and runs reopen once, as the first
+// publish of its first batch is made: what another transaction commits while a batch is
+// mid-publish.
+type reopeningPublisher struct {
+	recordingPublisher
+	once   sync.Once
+	reopen func()
+}
+
+func (p *reopeningPublisher) Window() bus.Sender { return p }
+
+func (p *reopeningPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	p.once.Do(p.reopen)
+	return answered(p.Publish(item))
+}
+
+// A comment.created whose mention a killed process had claimed is published without the
+// session's copy: the stranded pass resends that mention. When the resend fails, the API's settle
+// marks the attempt failed and reopens the event in one transaction. Here that commits while a
+// batch is publishing the event on what it read before - the copy left to the resend - so the
+// batch must not mark the event published: it records the destinations it reached and leaves
+// the event to the next scan, which reads the attempt failed and publishes the session's copy,
+// and nothing it already sent.
+func TestABatchNeverMarksPublishedAnEventReopenedWhileItPublishedIt(t *testing.T) {
+	const (
+		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
+		routeTopic = "notifications.agent.s1"
+	)
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	route := "session:s1"
+	seedIssue(t, database, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, database, "T-1", alice, "@s1 are you there?", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf("s1"),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new("s1"),
+		},
+	})
+	seedMentionDelivery(t, database, commentID, "s1", "resumed")
+	publisher := &reopeningPublisher{reopen: func() {
+		tx, err := database.Pool.Begin(context.Background())
+		if err != nil {
+			t.Errorf("begin the failed resend's settle: %v", err)
+			return
+		}
+		defer tx.Rollback(context.Background())
+		if _, err := tx.Exec(context.Background(), `
+			update comment_deliveries set state = 'failed', error = 'the listener did not answer' where comment_id = $1
+		`, commentID); err != nil {
+			t.Errorf("settle the resend failed: %v", err)
+			return
+		}
+		if _, err := tx.Exec(context.Background(), `
+			update events set published_at = null, next_attempt_at = null where id = $1
+		`, event.ID); err != nil {
+			t.Errorf("reopen the event: %v", err)
+			return
+		}
+		if err := tx.Commit(context.Background()); err != nil {
+			t.Errorf("commit the failed resend's settle: %v", err)
+		}
+	}}
+	deps := Deps{Store: database, Publisher: publisher}
+
+	scan(ctx, deps)
+	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{issueTopic}) {
+		t.Fatalf("the batch published %#v, want the issue topic alone: it read the copy as the resend's", got)
+	}
+	if at := publishedAt(t, database, event.ID); at != nil {
+		t.Fatalf("published_at = %v: the batch marked published an event reopened while it published it", at)
+	}
+	if destinations, _ := publishedDestinations(t, database, event.ID); !slices.Equal(destinations, []string{issueTopic}) {
+		t.Fatalf("published_destinations = %#v, want the issue topic the batch reached", destinations)
+	}
+
+	scan(ctx, deps)
+	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{issueTopic, routeTopic}) {
+		t.Fatalf("published %#v in all, want the issue topic once and then s1's copy", got)
+	}
+	if publishedAt(t, database, event.ID) == nil {
+		t.Fatal("published_at is null once the next scan published s1's copy")
+	}
+	destinations, attempts := publishedDestinations(t, database, event.ID)
+	if !slices.Equal(destinations, []string{issueTopic, routeTopic}) || attempts != 0 {
+		t.Fatalf("published_destinations = %#v and attempt_count = %d, want both topics and no attempt counted",
+			destinations, attempts)
 	}
 }
 

@@ -1298,7 +1298,17 @@ type CommentEventPayload struct {
 	// settled and sends nothing. An attempt a sender claimed - a send in flight when its process
 	// died, which may have reached the listener - is left to the stranded pass, which resends it
 	// under its own idempotency key, so the listener drops a repeat; the outbox takes it as
-	// abandoned only past StrandedMentionWindow, when no sender resumes it.
+	// abandoned only past StrandedMentionWindow, when no sender resumes it. A send the API settles
+	// failed, that resend included, reopens the comment's comment.created event when the comment
+	// mentions the attempt's session and the event has not reached that session's topic, or the
+	// route suppression below names the attempt's target alone (published_at and next_attempt_at
+	// cleared, this payload unchanged), so the outbox publishes then whichever route, author,
+	// claimant or follower copy reaches the session, to the destinations the event has not reached:
+	// a mentioned session loses no comment through a kill. One duplicate remains: a send the killed process had handed the listener
+	// before it died, whose resend then fails for good (the listener down after the restart),
+	// gives the session that mention and then the copy, under different dedupe keys
+	// (agent.<session>.<comment>:<target>:<mode> for the mention, dispatch-<event id> for the
+	// copy).
 	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
 	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
 	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),

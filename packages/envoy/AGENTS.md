@@ -1324,9 +1324,15 @@ claim, or by its creation while unclaimed: a killed sender's, or a send queued b
 that long - is the outbox's or the stranded pass's, whichever acts first on its row: the outbox
 settles it `failed` (with its `comment.delivery` receipt, under the comment's owner lock) before
 it publishes the copy, and a claim after that finds it settled and sends nothing; a claim that
-commits first leaves it claimed just now, and the outbox waits on the send. So the session hears
-the comment once through a kill, unless the killed sender had already handed the frame over (the
-outbox's caveats under the notification subjects below). The post-commit sender (`mentionSender`,
+commits first leaves it claimed just now, and the outbox waits on the send. An attempt a killed
+sender claimed is the stranded pass's to resend, and the outbox publishes the comment without that
+session's copy meanwhile; a send settled `failed` - that resend included - reopens the comment's
+`comment.created` in the settle's own transaction when the comment mentions that session and the
+event has not reached its own topic, or the route is suppressed by the attempt's target alone
+(`reopenCommentCreated`: `published_at` and `next_attempt_at` cleared, the payload as it was), so
+the outbox's next scan publishes whichever route, author, claimant or follower copy now reaches the
+session, and nothing it already sent. So a mentioned session loses no comment through a kill, and
+hears it once unless the killed sender had already handed the frame over. The post-commit sender (`mentionSender`,
 `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
 session the mention's lookup pinned, else its target as written: `role:X` shares
 `session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X`
@@ -2794,20 +2800,41 @@ the synchronous listener call records the sent or failed attempt instead of blin
   pending attempts only, so the mention and the copy are exclusive per attempt. An attempt a
   sender claimed and never settled (a send in flight when its process was killed, which may have
   reached the listener) is left to the stranded pass, whose resend repeats the attempt's
-  idempotency key so the listener drops a repeat; the outbox takes it as abandoned only past
-  `model.StrandedMentionWindow` (an hour), when no sender resumes it. Every other
-  session - each attempt `failed`, or no row at all - is published to as if it had not been
-  mentioned. A deferral with a denial
+  idempotency key so the listener drops a repeat; the outbox counts it with the sent ones
+  (`mentionResumed`) and does not wait on it, and takes it as abandoned only past
+  `model.StrandedMentionWindow` (an hour), when no sender resumes it. The copy still follows a
+  send that fails after the outbox decided, that resend included: the API's settle of a failed
+  send (`completeCommentDelivery`, not `settleAbandonedMentions`) reopens the comment's
+  `comment.created` in the same transaction when its payload leaves the session's copy to the
+  mention - the attempt's session in `suppressed_authors` or `suppressed_route_session_id`, or
+  its target the `suppressed_route` named alone
+  (`reopenCommentCreated`, `leavesCopyToMention`): it clears `published_at` and
+  `next_attempt_at`, under the owner lock first like the rest of that transaction, and leaves the
+  payload as it was. The next scan republishes the event to the destinations not yet in
+  `published_destinations`, reads the attempt `failed`, and publishes the copy and nothing it
+  already sent; an event not published yet is due at once. A batch publishing the event when the
+  reopen commits cannot mark it published on what it read before: `recordBatch` writes
+  `published_at`, `attempt_count` and `next_attempt_at` only while the row still holds the
+  `next_attempt_at` its claim wrote (`claimPendingEvents` returns it), so a row reopened or
+  claimed again since gets only the destinations that batch reached. The reopen asks only whether
+  the comment mentions the session and the event has not reached its topic, so it covers every
+  copy the outbox holds back for a mention - the route, an author, the claimant, a follower - and a
+  mentioned session no copy reaches gets nothing new. So a mentioned session loses no comment
+  through a kill.
+  Every other session - each attempt `failed`, or no row at all - is published to as if it had
+  not been mentioned. A deferral with a denial
   (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its
   attempt counted; a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a
   stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
   One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener
-  may have delivered the mention, and a first attempt stranded `pending` past the minute may have
-  landed before its sender stopped, and the outbox settles it and publishes the copy. Each way
-  the session receives the comment twice, under different dedupe keys (the mention's
-  delivery and the outbox's event); a host treats the second copy as the same comment (same
-  comment id).
+  may have delivered the mention, a first attempt stranded `pending` past the minute may have
+  landed before its sender stopped, and the outbox settles it and publishes the copy, and a send
+  the killed process had handed the listener before it died, whose stranded-pass resend then
+  fails for good (the listener down after the restart), is followed by the copy the failure
+  reopens. Each way the session receives the comment twice, under different dedupe keys (the
+  mention's `agent.<session>.<comment>:<target>:<mode>` and the outbox's `dispatch-<event id>`);
+  a host treats the second copy as the same comment (same comment id).
   Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`,
   `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a
   claimant, follower, author or route topic can receive the edit before the creation - for as

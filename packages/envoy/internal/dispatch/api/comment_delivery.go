@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -327,7 +328,10 @@ func commentDeliveryReceipt(
 // what the send did on the attempt this sender claimed and appends the comment.delivery
 // receipt, holding no listener call. recorded is the row recordCommentDeliveryResolution left
 // before the send, so this receipt states what that row says - the session holding the frame
-// included - rather than what the resolution behind the send happened to find.
+// included - rather than what the resolution behind the send happened to find. An attempt it
+// settles failed reopens the comment's comment.created in the same transaction when that event
+// leaves the session's copy to this mention (reopenCommentCreated), so the copy follows the
+// failure.
 func (s *server) completeCommentDelivery(
 	ctx context.Context,
 	comment model.Comment,
@@ -343,13 +347,17 @@ func (s *server) completeCommentDelivery(
 	sent.Duplicate, sent.EnvelopeID = duplicate, envelopeID
 	return settleDeliveryAttempt(ctx, s, commentDeliveryReceipt(comment, actor, sent),
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, error) {
-			return scanCommentDelivery(tx.QueryRow(ctx, `
+			settled, err := scanCommentDelivery(tx.QueryRow(ctx, `
 				update comment_deliveries set envelope_id = $5, state = $6, error = $7, duplicate = $8
 				where comment_id = $1 and target = $2 and attempt = $3
 				  and state = 'pending' and claimed_at = $4
 				returning `+commentDeliveryColumns,
 				comment.ID, sent.Target, claim.attempt, claim.claimedAt, envelopeID, sent.State, sent.Error, duplicate,
 			))
+			if err != nil || settled.State != "failed" {
+				return settled, err
+			}
+			return settled, s.reopenCommentCreated(ctx, tx, comment, settled)
 		},
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, bool, *string, error) {
 			var mine bool
@@ -504,21 +512,29 @@ func (s *server) deliverResolvedCommentMention(
 	)
 }
 
-// loadCommentCreatedEvent reads comment's comment.created event within the comment's owner, so
-// the read walks that owner's events by its (issue_key, seq) or (artifact_id, seq) index instead
-// of matching the payload id across the whole log. A comment has one comment.created event, and
-// both callers ask about recent comments, so the walk starts from the owner's newest event.
-func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment model.Comment) (model.Event, error) {
+// commentCreatedEventFrom is the from clause, filter and order of a read of comment's
+// comment.created event within the comment's owner, and the arguments they take, so the read
+// walks that owner's events by its (issue_key, seq) or (artifact_id, seq) index instead of
+// matching the payload id across the whole log. A comment has one comment.created event, and
+// every caller asks about a recent comment, so the walk starts from the owner's newest event.
+func commentCreatedEventFrom(comment model.Comment) (string, []any) {
 	ownerColumn, ownerID := commentEventOwner(comment)
+	return `
+		from events
+		where ` + ownerColumn + ` = $1 and type = 'comment.created' and payload ->> 'id' = $2
+		order by seq desc
+		limit 1
+	`, []any{ownerID, comment.ID}
+}
+
+// loadCommentCreatedEvent reads comment's comment.created event (commentCreatedEventFrom).
+func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment model.Comment) (model.Event, error) {
+	from, args := commentCreatedEventFrom(comment)
 	var event model.Event
 	var actor, payload []byte
 	if err := q.QueryRow(ctx, `
 		select id, issue_key, artifact_id::text, coalesce(project_key, ''), seq, type, actor, notify, created_at, payload
-		from events
-		where `+ownerColumn+` = $1 and type = 'comment.created' and payload ->> 'id' = $2
-		order by seq desc
-		limit 1
-	`, ownerID, comment.ID).Scan(
+	`+from, args...).Scan(
 		&event.ID, &event.IssueKey, &event.ArtifactID, &event.Project, &event.Seq, &event.Type,
 		&actor, &event.Notify, &event.CreatedAt, &payload,
 	); err != nil {
@@ -531,6 +547,88 @@ func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment
 		return model.Event{}, fmt.Errorf("decode comment-created event payload: %w", err)
 	}
 	return event, nil
+}
+
+// reopenCommentCreated hands comment's comment.created event back to the outbox when failed, an
+// attempt the caller's transaction has just settled failed, is a mention the event leaves that
+// session's copy to (leavesCopyToMention): it clears the event's published_at and
+// next_attempt_at and changes nothing else, payload and published_destinations included. The
+// outbox's next scan then republishes the event to the destinations it has not reached and,
+// reading the attempt failed, publishes the session's copy (attempt.leftTo in
+// internal/dispatch/outbox) and nothing it already sent; an event not published yet simply
+// becomes due now. This is what keeps the session from losing the comment when the outbox
+// published the event while the attempt read as the mention's to deliver - a send in flight
+// when its process was killed, which the stranded pass resends (mentionResumed in
+// internal/dispatch/outbox) - and that resend then failed. A batch publishing the event when
+// this commits records only the destinations it reached and never marks the event published
+// (recordBatch's claim token in internal/dispatch/outbox), so the copy is not lost to a decision
+// that batch made before the failure.
+//
+// It runs inside the settle transaction, which holds the comment's owner lock and the attempt row
+// already, and locks the event row last: the outbox's own statements on events rows take no other
+// lock, so the order settleDeliveryAttempt keeps holds.
+func (s *server) reopenCommentCreated(
+	ctx context.Context, tx pgx.Tx, comment model.Comment, failed model.CommentDelivery,
+) error {
+	from, args := commentCreatedEventFrom(comment)
+	var eventID int64
+	var raw []byte
+	var destinations []string
+	if err := tx.QueryRow(ctx, `select id, payload, published_destinations `+from+` for update`, args...).Scan(&eventID, &raw, &destinations); err != nil {
+		return fmt.Errorf("lock the comment.created event of comment %s: %w", comment.ID, err)
+	}
+	var payload model.CommentEventPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return fmt.Errorf("decode the comment.created event of comment %s: %w", comment.ID, err)
+	}
+	if !leavesCopyToMention(payload, destinations, failed) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		update events set published_at = null, next_attempt_at = null where id = $1
+	`, eventID); err != nil {
+		return fmt.Errorf("reopen the comment.created event of comment %s: %w", comment.ID, err)
+	}
+	return nil
+}
+
+// leavesCopyToMention reports whether a comment.created event may have left a copy of the comment
+// to the failed attempt's mention, so the outbox must look at it again now that the mention
+// failed: the route suppression names the attempt's target as suppressed_route with no session,
+// or the session the attempt counts under (mentionAttemptSession) is one the comment mentions and
+// the event has not been published to that session's own topic. Every copy the outbox holds back
+// for a mention - the route, an author, the claimant, a follower (attempt.leftToMention in
+// internal/dispatch/outbox) - is held back for a mentioned session, so this covers them all; the
+// outbox's re-check then publishes whichever of them reach the session, and a session no copy
+// reaches gets nothing new. An event already published to the session's topic gave it a copy, and
+// is left alone.
+func leavesCopyToMention(payload model.CommentEventPayload, destinations []string, attempt model.CommentDelivery) bool {
+	if payload.SuppressRoute && payload.SuppressedRouteSessionID == nil && payload.SuppressedRoute == attempt.Target {
+		return true
+	}
+	session := mentionAttemptSession(attempt)
+	if session == "" || slices.Contains(destinations, contracts.AgentSubject(session)) {
+		return false
+	}
+	for _, mention := range payload.Mentions {
+		if mention.Target == "session:"+session || (mention.SessionID != nil && *mention.SessionID == session) {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionAttemptSession is the session a mention attempt counts under: its session id, or,
+// naming none, the <id> of a session:<id> target; "" for an unpinned role:X. It is the outbox's
+// mentionSessionKey, spelled once here.
+func mentionAttemptSession(attempt model.CommentDelivery) string {
+	if attempt.SessionID != nil && *attempt.SessionID != "" {
+		return *attempt.SessionID
+	}
+	if named, ok := strings.CutPrefix(attempt.Target, "session:"); ok {
+		return named
+	}
+	return ""
 }
 
 // commentEventOwner is the events column and value naming comment's owner, so a read of its

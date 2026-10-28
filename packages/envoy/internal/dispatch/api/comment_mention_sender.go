@@ -273,8 +273,12 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 // abandoned: it waits on the send instead. An attempt a sender claimed and never settled - a send
 // in flight when its process was killed - is this pass's alone within model.StrandedMentionWindow:
 // its resend repeats the attempt's idempotency key, so a frame the killed process had already
-// handed to the listener is dropped there, and the session gets one copy of the comment through a
-// kill.
+// handed to the listener is dropped there. A resend that fails is settled failed, which reopens
+// the comment's comment.created when the comment mentions that session and the event has not
+// reached its topic (reopenCommentCreated), so the outbox publishes then whichever copy reaches
+// the session: a mentioned session loses no comment through a kill. A kill gives it two copies only when the killed process had handed its
+// frame over and the resend then fails for good (the listener down after the restart): that
+// mention, then the copy, under different dedupe keys.
 func (m *mentionSender) recoverStranded() {
 	m.mu.Lock()
 	if m.stoppedLocked() {

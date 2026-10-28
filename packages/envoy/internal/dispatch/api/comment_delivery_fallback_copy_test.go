@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -59,9 +60,9 @@ func TestALiveListenerLeavesTheMentionedSessionTheMentionsCopyAlone(t *testing.T
 	}
 }
 
-// A mention whose send fails, to a session the comment's creation skipped on no route - a reply
-// in a thread a person started, on an issue with no route - leaves the comment's comment.created
-// event as it was: its payload unchanged, and its publication not reopened.
+// A mention whose send fails, to a session no copy of the comment reaches - a reply in a thread a
+// person started, on an issue with no route - adds no copy: the comment's comment.created payload
+// is unchanged, and once the outbox has looked at it again it still reached no topic of s2's.
 func TestAFailedMentionOfASessionNothingSkippedLeavesTheCommentCreatedEventAlone(t *testing.T) {
 	listener, state := newMentionListener(t)
 	// Never released: the send to s2 waits until its caller gives up, and the attempt fails.
@@ -89,9 +90,12 @@ func TestAFailedMentionOfASessionNothingSkippedLeavesTheCommentCreatedEventAlone
 	if len(settled) != 1 || settled[0].State != "failed" {
 		t.Fatalf("the mention whose send never answered = %#v, want its one attempt failed", settled)
 	}
-	after := commentCreatedRow(t, database, created.ID)
-	if after.payload != before.payload || after.publishedAt == nil || !after.publishedAt.Equal(*before.publishedAt) {
-		t.Fatalf("comment.created after the mention failed = %+v, want it as it was before: %+v", after, before)
+	again := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	if len(again) != 1 || slices.Contains(again[0].Destinations, contracts.AgentSubject("s2")) {
+		t.Fatalf("comment.created deliveries after the mention failed = %#v, want none of them to s2", again)
+	}
+	if after := commentCreatedRow(t, database, created.ID); after.payload != before.payload || after.publishedAt == nil {
+		t.Fatalf("comment.created after the mention failed = %+v, want its payload as before and published: %+v", after, before)
 	}
 }
 
@@ -110,4 +114,63 @@ func commentCreatedRow(t *testing.T, database *store.Store, commentID string) co
 		t.Fatalf("read comment.created of %s: %v", commentID, err)
 	}
 	return row
+}
+
+// The claimant route holds its copy back for a mention of the claimant as the issue route does,
+// here on a reply, whose suppressed_authors names no session. A process killed after it claimed that mention's attempt, before its send reached the listener,
+// leaves the attempt to the stranded pass; when that resend fails too, the claimant still hears
+// the comment, from the claimant copy the failure reopens.
+func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
+	listener, state := newMentionListener(t)
+	stopping, stop := context.WithCancel(t.Context())
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{
+		envoyURL: listener.URL, envoyTimeout: time.Second, lifetime: stopping,
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "A claimed issue", "before")
+	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/claim", map[string]any{
+		"actor": claimActorBody("s1", "Implementer"),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("claim the issue as s1: status=%d body=%s", response.Code, response.Body.String())
+	}
+	// A reply in a thread a person started: its suppressed_authors names no session, so only the
+	// claimant route holds s1's copy back for the mention.
+	root := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{"body": "Where should this go?"}))
+	stop()
+	claimed := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "For the claimant.", "reply_to": root.ID, "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	if _, err := database.Pool.Exec(context.Background(), `
+		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' - interval '1 second'
+		where comment_id = $1
+	`, claimed.ID); err != nil {
+		t.Fatalf("lapse the killed process's claim: %v", err)
+	}
+	ageAttempts(t, database, claimed.ID)
+	_ = state.holdLookups("/v1/registry/s1")
+
+	published := eventDeliveries(t, database, deps.Docs, "comment.created", claimed.ID)
+	if len(published) != 1 || slices.Contains(published[0].Destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("comment.created deliveries = %#v, want the one event's, its claimant copy left to the resend", published)
+	}
+
+	passes := make(chan struct{}, 1)
+	lifetime, end := context.WithCancel(t.Context())
+	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
+	next.start()
+	settled := waitForCommentDeliveries(t, database, claimed.ID, "the resend settled", func(attempts []model.CommentDelivery) bool {
+		return len(attempts) == 1 && attempts[0].State != "pending"
+	})
+	end()
+	next.wait()
+	if settled[0].State != "failed" {
+		t.Fatalf("the resend to a listener that answers nothing = %#v, want it failed", settled)
+	}
+
+	again := eventDeliveries(t, database, deps.Docs, "comment.created", claimed.ID)
+	if len(again) != 1 || !slices.Contains(again[0].Destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("comment.created deliveries after the resend failed = %#v, want s1's topic among them", again)
+	}
+	if sends := state.sent(); len(sends) != 0 {
+		t.Fatalf("the listener took sends %#v, want none", sends)
+	}
 }
