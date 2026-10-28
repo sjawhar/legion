@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-651",
+  "completed": "2026-10-28T16:00:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
+  "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz (sha256 438af536f36c64cdebf5c04555a6b40787ed5ee5d24eeb65f7eeb408119e9633): scripts (identity.sh, negative.sh, cli.sh, runs.sh, verdict.sh, i651tool.go), every tsv, CLI output, run summary, cpu and heap profile",
+  "proof": [
+    {
+      "criterion": "A1: without the parameter (or with versions=all) the answer is byte-identical (status, headers but Date, ETag, body) at real size and on hard data",
+      "surface": "local Dispatch stack of the load test (packages/envoy/loadtest from sjawhar/legion#2369 at 5edd1f88f1fd), Postgres 16.2 with pgvector, real migrations, stack.sh seed plus INFRA-650's refseed (1,000 targets, 19,471 target versions, 310 issues with members)",
+      "command": "identity.sh base <src-base main eb21e78d8e6e>; identity.sh head <src-head 5ec228145b48> latest; diff {plain,adv,err}-full-base.tsv {plain,adv,err}-full-head.tsv; diff plain-full-head.tsv plain-all-head.tsv (each tsv: key, status, every header but Date, body sha256, bytes for all 1,000 seeded issues, each side from its own stack.sh reset)",
+      "observed": "plain: diff exit 0, both sha256 4f3247dc..., 1,000 x 200, 310 with members, 370,198,228 bytes; versions=all identical file; adversarial.sql: diff exit 0 (c46144e5..., 258,926,255 bytes); errors.sql: diff exit 0 (d9d50ee3...), 87 x 500 INTERNAL and 913 x 200 on both sides, 33 'decode artifact author' and 54 'decode artifact version authors' log lines on each",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "head build that trims the full answer too (loader called with latestOnly=true always): same 1,000 ETags, different body on 305 issues, diff exit 1 (negative/diff-full-trimfull.txt)"
+    },
+    {
+      "criterion": "A2: with versions=latest each member is the full answer's member with only its latest version, under its own ETag, and 304 works",
+      "surface": "same local stack; Postgres test suite",
+      "command": "i651tool fetch -query versions=latest for all 1,000 issues at head; i651tool compare -full bodies/plain-full-head -latest bodies/plain-latest-head (decode both as model.IssueReferences, cut each full member's versions to the last, re-encode, compare bytes; check ETags differ); same on adversarial data; go test ./internal/dispatch/api/ -run TestIssueReferencesLatestVersionsAnswerIsTheFullAnswerCutToEachLatestVersion",
+      "observed": "1,000 of 1,000 equal after the cut, 33,351 multi-version members, 0 of 310 member issues share an ETag with the full answer; 48,600,016 trimmed bytes vs 370,198,228 full; adversarial 34,218,141 vs 258,926,255; explain: Index Scan Backward using artifact_versions_artifact_id_number_key, one row per document; the Postgres test passes at head (304 with the trimmed ETag, both ETags change after a new version, the trimmed member carries version 41) and fails on main's code ('latest member 1 ... carries 10 versions; want 1')",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "head build whose lateral takes the first version (order by v.number asc): compare exit 1, 305 of 310 member issues differ (the other 5 hold only one-version documents); full answers still diff exit 0"
+    },
+    {
+      "criterion": "A3: a bad versions value answers 400 INVALID_QUERY; no identity still answers 401",
+      "surface": "Postgres test suite (real handler, real migrations)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable go test ./internal/dispatch/api/ -run 'Reference' -count=1",
+      "observed": "ok at head; TestIssueReferencesVersionsAllIsTheFullAnswerAndOtherValuesAreRefused (versions=all equal to no parameter in status, ETag, Content-Type and body; versions=bogus 400 INVALID_QUERY) and TestIssueReferencesRejectUnauthenticatedRequest (versions=bogus without identity 401 NO_IDENTITY) pass",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "the same tests on main's code: versions=bogus answers 200 ('versions=bogus: status=200'), test fails"
+    },
+    {
+      "criterion": "A4: dispatch read prints the same output and receives the trimmed answer; a new CLI against an old server prints the same",
+      "surface": "the real dispatch CLI (bin/dispatch.ts bundled by build-dispatch-cli.sh from main and from the head) against the local stack",
+      "command": "cli.sh head-server <src-head> cli-keys.txt; cli.sh base-server <src-base> cli-keys.txt: dispatch read --issue <KEY> for 25 issues (10 largest answers up to 7.1 MB, 10 more with members, 5 without) with each CLI; diff -r of the outputs; Dispatch access log bytes of route=/api/v1/issues/{key}/references",
+      "observed": "head server: base CLI vs head CLI diff -r exit 0; access log 68,478,298 bytes for the main CLI's 25 requests vs 8,893,398 for the head CLI's, each equal to that issue's trimmed answer (LGA-202 7,145,304 -> 943,392); head CLI on the base server: same 25 outputs, diff -r exit 0",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "head server build whose trimmed answer drops each issue's deepest member: head CLI output differs from the main CLI's on all 20 issues with references (diff -r exit 1, missing reference lines shown)"
+    },
+    {
+      "criterion": "A5: INFRA-650's test cleanup done at real size (>=158 members, >=2,205 versions, >=1 MB), passing at base and head",
+      "surface": "Postgres test suite (CI's envoy Go job runs it)",
+      "command": "go test ./internal/dispatch/api/ -run TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors -count=1 -v, at head and with the same test file on a git archive of main eb21e78d8e6e",
+      "observed": "passes at head (160 members, 6,421 versions, 1,078,728 bytes) and on main's code (160 members, 6,421 versions, 1,081,641 bytes); one served.loadArtifact per member is the oracle, Approval asserted non-nil and absent from the member, every other field compared both ways, authors null and [] checked with bytes.Contains",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "the latest-versions test in the same file fails on main's code, so the fixture distinguishes the change; INFRA-650 showed the oracle catches a memo keyed on the document"
+    },
+    {
+      "criterion": "A7: merge rule (dispatch://INFRA-512/comment/63dcf4bd-d37e-47a6-9040-beeaea4cd364) on INFRA-589's route mix with the CLI's new request",
+      "surface": "run-step.sh of packages/envoy/loadtest at #2369's newest head 3d988c68588d on the refseed seed",
+      "command": "run-step.sh <side>-<n> --events 1 --sessions 100 --requests 15 --rng-seed 1 --route-mix routes-2026-10-26-1719Z-versions-latest.txt (sha256 73804994...), base-1, head-1, base-2, head-2, base-3, head-3, each from its own reset; verdict.sh",
+      "observed": "Dispatch cores base 0.3389/0.3424/0.3522, head 0.3283/0.3162/0.3322: every head run below every base run -> merge; spread 0.0133; getIssueReferences base 10.70 s of 180.79 s (5.92%), head 2.01 s of 170.71 s (1.18%); E = 0.90 x 0.0198 = 0.0178 cores; 2,758/2,758 requests 2xx and 210/210 references 2xx in every run; calibration at 0.5x failed (76.8% 2xx, 60 references failures), 0.25x passed (100%, box busy 40%)",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "the calibration at 0.5x (--events 2 --sessions 200 --requests 30) is refused by the acceptance test: 4,236/5,513 2xx and 60 of 417 references requests failed"
+    },
+    {
+      "criterion": "A8: no resident memory added",
+      "surface": "code review; the merge-rule runs' heap profiles",
+      "command": "go tool pprof -top -sample_index=alloc_space '-show_from=api\\.\\(\\*server\\)\\.getIssueReferences' <run>/heap.pprof for the six runs",
+      "observed": "no package-level state, cache or pool in the diff; allocation under the route base 1,265/1,222/1,145 MB, head 106/103/132 MB per run",
+      "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
+      "negativeControl": "the verdict's contradiction check (head alloc above base) is false; base runs, which build full answers, allocate about 10x more under the route"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/references.go",
+    "packages/envoy/internal/dispatch/api/references_test.go",
+    "packages/envoy/internal/dispatch/api/routes_table.go",
+    "packages/envoy-client/src/dispatch-http.ts",
+    "packages/envoy-client/src/__tests__/dispatch-http.test.ts",
+    "packages/envoy-client/src/__tests__/dispatch-execute.test.ts",
+    "packages/contracts/src/dispatch-api.ts",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/.changes/unreleased/pr2469-Added-20261028-155815.yaml",
+    "packages/envoy-client/.changes/unreleased/pr2469-Changed-20261028-155816.yaml",
+    "packages/pi-envoy/.changes/unreleased/pr2469-Changed-20261028-155817.yaml"
+  ],
+  "trickyParts": [
+    "The full answer's SQL text is byte for byte main's: the loader varies only the version join string, so its plan, row order and which decode error a request hits are unchanged (errors.sql check).",
+    "The trimmed ETag hashes an extra 'versions=latest\\n' line after the header line, so the two answers of one issue never share an ETag; the full answer's ETag input is unchanged.",
+    "The trimmed statement keeps 'order by a.ref_key, v.number'; with one row per document the second key is redundant but keeps one statement text."
+  ],
+  "deviations": [
+    "Task 8 (commit refseed into packages/envoy/loadtest) is not done: the package exists only on sjawhar/legion#2369 (open, CHANGES_REQUESTED at 3d988c68 at 15:58Z). Per the architect's 12:38Z decision it lands by a forward merge once #2369 is on main, and the issue does not go to READY before it.",
+    "The calibration at the plan's 0.5x failed its acceptance test, so the six runs used 0.25x (--events 1 --sessions 100 --requests 15), as the plan's halving rule says.",
+    "The identity and CLI checks ran on #2369 at 5edd1f88; #2369 moved to 3d988c68 (sampler, guard and doc changes) before the merge-rule runs, so the six runs were repeated at 3d988c68 (both sets pass; the 5edd1f88 set is in runs-5edd1f88/).",
+    "The simplify pass ran before the proofs (on 1cc83c8b), so every proof ran at its applied head 5ec22814.",
+    "The CLI's 'unavailable' line for a references request that fails names the URL it requested, which now ends in ?versions=latest (dispatch-execute.test.ts updated); every successful read prints the same.",
+    "Full go test ./internal/dispatch/... on this 2-vCPU pod: api package ok but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a database already in byte-order collation (the load test's pgserver Postgres); other packages timed out or need Docker (files) under the concurrent seed. CI's envoy Go job is the record."
+  ],
+  "openQuestions": [
+    "Who restarts implementing for Task 8 once #2369 merges: the architect's send-back, or a task to this session?"
+  ]
+}
