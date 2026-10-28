@@ -28,8 +28,8 @@ func walkNodes(node *Node, visit func(*Node) bool) bool {
 // Paths are valid only for the duration of visit. Returning false stops the
 // traversal.
 //
-// Sizes are measured before the first visit, so a visitor must not change the
-// Text or Children of nodes the walk has not yet visited.
+// Sizes are measured before the first visit, so a visitor must not change any
+// node's Type, Text or Children, the visited node's included.
 func walk(doc *Node, visit func(n *Node, path []int, pos, end int) bool) {
 	if doc == nil || visit == nil {
 		return
