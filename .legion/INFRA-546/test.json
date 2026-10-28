@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-546",
+  "completed": "2026-10-28T13:37:16Z",
+  "round": 8,
+  "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
+  "codeHeadSha": "07b2cc7c310dcd07c9bb03d7175d672a7082ef6d",
+  "fingerprint": {
+    "oldHead": "81cf8c12ad439ac091aa7a35fd9d3850e24bb729",
+    "newHead": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
+    "base": "main (fork_point(main@origin | head))",
+    "result": "9eb94a30216d2528 -> a47a794122daacbf: changed, only in the .dispatch/architecture/envoy-listener.md summary line main (#2367) also rewrote; this PR's sentence is kept",
+    "decision": "real-surface checks re-run on the merged tree (main's listener code moved), not bare gates"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 91d30dea: P1-P5 and every standalone refusal reproduced."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "On the tree merged with main, a full ENVOY_NOTIFICATIONS refuses new messages: send and publish answer a retryable 503 naming the full stream (outcome stream_full), the GitHub webhook answers 503, and nothing stored is dropped",
+      "surface": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on a standalone nats-server v2.15.1, driven with curl",
+      "command": "bash /legion/scratch/tmp/t546/tS.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6470476902)",
+      "observed": "publish and send: 503, Retry-After: 1, 'envoy: the message bus refused the message because its stream is full: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded', records outcome stream_full; webhook 503; stream unchanged at 15 msgs, first_seq 1; after the operator's raise the same send -> 200.",
+      "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
+      "negativeControl": "NATS server stopped under the running listener: a send -> 503 'envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded', recorded bus_unavailable"
+    },
+    {
+      "criterion": "On the merged tree, a GitHub delivery and Dispatch outbox events a full clustered nats-server 2.10 stream refused are stored once there is room, with no step-down",
+      "surface": "Real envoy-listener and envoy-dispatch (Postgres 17) on three nats-server v2.10.29 processes; the listener also on three v2.15.1 processes",
+      "command": "bash /legion/scratch/tmp/t546/tX.sh <nats-server v2.10.29 | v2.15.1>; bash /legion/scratch/tmp/t546/tZ.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6470476902)",
+      "observed": "v2.10.29: d1 503 while full ('... does not hold, and its publish without its id failed: ... is full'), redelivery after the raise -> 200 and stored 15 -> 16 with no step-down, fresh d2 twice stored once; v2.15.1 the same. Dispatch: project.created and issue.created retried while full, stored once each after the raise.",
+      "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
+      "negativeControl": "GitHub webhook with a bad signature -> 401 'invalid signature'"
+    },
+    {
+      "criterion": "On the merged tree, copies, limit, DiscardNew and envoy_stream_id hold across listener and Dispatch starts and the mixed-settings race; an operator's raise of the limit stands",
+      "surface": "Real envoy-listener and envoy-dispatch on three nats-server v2.15.1 processes and a standalone v2.15.1",
+      "command": "bash /legion/scratch/tmp/p546b/proof.sh <workspace>; bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6470476902)",
+      "observed": "proof.sh: P1 replicas 3, max_bytes 44023414784, discard new, one id; P2 unchanged; P5 50 GiB raise stood, lowering restored; P3 dispatch listening, subjects 5 -> 8, same id; P4 10 acknowledged, 20 refused. race.sh: 8/8 PASS, 8 keeper restores.",
+      "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
+      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 -> exit 1 'insufficient storage resources available'"
+    }
+  ],
+  "observations": [
+    "Harness: one v2.10.29 webhook run first read a stale lX.log and sent its requests during the listener's starting gate; tX.sh now deletes the log before each start, and the recorded run is the corrected one.",
+    "CI at 07b2cc7c (the merge), read 2026-10-28T13:36Z: lint, typecheck, test, build and changes queued. Not waited for."
+  ]
+}
