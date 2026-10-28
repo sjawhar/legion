@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// trendFrom and trendTo are the minutes of the hour's window that the trend fits (plan D10): from
+// trendFrom and trendTo are the minutes of the hour's window that the trend fits: from
 // minute 5, inclusive, past the warm-up, to minute 60, exclusive.
 const (
 	trendFrom = 5
@@ -63,8 +63,8 @@ func fitTrend(points []trendPoint) (trendFit, bool) {
 	return trendFit{n: len(points), mean: my, slope: slope, lo: slope - half, hi: slope + half}, true
 }
 
-// upward is plan D10's upward trend: the interval's lower bound above 0, and the slope above 5% of
-// the mean per hour.
+// upward says the series trends upward: the interval's lower bound above 0, and the slope above
+// 5% of the mean per hour.
 func (f trendFit) upward() bool { return f.lo > 0 && f.slope > 0.05*f.mean }
 
 // studentT975 is the 0.975 quantile of Student's t with df degrees of freedom, the half-width
@@ -222,9 +222,9 @@ func renderTrend(steps []*curveStep) string {
 	}
 	var md markdown
 	md.line("# Trend over the hour\n")
-	md.line("Each row is a series of 1-minute means over minutes %d to %d of the hour step's window (minute %d inclusive to %d exclusive, past the warm-up): Dispatch's cores and working set from cgroup.json's `minutes` (a minute with a gap over 30 s in the cgroup samples is left out), and its Go heap in use from samples.json's in-window heap reads. The slope is the ordinary least-squares slope per hour with its 95%% interval (Student t, n − 2 degrees of freedom), and as a share of the series' mean per hour.\n",
-		trendFrom, trendTo, trendFrom, trendTo)
-	md.line("Rule (plan D10): a series is upward when the interval's lower bound is above 0 and the slope is above 5%% of the mean per hour. This is reported as measured; nothing here judges a step pass or fail.")
+	md.line("Each row is a series of 1-minute means over minutes %d to %d of the hour step's window (minute %d inclusive to %d exclusive, past the warm-up): Dispatch's cores and working set from cgroup.json's `minutes` (a minute with a gap over %s in the cgroup samples is left out), and its Go heap in use from samples.json's in-window heap reads. The slope is the ordinary least-squares slope per hour with its 95%% interval (Student t, n − 2 degrees of freedom), and as a share of the series' mean per hour.\n",
+		trendFrom, trendTo, trendFrom, trendTo, seconds(cgroupMaxGap))
+	md.line("Rule: a series is upward when the interval's lower bound is above 0 and the slope is above 5%% of the mean per hour. This is reported as measured; nothing here judges a step pass or fail.")
 	for _, s := range hours {
 		md.line("\n## %s\n", s.label())
 		if s.failed {

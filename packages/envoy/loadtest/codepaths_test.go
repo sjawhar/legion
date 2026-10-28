@@ -298,7 +298,12 @@ func TestCodepathsOutageBuckets(t *testing.T) {
 	if ws == nil || *ws != 39<<30 || !strings.Contains(wsSource, "last minute") {
 		t.Fatalf("working set at the end %v (%s), want the last minute's 39 GiB", ws, wsSource)
 	}
-	o := outageTable(buckets, "test", cf, 0, 11.1, 13.8, 13.8, ws, wsSource)
+	cores, coresWhy := dispatchCores(cf)
+	outage := func(windowOffsetMin int) cpOutage {
+		return outageTable(cpOutage{BucketsSource: "test", WindowOffsetMin: windowOffsetMin, OutageCoresLow: 11.1, OutageCoresHigh: 13.8,
+			OutageMemoryGiB: 13.8, ReplayMemorySource: wsSource}, buckets, cf, cores, coresWhy, ws)
+	}
+	o := outage(0)
 	// 23:00 is minutes 5-14 without the null minute 7: mean (5+6+8+...+14)/9, max 14.
 	b := o.Buckets[0]
 	if mean := (95.0 - 7) / 9; b.ReplayMinutes != 9 || !nearPtr(b.ReplayCoresMean, mean) || !nearPtr(b.ReplayCoresMax, 14) || !nearPtr(b.ReplayWSGiBMean, mean) || !nearPtr(b.ReplayWSGiBMax, 14) {
@@ -313,14 +318,14 @@ func TestCodepathsOutageBuckets(t *testing.T) {
 		t.Errorf("totals: cores %v, residual %v to %v, memory %v, residual %v", deref(o.ReplayCores), deref(o.ResidualCoresLow), deref(o.ResidualCoresHigh), deref(o.ReplayMemoryGiB), deref(o.ResidualMemoryGiB))
 	}
 	// A window starting at 23:00 puts the 23:00 bucket at its minutes 0-9, and 23:30 past its end.
-	o = outageTable(buckets, "test", cf, 5, 11.1, 13.8, 13.8, ws, wsSource)
+	o = outage(5)
 	if b := o.Buckets[0]; b.ReplayMinutes != 9 || !nearPtr(b.ReplayCoresMean, (45.0-7)/9) {
 		t.Errorf("23:00 at window offset 5: %+v", b)
 	}
 	if b := o.Buckets[3]; b.ReplayMinutes != 10 || !nearPtr(b.ReplayCoresMean, 34.5) {
 		t.Errorf("23:30 at window offset 5: %+v, want minutes 30-39", b)
 	}
-	o = outageTable(buckets, "test", cf, 40, 11.1, 13.8, 13.8, ws, wsSource)
+	o = outage(40)
 	if b := o.Buckets[0]; b.ReplayMinutes != 0 || b.ReplayCoresMean != nil || b.ReplayMissing == "" {
 		t.Errorf("a bucket before the window: %+v, want no number and why", b)
 	}

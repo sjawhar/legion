@@ -19,7 +19,9 @@
 # anchors_outside_logged_block not 0), each before any kubectl call; (c) up, seed, step,
 # replay-prepare, replay, db-size, collect, status, down and all run through to the end, and every
 # kubectl call any of them makes, the background heartbeat and sampler included, carries
-# `-n <namespace>`; each step and replay writes pg-stats-before.json and pg-stats-after.json;
+# `-n <namespace>`; each step and replay writes pg-stats-before.json and pg-stats-after.json; a
+# step's reset looks up the nats-box pod once; loadgen and seed.json go into the runner only when
+# it does not hold them, and a step's directory is removed from the runner once copied back;
 # replay-prepare downloads and verifies the parts, streams the dump into the Postgres pod,
 # restores it and renames it to dispatch_replay, writing replay-prepared.json; a replay's loadgen
 # run holds -source replay -replay-rate 1 -replay-from 0 -replay-to 39m (5m under all --profile
@@ -150,6 +152,13 @@ case $verb in
       "sha256sum "*) sha256sum "$FAKE_DIR/pod-dump" ;;
       pg_restore*) printf '%s\n' "$c" >>"$FAKE_DIR/restores" ;;
       "rm -f /var/lib/postgresql/copy/replay-seed.dump") ;;
+      # runner_has: the runner's file (FAKE_DIR/runner, which cp fills) when it passes the test.
+      'sh -c test "$1" "$2" && sha256sum "$2" sh '*)
+        f=$FAKE_DIR/runner${cmd[5]}
+        test "${cmd[4]}" "$f" && sha256sum "$f" || exit 1
+        ;;
+      # A step's directory and copy-meta file, removed from the runner once copied back.
+      "rm -rf /work/steps/"*) ;;
       # A replay step: the runner's directories, the bundle copied in and verified there.
       "sh -c rm -rf /work/bundle"*) ;;
       "tar -C /work -xf -") cat >/dev/null ;;
@@ -201,7 +210,12 @@ case $verb in
     esac
     ;;
   logs) echo 'fake log line' ;;
-  cp | scale | rollout | wait | patch) ;;
+  cp)
+    # A copy into the runner lands under FAKE_DIR/runner, where runner_has reads it.
+    dst=$FAKE_DIR/runner${5#runner:}
+    mkdir -p "${dst%/*}" && cp "$4" "$dst"
+    ;;
+  scale | rollout | wait | patch) ;;
   *)
     echo "fake kubectl: unexpected call: $*" >&2
     exit 1
@@ -412,6 +426,7 @@ write_pods() {
 reset_fake() {
   rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump"
+  rm -rf -- "$fake/runner"
   write_pods
   echo '1600000 100000' >"$fake/cpu.max"
 }
@@ -563,10 +578,18 @@ jq -e '.namespace == "'"$ns"'" and .postgres.version != "" and .postgres.setting
 jq -e '.bgwriter.buffers_clean == 0' "$run_dir/steps/smoke/pg-stats-after.json" >/dev/null ||
   fail "pg-stats-after.json does not hold pg_stat_bgwriter: $(cat "$run_dir/steps/smoke/pg-stats-after.json")"
 
+boxes=$(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log" || true)
 run_cluster step --namespace "$ns" reads 10 --duration 1m --reads-only
 ((RC == 0)) || fail "step --reads-only exited $RC"
 start=$(grep '^step-reads ' "$fake/runner-starts")
 [[ $start == *"-events 0 "* && $start == *"-requests 600 "* ]] || fail "a --reads-only step at 10x is not 0 events and 600 requests: $start"
+boxes=$(($(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log") - boxes))
+((boxes == 1)) || fail "a step's reset looked up the nats-box pod $boxes times, not once"
+[ "$(grep -c -- "^-n $ns cp $run_dir/seed.json runner:/work/seed.json " "$fake/kubectl.log")" = 1 ] ||
+  fail "seed.json was copied into the runner again although the runner held it"
+grep -qx -- "-n $ns exec runner -c runner -- rm -rf /work/steps/smoke /work/meta/smoke.json" "$fake/kubectl.log" ||
+  fail "step smoke's directory and copy-meta file were not removed from the runner once copied back"
+pass "a step's reset looks up the nats-box pod once, seed.json goes into the runner only when it lacks it, and a step's directory leaves the runner once copied back"
 
 FAKE_QUIET=1 run_cluster replay-prepare --namespace "$ns" --manifest "$seeded"
 ((RC == 0)) || fail "replay-prepare exited $RC"
@@ -603,6 +626,8 @@ jq -e --arg c "$commit_ok" '.dispatch_commit == $c' "$run_dir/steps/r16/envoy-di
 grep -qx -- "codepaths -step $run_dir/steps/r16 -out $run_dir/steps/r16 -heap-start $run_dir/steps/r16/heap-start.pprof -heap-end $run_dir/steps/r16/heap-end.pprof -outage-cores 11.1,13.8 -outage-memory 13.8 -residual-notes $here/replay-residual.md -window-offset 0" \
   "$fake/loadgen.log" || fail "replay r16 did not run loadgen codepaths beside the outage: $(grep '^codepaths ' "$fake/loadgen.log")"
 grep -qx r16 "$run_dir/phases/replay" || fail "replay r16 is not in the phase replay"
+[ "$(grep -c -- "^-n $ns cp $run_dir/loadgen runner:/work/loadgen " "$fake/kubectl.log")" = 1 ] ||
+  fail "loadgen was copied into the runner again although the runner held it since up"
 pass "replay-prepare downloads, streams, restores and prepares dispatch_replay; replay r16 resets from it and runs loadgen run -source replay at rate 1 over 0-39m with codepaths beside the outage"
 
 echo '400000 100000' >"$fake/cpu.max"

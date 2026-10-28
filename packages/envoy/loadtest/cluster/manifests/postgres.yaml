@@ -1,4 +1,4 @@
-# postgres.yaml: the copy's Postgres (INFRA-598 plan D2), one StatefulSet pod on one PVC, at the
+# postgres.yaml: the copy's Postgres, one StatefulSet pod on one PVC, at the
 # size of a Cloud SQL tier. cluster.sh fills every placeholder from validated values; up fills
 # the tier db-custom-16-61440 (production's databaseTier: 16 CPU, 61440 MB), and
 # `cluster.sh db-size 4 15Gi` renders it again for db-custom-4-15360 and applies it, so the pod

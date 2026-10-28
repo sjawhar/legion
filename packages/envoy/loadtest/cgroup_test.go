@@ -85,8 +85,8 @@ func mergeLines(t *testing.T, lines []string) (cgroupFile, string) {
 	return *cf, dir
 }
 
-// near is true when a holds a value within 1e-9 of want.
-func nearPtr(a *float64, want float64) bool { return a != nil && math.Abs(*a-want) < 1e-9 }
+// nearPtr is true when a holds a value within 1e-9 of want.
+func nearPtr(a *float64, want float64) bool { return a != nil && near(*a, want) }
 
 // The default series: from 2 minutes before the window, 3 s off its grid, to 7 s after it.
 func defaultSeries(role string, cores float64) cgSeries {

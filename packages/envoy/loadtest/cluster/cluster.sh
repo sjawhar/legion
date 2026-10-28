@@ -98,7 +98,7 @@ RUNNER_IMAGE=mirror.gcr.io/library/debian:bookworm-slim
 MANIFEST_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json'
 # The copy containers the sampler reads and the crash check compares, by role (cgroup.go).
 SAMPLE_ROLES=(dispatch pprof postgres nats-0 nats-1 nats-2 listener runner)
-# The LINUX replay (plan D8): INFRA-639's manifest, the template database replay-prepare makes,
+# The LINUX replay: INFRA-639's manifest, the template database replay-prepare makes,
 # where the dump goes in the Postgres pod (on its claim), and the outage's Dispatch figures that
 # loadgen codepaths sets a replay beside (production profile §5: 11.1-13.8 cores, 13.8 GiB).
 REPLAY_MANIFEST=$here/../replay-2026-10-26.json
@@ -112,8 +112,8 @@ OUTAGE_MEMORY_GIB=13.8
 COPY_KINDS=pods,services,deployments,statefulsets,replicasets,jobs,persistentvolumeclaims,configmaps,secrets
 DELETE_KINDS=deployments,statefulsets,jobs,pods,services,persistentvolumeclaims,configmaps,secrets
 SSA=(apply --server-side --force-conflicts --field-manager=dispatch-loadtest -f -)
-
-note() { printf 'cluster.sh: %s\n' "$*" >&2; }
+# The nats-box pod that reset_copy looked up for nats_box; empty outside a reset.
+NATS_BOX_POD=""
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -391,7 +391,7 @@ pg_tier() {
 use_run() {
   local run=${OPT[run]:-} lock
   if [ -z "$run" ]; then
-    lock=$(lock_get)
+    lock=$(kube_lock_get)
     [ -n "$lock" ] || die "namespace $NS has no lock ConfigMap $LOCK, so no run is up there (cluster.sh up first, or name a run with --run)"
     run=$(jq -r '.data.run // ""' <<<"$lock")
   fi
@@ -437,8 +437,8 @@ pg_url() { printf 'postgres://dispatch:%s@postgres.%s.svc:5432/dispatch?sslmode=
 
 # ---- the lock -------------------------------------------------------------------------------------
 
-# lock_get: the lock ConfigMap as JSON, empty when there is none.
-lock_get() {
+# kube_lock_get: the lock ConfigMap as JSON, empty when there is none.
+kube_lock_get() {
   kube get configmap "$LOCK" --ignore-not-found -o json || die "kubectl could not read ConfigMap $LOCK in $NS"
 }
 
@@ -458,27 +458,27 @@ refuse_lock() {
   local pod uid issue run started hb age
   IFS=$'\t' read -r pod uid issue run started hb < <(jq -r '.data | [."holder-pod", ."holder-uid", .issue, .run, .started, .heartbeat] | map(. // "?") | @tsv' <<<"$1")
   age=$(heartbeat_age "$hb")
-  printf 'cluster.sh: namespace %s is locked: ConfigMap %s names run %s, holder pod %s (uid %s, issue %s), started %s, last heartbeat %s, %s s ago.\n' \
-    "$NS" "$LOCK" "$run" "$pod" "$uid" "$issue" "$started" "$hb" "$age" >&2
+  note "namespace $NS is locked: ConfigMap $LOCK names run $run, holder pod $pod (uid $uid, issue $issue), started $started, last heartbeat $hb, $age s ago."
   if [[ $age =~ ^[0-9]+$ ]] && ((age > STALE_SECONDS)); then
-    printf 'cluster.sh: that heartbeat is older than 15 min, so the holder is stale. Clear its copy and the lock with: cluster.sh down --namespace %s --run %s\n' "$NS" "$run" >&2
+    note "that heartbeat is older than $((STALE_SECONDS / 60)) min, so the holder is stale. Clear its copy and the lock with: cluster.sh down --namespace $NS --run $run"
   else
-    printf 'cluster.sh: one copy at a time: wait for that run to end (its holder updates the heartbeat every 60 s)\n' >&2
+    note "one copy at a time: wait for that run to end (its holder updates the heartbeat every 60 s)"
   fi
   exit 2
 }
 
-lock_take() {
+# kube_lock_take: create the lock ConfigMap for RUN; refuse_lock when another run holds it.
+kube_lock_take() {
   local now existing
   now=$(utc_now)
-  existing=$(lock_get)
+  existing=$(kube_lock_get)
   [ -z "$existing" ] || refuse_lock "$existing"
   if ! jq -n --arg name "$LOCK" --arg run "$RUN" --arg pod "$HOLDER_POD" --arg uid "$POD_UID" \
-    --arg issue "$LEGION_ISSUE" --arg now "$now" '{apiVersion: "v1", kind: "ConfigMap",
-      metadata: {name: $name, labels: {"app.kubernetes.io/part-of": "dispatch-loadtest", "dispatch-loadtest/run": $run}},
+    --arg issue "$LEGION_ISSUE" --arg now "$now" --arg run_label "$RUN_LABEL" '{apiVersion: "v1", kind: "ConfigMap",
+      metadata: {name: $name, labels: {"app.kubernetes.io/part-of": "dispatch-loadtest", ($run_label): $run}},
       data: {"holder-pod": $pod, "holder-uid": $uid, issue: $issue, run: $run, started: $now, heartbeat: $now}}' |
     kube create -f - >/dev/null; then
-    existing=$(lock_get)
+    existing=$(kube_lock_get)
     [ -z "$existing" ] || refuse_lock "$existing"
     die "kubectl could not create the lock ConfigMap $LOCK in $NS"
   fi
@@ -541,7 +541,7 @@ cmd__heartbeat() {
     patch=$(jq -nc --arg run "$RUN" --arg now "$(utc_now)" \
       '[{op: "test", path: "/data/run", value: $run}, {op: "replace", path: "/data/heartbeat", value: $now}]')
     if ! out=$(kube patch configmap "$LOCK" --type json -p "$patch" 2>&1); then
-      lock=$(kube get configmap "$LOCK" --ignore-not-found -o json 2>/dev/null) || {
+      lock=$(kube_lock_get 2>/dev/null) || {
         note "heartbeat: $out"
         continue
       }
@@ -554,7 +554,7 @@ cmd__heartbeat() {
   done
 }
 
-# ---- the cgroup sampler (plan D6) -------------------------------------------------------------------
+# ---- the cgroup sampler ---------------------------------------------------------------------------
 
 # The script each copy container runs under one long-lived kubectl exec: every 5 s, its cgroup v2
 # counters as "key value" lines, then "end". One exec per container for the whole run, not one per
@@ -589,8 +589,15 @@ role_target() {
 find_pod() {
   local pods
   pods=$(kube get pods -l "$RUN_LABEL=$RUN,$ROLE_LABEL=$1" -o json) || return 1
-  jq -r --arg name "${2:-}" '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running"
-    and ($name == "" or .metadata.name == $name)) | .metadata.name][0] // empty' <<<"$pods"
+  running_pod "$pods" "$1" "${2:-}"
+}
+
+# running_pod PODS ROLE [NAME]: in PODS (kubectl get pods -o json), a running pod with that role
+# label (and that name), not being deleted; empty when none.
+running_pod() {
+  jq -r --arg label "$ROLE_LABEL" --arg role "$2" --arg name "${3:-}" '[.items[] | select(.metadata.deletionTimestamp == null
+    and .status.phase == "Running" and .metadata.labels[$label] == $role and ($name == "" or .metadata.name == $name))
+    | .metadata.name][0] // empty' <<<"$1"
 }
 
 # sample_at: the worker's clock, RFC 3339 with microseconds, into AT.
@@ -706,11 +713,14 @@ pg_stats() {
   fi
 }
 
-# nats_box ARGS: the nats CLI in the run's nats-box pod.
+# nats_box ARGS: the nats CLI in the run's nats-box pod: NATS_BOX_POD when reset_copy has looked it
+# up, else the one running now.
 nats_box() {
-  local pod
-  pod=$(find_pod nats-box) || die "kubectl could not list the nats-box pod"
-  [ -n "$pod" ] || die "no running nats-box pod in $NS"
+  local pod=${NATS_BOX_POD:-}
+  if [ -z "$pod" ]; then
+    pod=$(find_pod nats-box) || die "kubectl could not list the nats-box pod"
+    [ -n "$pod" ] || die "no running nats-box pod in $NS"
+  fi
   # The server named explicitly, so no nats-box context decides which NATS this purges.
   kube exec "$pod" -c nats-box -- nats --server "nats://nats.$NS.svc:4222" "$@"
 }
@@ -751,7 +761,7 @@ wait_dispatch_healthy() {
   done
 }
 
-# check_stream_replicas: ENVOY_NOTIFICATIONS must run on 3 replicas (plan D4), else no step starts.
+# check_stream_replicas: ENVOY_NOTIFICATIONS must run on 3 replicas, else no step starts.
 check_stream_replicas() {
   local info n
   info=$(nats_box stream info ENVOY_NOTIFICATIONS --json) || die "nats stream info ENVOY_NOTIFICATIONS failed through nats-box"
@@ -759,32 +769,42 @@ check_stream_replicas() {
   [ "$n" = 3 ] || die "stream ENVOY_NOTIFICATIONS has config.num_replicas $n, not 3, so the step refuses to start (the listener starts first, with ENVOY_NATS_REPLICAS=3, to create it on three)"
 }
 
-# kv_replicas: each KV bucket's replicas, as a JSON object, for the reset's record.
-kv_replicas() {
-  local names b n obj='{}'
+# each_kv_bucket CMD...: CMD BUCKET for each KV bucket, in nats kv ls's order; a name that is not a
+# bucket name stops it there.
+each_kv_bucket() {
+  local names b
   names=$(nats_box kv ls --names) || die "nats kv ls failed through nats-box"
   while read -r b; do
     [ -n "$b" ] || continue
     [[ $b =~ ^[A-Za-z0-9_-]+$ ]] || die "nats kv ls named '$b', which is not a bucket name"
-    n=$(nats_box stream info "KV_$b" --json | jq -r '.config.num_replicas // "none"') || n=error
-    obj=$(jq -c --arg b "$b" --arg n "$n" '. + {($b): ($n | tonumber? // .)}' <<<"$obj")
+    "$@" "$b"
   done <<<"$names"
+}
+
+# kv_replicas: each KV bucket's replicas, as a JSON object, for the reset's record.
+kv_replicas() {
+  local obj='{}'
+  each_kv_bucket kv_replicas_add
   printf '%s\n' "$obj"
 }
 
+# kv_replicas_add BUCKET: BUCKET's replicas into kv_replicas' obj.
+kv_replicas_add() {
+  local n
+  n=$(nats_box stream info "KV_$1" --json | jq -r '.config.num_replicas // "none"') || n=error
+  obj=$(jq -c --arg b "$1" --arg n "$n" '. + {($b): ($n | tonumber? // .)}' <<<"$obj")
+}
+
 nats_purge() {
-  local streams names b
+  local streams
   streams=$(nats_box stream ls --names) || die "nats stream ls failed through nats-box"
   if grep -qx ENVOY_NOTIFICATIONS <<<"$streams"; then
     nats_box stream rm ENVOY_NOTIFICATIONS -f >/dev/null || die "nats stream rm ENVOY_NOTIFICATIONS failed"
   fi
-  names=$(nats_box kv ls --names) || die "nats kv ls failed through nats-box"
-  while read -r b; do
-    [ -n "$b" ] || continue
-    [[ $b =~ ^[A-Za-z0-9_-]+$ ]] || die "nats kv ls named '$b', which is not a bucket name"
-    nats_box kv del "$b" -f >/dev/null || die "nats kv del $b failed"
-  done <<<"$names"
+  each_kv_bucket kv_delete
 }
+
+kv_delete() { nats_box kv del "$1" -f >/dev/null || die "nats kv del $1 failed"; }
 
 # start_copy: the listener first, so it creates ENVOY_NOTIFICATIONS on three replicas, then
 # Dispatch, until /healthz reports ok and nats; then the replica check.
@@ -795,9 +815,15 @@ start_copy() {
   check_stream_replicas
 }
 
+# stop_copy: Dispatch and the listener scaled to 0, each until none of its pods is left.
+stop_copy() {
+  scale_to dispatch 0
+  scale_to listener 0
+}
+
 elapsed_since() { awk -v a="$1" -v b="$EPOCHREALTIME" 'BEGIN { printf "%.1f", b - a }'; }
 
-# reset_copy RECORD [TEMPLATE]: the reset before every step (plan D5) from TEMPLATE (default
+# reset_copy RECORD [TEMPLATE]: the reset before every step from TEMPLATE (default
 # dispatch_seed), its times and replicas into RECORD. From the replay's template, the new
 # database's loadgen replay-checksum is read before Dispatch starts, into RECORD's checksum.
 reset_copy() {
@@ -807,16 +833,19 @@ reset_copy() {
     [ "$template" = "$REPLAY_TEMPLATE" ] && die "the copy's Postgres has no template database $template; cluster.sh replay-prepare first"
     die "the copy's Postgres has no template database $template; cluster.sh seed first"
   fi
-  scale_to dispatch 0
-  scale_to listener 0
+  stop_copy
   psql_at postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
   psql_at postgres "create database dispatch template $template" >/dev/null || die "create database dispatch from $template failed"
   if [ "$template" = "$REPLAY_TEMPLATE" ]; then
     checksum=$(replay_checksum dispatch) || die "loadgen replay-checksum of database dispatch failed"
   fi
+  # The nats-box pod, looked up once for the reset's NATS calls; a failed lookup leaves each call to
+  # look it up and say why.
+  NATS_BOX_POD=$(find_pod nats-box 2>/dev/null || true)
   nats_purge
   start_copy
   kv=$(kv_replicas)
+  NATS_BOX_POD=""
   jq -n --arg started "$started" --arg ended "$(utc_now)" --argjson seconds "$(elapsed_since "$t0")" --argjson kv "$kv" \
     --arg template "$template" --argjson checksum "$checksum" \
     '{started: $started, ended: $ended, seconds: $seconds, template: $template,
@@ -829,7 +858,19 @@ reset_copy() {
 
 runner_put() { kube cp "$1" "runner:$2" -c runner >/dev/null || die "kubectl cp of $1 into the runner failed"; }
 
+# runner_has FILE DEST TEST: the runner's DEST passes `test TEST DEST` and has FILE's sha256. /work
+# lasts as long as the runner pod, so a file that an earlier command put there need not be copied
+# again.
+runner_has() {
+  local got
+  # shellcheck disable=SC2016 # expanded by the runner's sh
+  got=$(kube exec runner -c runner -- sh -c 'test "$1" "$2" && sha256sum "$2"' sh "$3" "$2" 2>/dev/null) || return 1
+  [ "${got%% *}" = "$(sha256_of "$1")" ]
+}
+
+# put_loadgen: the run's loadgen into the runner as /work/loadgen, executable, unless it is there.
 put_loadgen() {
+  if runner_has "$LOADGEN" /work/loadgen -x; then return 0; fi
   runner_put "$LOADGEN" /work/loadgen
   kube exec runner -c runner -- chmod 755 /work/loadgen || die "chmod of /work/loadgen in the runner failed"
 }
@@ -845,10 +886,10 @@ runner_start() {
     sh "$name" "$@" || die "kubectl exec could not start $name in the runner"
 }
 
-# runner_wait NAME SECONDS: NAME's exit status once it has one; past SECONDS it kills NAME and
-# prints "timeout". Its log is copied to LOG_TO (default the run's logs/).
+# runner_wait NAME SECONDS [LOG_DIR]: NAME's exit status once it has one; past SECONDS it kills
+# NAME and prints "timeout". Its log is copied to LOG_DIR (default the run's logs/).
 runner_wait() {
-  local name=$1 deadline=$((EPOCHSECONDS + $2)) rc
+  local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} rc
   while :; do
     if rc=$(kube exec runner -c runner -- cat "/work/logs/$name.rc" 2>/dev/null) && [[ $rc =~ ^[0-9]+$ ]]; then
       break
@@ -861,7 +902,7 @@ runner_wait() {
     fi
     sleep 15
   done
-  kube exec runner -c runner -- cat "/work/logs/$name.log" >"${LOG_TO:-$RUN_DIR/logs}/$name.log" 2>/dev/null || true
+  kube exec runner -c runner -- cat "/work/logs/$name.log" >"$log_dir/$name.log" 2>/dev/null || true
   printf '%s\n' "$rc"
 }
 
@@ -869,9 +910,9 @@ runner_wait() {
 
 # The jq program that turns the run's pods into one line per sampled container: role, pod,
 # container, restartCount, lastState.terminated.reason.
-# shellcheck disable=SC2016 # $m, $r and $role are jq's variables
+# shellcheck disable=SC2016 # $m, $r, $role and $role_label are jq's variables
 SNAPSHOT_JQ='.items[] | select(.metadata.deletionTimestamp == null) | .metadata as $m
-  | ($m.labels["dispatch-loadtest/role"] // "") as $r | .status.containerStatuses[]?
+  | ($m.labels[$role_label] // "") as $r | .status.containerStatuses[]?
   | (if $r == "dispatch" and .name == "envoy-dispatch" then "dispatch"
      elif $r == "dispatch" and .name == "pprof" then "pprof"
      elif $r == "postgres" and .name == "postgres" then "postgres"
@@ -881,11 +922,11 @@ SNAPSHOT_JQ='.items[] | select(.metadata.deletionTimestamp == null) | .metadata 
      else empty end) as $role
   | [$role, $m.name, .name, (.restartCount | tostring), (.lastState.terminated.reason // "-")] | @tsv'
 
-# container_snapshot FILE: every sampled container's restart record, one line each.
+# container_snapshot FILE: every sampled container's restart record, one line each. The pods it
+# lists stay in COPY_PODS for write_copy_meta and save_pod_logs.
 container_snapshot() {
-  local pods
-  pods=$(kube get pods -l "$RUN_LABEL=$RUN" -o json) || die "kubectl could not list the copy's pods"
-  jq -r "$SNAPSHOT_JQ" <<<"$pods" | sort >"$1"
+  COPY_PODS=$(kube get pods -l "$RUN_LABEL=$RUN" -o json) || die "kubectl could not list the copy's pods"
+  jq -r --arg role_label "$ROLE_LABEL" "$SNAPSHOT_JQ" <<<"$COPY_PODS" | sort >"$1"
 }
 
 # record_failure DIR KIND ROLE DETAIL: one reason in DIR/step-failed.json, in cgroup.go's shape
@@ -932,36 +973,46 @@ save_pg_settings() { psql_at postgres 'show all' >"$1" || die "SHOW ALL failed i
 # write_copy_meta FILE DIR: loadgen run's -copy-meta object (recorded under meta.json copy):
 # the images, Postgres's version and the sha256 of its SHOW ALL (DIR/postgres-settings.txt), the
 # node CPU model in the Dispatch and Postgres containers, the namespace, the run id and each copy
-# pod's resources as the live pods have them.
+# pod's resources as the live pods have them (COPY_PODS, container_snapshot's listing).
 write_copy_meta() {
   local file=$1 dir=$2 version sha dpod cpu_d cpu_p pods
   version=$(psql_at postgres 'select version()') || die "select version() failed in the copy's Postgres"
   save_pg_settings "$dir/postgres-settings.txt"
-  sha=$(sha256sum <"$dir/postgres-settings.txt" | cut -d' ' -f1)
-  dpod=$(find_pod dispatch) || die "kubectl could not list the Dispatch pod"
+  sha=$(sha256_of "$dir/postgres-settings.txt")
+  dpod=$(running_pod "$COPY_PODS" dispatch)
   [ -n "$dpod" ] || die "no running Dispatch pod for the copy meta"
   cpu_d=$(cpu_model "$dpod" envoy-dispatch)
   cpu_p=$(cpu_model postgres-0 postgres)
-  pods=$(kube get pods -l "$RUN_LABEL=$RUN" -o json | jq -c '[.items[] | select(.metadata.deletionTimestamp == null)
-    | {pod: .metadata.name, node: .spec.nodeName, containers: [.spec.containers[] | {name, image, resources}]}]') ||
-    die "kubectl could not list the copy's pods"
+  pods=$(jq -c '[.items[] | select(.metadata.deletionTimestamp == null)
+    | {pod: .metadata.name, node: .spec.nodeName, containers: [.spec.containers[] | {name, image, resources}]}]' <<<"$COPY_PODS")
   jq --arg version "$version" --arg sha "$sha" --arg cpu_d "$cpu_d" --arg cpu_p "$cpu_p" --argjson pods "$pods" \
     '{namespace, run_id: .run, dispatch_commit, production_repo, pg_major, images,
       postgres: {version: $version, settings_sha256: $sha, settings_file: "postgres-settings.txt", tier: .postgres.tier, cpu: .postgres.cpu, memory: .postgres.memory, settings: .postgres.settings},
       node_cpu_model: {dispatch: $cpu_d, postgres: $cpu_p}, pods: $pods}' "$STATE" >"$file"
 }
 
-# save_pod_logs DIR SINCE: the copy's logs since the step's start, into DIR.
+# save_pod_logs DIR SINCE: the copy's logs since the step's start, into DIR, fetched at once; the
+# Dispatch and listener pods are COPY_PODS's.
 save_pod_logs() {
-  local dir=$1 since=$2 pod i
-  pod=$(find_pod dispatch || true)
-  [ -z "$pod" ] || kube logs "$pod" -c envoy-dispatch --since-time="$since" >"$dir/dispatch.log" 2>&1 || true
-  pod=$(find_pod listener || true)
-  [ -z "$pod" ] || kube logs "$pod" -c envoy-listener --since-time="$since" >"$dir/listener.log" 2>&1 || true
-  kube logs postgres-0 -c postgres --since-time="$since" >"$dir/postgres.log" 2>&1 || true
+  local dir=$1 since=$2 pod i pids=()
+  pod=$(running_pod "$COPY_PODS" dispatch)
+  if [ -n "$pod" ]; then
+    kube logs "$pod" -c envoy-dispatch --since-time="$since" >"$dir/dispatch.log" 2>&1 &
+    pids+=($!)
+  fi
+  pod=$(running_pod "$COPY_PODS" listener)
+  if [ -n "$pod" ]; then
+    kube logs "$pod" -c envoy-listener --since-time="$since" >"$dir/listener.log" 2>&1 &
+    pids+=($!)
+  fi
+  kube logs postgres-0 -c postgres --since-time="$since" >"$dir/postgres.log" 2>&1 &
+  pids+=($!)
   for i in 0 1 2; do
-    kube logs "nats-$i" -c nats --since-time="$since" >"$dir/nats-$i.log" 2>&1 || true
+    kube logs "nats-$i" -c nats --since-time="$since" >"$dir/nats-$i.log" 2>&1 &
+    pids+=($!)
   done
+  # These fetches alone: this shell may also be the parent of the heartbeat and sampler daemons.
+  wait "${pids[@]}" || true
 }
 
 # run_step NAME FACTOR DURATION READS_ONLY PHASE: one step (see the header), into steps/NAME.
@@ -989,7 +1040,7 @@ run_step() {
   container_snapshot "$dir/containers-before.tsv"
   write_copy_meta "$dir/copy-meta.json" "$dir"
   put_loadgen
-  runner_put "$RUN_DIR/seed.json" /work/seed.json
+  runner_has "$RUN_DIR/seed.json" /work/seed.json -f || runner_put "$RUN_DIR/seed.json" /work/seed.json
   kube exec runner -c runner -- mkdir -p /work/meta /work/steps || die "mkdir in the runner failed"
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
@@ -1004,19 +1055,24 @@ run_step() {
 
 # run_in_runner NAME DIR JOB SECONDS CMD...: a step's loadgen run CMD as the runner job JOB (at
 # most SECONDS), with Postgres's write-out counters before and after it (pg-stats-before.json,
-# pg-stats-after.json), then the after-work of every step: /work/steps/NAME copied back into DIR,
-# the crash check, the container logs, a non-zero exit recorded, cgroup-merge and tables.
+# pg-stats-after.json), then the after-work of every step: /work/steps/NAME copied back into DIR
+# (and, once copied, removed from the runner with /work/meta/NAME.json), the crash check, the
+# container logs, a non-zero exit recorded, cgroup-merge and tables.
 run_in_runner() {
   local name=$1 dir=$2 job=$3 seconds=$4 started rc
   shift 4
   pg_stats "$dir/pg-stats-before.json"
   started=$(utc_now)
   runner_start "$job" "$@"
-  rc=$(LOG_TO=$dir runner_wait "$job" "$seconds")
+  rc=$(runner_wait "$job" "$seconds" "$dir")
   pg_stats "$dir/pg-stats-after.json"
   [ ! -f "$dir/$job.log" ] || mv -- "$dir/$job.log" "$dir/loadgen.out"
-  kube exec runner -c runner -- tar -C "/work/steps/$name" -cf - . | tar -C "$dir" -xf - ||
+  if kube exec runner -c runner -- tar -C "/work/steps/$name" -cf - . | tar -C "$dir" -xf -; then
+    kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
+      note "step $name: removing /work/steps/$name from the runner failed"
+  else
     note "step $name: copying /work/steps/$name back from the runner failed"
+  fi
 
   container_snapshot "$dir/containers-after.tsv"
   crash_check "$dir/containers-before.tsv" "$dir/containers-after.tsv" "$dir"
@@ -1038,17 +1094,22 @@ isolated() {
   set -e
 }
 
-# run_step_logged ARGS: run_step in a subshell, so that a step that dies leaves the run going.
-run_step_logged() {
-  isolated run_step "$@"
-  ((ISOLATED_RC == 0)) || note "step $1 did not complete (exit $ISOLATED_RC); the run goes on"
+# go_on WHAT CMD...: CMD isolated, so that a CMD that dies leaves the run going, and a note naming
+# WHAT when it does.
+go_on() {
+  local what=$1
+  shift
+  isolated "$@"
+  ((ISOLATED_RC == 0)) || note "$what did not complete (exit $ISOLATED_RC); the run goes on"
 }
 
+# run_step_logged ARGS: run_step, so that a step that dies leaves the run going.
+run_step_logged() { go_on "step $1" run_step "$@"; }
+
 run_series() {
-  local duration=$1 s name factor
-  for s in "1x 1" "2x 2" "3x 3" "5x 5" "7x 7" "10x 10"; do
-    read -r name factor <<<"$s"
-    run_step_logged "$name" "$factor" "$duration" false series
+  local duration=$1 f
+  for f in 1 2 3 5 7 10; do
+    run_step_logged "${f}x" "$f" "$duration" false series
   done
   run_step_logged 10x-reads 10 "$duration" true series
 }
@@ -1085,7 +1146,7 @@ steps_in_run_order() {
   )
 }
 
-# refine_run DURATION: plan D7's refinement, after the grid and the control. loadgen curves over
+# refine_run DURATION: the refinement, after the grid and the control. loadgen curves over
 # the steps of the phases series and refinement writes KNEES.md and refine.txt into <run>/curves:
 # one factor per knee whose bracket it can still narrow, at most two refinement steps per knee.
 # Each factor F runs as step <F>x for DURATION, then curves again, until refine.txt is empty.
@@ -1119,8 +1180,7 @@ resize_postgres() {
   # shellcheck disable=SC2016 # $tier is jq's variable
   state_set '.postgres = $tier' --argjson tier "$tier"
   # Dispatch and the listener hold Postgres connections; the next step's reset starts both again.
-  scale_to dispatch 0
-  scale_to listener 0
+  stop_copy
   apply_manifest postgres.yaml
   kube_for 960 rollout status statefulset/postgres --timeout=900s >/dev/null ||
     die "the Postgres StatefulSet did not roll out within 15 min"
@@ -1133,7 +1193,7 @@ resize_postgres() {
   note "Postgres at $(state .postgres.tier): cpu.max $got; SHOW ALL in $RUN_DIR/postgres-settings.txt"
 }
 
-# ---- the replay (plan D8) ---------------------------------------------------------------------------
+# ---- the replay -----------------------------------------------------------------------------------
 
 # replay_manifest_valid MANIFEST: refuse a file that is not a schema 1 replay manifest.
 replay_manifest_valid() {
@@ -1228,12 +1288,10 @@ wait_block_index() {
   note "block-index backfill done after $((EPOCHSECONDS - started)) s"
 }
 
-# replay_prepare_run MANIFEST FROM_DIR: replay-prepare (see the header).
+# replay_prepare_run MANIFEST FROM_DIR: replay-prepare (see the header), on a manifest that its
+# caller has checked (replay_manifest_valid, replay_seed_refusal).
 replay_prepare_run() {
-  local manifest=$1 from_dir=$2 rdir=$RUN_DIR/replay rec=$RUN_DIR/replay-prepared.json why
-  replay_manifest_valid "$manifest"
-  why=$(replay_seed_refusal "$manifest")
-  [ -z "$why" ] || die "replay-prepare: $why; refusing before it touches the copy"
+  local manifest=$1 from_dir=$2 rdir=$RUN_DIR/replay rec=$RUN_DIR/replay-prepared.json
   local dump_sha t0 total0=$EPOCHREALTIME
   dump_sha=$(jq -er .seed.dump_sha256 "$manifest")
   if [ -f "$rec" ] && [ "$(jq -r .seed_dump_sha256 "$rec")" = "$dump_sha" ] && db_exists "$REPLAY_TEMPLATE"; then
@@ -1253,8 +1311,7 @@ replay_prepare_run() {
 
   # The dump, restored into a fresh database dispatch.
   rm -f -- "$rec"
-  scale_to dispatch 0
-  scale_to listener 0
+  stop_copy
   psql_at postgres "drop database if exists $REPLAY_TEMPLATE with (force)" >/dev/null || die "drop database $REPLAY_TEMPLATE failed"
   psql_at postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
   psql_at postgres 'create database dispatch' >/dev/null || die "create database dispatch failed"
@@ -1299,8 +1356,7 @@ replay_prepare_run() {
   wait_block_index dispatch
   s_backfill=$(elapsed_since "$t0")
   wait_dispatch_quiet
-  scale_to dispatch 0
-  scale_to listener 0
+  stop_copy
 
   t0=$EPOCHREALTIME
   psql_at dispatch 'vacuum analyze' >/dev/null || die "vacuum analyze of database dispatch failed"
@@ -1365,7 +1421,6 @@ run_replay() {
       migration: $p[0].migration_after, prepared: $p[0], reset_at: $r[0].ended}' >"$dir/last-reset.json"
   jq -n --slurpfile p "$rec" '{dispatch_commit: $p[0].dispatch_commit, dispatch_image: $p[0].dispatch_image,
     newest_migration: $p[0].schema_version}' >"$dir/envoy-dispatch.json"
-  # shellcheck disable=SC2016 # nothing to expand
   kube exec runner -c runner -- sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
     die "preparing the runner's directories failed"
   tar -C "$RUN_DIR/replay" -cf - bundle | kube_for 900 exec -i runner -c runner -- tar -C /work -xf - ||
@@ -1392,11 +1447,8 @@ run_replay() {
   note "replay $name done: $dir"
 }
 
-# run_replay_logged ARGS: run_replay in a subshell, so that a replay that dies leaves the run going.
-run_replay_logged() {
-  isolated run_replay "$@"
-  ((ISOLATED_RC == 0)) || note "replay $1 did not complete (exit $ISOLATED_RC); the run goes on"
-}
+# run_replay_logged ARGS: run_replay, so that a replay that dies leaves the run going.
+run_replay_logged() { go_on "replay $1" run_replay "$@"; }
 
 # ---- collect --------------------------------------------------------------------------------------
 
@@ -1439,13 +1491,9 @@ pack_tar() {
 # pack_phase PHASE [ISSUE]: the phase's step directories (pack_tar), packed again only when the
 # phase has run a step since.
 pack_phase() {
-  local phase=$1 list=$RUN_DIR/phases/$1 names=() name
-  [ -f "$list" ] || return 0
-  while read -r name; do
-    if [ -d "$RUN_DIR/steps/$name" ]; then names+=("$name"); fi
-  done <"$list"
-  ((${#names[@]})) || return 0
-  pack_tar "$phase" "${2:-}" "$list" "$RUN_DIR/steps" "${names[@]}"
+  phase_dirs "$1"
+  ((${#DIRS[@]})) || return 0
+  pack_tar "$1" "${2:-}" "$RUN_DIR/phases/$1" "$RUN_DIR/steps" "${DIRS[@]##*/}"
 }
 
 # pack_results [ISSUE]: the phase results (pack_tar), packed and uploaded again on every collect:
@@ -1600,7 +1648,7 @@ up_run() {
   nats_images=$(nats_manifest_images) || die "up: manifests/nats.yaml names an image that does not resolve"
 
   set_run "lt-$(date -u +%Y%m%dt%H%M%S)-$(random_hex 2)"
-  lock_take
+  kube_lock_take
   RUN_TAKEN=1
   note "took the lock $LOCK in $NS for run $RUN"
   (umask 077 && mkdir -p -- "$RUN_DIR/logs" "$RUN_DIR/tmp" "$RUN_DIR/steps")
@@ -1695,8 +1743,7 @@ seed_run() {
   counts=$(psql_at dispatch "select json_build_object('projects', (select count(*) from projects),
     'issues', (select count(*) from issues), 'comments', (select count(*) from comments),
     'artifacts', (select count(*) from artifacts), 'events', (select count(*) from events))") || die "counting the seed failed"
-  scale_to dispatch 0
-  scale_to listener 0
+  stop_copy
   psql_at postgres 'alter database dispatch rename to dispatch_seed' >/dev/null || die "renaming dispatch to dispatch_seed failed"
   jq -n --argjson migration "$migration" --arg commit "$(state .dispatch_commit)" --arg at "$started" \
     --argjson seconds "$(elapsed_since "$t0")" --argjson counts "$counts" \
@@ -1793,7 +1840,7 @@ cmd_status() {
   parse "namespace run" "" "$@"
   positional 0 "no positional arguments"
   local lock run=${OPT[run]:-} name
-  lock=$(lock_get)
+  lock=$(kube_lock_get)
   if [ -n "$lock" ]; then
     jq -r '.data | "lock: run \(.run), holder pod \(."holder-pod") (uid \(."holder-uid"), issue \(.issue)), started \(.started), heartbeat \(.heartbeat)"' <<<"$lock"
     printf 'heartbeat age: %s s\n' "$(heartbeat_age "$(jq -r .data.heartbeat <<<"$lock")")"
@@ -1819,16 +1866,17 @@ cmd_status() {
 cmd_down() {
   parse "namespace run" "" "$@"
   positional 0 "no positional arguments"
-  local lock lock_run="" run=${OPT[run]:-}
-  lock=$(lock_get)
+  local lock lock_run="" run=${OPT[run]:-} holder
+  lock=$(kube_lock_get)
   [ -z "$lock" ] || lock_run=$(jq -r '.data.run // ""' <<<"$lock")
   if [ -z "$run" ]; then
     [ -n "$lock_run" ] || die "down: namespace $NS has no lock ConfigMap $LOCK; name the run to remove with --run"
     run=$lock_run
     valid run "$run" || die "down: the lock names run '$run', which is not one cluster.sh makes"
     if [ "$(jq -r '.data."holder-uid" // ""' <<<"$lock")" != "${POD_UID:-}" ] || [ ! -f "$CLUSTER_ROOT/$run/state.json" ]; then
-      printf 'cluster.sh: down: the lock is held by another run:\n' >&2
-      jq -r '.data | "cluster.sh:   run \(.run), holder pod \(."holder-pod") (uid \(."holder-uid"), issue \(.issue)), heartbeat \(.heartbeat)"' <<<"$lock" >&2
+      note "down: the lock is held by another run:"
+      holder=$(jq -r '.data | "run \(.run), holder pod \(."holder-pod") (uid \(."holder-uid"), issue \(.issue)), heartbeat \(.heartbeat)"' <<<"$lock")
+      note "  $holder"
       die "down: refusing to remove another run's copy and lock; pass --run $run to remove them"
     fi
   fi
@@ -1859,15 +1907,14 @@ cmd_all() {
   run_series "$step_d"
   pack_phase series "$issue"
   if [ "$refine" = true ]; then
-    isolated refine_run "$step_d"
-    ((ISOLATED_RC == 0)) || note "the refinement did not complete (exit $ISOLATED_RC); the run goes on"
+    go_on "the refinement" refine_run "$step_d"
     pack_phase refinement "$issue"
   else
     note "skipped phase refinement: profile quick runs no refinement steps"
   fi
   run_step_logged 10x-hour 10 "$hour_d" false soak
   pack_phase soak "$issue"
-  # The replay on the 16 vCPU database, then on the 4 vCPU one after its 1x step (plan D8).
+  # The replay on the 16 vCPU database, then on the 4 vCPU one after its 1x step.
   local replay_ready=false
   why=$(replay_seed_refusal "$manifest")
   if [ -n "$why" ]; then
@@ -1895,7 +1942,7 @@ cmd_all() {
     run_replay_logged r4 0 "$replay_to" replay
     pack_phase replay "$issue"
   else
-    note "skipped phase replay r4: ${why:-replay-prepare was skipped}"
+    note "skipped phase replay r4: $why"
   fi
   isolated collect_run "$issue"
   collect_rc=$ISOLATED_RC

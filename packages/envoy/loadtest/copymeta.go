@@ -16,7 +16,7 @@ func readCopyMeta(path string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("-copy-meta: %w", err)
 	}
 	b = bytes.TrimSpace(b)
-	if !json.Valid(b) || len(b) == 0 || b[0] != '{' {
+	if !json.Valid(b) || b[0] != '{' {
 		return nil, fmt.Errorf("-copy-meta %s is not a JSON object", path)
 	}
 	return json.RawMessage(b), nil

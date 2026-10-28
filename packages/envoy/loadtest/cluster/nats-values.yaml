@@ -1,5 +1,5 @@
 # nats-values.yaml: the values render-nats.sh gives chart nats/nats 2.15.1 to render
-# manifests/nats.yaml, the cluster copy's three-pod JetStream hub (INFRA-598 plan D4).
+# manifests/nats.yaml, the cluster copy's three-pod JetStream hub.
 #
 # They follow INFRA-549's section 2.1 (INFRA-14's shape): a three-server cluster with
 # noAdvertise, JetStream on a 20Gi PVC per server with an 18Gi file store and no memory store, the

@@ -42,21 +42,19 @@ func readPGClock(ctx context.Context, url string) pgClockReading {
 		return pgClockReading{Error: fmt.Sprintf("connect: %v", err)}
 	}
 	defer conn.Close(context.Background())
-	return measurePGClock(ctx, pgClockReads, time.Now, func(ctx context.Context) (time.Time, error) {
+	return measurePGClock(ctx, time.Now, func(ctx context.Context) (time.Time, error) {
 		var t time.Time
 		err := conn.QueryRow(ctx, "select clock_timestamp()", pgx.QueryExecModeSimpleProtocol).Scan(&t)
 		return t, err
 	})
 }
 
-// measurePGClock times n reads of Postgres's clock (read) on the local clock now. The read with
-// the smallest round trip bounds the offset best: Postgres read its clock between the read's send
-// and its answer, so the offset is Postgres's time minus the midpoint, within half that round
-// trip. A failed read ends the reading with Error and no number.
-func measurePGClock(ctx context.Context, n int, now func() time.Time, read func(context.Context) (time.Time, error)) pgClockReading {
-	if n < 1 {
-		return pgClockReading{Error: fmt.Sprintf("%d reads asked for, none taken", n)}
-	}
+// measurePGClock times pgClockReads reads of Postgres's clock (read) on the local clock now. The
+// read with the smallest round trip bounds the offset best: Postgres read its clock between the
+// read's send and its answer, so the offset is Postgres's time minus the midpoint, within half that
+// round trip. A failed read ends the reading with Error and no number.
+func measurePGClock(ctx context.Context, now func() time.Time, read func(context.Context) (time.Time, error)) pgClockReading {
+	const n = pgClockReads
 	rtts := make([]float64, 0, n)
 	var best, bestOffset time.Duration
 	for i := range n {

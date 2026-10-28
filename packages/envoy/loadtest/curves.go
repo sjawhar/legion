@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/csv"
 	"errors"
 	"flag"
@@ -15,7 +16,7 @@ import (
 	"strings"
 )
 
-// gridFactors are the load factors of the cluster grid (plan D7); a knee-series step at another
+// gridFactors are the load factors of the cluster grid; a knee-series step at another
 // factor is a refinement step.
 var gridFactors = []float64{1, 2, 3, 5, 7, 10}
 
@@ -39,7 +40,7 @@ const (
 	verdictNA   verdict = "n/a"
 )
 
-// The pass criteria of plan D10, as indices into passCriteria and curveStep.verdicts.
+// The pass criteria, as indices into passCriteria and curveStep.verdicts.
 const (
 	critCommits = iota
 	critRequests
@@ -49,7 +50,7 @@ const (
 	critFailed
 )
 
-// passCriteria are plan D10's pass rule, one per column of the Pass table: a step passes when none
+// passCriteria are the pass rule, one per column of the Pass table: a step passes when none
 // is FAIL. when says when a criterion is n/a, or FAIL for want of a number.
 var passCriteria = []struct{ id, csv, text, when string }{
 	{"a", "pass_a_commits", "committed events/s ≥ 0.95 × offered", "n/a when offered is 0; FAIL when the commit rows were not read"},
@@ -226,16 +227,7 @@ func (s *curveStep) tripped() []int {
 // and the 4 vCPU database steps, each in factor order.
 func sortCurveSteps(steps []*curveStep) {
 	slices.SortStableFunc(steps, func(a, b *curveStep) int {
-		if a.kind != b.kind {
-			return int(a.kind) - int(b.kind)
-		}
-		if a.factor != b.factor {
-			if a.factor < b.factor {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.name, b.name)
+		return cmp.Or(cmp.Compare(a.kind, b.kind), cmp.Compare(a.factor, b.factor), strings.Compare(a.name, b.name))
 	})
 }
 
@@ -276,7 +268,7 @@ func (c curveCol) csvCell(s *curveStep) string {
 	if !ok || !finite(v) {
 		return ""
 	}
-	return strconv.FormatFloat(v, 'f', -1, 64)
+	return fmtFloat(v)
 }
 
 // curveTable is one table of CURVES.md. commits is set when a cell comes from the run's commit
@@ -337,13 +329,7 @@ func (s *curveStep) natsRoles() []cgroupRole {
 	if s.cgroup == nil {
 		return nil
 	}
-	var names []string
-	for name := range s.cgroup.Roles {
-		if strings.HasPrefix(name, "nats-") {
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
+	names := s.cgroup.natsRoleNames()
 	out := make([]cgroupRole, len(names))
 	for i, name := range names {
 		out[i] = s.cgroup.Roles[name]
@@ -664,8 +650,9 @@ func refineFactors(knees []knee, steps []*curveStep) []float64 {
 	return out
 }
 
-// fmtFactor is a factor as the step names and refine.txt write it: 8.5, 10.
-func fmtFactor(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+// fmtFloat is f in the fewest digits that read back as f: a factor as the step names and refine.txt
+// write it (8.5, 10), and a curves.csv number.
+func fmtFloat(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 
 // --- the command ----------------------------------------------------------------------------
 
@@ -730,7 +717,7 @@ func runCurves(args []string) error {
 func renderRefine(factors []float64) string {
 	var b strings.Builder
 	for _, f := range factors {
-		b.WriteString(fmtFactor(f) + "\n")
+		b.WriteString(fmtFloat(f) + "\n")
 	}
 	return b.String()
 }
@@ -760,7 +747,7 @@ func renderCurvesCSV(steps []*curveStep) (string, error) {
 		return "", err
 	}
 	for _, s := range steps {
-		row := []string{s.name, fmtFactor(s.factor), s.kindName(), strings.Join(s.failedKinds, ";")}
+		row := []string{s.name, fmtFloat(s.factor), s.kindName(), strings.Join(s.failedKinds, ";")}
 		for _, c := range cols {
 			row = append(row, c.csvCell(s))
 		}
@@ -781,8 +768,8 @@ func renderCurves(steps []*curveStep) string {
 	md.line("# Scaling curves\n")
 	md.line("One row per step: the knee series (the grid and refinement steps) in factor order, then the reads-only control, the hour and the 4 vCPU database. A step's factor is its requests/s target ÷ 60 (events/s ÷ 4 without requests). `-` is a number the step did not measure or that could not be read, never 0.")
 	if slices.ContainsFunc(steps, func(s *curveStep) bool { return s.failed }) {
-		md.line("\n(failed: <kinds>), in every table: the step failed, so its row shows no number. The kinds are step-failed.json's `reasons[].kind` (`restart`: a container of the copy restarted during the step; `loadgen_exit`: loadgen run exited non-zero; `sampler_gap`: a role went over 30 s without a good cgroup sample in the window), `%s` (cgroup.json is marked failed) and `%s` (the step directory holds none).",
-			failedKindCgroup, failedKindNoSummary)
+		md.line("\n(failed: <kinds>), in every table: the step failed, so its row shows no number. The kinds are step-failed.json's `reasons[].kind` (`restart`: a container of the copy restarted during the step; `loadgen_exit`: loadgen run exited non-zero; `sampler_gap`: a role went over %s without a good cgroup sample in the window), `%s` (cgroup.json is marked failed) and `%s` (the step directory holds none).",
+			seconds(cgroupMaxGap), failedKindCgroup, failedKindNoSummary)
 	}
 	for _, t := range curveTables {
 		curveTableMD(&md, t, steps)
@@ -793,22 +780,25 @@ func renderCurves(steps []*curveStep) string {
 }
 
 // rowLabel is the step's label in a CURVES.md table, with the marks of the table's missing
-// sources.
-func rowLabel(s *curveStep, t curveTable) string {
-	label := s.label()
+// sources; unread, noCgroup and noSampler say which of the marks it carries.
+func rowLabel(s *curveStep, t curveTable) (label string, unread, noCgroup, noSampler bool) {
+	label = s.label()
 	if s.failed {
-		return label
+		return label, false, false, false
 	}
-	if t.commits && s.sum.Events.commitsUnread() {
+	unread = t.commits && s.sum.Events.commitsUnread()
+	noCgroup = t.cgroup && s.cgroup == nil
+	noSampler = t.sampler && s.sum.Resources == nil
+	if unread {
 		label += " " + commitsUnreadMark
 	}
-	if t.cgroup && s.cgroup == nil {
+	if noCgroup {
 		label += " " + noCgroupMark
 	}
-	if t.sampler && s.sum.Resources == nil {
+	if noSampler {
 		label += " " + noSamplerMark
 	}
-	return label
+	return label, unread, noCgroup, noSampler
 }
 
 // curveTableMD writes one series table: every step a row.
@@ -822,11 +812,9 @@ func curveTableMD(md *markdown, t curveTable, steps []*curveStep) {
 	md.header(header...)
 	var unread, noCgroup, noSampler bool
 	for _, s := range steps {
-		label := rowLabel(s, t)
-		unread = unread || strings.Contains(label, commitsUnreadMark)
-		noCgroup = noCgroup || strings.Contains(label, noCgroupMark)
-		noSampler = noSampler || strings.Contains(label, noSamplerMark)
-		cells := []string{label, fmtFactor(s.factor)}
+		label, u, c, sm := rowLabel(s, t)
+		unread, noCgroup, noSampler = unread || u, noCgroup || c, noSampler || sm
+		cells := []string{label, fmtFloat(s.factor)}
 		for _, c := range t.cols {
 			cells = append(cells, c.cell(s))
 		}
@@ -844,14 +832,14 @@ func curveTableMD(md *markdown, t curveTable, steps []*curveStep) {
 // passTableMD writes the Pass table and its criteria.
 func passTableMD(md *markdown, steps []*curveStep) {
 	md.line("\n## Pass\n")
-	md.line("Plan D10's pass rule, each criterion per step. A step passes when no criterion is FAIL. A failed row is judged by (f) alone: the curves take no number from it, so its other criteria are n/a.\n")
+	md.line("The pass rule, each criterion per step. A step passes when no criterion is FAIL. A failed row is judged by (f) alone: the curves take no number from it, so its other criteria are n/a.\n")
 	header := []string{"step", "factor"}
 	for _, p := range passCriteria {
 		header = append(header, "("+p.id+")")
 	}
 	md.header(append(header, "passes")...)
 	for _, s := range steps {
-		cells := []string{s.label(), fmtFactor(s.factor)}
+		cells := []string{s.label(), fmtFloat(s.factor)}
 		for _, v := range s.verdicts {
 			cells = append(cells, string(v))
 		}
@@ -902,7 +890,7 @@ func controlMD(md *markdown, steps []*curveStep) {
 		md.line("No reads-only control with a knee-series step at its factor.")
 	}
 	for _, p := range reads {
-		md.line("### Requests with and without events at %sx\n", fmtFactor(p[0].factor))
+		md.line("### Requests with and without events at %sx\n", fmtFloat(p[0].factor))
 		cols := []curveCol{{md: "events/s offered", d: 2, value: func(s *curveStep) (float64, bool) { return s.sum.Events.OfferedPerS, true }}, colReqP99, colSucceeded}
 		pairTableMD(md, p, cols)
 		with, okW := colReqP99.value(p[0])
@@ -916,7 +904,7 @@ func controlMD(md *markdown, steps []*curveStep) {
 		md.line("No 4 vCPU database step with a knee-series step at its factor.")
 	}
 	for _, p := range db4 {
-		md.line("### %sx on the 4 vCPU database\n", fmtFactor(p[0].factor))
+		md.line("### %sx on the 4 vCPU database\n", fmtFloat(p[0].factor))
 		pairTableMD(md, p, []curveCol{colArrivalP99, colCommitted, colSucceeded, colReqP99, colPGCores, colPGPeak, colDispatchCores, colPoolP50})
 		md.line("")
 	}
@@ -952,16 +940,16 @@ func renderKnees(series []*curveStep, knees []knee) string {
 	}
 	for _, k := range knees {
 		f := k.fail
-		md.line("\n## Knee at %sx (step %s)\n", fmtFactor(f.factor), f.label())
+		md.line("\n## Knee at %sx (step %s)\n", fmtFloat(f.factor), f.label())
 		md.line("- Tripped:")
 		for _, c := range f.tripped() {
 			md.line("  - (%s) %s", passCriteria[c].id, passCriteria[c].text)
 		}
 		if k.pass == nil {
-			md.line("- Bracket: (none, %s): the series' first step fails, so no step passed before it.", fmtFactor(f.factor))
+			md.line("- Bracket: (none, %s): the series' first step fails, so no step passed before it.", fmtFloat(f.factor))
 		} else {
-			md.line("- Bracket: (%s, %s): last passing factor %s (step %s), failing factor %s.", fmtFactor(k.pass.factor), fmtFactor(f.factor),
-				fmtFactor(k.pass.factor), k.pass.name, fmtFactor(f.factor))
+			md.line("- Bracket: (%s, %s): last passing factor %s (step %s), failing factor %s.", fmtFloat(k.pass.factor), fmtFloat(f.factor),
+				fmtFloat(k.pass.factor), k.pass.name, fmtFloat(f.factor))
 		}
 		md.line("- Measured limit:")
 		for _, c := range f.tripped() {

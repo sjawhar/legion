@@ -22,7 +22,7 @@ import (
 	"github.com/google/pprof/profile"
 )
 
-// codepaths is plan D10's code-path table of one replay step: Dispatch's CPU by entry point
+// codepaths is the code-path table of one replay step: Dispatch's CPU by entry point
 // (exclusive, the production profile's §2a rule) and by subsystem (inclusive, §2b, with INFRA-512's
 // write-path functions), its working set at the window's end split by the same entry points, and the
 // replay's cores and memory beside the 2026-10-26 outage's (§5), with the residual.
@@ -411,14 +411,6 @@ type cpBucket struct {
 
 func gibOf(b float64) float64 { return b / (1 << 30) }
 
-// cpCell is *p with d decimals, "-" for nil.
-func cpCell(p *float64, d int) string {
-	if p == nil {
-		return "-"
-	}
-	return num(*p, d)
-}
-
 // shareCell is a share as a percentage with two decimals, "-" for nil.
 func shareCell(p *float64) string {
 	if p == nil {
@@ -429,11 +421,10 @@ func shareCell(p *float64) string {
 
 // dispatchCores is the cgroup's Dispatch cores_mean over the window, or why there is none.
 func dispatchCores(cf *cgroupFile) (*float64, string) {
-	switch r, ok := dispatchRole(cf); {
-	case cf == nil:
-		return nil, "no cgroup.json (loadgen cgroup-merge)"
-	case !ok:
-		return nil, "cgroup.json has no dispatch role"
+	r, why := dispatchRole(cf)
+	switch {
+	case why != "":
+		return nil, why
 	case r.CoresMean == nil:
 		return nil, "cgroup.json's dispatch cores_mean is null (no good sample brackets the window's ends)"
 	default:
@@ -441,23 +432,24 @@ func dispatchCores(cf *cgroupFile) (*float64, string) {
 	}
 }
 
-func dispatchRole(cf *cgroupFile) (cgroupRole, bool) {
+// dispatchRole is cf's dispatch role, or why there is none.
+func dispatchRole(cf *cgroupFile) (cgroupRole, string) {
 	if cf == nil {
-		return cgroupRole{}, false
+		return cgroupRole{}, "no cgroup.json (loadgen cgroup-merge)"
 	}
 	r, ok := cf.Roles["dispatch"]
-	return r, ok
+	if !ok {
+		return r, "cgroup.json has no dispatch role"
+	}
+	return r, ""
 }
 
 // workingSetAtEnd is the Dispatch working set at the window's end: the last minute's mean, else the
 // window's maximum; the source says which, or why there is none.
 func workingSetAtEnd(cf *cgroupFile) (*float64, string) {
-	r, ok := dispatchRole(cf)
-	switch {
-	case cf == nil:
-		return nil, "no cgroup.json (loadgen cgroup-merge)"
-	case !ok:
-		return nil, "cgroup.json has no dispatch role"
+	r, why := dispatchRole(cf)
+	if why != "" {
+		return nil, why
 	}
 	if n := len(r.Minutes); n > 0 && r.Minutes[n-1] != nil {
 		return new(r.Minutes[n-1].WorkingSetBytesMean), fmt.Sprintf("the last minute's working_set_bytes_mean (minute %d of cgroup.json's dispatch minutes)", n)
@@ -806,38 +798,30 @@ func replayBucket(b outageBucket, minutes []*cgroupMinute, start int) cpBucket {
 	return out
 }
 
-// outageTable puts the replay beside the outage: each bucket at the same offset from 22:55 (the
-// replay's window starting windowOffsetMin minutes after 22:55), then the totals and the residual.
-func outageTable(buckets []outageBucket, source string, cf *cgroupFile, windowOffsetMin int, coresLow, coresHigh, memGiB float64, ws *float64, wsSource string) cpOutage {
-	o := cpOutage{BucketsSource: source, WindowOffsetMin: windowOffsetMin, OutageCoresLow: coresLow, OutageCoresHigh: coresHigh, OutageMemoryGiB: memGiB}
-	r, ok := dispatchRole(cf)
-	var why string
-	switch {
-	case cf == nil:
-		why = "no cgroup.json (loadgen cgroup-merge)"
-	case !ok:
-		why = "cgroup.json has no dispatch role"
-	}
+// outageTable puts the replay beside the outage in o, which holds the outage's figures, the
+// buckets' source, the window's offset and the working set's source: each bucket at the same offset
+// from 22:55 (the replay's window starting o.WindowOffsetMin minutes after 22:55), then the totals
+// (Dispatch's cores, or coresWhy, and its working set ws) and the residual.
+func outageTable(o cpOutage, buckets []outageBucket, cf *cgroupFile, cores *float64, coresWhy string, ws *float64) cpOutage {
+	r, why := dispatchRole(cf)
 	for _, b := range buckets {
-		row := replayBucket(b, r.Minutes, b.OffsetMin-windowOffsetMin)
+		row := replayBucket(b, r.Minutes, b.OffsetMin-o.WindowOffsetMin)
 		if why != "" {
 			row.ReplayMissing = why
 		}
 		o.Buckets = append(o.Buckets, row)
 	}
-	var coresWhy string
-	o.ReplayCores, coresWhy = dispatchCores(cf)
-	if o.ReplayCores != nil {
-		o.ResidualCoresLow, o.ResidualCoresHigh = new(coresLow-*o.ReplayCores), new(coresHigh-*o.ReplayCores)
+	o.ReplayCores = cores
+	if cores != nil {
+		o.ResidualCoresLow, o.ResidualCoresHigh = new(o.OutageCoresLow-*cores), new(o.OutageCoresHigh-*cores)
 	} else {
 		o.Missing = append(o.Missing, "replay cores: "+coresWhy)
 	}
-	o.ReplayMemorySource = wsSource
 	if ws != nil {
 		o.ReplayMemoryGiB = new(gibOf(*ws))
-		o.ResidualMemoryGiB = new(memGiB - *o.ReplayMemoryGiB)
+		o.ResidualMemoryGiB = new(o.OutageMemoryGiB - *o.ReplayMemoryGiB)
 	} else {
-		o.Missing = append(o.Missing, "replay memory: "+wsSource)
+		o.Missing = append(o.Missing, "replay memory: "+o.ReplayMemorySource)
 	}
 	return o
 }
@@ -988,20 +972,17 @@ func runCodepaths(args []string) error {
 		defaults   []string
 		path, why  string
 	}
-	inputs := []*input{
-		{name: "cpu", flag: *cpuPath, defaults: []string{"cpu.pprof"}},
-		{name: "heap-start", flag: *heapStartPath, defaults: []string{"heap-start.pprof"}},
-		{name: "heap-end", flag: *heapEndPath, defaults: []string{"heap-end.pprof", "heap.pprof"}},
-		{name: "heap-txt", flag: *heapTxtPath, defaults: []string{"heap.txt"}},
-		{name: "cgroup", flag: *cgroupPath, defaults: []string{"cgroup.json"}},
-	}
-	for _, in := range inputs {
+	cpuIn := &input{name: "cpu", flag: *cpuPath, defaults: []string{"cpu.pprof"}}
+	startIn := &input{name: "heap-start", flag: *heapStartPath, defaults: []string{"heap-start.pprof"}}
+	endIn := &input{name: "heap-end", flag: *heapEndPath, defaults: []string{"heap-end.pprof", "heap.pprof"}}
+	txtIn := &input{name: "heap-txt", flag: *heapTxtPath, defaults: []string{"heap.txt"}}
+	cgIn := &input{name: "cgroup", flag: *cgroupPath, defaults: []string{"cgroup.json"}}
+	for _, in := range []*input{cpuIn, startIn, endIn, txtIn, cgIn} {
 		if in.path, in.why, err = cpFile(in.flag, *step, in.defaults...); err != nil {
 			return fmt.Errorf("-%s: %w", in.name, err)
 		}
 		rep.Inputs = append(rep.Inputs, cpInput{Name: in.name, Path: in.path, Missing: in.why})
 	}
-	cpuIn, startIn, endIn, txtIn, cgIn := inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]
 
 	var cf *cgroupFile
 	if cgIn.path != "" {
@@ -1056,7 +1037,9 @@ func runCodepaths(args []string) error {
 	if rep.Memory, err = memoryTable(mi); err != nil {
 		return err
 	}
-	rep.Outage = outageTable(buckets, bucketsSource, cf, int(*windowOffset/time.Minute), coresLow, coresHigh, *outageMemory, mi.ws, mi.wsSource)
+	rep.Outage = outageTable(cpOutage{BucketsSource: bucketsSource, WindowOffsetMin: int(*windowOffset / time.Minute),
+		OutageCoresLow: coresLow, OutageCoresHigh: coresHigh, OutageMemoryGiB: *outageMemory, ReplayMemorySource: mi.wsSource},
+		buckets, cf, cores, coresWhy, mi.ws)
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		return err
@@ -1089,7 +1072,7 @@ func renderCodepaths(rep codepathsReport) string {
 		title += ": " + rep.Step
 	}
 	md.line("# %s\n", title)
-	md.line("Plan D10's code-path table: Dispatch's CPU by entry point and by subsystem, its working set at the window's end, and the replay beside the 2026-10-26 outage. `-` is a number an input did not give, never 0. Every number is also in codepaths.json.\n")
+	md.line("The code-path table: Dispatch's CPU by entry point and by subsystem, its working set at the window's end, and the replay beside the 2026-10-26 outage. `-` is a number an input did not give, never 0. Every number is also in codepaths.json.\n")
 	md.line("Inputs:\n")
 	for _, in := range rep.Inputs {
 		if in.Path != "" {
@@ -1106,7 +1089,7 @@ func renderCodepaths(rep codepathsReport) string {
 }
 
 func cpuRowCells(r cpCPURow) []string {
-	return []string{r.Row, num(float64(r.Samples), 0), shareCell(r.Share), num(r.CPUS, 2), cpCell(r.Cores, 2)}
+	return []string{r.Row, num(float64(r.Samples), 0), shareCell(r.Share), num(r.CPUS, 2), numPtr(r.Cores, 2)}
 }
 
 func cpuEntryMD(md *markdown, c *cpCPU) {
@@ -1171,11 +1154,7 @@ func memoryMD(md *markdown, m cpMemory) {
 		ws, m.WorkingSetSource)
 	md.header("part", "MiB", "GiB", "share of working set", "inuse_space share", "allocated in window GiB")
 	for _, r := range m.Rows {
-		var alloc *float64
-		if r.WindowAllocBytes != nil {
-			alloc = new(gibOf(*r.WindowAllocBytes))
-		}
-		md.row(r.Row, mibCell(r.Bytes), gibCell(r.Bytes, 3), shareCell(r.ShareOfWorkingSet), shareCell(r.InuseShare), cpCell(alloc, 3))
+		md.row(r.Row, mibCell(r.Bytes), gibCell(r.Bytes, 3), shareCell(r.ShareOfWorkingSet), shareCell(r.InuseShare), gibCell(r.WindowAllocBytes, 3))
 	}
 	total := (*float64)(nil)
 	if m.WorkingSetBytes != nil {
@@ -1209,8 +1188,8 @@ func outageMD(md *markdown, o cpOutage, notes []string) {
 	var missing []string
 	for _, b := range o.Buckets {
 		md.row(b.Label, strconv.Itoa(b.OffsetMin), num(b.OutageCoresMean, 2)+" / "+num(b.OutageCoresMax, 2),
-			cpCell(b.ReplayCoresMean, 2)+" / "+cpCell(b.ReplayCoresMax, 2), num(b.OutageMemGiBMean, 2)+" / "+num(b.OutageMemGiBMax, 2),
-			cpCell(b.ReplayWSGiBMean, 2)+" / "+cpCell(b.ReplayWSGiBMax, 2), fmt.Sprintf("%d of %d", b.ReplayMinutes, outageBucketMinutes))
+			numPtr(b.ReplayCoresMean, 2)+" / "+numPtr(b.ReplayCoresMax, 2), num(b.OutageMemGiBMean, 2)+" / "+num(b.OutageMemGiBMax, 2),
+			numPtr(b.ReplayWSGiBMean, 2)+" / "+numPtr(b.ReplayWSGiBMax, 2), fmt.Sprintf("%d of %d", b.ReplayMinutes, outageBucketMinutes))
 		if b.ReplayMissing != "" {
 			missing = append(missing, fmt.Sprintf("%s: %s", b.Label, b.ReplayMissing))
 		}
@@ -1221,12 +1200,12 @@ func outageMD(md *markdown, o cpOutage, notes []string) {
 	md.line("\nTotals: the replay's cores_mean over its window against the outage's 10-minute means, and its working set at the window's end (%s) against the outage's memory at its end. The residual is the outage's figure minus the replay's.\n", o.ReplayMemorySource)
 	md.header("row", "Dispatch cores", "Dispatch memory GiB")
 	md.row("outage", num(o.OutageCoresLow, 2)+"-"+num(o.OutageCoresHigh, 2), num(o.OutageMemoryGiB, 2))
-	md.row("replay", cpCell(o.ReplayCores, 2), cpCell(o.ReplayMemoryGiB, 2))
+	md.row("replay", numPtr(o.ReplayCores, 2), numPtr(o.ReplayMemoryGiB, 2))
 	residual := "-"
 	if o.ResidualCoresLow != nil {
 		residual = num(*o.ResidualCoresLow, 2) + " to " + num(*o.ResidualCoresHigh, 2)
 	}
-	md.row("**residual** (outage - replay)", residual, cpCell(o.ResidualMemoryGiB, 2))
+	md.row("**residual** (outage - replay)", residual, numPtr(o.ResidualMemoryGiB, 2))
 	for _, m := range o.Missing {
 		md.line("\n%s, so its cells show `-`.", m)
 	}

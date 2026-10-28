@@ -1,10 +1,10 @@
-# dispatch.yaml: the copy's Dispatch (INFRA-598 plan D2), production's pod
+# dispatch.yaml: the copy's Dispatch, production's pod
 # (packages/envoy/infra/gcp/dispatch_kube.go) at production's size, with an environment written
 # from scratch: no production credential, address or setting. cluster.sh fills every
 # placeholder from validated values.
 #
 # The Deployment starts at 0 replicas: cluster.sh scales the listener up first and Dispatch after
-# it, so the listener creates ENVOY_NOTIFICATIONS with ENVOY_NATS_REPLICAS=3 (plan D4).
+# it, so the listener creates ENVOY_NOTIFICATIONS with ENVOY_NATS_REPLICAS=3.
 #
 # No cloud-sql-proxy sidecar (Postgres is a pod of the copy), no tailnet front door and no NATS
 # nkey or SOCKS5 proxy (NATS is the copy's own, without auth), header identity instead of cookies,

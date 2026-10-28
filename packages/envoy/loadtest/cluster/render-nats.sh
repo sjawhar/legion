@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# render-nats.sh: regenerates manifests/nats.yaml, the cluster copy's three-pod NATS JetStream hub
-# (INFRA-598 plan D4), so that a run needs no helm and no chart download.
+# render-nats.sh: regenerates manifests/nats.yaml, the cluster copy's three-pod NATS JetStream hub,
+# so that a run needs no helm and no chart download.
 #
 #   render-nats.sh [--out FILE] [--pin-from FILE]
 #
@@ -58,7 +58,7 @@ curl -fsSL --max-time 60 -o "$tmp/index.yaml" "$CHART_REPO/index.yaml" || die "c
 url=$(grep -oE "https://[^[:space:]\"']+/nats-$CHART_VERSION\.tgz" "$tmp/index.yaml" | head -n1)
 [ -n "$url" ] || die "$CHART_REPO/index.yaml lists no nats-$CHART_VERSION.tgz"
 curl -fsSL --max-time 120 -o "$tmp/nats.tgz" "$url" || die "could not download $url"
-sha=$(sha256sum "$tmp/nats.tgz" | cut -d' ' -f1)
+sha=$(sha256_of "$tmp/nats.tgz")
 [ "$sha" = "$CHART_SHA256" ] || die "$url has sha256 $sha, not $CHART_SHA256; refusing it"
 
 sets=()

@@ -351,7 +351,8 @@ does these steps:
    900 s; a build older than migration 0121 has neither table and skips this wait). A seed that
    still owed the backfill would give every step about 100 s of it in its window: Dispatch indexes
    20 documents every 2 s. Then it runs `vacuum analyze` and installs the commit-time trigger
-   (`loadgen trigger-sql`). `cluster.sh seed` runs the same command.
+   (`commit-trigger.sql`, which `loadgen trigger-sql` prints). `cluster.sh seed` runs the same
+   command.
 4. It stops Dispatch.
 5. It writes `seed.meta.json` and renames the database to `dispatch_seed`, the template.
 

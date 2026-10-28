@@ -1,7 +1,7 @@
-# runner.yaml: the pod loadgen runs in (INFRA-598 plan D2): 8 CPU / 16Gi, request = limit, with an
-# emptyDir /work into which cluster.sh copies a static loadgen, seed.json and each step's
-# copy-meta file, and from which it copies each step directory back. loadgen runs detached inside
-# it through kubectl exec. A bare pod, so a crash is not hidden by a restart; activeDeadlineSeconds
+# runner.yaml: the pod loadgen runs in: 8 CPU / 16Gi, request = limit, with an emptyDir /work into
+# which cluster.sh copies a static loadgen, seed.json and each step's copy-meta file, and from
+# which it copies each step directory back, then removes it. loadgen runs detached inside it
+# through kubectl exec. A bare pod, so a crash is not hidden by a restart; activeDeadlineSeconds
 # ends it 12 hours after it starts. cluster.sh fills every placeholder from validated values.
 apiVersion: v1
 kind: Pod

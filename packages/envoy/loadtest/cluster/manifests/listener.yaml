@@ -1,8 +1,8 @@
-# listener.yaml: the copy's Envoy listener (INFRA-598 plan D2), production's dispatch-listener at
+# listener.yaml: the copy's Envoy listener, production's dispatch-listener at
 # its size (500m / 512Mi, request = limit) on production's listener image by digest, with an
 # environment written from scratch: the copy's NATS, without auth, and a random API token from the
 # run's Secret. ENVOY_NATS_REPLICAS=3 makes the listener create ENVOY_NOTIFICATIONS on three
-# replicas; cluster.sh starts it before Dispatch and checks the stream's replicas (plan D4). The
+# replicas; cluster.sh starts it before Dispatch and checks the stream's replicas. The
 # Deployment starts at 0 replicas; cluster.sh scales it. cluster.sh fills every placeholder.
 apiVersion: v1
 kind: Service

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -79,9 +78,7 @@ func runSeedFinish(args []string) error {
 // (commitTriggerSQL).
 func (f seedFinisher) finish(ctx context.Context, db pgSession) error {
 	f.lg.Print("waiting for the outbox to publish every seed event")
-	if err := f.waitZero(ctx, db, sqlUnpublishedEvents, func(n int64) string {
-		return fmt.Sprintf("the outbox still holds %d unpublished events after %s", n, seconds(f.timeout))
-	}); err != nil {
+	if err := f.waitZero(ctx, db, sqlUnpublishedEvents, "the outbox still holds %d unpublished events"); err != nil {
 		return err
 	}
 	var indexed bool
@@ -90,9 +87,7 @@ func (f seedFinisher) finish(ctx context.Context, db pgSession) error {
 	}
 	if indexed {
 		f.lg.Print("waiting for Dispatch's block-index backfill to finish")
-		if err := f.waitZero(ctx, db, sqlBlockIndexOwed, func(n int64) string {
-			return fmt.Sprintf("Dispatch still owes %d block-index entries after %s", n, seconds(f.timeout))
-		}); err != nil {
+		if err := f.waitZero(ctx, db, sqlBlockIndexOwed, "Dispatch still owes %d block-index entries"); err != nil {
 			return err
 		}
 	} else {
@@ -111,8 +106,8 @@ func (f seedFinisher) finish(ctx context.Context, db pgSession) error {
 }
 
 // waitZero reads the count query until it is 0. Once it has waited f.timeout and the count is
-// still above 0, it fails with pending's text of that count.
-func (f seedFinisher) waitZero(ctx context.Context, db pgSession, query string, pending func(int64) string) error {
+// still above 0, it fails with pending (a format of that count) and how long it waited.
+func (f seedFinisher) waitZero(ctx context.Context, db pgSession, query, pending string) error {
 	deadline := f.now().Add(f.timeout)
 	for {
 		var n int64
@@ -123,7 +118,7 @@ func (f seedFinisher) waitZero(ctx context.Context, db pgSession, query string, 
 			return nil
 		}
 		if !f.now().Before(deadline) {
-			return errors.New(pending(n))
+			return fmt.Errorf(pending+" after %s", n, seconds(f.timeout))
 		}
 		if !f.sleep(ctx, f.poll) {
 			return ctx.Err()

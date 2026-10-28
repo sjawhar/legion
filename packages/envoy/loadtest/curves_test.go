@@ -280,10 +280,10 @@ func TestCurvesRefineAWideKneeAtMostTwice(t *testing.T) {
 		root := t.TempDir()
 		var dirs []string
 		for _, f := range c.pass {
-			dirs = append(dirs, curveFixture(t, root, fmtFactor(f)+"x", goodSummary(f), fixtureCgroup(2)))
+			dirs = append(dirs, curveFixture(t, root, fmtFloat(f)+"x", goodSummary(f), fixtureCgroup(2)))
 		}
 		for _, f := range c.fail {
-			dirs = append(dirs, curveFixture(t, root, fmtFactor(f)+"x", collapsed(f), fixtureCgroup(2)))
+			dirs = append(dirs, curveFixture(t, root, fmtFloat(f)+"x", collapsed(f), fixtureCgroup(2)))
 		}
 		out := curves(t, dirs...)
 		if got := readText(t, filepath.Join(out, "refine.txt")); got != c.wantR {

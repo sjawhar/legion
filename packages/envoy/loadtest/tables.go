@@ -123,6 +123,14 @@ func num(x float64, d int) string {
 	return b.String()
 }
 
+// numPtr is num of *p, "-" for nil.
+func numPtr(p *float64, d int) string {
+	if p == nil {
+		return "-"
+	}
+	return num(*p, d)
+}
+
 // pair renders "a / b" of a stat, or "-" when it holds no values.
 func pair(s stat, a, b func(stat) float64, d int) string {
 	if s.N == 0 {
@@ -311,8 +319,7 @@ func kindsTable(md *markdown, steps []stepData) {
 
 func resourcesTable(md *markdown, steps []stepData) {
 	md.line("\n## Resources\n")
-	// The working-set column exists only when a step holds cgroup.json, so a table of steps
-	// without one is unchanged.
+	// The working-set column exists only when a step holds cgroup.json.
 	withCgroup := slices.ContainsFunc(steps, func(s stepData) bool { return s.cgroup != nil })
 	columns := []string{"step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
 		"box busy", "box busy before", "Dispatch RSS max MiB"}

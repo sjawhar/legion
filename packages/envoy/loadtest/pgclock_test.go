@@ -57,7 +57,7 @@ func TestPGClockOffsetIsPostgresMinusTheMidpointOfTheFastestRead(t *testing.T) {
 		want  float64
 	}{{250 * time.Millisecond, 250}, {-1500 * time.Millisecond, -1500}, {0, 0}} {
 		clk := newFakePGClock(c.ahead)
-		r := measurePGClock(context.Background(), pgClockReads, clk.now, clk.read)
+		r := measurePGClock(context.Background(), clk.now, clk.read)
 		if r.Error != "" || r.OffsetMs == nil || r.RTTMsMin == nil || r.RTTMsP50 == nil {
 			t.Fatalf("Postgres %s ahead: reading %+v, want every number and no error", c.ahead, r)
 		}
@@ -76,7 +76,7 @@ func TestPGClockOffsetIsPostgresMinusTheMidpointOfTheFastestRead(t *testing.T) {
 func TestPGClockFailedReadGivesAnErrorAndNoNumber(t *testing.T) {
 	clk := newFakePGClock(time.Second)
 	clk.failAt = 3
-	r := measurePGClock(context.Background(), pgClockReads, clk.now, clk.read)
+	r := measurePGClock(context.Background(), clk.now, clk.read)
 	if !strings.Contains(r.Error, "read 4 of 10") || !strings.Contains(r.Error, "connection reset by peer") {
 		t.Fatalf("error %q does not name the failed read", r.Error)
 	}

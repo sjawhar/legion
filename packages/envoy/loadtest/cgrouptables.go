@@ -61,16 +61,18 @@ func failedMark(kinds []string) string {
 // failedNote defines failedMark under a table, when a row has it.
 func failedNote(md *markdown, marked bool) {
 	if marked {
-		md.line("\n(failed: <kinds>): the step directory holds step-failed.json, whose `reasons[].kind` say why the step failed (`restart`: a container of the copy restarted during the step; `sampler_gap`: loadgen cgroup-merge found a role over 30 s without a good cgroup sample in the window), so its row, in every table here, does not measure the load.")
+		md.line("\n(failed: <kinds>): the step directory holds step-failed.json, whose `reasons[].kind` say why the step failed (`restart`: a container of the copy restarted during the step; `sampler_gap`: loadgen cgroup-merge found a role over %s without a good cgroup sample in the window), so its row, in every table here, does not measure the load.", seconds(cgroupMaxGap))
 	}
 }
 
-// The marks of a Resources row whose cells come from cgroup.json, as their notes name them, and
-// the working-set column's header.
+// The marks of a Resources row whose cells come from cgroup.json, as their notes name them (a row's
+// unmeasured mark names its roles after cgroupUnmeasuredPrefix), and the working-set column's
+// header.
 const (
-	cgroupFailedMark     = "(cgroup failed)"
-	cgroupUnmeasuredMark = "(no cgroup cores: <roles>)"
-	cgroupWorkingSetH    = "Dispatch working set max MiB"
+	cgroupFailedMark       = "(cgroup failed)"
+	cgroupUnmeasuredPrefix = "(no cgroup cores: "
+	cgroupUnmeasuredMark   = cgroupUnmeasuredPrefix + "<roles>)"
+	cgroupWorkingSetH      = "Dispatch working set max MiB"
 )
 
 // cgroupResources are the Resources cells that a step's cgroup.json gives: Dispatch cores mean /
@@ -105,20 +107,10 @@ func (cf *cgroupFile) resources() cgroupResources {
 		return num(*r.CoresMean, d)
 	}
 	if d := cores("dispatch", 2); d != "-" {
-		peak := "-"
-		if p := cf.Roles["dispatch"].CoresPeak5s; p != nil {
-			peak = num(*p, 2)
-		}
-		c.dispatch = d + " / " + peak
+		c.dispatch = d + " / " + numPtr(cf.Roles["dispatch"].CoresPeak5s, 2)
 	}
 	c.postgres, c.listener, c.loadgen = cores("postgres", 2), cores("listener", 3), cores("runner", 2)
-	var natsRoles []string
-	for name := range cf.Roles {
-		if strings.HasPrefix(name, "nats-") {
-			natsRoles = append(natsRoles, name)
-		}
-	}
-	slices.Sort(natsRoles)
+	natsRoles := cf.natsRoleNames()
 	sum, measured := 0.0, len(natsRoles) > 0
 	for _, name := range natsRoles {
 		if r := cf.Roles[name]; r.CoresMean != nil {
@@ -133,11 +125,23 @@ func (cf *cgroupFile) resources() cgroupResources {
 	}
 	if d, ok := cf.Roles["dispatch"]; ok {
 		if d.WorkingSetBytesMax != nil {
-			c.workingSet = num(float64(*d.WorkingSetBytesMax)/(1<<20), 0)
+			c.workingSet = num(mib(float64(*d.WorkingSetBytesMax)), 0)
 		}
 		c.dispatchCPUS = d.CPUS
 	}
 	return c
+}
+
+// natsRoleNames are the names of cf's roles of the NATS pods (nats-*), sorted.
+func (cf *cgroupFile) natsRoleNames() []string {
+	var names []string
+	for name := range cf.Roles {
+		if strings.HasPrefix(name, "nats-") {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // mark is the marks of the row that carries c's cells.
@@ -147,7 +151,7 @@ func (c cgroupResources) mark() string {
 		m = append(m, cgroupFailedMark)
 	}
 	if len(c.unmeasured) > 0 {
-		m = append(m, "(no cgroup cores: "+strings.Join(c.unmeasured, ", ")+")")
+		m = append(m, cgroupUnmeasuredPrefix+strings.Join(c.unmeasured, ", ")+")")
 	}
 	return strings.Join(m, " ")
 }
@@ -159,7 +163,7 @@ func cgroupNotes(md *markdown, present, failed, unmeasured bool) {
 		md.line("\nA step whose directory holds cgroup.json (loadgen cgroup-merge of the cluster sampler's cgroup v2 reads) takes its Dispatch, Postgres, listener, NATS (the sum of the nats-* pods) and loadgen (the runner pod) cores, its %s (memory.current less inactive_file) and, when summary.json has none, its Dispatch CPU-s per operation from cgroup.json.", cgroupWorkingSetH)
 	}
 	if failed {
-		md.line("\n%s: cgroup.json marks the step failed (`failed`, `failures`: a role went over 30 s without a good sample in the window, or had none), so every cell taken from cgroup.json shows `-`, not a measured number.", cgroupFailedMark)
+		md.line("\n%s: cgroup.json marks the step failed (`failed`, `failures`: a role went over %s without a good sample in the window, or had none), so every cell taken from cgroup.json shows `-`, not a measured number.", cgroupFailedMark, seconds(cgroupMaxGap))
 	}
 	if unmeasured {
 		md.line("\n%s: cgroup.json has no good sample of those roles at or before window_start, or at or after window_end (`cores_mean` null), so their cores cells show `-`, not 0.", cgroupUnmeasuredMark)

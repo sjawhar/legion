@@ -93,6 +93,20 @@ func (rs *roleSamples) series() (in, good []cgroupSample, cut []bool) {
 	return in, good, restartCuts(good)
 }
 
+// roleSeries is a role's samples as its figures read them over a step's window: in, good and cut
+// (series) and the 5 s cores (intervalCores).
+type roleSeries struct {
+	in, good []cgroupSample
+	cut      []bool
+	cores    []float64
+}
+
+// window is the role's roleSeries over the window from ws to we.
+func (rs *roleSamples) window(ws, we time.Time) roleSeries {
+	in, good, cut := rs.series()
+	return roleSeries{in: in, good: good, cut: cut, cores: intervalCores(good, cut, ws, we)}
+}
+
 // readCgroupSamples streams the samples file at path and keeps, per role, the samples from `from`
 // to `to` and the good samples that bracket that span; a role is seen when it has a line at or
 // before windowEnd. A line that is not a sample is an error naming the file and line, except an
@@ -206,8 +220,10 @@ type cgroupMinute struct {
 }
 
 // mergeCgroup reduces every sampled role's samples to its figures over the window from ws to we.
-func mergeCgroup(roles map[string]*roleSamples, ws, we time.Time) cgroupFile {
-	cf := cgroupFile{WindowStart: ws, WindowEnd: we, WindowS: we.Sub(ws).Seconds(), Roles: map[string]cgroupRole{}}
+// dispatch is the dispatch role's series, which the replay block's CPU fields read too; nil when
+// the role has no samples.
+func mergeCgroup(roles map[string]*roleSamples, ws, we time.Time) (cf cgroupFile, dispatch *roleSeries) {
+	cf = cgroupFile{WindowStart: ws, WindowEnd: we, WindowS: we.Sub(ws).Seconds(), Roles: map[string]cgroupRole{}}
 	names := make([]string, 0, len(roles))
 	for name, rs := range roles {
 		if rs.seen {
@@ -216,7 +232,11 @@ func mergeCgroup(roles map[string]*roleSamples, ws, we time.Time) cgroupFile {
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		r := summarizeCgroupRole(roles[name], ws, we)
+		s := roles[name].window(ws, we)
+		if name == "dispatch" {
+			dispatch = &s
+		}
+		r := summarizeCgroupRole(roles[name], s, ws, we)
 		cf.Roles[name] = r
 		switch {
 		case r.Samples == 0:
@@ -227,13 +247,18 @@ func mergeCgroup(roles map[string]*roleSamples, ws, we time.Time) cgroupFile {
 		}
 	}
 	cf.Failed = len(cf.Failures) > 0
-	return cf
+	if rs := roles["dispatch"]; rs != nil && dispatch == nil {
+		// Not seen in the window, so not summarized; its samples still bracket the replay's spans.
+		s := rs.window(ws, we)
+		dispatch = &s
+	}
+	return cf, dispatch
 }
 
-// summarizeCgroupRole is one role's figures over the window from ws to we; samples kept outside it
-// count only as the counters' brackets.
-func summarizeCgroupRole(rs *roleSamples, ws, we time.Time) cgroupRole {
-	in, good, cut := rs.series()
+// summarizeCgroupRole is one role's figures over the window from ws to we, from its series w;
+// samples kept outside the window count only as the counters' brackets.
+func summarizeCgroupRole(rs *roleSamples, w roleSeries, ws, we time.Time) cgroupRole {
+	in, good, cut := w.in, w.good, w.cut
 
 	r := cgroupRole{Pods: []string{}}
 	var last *cgroupSample
@@ -289,10 +314,9 @@ func summarizeCgroupRole(rs *roleSamples, ws, we time.Time) cgroupRole {
 			r.Restarts++
 		}
 	}
-	for _, c := range intervalCores(good, cut, ws, we) {
-		if r.CoresPeak5s == nil || c > *r.CoresPeak5s {
-			r.CoresPeak5s = &c
-		}
+	if len(w.cores) > 0 {
+		peak := slices.Max(w.cores)
+		r.CoresPeak5s = &peak
 	}
 	r.Minutes = cgroupMinutes(good, cut, ws, we)
 	return r
@@ -467,7 +491,7 @@ func runCgroupMerge(args []string) error {
 	if err != nil {
 		return err
 	}
-	cf := mergeCgroup(roles, ws, we)
+	cf, dispatch := mergeCgroup(roles, ws, we)
 	b, err := json.MarshalIndent(cf, "", "  ")
 	if err != nil {
 		return err
@@ -484,7 +508,7 @@ func runCgroupMerge(args []string) error {
 		verdict = fmt.Sprintf("the step is marked failed (%d sampler gaps, in step-failed.json)", len(cf.Failures))
 	}
 	fmt.Fprintf(os.Stderr, "loadgen cgroup-merge: wrote %s: %d roles over %.0f s; %s\n", out, len(cf.Roles), cf.WindowS, verdict)
-	filled, err := fillReplayCPU(dir, roles["dispatch"], cf.Roles["dispatch"], ws, we, drainEnd)
+	filled, err := fillReplayCPU(dir, dispatch, cf.Roles["dispatch"], ws, we, drainEnd)
 	if err != nil {
 		return err
 	}
@@ -575,10 +599,10 @@ func recordSamplerGaps(dir string, failures []cgroupFailure) error {
 }
 
 // fillReplayCPU fills the CPU fields of the step's summary.json replay block from the Dispatch
-// role's cgroup samples (rs, and role, its cgroup.json figures), for a run that read no /proc
-// (cpu_source "none", -allow-foreign): cpu_source "cgroup", dispatch_cpu_s (the window's, role's
-// cpu_s), idle_cores_before (the replayIdleSpan before ws), cores_full_rate and
-// cores_full_rate_idle_corrected (replayCoresFullRate and replayIdleCorrected with the inputs'
+// role's cgroup samples (w, their series, nil without samples; role, its cgroup.json figures), for
+// a run that read no /proc (cpu_source "none", -allow-foreign): cpu_source "cgroup", dispatch_cpu_s
+// (the window's, role's cpu_s), idle_cores_before (the replayIdleSpan before ws), cores_full_rate
+// and cores_full_rate_idle_corrected (replayCoresFullRate and replayIdleCorrected with the inputs'
 // rate factor, over the window ws to we, which window_s then holds), and drain_cpu_s (we to
 // drainEnd; none when drainEnd is zero). A figure the samples cannot give stays null, never 0:
 // the window's needs the role's cpu_s, the idle and drain spans a gap-free span (gapFreeSpan).
@@ -587,7 +611,7 @@ func recordSamplerGaps(dir string, failures []cgroupFailure) error {
 // (role.limit_cores) in at least 10% of the window's intervals. Every field is computed from the
 // samples again, so a re-run gives the same block. Everything else in summary.json keeps its bytes.
 // It returns what it did, "" when summary.json has no replay block.
-func fillReplayCPU(dir string, rs *roleSamples, role cgroupRole, ws, we, drainEnd time.Time) (string, error) {
+func fillReplayCPU(dir string, w *roleSeries, role cgroupRole, ws, we, drainEnd time.Time) (string, error) {
 	path := filepath.Join(dir, "summary.json")
 	doc, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -610,7 +634,7 @@ func fillReplayCPU(dir string, rs *roleSamples, role cgroupRole, ws, we, drainEn
 	if rec.CPUSource == "proc" {
 		return "summary.json's replay block has cpu_source proc (Dispatch's /proc reads); left as it is", nil
 	}
-	fillReplayRecord(&rec, rs, role, ws, we, drainEnd)
+	fillReplayRecord(&rec, w, role, ws, we, drainEnd)
 	value, err := json.MarshalIndent(rec, "  ", "  ")
 	if err != nil {
 		return "", err
@@ -625,7 +649,7 @@ func fillReplayCPU(dir string, rs *roleSamples, role cgroupRole, ws, we, drainEn
 }
 
 // fillReplayRecord is fillReplayCPU's computation on the decoded block.
-func fillReplayRecord(rec *replayRecord, rs *roleSamples, role cgroupRole, ws, we, drainEnd time.Time) {
+func fillReplayRecord(rec *replayRecord, w *roleSeries, role cgroupRole, ws, we, drainEnd time.Time) {
 	rec.CPUSource = "none"
 	rec.DispatchCPUS, rec.CoresFullRate, rec.IdleCoresBefore, rec.CoresFullRateIdleCorrected, rec.DrainCPUS = nil, nil, nil, nil, nil
 	reasons := []string{}
@@ -634,8 +658,8 @@ func fillReplayRecord(rec *replayRecord, rs *roleSamples, role cgroupRole, ws, w
 			reasons = append(reasons, r)
 		}
 	}
-	if rs != nil {
-		_, good, cut := rs.series()
+	if w != nil {
+		good, cut := w.good, w.cut
 		windowS := we.Sub(ws).Seconds()
 		rate := rec.Inputs.RateFactor
 		if role.CPUS != nil {
@@ -662,7 +686,7 @@ func fillReplayRecord(rec *replayRecord, rs *roleSamples, role cgroupRole, ws, w
 		if rec.DispatchCPUS != nil || rec.IdleCoresBefore != nil || rec.DrainCPUS != nil {
 			rec.CPUSource = "cgroup"
 		}
-		if cores := intervalCores(good, cut, ws, we); role.LimitCores != nil && len(cores) > 0 {
+		if cores := w.cores; role.LimitCores != nil && len(cores) > 0 {
 			high := 0
 			for _, c := range cores {
 				if c >= 0.9**role.LimitCores {

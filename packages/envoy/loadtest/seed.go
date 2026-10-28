@@ -19,8 +19,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// commitTriggerSQL installs loadtest.event_commits and its trigger on events; stack.sh pipes it
-// to psql once the seed's outbox has drained (loadgen trigger-sql).
+// commitTriggerSQL installs loadtest.event_commits and its trigger on events; loadgen seed-finish
+// runs it once the seed's outbox has drained (finish), and loadgen trigger-sql prints it.
 //
 //go:embed commit-trigger.sql
 var commitTriggerSQL string
