@@ -2,48 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T14:00:00Z",
-  "headTested": "7dc21ecd997b3f889bd06fa762e83e783b465034",
+  "completed": "2026-10-28T15:35:00Z",
+  "headTested": "2bc6a743e98421517d23a45be62a7be9cabdd49b",
+  "codeHead": "1a19ad77d1d8",
+  "round": "3: after review round 1 (635552d3, 7cfb0dc9) and the forward merge 1a19ad77 that renumbers this branch's migrations 0136-0138 after main's 0135_server_processes. The diff's fingerprint changed, so this was a full test round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Rebuilt my harness from head 7dc21ecd (code tree of daf7b77d): bun run dispatch:local on the pod's Postgres 17, database dispatch_tester, server 127.0.0.1:8877, fakes 9121/9122/9124. Re-ran the implementer's commands: block-graph.sh exit 0 with 133 PASS; `bunx playwright test … e2e/conversation.e2e.ts -g 'passage'` 3 passed, my round-1 red row included; my red Go test TestADirectMessagesBlockHasNoAddress passes unmodified (with TestTheBlocksRoutesListAnItemsBlocks and TestAMessageReplyNamesTheBlockItAnswers, ok 2.462s). The direct-message references read answers 404 and the CLI exits 1, as the implementer recorded."
+    "how": "Rebuilt my harness from this head on a fresh database (dispatch_tester recreated after the renumber; bun run dispatch:local, Postgres 17, server 127.0.0.1:8877). Re-ran the implementer's commands: block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/references.e2e.ts e2e/block-references.e2e.ts e2e/deep-links.e2e.ts e2e/hover-preview.e2e.ts` gave 52 passed and 4 skipped, the same as the implementer's count. The review fixes hold over HTTP (third proof entry)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-1 failure 1 (plan decision 3): a direct message has no address, so no reference reads its blocks. A direct message's blocks are read only through the blocks route under the conversation's read rule, and a reply to a direct message still names its block",
-      "surface": "Local Dispatch harness over HTTP and the real dispatch CLI",
-      "command": "As alice: POST /api/v1/agents/dm-session/messages {body:'Secret one.\\n\\nSecret two.', delivery:'btw'}. curl -H 'Authorization: Bearer e2e-token' 'http://127.0.0.1:8877/api/v1/references?to=dispatch%3A%2F%2F{ANY-1,ZZZ-9}%2Fmessage%2F<dm>%23b-b1'. DISPATCH_SESSION_ID=other-session bun packages/envoy-client/bin/dispatch.ts read --ref dispatch://ANY-1/message/<dm>#b-b1. POST /api/v1/messages/<dm>/reply {attempt:1, body, in_reply_to_block:'b2', actor dm-session}. GET /api/v1/messages/<dm> as alice and as ?session=dm-session. GET /api/v1/messages/<dm>/blocks",
-      "observed": "Both references reads answer 404 NOT_FOUND 'no block \"b1\" in message <dm>', with none of the text. The CLI prints 'No block b1 in dispatch://ANY-1/message/<dm>.' and exits 1. dm-session's reply names b2, and the thread read by alice and by dm-session shows reply_block {block_id b2, text 'Secret two.', removed false, no ref}. ?from=<the reply> lists only replies_to to the message, with text null. alice's blocks read answers b1 'Secret one.' and b2 'Secret two.'",
-      "headSha": "7dc21ecd997b",
-      "negativeControl": "GET /api/v1/messages/<dm>/blocks?session=other is refused with 403 THREAD_FORBIDDEN. At 1f699d69 the same references read answered 200 with the block's text"
+      "criterion": "Rollout (plan review focus 1, R14, and older items get blocks): a database main migrated takes this head's migrations; the head indexes what main wrote; main runs on the migrated schema and its writes are left owed; rolling forward again indexes them",
+      "surface": "Two real Go servers on one Postgres 17 database (dispatch_upgrade, port 8977): main@origin 690c0136 (git archive into $TMPDIR, GOWORK=off, run-server.sh) and this head (run-server.sh from the workspace), over HTTP and psql",
+      "command": "1. main's server on a fresh dispatch_upgrade (migrations to 0135_server_processes). seed-old.sh wrote, as alice and an agent: a two-paragraph comment C citing UPG-2, a reply to it, a comment E edited once, an ask with a reply, an issue message with a reply, and a direct message. 2. Stopped main and started the head on the same database. 3. Stopped the head and started main again (rollback); main wrote comment N, edited C and wrote a message. 4. Stopped main and started the head again. After steps 2 and 4: GET /api/v1/comments/{id}/blocks, GET /api/v1/references?to=, the threads, a new reply_to_block, and psql of the owed state.",
+      "observed": "Step 2: schema_migrations reads 138, 137, 136, 135. The first tick logs item_blocks=7 and 0 items are left owed. C reads indexed:true at revision 1 with b1 'Old first.' and b2 'Old second cites dispatch://UPG-2 here.'. E reads b1 and b2 with made_at null (edited before indexing). ?to=UPG-2 lists the mention from block comment/C#b2 with parent C. The old reply, the ask reply and the message reply all show, with reply_block null. A new reply naming b2 of C gets reply_block b2. The direct message's block reads 404 on ?to=, and alice's blocks read gives b1 and b2. Step 3: main starts on schema 138 and serves ?to=UPG-2 with the comment node once and no block row. The thread read answers 200, and the comment write, the PATCH and the message write each succeed, and each is left owed (owed_at set). Step 4: the first tick logs item_blocks=3 and 0 items are left owed. C reads revision 2: b2 is kept by its text with changed_revision 1, and b3 is 'Old first, moved.'. The reply still names b2 with its text. N gets b1 and b2, and ?to=UPG-2 lists comment/N#b2 and comment/C#b2",
+      "headSha": "2bc6a743e984",
+      "negativeControl": "At step 1, main's server answered GET /api/v1/comments/<C>/blocks with 404 (no such route), and its ?to=UPG-2 listed the mention from the comment node, not a block"
     },
     {
-      "criterion": "Round-1 failure 2 (root spec R11, A13 rewording): typing over the whole text of a cited paragraph in the dashboard editor keeps its id. The rest of the editor's carried-id behaviour is unchanged",
-      "surface": "The Conversation tab's comment editor in Chromium as the signed-in author, over the local harness",
-      "command": "cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_tester?sslmode=disable' FAKE_ENVOY_PORT=9121 FAKE_GITHUB_PORT=9122 FAKE_BROKER_PORT=9124 DISPATCH_E2E_PORT=8877 PLAIN_HTTP_PORT=31820 PLAYWRIGHT_BROWSERS_PATH=/legion/scratch/tmp/ms-playwright bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts -g 'passage'. Then a throwaway spec (removed) with five editor cases",
-      "observed": "3 passed, including 'the editor keeps a cited passage's id when its whole text is typed over' (b1, b2 'Other words entirely.', b3; the reply reads b2 removed:false). In the throwaway spec: a Backspace join after an emoji keeps b1 and reads b2 removed. A cut paragraph pasted twice keeps b2 on the first paste, and select-all then retype sends blocks [] and reads b2 removed. Typing over b2 and undoing back to the original sends b1, b2 and b3 and keeps b2. Typing over b2 together with its paragraph break joins it to b3, so b2 is kept on 'New Gamma.' and b3 is removed. That is R11's join rule, and the server's text rules give the same result without ids. Typing over two whole blocks at once sends neither id, and the reply reads b2 removed",
-      "headSha": "7dc21ecd997b",
-      "negativeControl": "Typing over two whole blocks at once ('Merged.') sends only b1 and gives a new b4, so the citation reads removed:true. The fix keeps an id only when one block's whole text is typed over"
+      "criterion": "A7, A10 comment half, A11, A13, A15 comment half and R14 (the driver's sections), plus the round-1 and round-2 fixes, at this head",
+      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0138 on a fresh database, the real dispatch CLI, Chromium",
+      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_tester?sslmode=disable' FAKE_ENVOY_PORT=9121 FAKE_GITHUB_PORT=9122 FAKE_BROKER_PORT=9124 DISPATCH_E2E_PORT=8877 PLAIN_HTTP_PORT=31820 PLAYWRIGHT_BROWSERS_PATH=/legion/scratch/tmp/ms-playwright bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/references.e2e.ts e2e/block-references.e2e.ts e2e/deep-links.e2e.ts e2e/hover-preview.e2e.ts; go test ./internal/dispatch/api/ -run 'TestADirectMessagesBlockHasNoAddress|TestAMentionStartsAtItsBlock'",
+      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 52 passed and 4 skipped, including the three Conversation tab 'passage' rows (my round-1 red row among them). Go: ok. A throwaway editor case on a CR LF body with an emoji (the valueOffset rewrite) reworded the last block and typed over b2. The save sent from offsets 0, 11, 24 and 32 into the LF body. b1 and b3 kept changed_revision 1, b2 'Typed over.' and b4 'Delta. More.' moved to revision 2, and the reply still cites b2",
+      "headSha": "2bc6a743e984",
+      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
     },
     {
-      "criterion": "A7, A10 comment half, A11, A13, A15 comment half and R14 (the driver's sections) at this head",
-      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0137, the real dispatch CLI, over HTTP",
-      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit 0, 133 PASS, no FAIL or SKIP line (every A7, A10 comment, A11, A13 and A15 comment line, and every earlier section)",
-      "headSha": "7dc21ecd997b",
-      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT naming b9, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
+      "criterion": "Review round 1, findings 1 and 2: on a document page, ?comment=<id>#b-<x> names the comment, while a comment page's #b- names the comment's block. A graph read's edge nodes carry no item block's text; only the node a reference read names does",
+      "surface": "Local harness over HTTP",
+      "command": "An agent's comment S whose body holds http://127.0.0.1:8877/issues/RVW-1/spec?comment=<C>#b-b1, http://127.0.0.1:8877/issues/RVW-1/comments/<C>#b-b2 and dispatch://RVW-1/comment/<C>#b-b2. Then GET /api/v1/references?from=S, ?to=C and ?to=C#b-b2",
+      "observed": "?from=S lists two mentions: comment <C> (the document-page link) and block comment/<C>#b2 (the comment-page link and the dispatch:// reference, as one edge). Neither node carries text. ?to=C lists the same two edges from S's block b1, one with block b2 and one without, each with S's block text as its excerpt and no node text. ?to=C#b-b2, a reference read, carries text 'Cb.'",
+      "headSha": "2bc6a743e984",
+      "negativeControl": "At 7dc21ecd the review read the document-page form as comment/<C>#<document block id>, a node that never exists"
     },
     {
-      "criterion": "Adversarial regression of round 1's probe at this head",
-      "surface": "Local Dispatch harness over HTTP and psql",
-      "command": "PRJ=PRR python3 /legion/scratch/tmp/infra368/probe.py (throwaway)",
-      "observed": "42 of 43 checks hold. These include: every carried-id refusal; UTF-16 and CR LF offsets; an LF-only rewrite that keeps changed_revision 1 and a pin unchanged; refusals of a reply in an ask's thread and of a removed block; owed parents indexed by a reply; 12 concurrent carried edits and 12 concurrent replies; and now a direct message's block on ?to=, which answers 404. The one failed check is the probe's own reply call, which omits attempt; the same reply with attempt:1 succeeds (first proof)",
-      "headSha": "7dc21ecd997b",
+      "criterion": "Adversarial regression of the round-1 probe at this head",
+      "surface": "Local harness over HTTP and psql",
+      "command": "PRJ=PRS python3 /legion/scratch/tmp/infra368/probe.py (throwaway)",
+      "observed": "42 of 43 checks hold: the carried-id refusals, UTF-16 and CR LF offsets, the pin through an LF rewrite, the ask-thread and removed-block refusals, owed parents, 12 concurrent edits and 12 concurrent replies, and the direct-message block's 404 on ?to=. The one failure is the probe's own reply call, which omits attempt",
+      "headSha": "2bc6a743e984",
       "negativeControl": "PATCH blocks with an id named twice, an unknown id, a from out of order, outside the body or inside a surrogate pair, or blocks without base_revision: 400 INVALID_COMMENT each, body unchanged"
     }
   ],
-  "ci": "At head 7dc21ecd GitHub shows build, changes, lint, test, typecheck and pr-title queued. The runs at daf7b77d were cancelled when 7dc21ecd was pushed. I did not wait for CI.",
-  "migrations": "main@origin tops out at 0134. This head adds 0135-0137. #2394 (also 0135) is still open."
+  "notes": [
+    "A database that already ran this branch's old numbering (0135_item_blocks to 0137) cannot take the renumbered head. The head reads 135-137 as applied and fails on 0138 with 'trigger messages_item_blocks_owed already exists'. I saw this on my own pre-renumber dispatch_tester. Only branch-built databases are exposed: deploys come only from main, which never carried the old numbers. So I recreated my databases rather than recording a failure.",
+    "#2394 (also restating graph_edges) is still open, so the architect's 'migrate a database that main migrated, after the first merge' check was run against main's own new 0135_server_processes: the first proof entry."
+  ],
+  "ci": "At code head 1a19ad77 GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. 2bc6a743 is a handoff-only commit carrying skip-checks. I did not wait for CI."
 }
