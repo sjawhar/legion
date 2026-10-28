@@ -57,8 +57,9 @@ publishes nothing, so the first publisher wins. The object carries:
   its `session_shutdown`, clear it, and so does a start command whose claim fails before the send or
   hands over to a new session (`clearStartupTurn`; `packages/pi-legion/AGENTS.md`, "The
   controller's start turn"). The Envoy entry reads it (`packages/pi-envoy/src/card-wake.ts`): while
-  it names the Envoy entry's own live session and its start is unsent or was sent under 30 s ago, a
-  card that finds the session idle starts no turn and the startup wake waits for the start turn.
+  it names the Envoy entry's own live session and its start was sent under 30 s ago, or is unsent
+  and the Envoy entry first read that unsent mark under 30 s ago (re-read every second until then),
+  a card that finds the session idle starts no turn and the startup wake waits for the start turn.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.

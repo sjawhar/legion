@@ -927,6 +927,63 @@ describe("while the start-turn mark names the session", () => {
     await host.fire();
     expect(host.sent).toEqual([]);
   });
+
+  // An interrupt of the start turn keeps the startup cards it owes folded until the person's next
+  // turn: a wake after it would start the turn the person stopped. Extensions see the interrupt as
+  // the start turn's aborted reply (Esc, RPC `abort`), an aborted post-run auto-compaction, or a
+  // retry cancelled in its backoff, each before the run's `agent_end`.
+  for (const by of [
+    "an Esc or an RPC abort",
+    "an aborted auto-compaction",
+    "a retry cancelled in its backoff",
+  ] as const) {
+    for (const mode of ["tui", "rpc"] as const) {
+      test(`sends no wake for an owed startup card when ${by} ends the start turn (${mode}), and the next run reads it with none after`, async () => {
+        const host = harness({ mode });
+        // The operator's controller in a terminal marks its start unsent at `session_start`; the
+        // daemon's in RPC mode marks it sent before the daemon's prompt.
+        if (mode === "tui") host.markUnsent();
+        else host.markSent(host.clock());
+        host.setIdle(true);
+        const card = host.card(`owed-${mode}`);
+        expect(card.delivery).toMatchObject(followUp);
+        host.message(card.message);
+        await host.fire();
+        expect(host.sent).toEqual([]);
+
+        if (mode === "tui") host.markSent(host.clock());
+        host.setIdle(false);
+        host.run();
+        host.clearMark();
+        host.message({ role: "user", content: "start" });
+        if (by === "an Esc or an RPC abort") {
+          host.message(host.reply(interrupted));
+        } else if (by === "an aborted auto-compaction") {
+          host.message(host.reply());
+          host.wake.autoCompactionEnd({ aborted: true });
+        } else {
+          host.message(host.reply({ stopReason: "error", errorMessage: "overloaded" }));
+          host.wake.autoRetryEnd({ success: false, finalError: "Retry cancelled" });
+        }
+        host.setIdle(true);
+        host.end();
+        await host.fire();
+        expect(host.sent).toEqual([]);
+
+        // The person's next turn reads the folded card; no stale check wakes for it later.
+        host.setIdle(false);
+        host.run();
+        host.message({ role: "user", content: "typed" });
+        host.message(host.reply());
+        host.setIdle(true);
+        host.end();
+        await host.fire();
+        host.advance(STARTUP_TURN_CAP_MS);
+        await host.fire();
+        expect(host.sent).toEqual([]);
+      });
+    }
+  }
 });
 
 // While the host sets up a prompt (busy, before its run's `agent_start`: the usage preflight,

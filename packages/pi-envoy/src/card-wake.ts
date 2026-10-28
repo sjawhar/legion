@@ -114,8 +114,9 @@ import type {
  * so still hold the drain; one older than that is a send the host failed (a discarded hold rejects
  * it, and so does a send that throws) and waits the check no longer. A seen startup card is in the
  * context: a running turn reads it, so a busy check keeps it and the run's `agent_end` checks
- * again, and an idle check wakes for it whatever the interrupt latch or the run, as the steer it
- * replaces started a turn after an interrupt too.
+ * again, and an idle check wakes for it whatever the run. It also wakes for one whatever the
+ * interrupt latch, as the steer it replaces started a turn after an interrupt too, unless the card
+ * is owed (below): an interrupt then stopped the start turn that card waited for.
  *
  * The start turn. A session whose first turn is a start sent after Oh My Pi's startup, the Legion
  * controller's start message, is named in the plugin interface's start-turn mark
@@ -142,9 +143,12 @@ import type {
  * phase and sends one wake. A startup card seen while the mark held, at its `message_end` or at a
  * check, is owed that wake unless a turn after the start turn read it, since the start turn's
  * replies after it ran the start procedure rather than reading it (`unreadCards`); every other
- * card is counted as before. A sent mark past its cap is a start the host failed and holds nothing
- * back, and a mark naming another session (a `task` subagent's, or a session switched away from)
- * changes nothing.
+ * card is counted as before. An owed card gets no wake while an interrupt is in effect, which at
+ * that check is one that stopped the start turn (its aborted reply, an aborted auto-compaction or
+ * a cancelled retry): a wake would start the turn the person stopped, so the card stays folded
+ * for the person's next turn, as a fold card does, and the check that ends the phase drops it. A
+ * sent mark past its cap is a start the host failed and holds nothing back, and a mark naming
+ * another session (a `task` subagent's, or a session switched away from) changes nothing.
  */
 
 /** How long a card sent in the startup phase may go without its `message_end` before the wake's
@@ -494,11 +498,16 @@ export class CardWake {
       return;
     }
     // A card fed to a run that has since started is that run's to read, and one an interrupt
-    // found stays folded; a startup card is neither's. The branch decides which are unread, an
-    // owed card's start-turn replies not counting as its reading.
+    // found stays folded; a startup card is neither's, except that an owed one stays folded under
+    // an interrupt too, which stopped the start turn it waited for. The branch decides which are
+    // unread, an owed card's start-turn replies not counting as its reading.
     const pending = new Set(
       this.#seen
-        .filter((card) => card.startup || (!this.#interrupted && card.run === this.#run))
+        .filter((card) =>
+          card.startup
+            ? !(this.#interrupted && this.#owed.has(card.id))
+            : !this.#interrupted && card.run === this.#run
+        )
         .map((card) => card.id)
     );
     const unread =

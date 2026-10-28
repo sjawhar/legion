@@ -100,9 +100,12 @@ after the start turn read it: the start turn's own replies, its tool calls' incl
 start procedure and do not count, but any assistant message after the first one after the card
 that ends a model turn (one that called no tool and did not error) does, whether a later run or
 the start turn's run going on for an aside it took at the model's stop wrote it; the branch's
-order decides, as for every other card. A sent mark past its cap (a start the host failed) or a
-mark naming another session (a `task` subagent's, a session switched away from) changes nothing,
-and a session change drops the owed cards with the rest. A card that reaches the session before
+order decides, as for every other card. An interrupt that stopped the start turn (its aborted
+reply, an aborted automatic compaction, a cancelled retry) leaves the owed cards folded for the
+person's next turn with no wake, which would start the turn the person stopped. A sent mark past
+its cap (a start the host failed) or a mark naming another session (a `task` subagent's, a
+session switched away from) changes nothing, and a session change drops the owed cards with the
+rest. A card that reaches the session before
 the Legion entry's `session_start` has set the unsent mark (inside the Envoy entry's own
 `session_start`, when Oh My Pi runs that first) finds no mark.
 The limits: a card sent as a session turns busy, before the host has marked it busy, is a steer,

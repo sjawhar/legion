@@ -157,8 +157,15 @@ interface ControllerSession {
   transcriptLines(): Promise<string[]>;
   /** The transcript's message entries, in order. */
   messages(): Promise<MessageEntry[]>;
-  /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
-  until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
+  /**
+   * Polls `probe` until it returns a value, failing at the deadline (`withinMs` from now, when a
+   * case's own bound is the property under test) or when omp exits.
+   */
+  until<T>(
+    what: string,
+    probe: () => T | undefined | Promise<T | undefined>,
+    withinMs?: number
+  ): Promise<T>;
   /** Resolves once the screen shows all of `texts` at once; fails on `what` at the deadline. */
   shows(what: string, ...texts: readonly string[]): Promise<void>;
 }
@@ -422,11 +429,16 @@ async function startController(
 
   const until = async <T>(
     what: string,
-    probe: () => T | undefined | Promise<T | undefined>
+    probe: () => T | undefined | Promise<T | undefined>,
+    withinMs?: number
   ): Promise<T> => {
     // A wait gets its own step, and one that starts before Oh My Pi's startup could be over gets
-    // until the startup deadline: the first wait of every case spans that startup.
-    const deadline = Math.max(Date.now() + STEP_DEADLINE_MS, spawnedAt + STARTUP_DEADLINE_MS);
+    // until the startup deadline: the first wait of every case spans that startup. A case's own
+    // bound replaces both.
+    const deadline =
+      withinMs === undefined
+        ? Math.max(Date.now() + STEP_DEADLINE_MS, spawnedAt + STARTUP_DEADLINE_MS)
+        : Date.now() + withinMs;
     for (;;) {
       if (exitCode !== undefined) {
         throw new Error(
@@ -499,6 +511,8 @@ interface DaemonController {
   deliver(message: string): void;
   /** Answers one RPC `get_state`, which Oh My Pi reads only once its startup is over. */
   state(): Promise<z.infer<typeof RpcStateSchema>>;
+  /** Sends one RPC `abort`, as a Legion daemon interrupts a turn, and resolves on its answer. */
+  abort(): Promise<void>;
   /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
   until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
 }
@@ -566,6 +580,19 @@ async function startDaemonController(hooks: StandinHooks): Promise<DaemonControl
     }
   };
 
+  // One RPC command, answered by its response frame; a refusal throws.
+  const command = async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const id = randomUUID();
+    const waiting = Promise.withResolvers<Record<string, unknown>>();
+    responses.set(id, waiting);
+    rpc.send({ ...body, id });
+    const response = await Promise.race([waiting.promise, rpc.closed]);
+    if (response.success !== true) {
+      throw new Error(`omp refused ${String(body.type)}: ${JSON.stringify(response)}`);
+    }
+    return response;
+  };
+
   let taken = 0;
   return {
     turns,
@@ -578,15 +605,10 @@ async function startDaemonController(hooks: StandinHooks): Promise<DaemonControl
       rpc.send({ type: "prompt", id: randomUUID(), message });
     },
     async state() {
-      const id = randomUUID();
-      const waiting = Promise.withResolvers<Record<string, unknown>>();
-      responses.set(id, waiting);
-      rpc.send({ type: "get_state", id });
-      const response = await Promise.race([waiting.promise, rpc.closed]);
-      if (response.success !== true) {
-        throw new Error(`omp refused get_state: ${JSON.stringify(response)}`);
-      }
-      return RpcStateSchema.parse(response.data);
+      return RpcStateSchema.parse((await command({ type: "get_state" })).data);
+    },
+    async abort() {
+      await command({ type: "abort" });
     },
     until,
   };
@@ -1258,6 +1280,72 @@ test.skipIf(skip)(
   CASE_TIMEOUT_MS
 );
 
+// An interrupt of the start turn: RPC `abort`, as the daemon interrupts a turn (the terminal's Esc
+// ends the run with the same "Interrupted by user" reply), while the start turn's model request is
+// held. The startup card that reached the session while its ready was held is owed a wake after
+// the start turn, and that wake, a next-turn message with `triggerTurn`, would start the turn the
+// interrupt stopped: the card stays folded for the next turn instead. So the session settles with
+// no model request after the start turn's, and a probe prompt is the next request, carrying the
+// card and no wake. A `get_state` after the settle is read once the check the start turn's
+// `agent_end` armed has run (as in the case above), so a wake that check sent is under way before
+// the probe goes.
+test.skipIf(skip)(
+  "an RPC abort of the daemon-launched controller's start turn leaves its startup card folded, with no wake",
+  async () => {
+    const ready = newHold();
+    let sid: string | undefined;
+    const session = await startDaemonController({
+      ready,
+      onRoleClaim: (claimed) => {
+        sid = claimed;
+      },
+    });
+    await session.until("the controller's ready", () => (ready.reached() ? true : undefined));
+    const claimed = await session.until("the controller role's claim", () => sid);
+    const inbound = await controllerInbound(setup().nats);
+    const { card, receipt } = inbound.card(claimed, "interrupted-start");
+    await receipt;
+    await inbound.repeat(claimed, card);
+    ready.release();
+
+    await session.state();
+    expect((await session.state()).isStreaming).toBe(false);
+    expect(session.turns).toHaveLength(0);
+    session.deliver(START_MESSAGE);
+    const start = await session.nextTurn("the start turn's model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    expect(conversation(start.request)).toContain(card.summary);
+    await session.abort();
+
+    const noRequestAfterStart = (): undefined => {
+      const extra = session.turns[1];
+      if (extra !== undefined) {
+        throw new Error(`a model request came before the probe, on ${lastMessage(extra.request)}`);
+      }
+      return undefined;
+    };
+    await session.until("the interrupted session to settle", async () => {
+      noRequestAfterStart();
+      return (await session.state()).isSettled ? true : undefined;
+    });
+    await session.state();
+    noRequestAfterStart();
+
+    const prompt = `PROBE-${randomUUID().slice(0, 8)}`;
+    session.deliver(prompt);
+    const probe = await session.nextTurn("the probe's model request");
+    expect(lastMessage(probe.request)).toContain(prompt);
+    expect(conversation(probe.request)).toContain(card.summary);
+    expect(conversation(probe.request)).not.toMatch(WAKE_TEXT);
+    probe.reply("Probe answered.");
+    await session.until("the session to settle", async () =>
+      (await session.state()).isSettled ? true : undefined
+    );
+    expect(session.turns).toHaveLength(2);
+  },
+  CASE_TIMEOUT_MS
+);
+
 // The operator's controller claims and sends its start message only from
 // `/legion-controller-start`, after Oh My Pi's startup, while the Envoy entry opens the session's
 // agent subject at its own `session_start`. A card that reaches that subject in between found an
@@ -1393,13 +1481,13 @@ for (const variant of ["the start claim never answers", "the start command never
       startupHold.release();
 
       // A real clock: the bound is the property under test.
-      const deadline = Date.now() + 90_000;
-      while (session.turns.length === 0 && Date.now() < deadline) await Bun.sleep(100);
-      const first = session.turns[0];
-      expect(first === undefined ? "no model request within 90 s" : "a model request").toBe(
-        "a model request"
+      const first = await session.until(
+        "the startup card's model request, within 90 s",
+        () => session.turns[0],
+        90_000
       );
-      expect(conversation(first?.request ?? { path: "", body: {} })).toContain(card.summary);
+      expect(conversation(first.request)).toContain(card.summary);
+      expect(lastMessage(first.request)).toContain(WAKE_ONE);
     },
     CASE_TIMEOUT_MS
   );
