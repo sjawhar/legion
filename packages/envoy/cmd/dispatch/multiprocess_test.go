@@ -25,9 +25,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,11 +38,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
@@ -965,6 +972,143 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillClose(t *testing.T) {
 	}
 }
 
+// ───── the asks of a closed issue ──────────────────────────────────────────
+
+// A browser connected to B's room writes a decision block into a document of an issue A has just
+// closed. A's close, and the sweep it runs once its rooms are closed, reach only A's rooms
+// (SetIssueClosed), so B's room still takes the write: the block is stored, and the document owes a
+// settlement no process runs while the issue is closed, so the block would read open, with no ask,
+// for as long as the issue stays closed. One repair pass, run as the interval runs it - from
+// another process on the same database, bounded to the documents marked owing a settlement since a
+// moment before the close - gives the issue the close's final sweep: the block reads resolved in
+// the durable document, and in B's room once B has reloaded it.
+func TestTheRepairSweepResolvesADecisionBlockWrittenOnTheOtherProcessAfterTheClose(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SWP")
+	pair.a.createProject(t, project, "Swept after the close")
+	issueKey, artifactID := pair.a.createIssueIn(t, project, "Closed on A, written on B", "Context")
+
+	editor := pair.b.openEditor(t, artifactID, "Context\n")
+	// The tab's sync and the issue's creation each leave a settlement owed, which B and A settle
+	// within their settle delay; the close is to find the document settled.
+	waitForSettlementOwed(t, pair.database, artifactID, false)
+	var markedSince time.Time
+	if err := pair.database.Pool.QueryRow(context.Background(), `select statement_timestamp()`).Scan(&markedSince); err != nil {
+		t.Fatalf("read the database's clock: %v", err)
+	}
+	pair.a.call(t, http.MethodPatch, "/api/v1/issues/"+issueKey, `{"status":"done"}`, http.StatusOK)
+	if settlementOwed(t, pair.database, artifactID) {
+		t.Fatal("A's close left the document owing a settlement, so this row could not tell B's write from it")
+	}
+
+	const block = ":::ask{#written-on-b urgency=\"low\" multiple=\"false\"}\nWritten on B after the close?\n:::\n"
+	head := storedHead(t, pair, artifactID)
+	appendBlock(t, editor, block)
+	// B stores the tab's update, which marks the document owing a settlement again.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if storedHead(t, pair, artifactID) > head && settlementOwed(t, pair.database, artifactID) &&
+			settlementMarkedAt(t, pair.database, artifactID).After(markedSince) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B never stored its tab's block: stored head %d (was %d), settlement owed %v\nB:\n%s",
+				storedHead(t, pair, artifactID), head, settlementOwed(t, pair.database, artifactID), pair.b.Output.String())
+		}
+	}
+	const written = `:::ask{#written-on-b urgency="low" multiple="false" state="open"}`
+	if text := pair.b.documentText(t, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("B's room does not hold the block its tab wrote:\n%s", text)
+	}
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("the durable document does not hold the block B's tab wrote:\n%s", text)
+	}
+
+	logs := captureDefaultLog(t)
+	broker := events.NewBroker()
+	documents := docs.New(docs.Deps{Store: pair.database, Events: broker})
+	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	repair, err := api.RepairIssueAsks(store.WithTransactionTracking(context.Background()),
+		api.Deps{Store: pair.database, Docs: documents, Events: broker}, &markedSince)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if repair.Swept != 1 || repair.Withdrawn != 0 || repair.Restored != 0 {
+		t.Fatalf("repair = %+v, want the one block B's tab wrote swept", repair)
+	}
+	logged := logs.String()
+	if !slices.ContainsFunc(strings.Split(logged, "\n"), func(line string) bool {
+		return holdsAll(line, `msg="dispatch: repaired the asks of an issue"`, "issue="+issueKey, "swept=1")
+	}) {
+		t.Fatalf("the repair logged no line sweeping one block of %s:\n%s", issueKey, logged)
+	}
+	const resolved = `:::ask{#written-on-b urgency="low" multiple="false" state="resolved"}`
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, resolved) {
+		t.Fatalf("the durable document after the repair:\n%s\nwant it to hold %s", text, resolved)
+	}
+	// The repair's write leaves B's room behind the durable head, which B closes; a reader then
+	// reads the document B loads again.
+	select {
+	case <-editor.Ended:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("B's room never closed behind the repair's write:\nB:\n%s", pair.b.Output.String())
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		text := pair.b.documentText(t, artifactID)
+		if strings.Contains(text, resolved) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B serves the document without the swept block after reloading it:\n%s", text)
+		}
+	}
+}
+
+// appendBlock appends markdown's blocks to the end of the editor's document in one keystroke's
+// transaction, and sends the room the update it made.
+func appendBlock(t *testing.T, editor *docstest.Peer, markdown string) {
+	t.Helper()
+	typed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			changeErr = err
+			return
+		}
+		tree.Children = append(tree.Children, typed.Children...)
+		changeErr = pmdoc.Update(txn, fragment, tree)
+	}); err != nil || changeErr != nil {
+		t.Fatalf("the editor's edit: %v %v", err, changeErr)
+	}
+}
+
+// durableText is the document as its stored updates hold it: read by a document service of this
+// test's own, which holds no room of it until this read loads one from the store.
+func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
+	t.Helper()
+	reader := docs.New(docs.Deps{Store: pair.database})
+	defer func() { _ = reader.Shutdown(context.Background()) }()
+	text, err := reader.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the durable document %s: %v", artifactID, err)
+	}
+	return text
+}
+
+// captureDefaultLog records what the default logger writes until the test ends.
+func captureDefaultLog(t *testing.T) *storetest.LockedLog {
+	t.Helper()
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
 // ───── the leased maintenance loops ────────────────────────────────────────
 
 // The two lines duty.Exclusive writes, which every leased loop reports its pass through.
@@ -1039,14 +1183,15 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the eight leases are observable inside a window a test can wait out:
+// Four of the nine leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other four
+// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
-// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake; and edit-notices' period is five
-// seconds, so this window holds many of its periods, each served once
+// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
+// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
+// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
+// their passes ever overlap is a coin toss no test should turn into a flake; and edit-notices'
+// period is five seconds, so this window holds many of its periods, each served once
 // (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
@@ -1105,6 +1250,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
