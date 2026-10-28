@@ -1238,3 +1238,72 @@ test("the editor keeps a cited passage's id through move, reword, split, delete 
     await alice.close();
   }
 });
+
+// Rewording a cited paragraph by selecting its whole text and typing new words over it is a
+// rewording (root spec R11: a block keeps its id when it is kept, moved or reworded), as it is
+// when the same body is sent without ids and matched by its text: the reply still cites it.
+test("the editor keeps a cited passage's id when its whole text is typed over", async ({
+  browser,
+}) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Retyped passage" });
+  const body = "Alpha first.\n\nBeta second.\n\nGamma third.";
+  const comment = await createComment(issue.key, { body });
+  const reply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "Citing the second paragraph." },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await expandedCommentCard(page, comment.id);
+    const quote = threadReply(page, card, "Citing the second paragraph.");
+    const blocksRead = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        response.url().endsWith(`/api/v1/comments/${comment.id}/blocks`)
+    );
+    await card.getByRole("button", { exact: true, name: "Edit" }).click();
+    expect((await blocksRead).ok()).toBe(true);
+    const field = card.getByLabel("Edit comment");
+    const start = body.indexOf("Beta second.");
+    await field.evaluate(
+      (element: HTMLTextAreaElement, [from, to]) => {
+        element.focus();
+        element.setSelectionRange(from, to);
+      },
+      [start, start + "Beta second.".length] as const
+    );
+    await field.pressSequentially("Other words entirely.");
+    const retyped = "Alpha first.\n\nOther words entirely.\n\nGamma third.";
+    await expect(field).toHaveValue(retyped);
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        response.url().endsWith(`/api/v1/comments/${comment.id}`)
+    );
+    await card.getByRole("button", { name: "Save" }).click();
+    expect((await saved).ok()).toBe(true);
+
+    const read = await getCommentBlocks(comment.id);
+    expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: "b1", text: "Alpha first." },
+      { id: "b2", text: "Other words entirely." },
+      { id: "b3", text: "Gamma third." },
+    ]);
+    expect(await commentReplyBlock(comment.id, reply.id)).toMatchObject({
+      block_id: "b2",
+      removed: false,
+      text: "Other words entirely.",
+    });
+    await expect(quote).toContainText("Replying to alice's passage — Other words entirely.");
+  } finally {
+    await alice.close();
+  }
+});
