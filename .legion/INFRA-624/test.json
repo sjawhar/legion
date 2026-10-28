@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-624",
+  "completed": "2026-10-28T09:29:38Z",
+  "headSha": "acd9df19d914e936d3dc8ddd21847319368fbf29",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its browser command at acd9df19: `cd packages/dispatch && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone` gave 10 passed. Re-ran its negative control on a git archive of b295a3fb (main@origin, the merge's base) with the head spec files copied in: both ask-concurrent-edit tests and the paste row fail there. Its claim that Enter in the malformed question keeps every word is true, but I proved it with my own probe T8. The test of that name puts its caret in the malformed banner (see notes)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1. Two editors whose concurrent edits leave an ask holding two lists keep the question and both options in both editors and the stored document; the ask stays open, is marked malformed, and joining the lists clears that",
+      "surface": "Dispatch document editor in headless Chromium (chromium and iphone projects), real Go Dispatch server and Postgres 17 in the issue pod",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone; plus throwaway probes T1, T2, T5 and T10 (run record https://github.com/sjawhar/legion/pull/2433#issuecomment-6465414326)",
+      "observed": "10 passed (1.1m). T1: after both pages closed and every room was quiesced, a third user opened the malformed decision. Every word stayed, the block was still malformed, ask a1 stayed open, and the third user's edit wrote back the stored markdown unchanged except for that edit. T10, 3 runs: 1 run gave the paragraph-after-list order. That decision was marked malformed with the reason 'holds a paragraph after its options', kept every word on both pages and in storage, and stayed open. T5: PATCH /api/v1/asks/<id> repaired the malformed block into one list, and the row took both options. T2: Enter, typing and a selection delete inside the malformed decision kept every word, with no page error.",
+      "headSha": "acd9df19d914e936d3dc8ddd21847319368fbf29",
+      "negativeControl": "The same spec file on a git archive of b295a3fb with bun install: 'two editors…' fails with toContainText \"Option A\" -> element(s) not found, and 'Enter in the question…' fails with toHaveAttribute data-dispatch-ask-malformed \"true\" -> element(s) not found (the decision is deleted)"
+    },
+    {
+      "criterion": "P. A pasted unknown typed block keeps every word, drawn as its lines",
+      "surface": "Dispatch document editor in headless Chromium, a real paste (navigator.clipboard.writeText + ControlOrMeta+V)",
+      "command": "the run above (typed-block-content-rule.e2e.ts, chromium and iphone); plus throwaway probe T11 (real paste of :::callout{bogus=\"1\"}…:::, ::leaf, text :inline{x=1} more, and an ask with a paragraph after its list)",
+      "observed": "The paste row passes in both projects. T11: the stored markdown keeps each paste as its literal lines (\\\\:::callout{bogus=\"1\"} / callout body / :::, \\\\::leaf, text :inline{x=1} more, \\\\:::ask{#zz} … After para … :::), with no page error",
+      "headSha": "acd9df19d914e936d3dc8ddd21847319368fbf29",
+      "negativeControl": "The same row on the b295a3fb archive: p /^:::note$/ -> element(s) not found"
+    },
+    {
+      "criterion": "R. The reproduction and every reachability attempt are recorded on the issue",
+      "surface": "dispatch://INFRA-624",
+      "command": "dispatch read --ref dispatch://INFRA-624/comment/3cb60eb2-b4c2-4e0c-883d-f9de8cd7e7fa",
+      "observed": "The comment records the base two-editor run (the decision lost, then the ask retracted by system/document-settlement), the real paste of :::note (lines joined, page error 'unknown typed block \"note\"'), and the other attempts (list crossed with a paragraph, # Head, backticks)",
+      "headSha": "acd9df19d914e936d3dc8ddd21847319368fbf29",
+      "negativeControl": "dispatch read --comment <id> is refused with 'unknown flag --comment'. The ref form is the one that reads the comment"
+    }
+  ],
+  "ci": "Read on GitHub at acd9df19 during testing: pr-title, changes, build (x2) and typecheck pass. lint, test, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke and envoy-infra-go were pending (still running). Not re-run.",
+  "notes": [
+    "Test-quality finding for the reviewer: the test 'Enter in the question of an ask holding two lists keeps every word' (packages/dispatch/e2e/ask-concurrent-edit.e2e.ts:149) calls placeCaret(alicePage, 'after', 'Which one?'). placeCaret takes the first occurrence, which is in the malformed banner (contenteditable=false), because the banner quotes the question. Probe T9 ran the test's own steps: the selection anchor was the banner <p class='… text-rose-700 …'> at offset 34, and the stored result was '- Option B\\n\\n* \\n* MoreOption A' (More went into the second list). Probe T8 put the caret in the editable question: Enter does not split the paragraph (the content match refuses it, as ask-content.ts documents) and More is added to the question ('Which one?More'). Every word stays in both cases. No test exercises Enter in the question of a broken ask. The plan's gap analysis named this e2e step as that check.",
+    "Not a defect of this change (the same at b295a3fb and at the head): Enter twice at the end of the last option of a valid decision gives '- Option AOutside\\n- ', the empty-option class that the reproduction comment names.",
+    "Throwaway probe spec and the base tree were removed. The working copy holds only this handoff."
+  ]
+}
