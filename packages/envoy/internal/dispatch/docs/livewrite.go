@@ -49,8 +49,8 @@ import (
 // transaction never waits for it (awaitRoomRecovery): an operation that meets a failed room
 // fails with ErrServiceUnavailable, and the transaction rolls back. A write whose room fails
 // after it opened fails at its next append, the point from which its advisory lock holds off
-// any eviction until it ends (applyLive): its slot is on the failed room, which neither the
-// reloaded room's settlement nor its next writer sees.
+// any eviction until it ends (recordLiveOperation): its slot is on the failed room, which neither
+// the reloaded room's settlement nor its next writer sees.
 //
 // The write's actor, who made its content changes, is credited to the room once the transaction
 // commits (Ledger.Commit), never while it may still roll back.
@@ -103,13 +103,21 @@ type liveWrite struct {
 	// appends it makes store nothing ahead of themselves.
 	storeAhead   func(ctx context.Context, tx pgx.Tx) error
 	storingAhead bool
+	// marginRooms names, for each of updates, the room document a margin write's fork was
+	// warm-built from (applyMargin), held weakly as forkedFrom is: its publish tags the update
+	// margin-only when it reaches that same room instance (liveWriteOrigin.marginOnly). It is the
+	// zero pointer for every other update, and for a margin write made on a cold fork, which no
+	// room was behind. recordLiveOperation appends it beside the update, so the two never fall
+	// out of step.
+	marginRooms []weak.Pointer[crdt.Doc]
 	// tree and markdown are the document as this transaction's latest operation left it,
-	// rendered once by that operation (applyLive) for the version its transaction may write, and
-	// offsets each identified block's byte range in markdown from that same render.
-	// forkLive drops them whenever the fork they describe moves, so while tree is set markdown is
-	// also the rendering of the fork as the transaction's next operation finds it: that operation
-	// takes it as its rendering before it applies, known without rendering the fork again
-	// (applyLive).
+	// rendered once for the version its transaction may write - by applyLive, or by a margin
+	// write (applyMargin) that found none kept - and offsets each identified block's byte range
+	// in markdown from that same render. A later margin write, which leaves the fragment they
+	// describe as it was, reuses them rather than rendering again. forkLive drops them whenever
+	// the fork they describe moves, so while tree is set markdown is also the rendering of the
+	// fork as the transaction's next operation finds it: that operation takes it as its rendering
+	// before it applies, known without rendering the fork again (applyLive).
 	tree     *pmdoc.Node
 	markdown string
 	offsets  []pmdoc.BlockOffset
@@ -146,13 +154,14 @@ type liveWrite struct {
 	// commit the same way (Ledger.creditRooms, roomState.registerCarriedAskAuthors) rather than
 	// written into the room's own bookkeeping as soon as the stamp runs: a write refused after the
 	// stamp but before commit (growth, a later validation failure) must not leave the room
-	// holding a trace of it. applyLive's own defer clears all three maps whenever its one
-	// operation changed the fork but was never recorded - the same guard that drops the fork's
-	// rendering - so a growth-refused edit's own stamp never reaches Ledger.creditRooms. That defer
-	// runs per applyLive call, so it does not distinguish this call's own stamp from an earlier,
-	// already-recorded call's on the same liveWrite; no production caller invokes ApplyOps or
-	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
-	// calls never share one liveWrite today, and a future one that did would need its own guard.
+	// holding a trace of it. liveOperation.abandon, which applyLive and applyMargin both defer,
+	// clears all three maps whenever its one operation changed the fork but was never recorded -
+	// the same guard that drops the fork's rendering - so a growth-refused edit's own stamp never
+	// reaches Ledger.creditRooms. It runs per operation, so it does not distinguish this
+	// operation's own stamp from an earlier, already-recorded one's on the same liveWrite; no
+	// production caller invokes ApplyOps or ReplaceText more than once per Join (every api/ call
+	// site joins once per request), so two calls never share one liveWrite today, and a future
+	// one that did would need its own guard.
 	credits    map[string]model.Actor
 	creditedBy map[string]persistence.Version
 	actor      *model.Actor
@@ -207,6 +216,23 @@ type liveWriteOrigin struct {
 	slot      *suppressSlot
 	rendering publishedRendering
 	inRoom    bool
+	// marginOnly says the update is a margin write (applyMargin) whose fork was warm-built from
+	// the very room document it is applied to, so it cannot change the document's XML fragment
+	// and the room's update observer keeps the rendering it has rather than rendering the
+	// replica again (renderedReplica.observe). The fork was room instance R's whole state, its
+	// delete set included, plus the transaction's earlier updates, which publishLiveWrite
+	// publishes into R before this one, in order, stopping at the first that fails. ygo encodes
+	// every update with the whole delete set of the document it was made on (sjawhar/ygo
+	// crdt/update.go, buildDeleteSet), so every delete the margin update carries is already in R
+	// but the marks map value it replaced, and every struct it adds is an item of the marks map.
+	// The replica is R as of the commit before this one (the update log's order), so neither the
+	// fragment nor its rendering can move. A margin write made on a cold fork is never tagged: its
+	// room stood behind the durable head, and the store it forked holds another process's deletes
+	// R lacks, which the update carries in. Nor is one published into a room replaced or reloaded
+	// since its fork, which can lack deletes the fork held (a browser update whose append failed).
+	// It is set inside the publish's Apply, against the document the update reaches, beside
+	// inRoom (publishLiveUpdate).
+	marginOnly bool
 }
 
 // publishedRendering is one operation's rendering of the fork it left, kept for the room's update
@@ -1064,7 +1090,7 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 		}
 	} else {
 		for index, update := range write.updates {
-			err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], write.renderings[index])
+			err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], write.renderings[index], write.marginRooms[index])
 			if err == nil {
 				continue
 			}
@@ -1199,14 +1225,20 @@ func (s *Service) lostAtStoredHead(ctx context.Context, rooms Queryer, write *li
 // The origin carries rendering, the operation's own rendering of what the update leaves, and
 // inRoom, set where the update reaches the room instance and before it is applied: whether that
 // instance's load already held the update's version (roomInstance.loadedHead). The room's update
-// observer classifies the update by either when it can (renderedReplica.changedBy).
-func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, rendering publishedRendering) error {
+// observer classifies the update by either when it can (renderedReplica.changedBy). marginRoom is
+// the room document a margin write's fork was warm-built from, or the zero pointer
+// (liveWrite.marginRooms): the update is tagged margin-only when the document it reaches is that
+// one (liveWriteOrigin.marginOnly).
+func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc]) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &liveWriteOrigin{slot: slot, rendering: rendering}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		instance := s.instanceOf(doc)
 		origin.inRoom = instance != nil && int64(version) <= instance.loadedHead
+		// Tagged against the document Apply hands here, not the one the room held when the
+		// publish began (liveWriteOrigin.marginOnly).
+		origin.marginOnly = marginRoom.Value() == doc
 		if instance != nil {
 			instance.hold.add(int64(version))
 			// The room takes the update this version is stored at, here, where it reaches the
@@ -1252,7 +1284,7 @@ func (s *Service) finishLiveWrite(write *liveWrite) {
 	}
 	write.finished = true
 	write.releaseFork()
-	write.updates, write.renderings = nil, nil
+	write.updates, write.renderings, write.marginRooms = nil, nil, nil
 	state := write.state
 	state.mu.Lock()
 	state.liveWriter = nil

@@ -49,6 +49,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -1727,7 +1728,7 @@ func typeAtEnd(editor *docstest.Peer, text string) error {
 	fragment := editor.Doc.GetXmlFragment("prosemirror")
 	missing := false
 	if _, err := editor.Send(func(txn *crdt.Transaction) {
-		paragraph := docstest.FirstText(fragment)
+		paragraph := crafted.FirstText(fragment)
 		if paragraph == nil {
 			missing = true
 			return
