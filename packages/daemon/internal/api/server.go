@@ -111,11 +111,12 @@ type Options struct {
 	// before release_children applies its view of a child (the daemon's prepareObserved, handed the
 	// child as Dispatch's detail shows it, intake.ObservedIssue). Nil prepares nothing.
 	PrepareRepository func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	// RepositoryHeld says whether the daemon holds an issue whose apply found its repository left
-	// out by a failed GitHub App installation read, while that repository is still unread: the
-	// daemon records it itself once GitHub answers (the daemon's repositoryHeld). release_children
-	// answers such a child released, with nothing for its architect to retry. Nil holds none.
-	RepositoryHeld func(key string) bool
+	// RepositoryUnread says whether a repository is left out for now because its GitHub App
+	// installation read failed (the daemon's repositoryUnread): the daemon recovers the issues on
+	// it from Dispatch's listing once GitHub answers. release_children answers a todo child on one,
+	// under a recorded parent, released, and one whose parent is unrecorded and on such a
+	// repository, or itself on one, REPOSITORY_READ_FAILED naming it. Nil leaves none out.
+	RepositoryUnread func(resolved string) bool
 	// RoleFor is the role that works a phase (the daemon's workflow.RoleFor, handed in because the
 	// workflow's tests import this package). The operator's retry of a failed phase worker applies
 	// its issue's held phase only when that phase's role is the claim's (retryClaim); nil retries no
@@ -179,7 +180,7 @@ type server struct {
 	pool         *pgxpool.Pool
 	handlers     []intake.Handler
 	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	held         func(key string) bool
+	unread       func(resolved string) bool
 	roleFor      func(phase.Phase) claim.Role
 	records      record.Store
 	dispatch     dispatch.Client
@@ -224,7 +225,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
 		prepare:            opts.PrepareRepository,
-		held:               opts.RepositoryHeld,
+		unread:             opts.RepositoryUnread,
 		roleFor:            opts.RoleFor,
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,

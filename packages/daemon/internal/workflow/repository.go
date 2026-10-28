@@ -26,8 +26,8 @@ type Repositories interface {
 // it, with GitHubRepo, GitHub's spelling of Repo that Envoy's event subjects carry, or Refusal, why
 // it does not. LeftOut is a mapped repository Legion leaves out, for a GitHub App not installed on
 // it or, with Unread, for now, because GitHub did not answer its installation read; Refusal names
-// which. An Unread issue is not refused but held: the daemon admits it itself once the repository
-// is served, so RefuseRecording says nothing on it.
+// which. An Unread issue is not refused but left: RefuseRecording says nothing on it, and the
+// daemon takes it from Dispatch's listing once GitHub answers for the repository (its recovery).
 type Resolution struct {
 	Repo          string
 	DefaultBranch string
@@ -77,16 +77,11 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // resolved, resolves to none or to one Legion does not serve (refused). It says it once per
 // resolution (record.RepoNote), so a repeated event of the issue says nothing again, and reports
 // whether it said it now. A child's refusal is also told to its tree's architect (refuseChild). An
-// Unread resolution says nothing, to the issue or to an architect: it hands the issue to the
-// daemon's hold (Config.HoldUnread) once the fact commits, and the daemon admits it once GitHub
-// answers for its repository, with nothing for anyone to move. The hold is made here, where the
-// fact applies, rather than where it was prepared, so every apply that finds the repository unread
-// leaves the issue held, whatever the mapping was when the event was prepared.
+// Unread resolution says nothing, to the issue or to an architect, and keeps nothing: the daemon
+// recovers the issue from Dispatch's listing once GitHub answers for its repository, with nothing
+// for anyone to move.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
 	if refused.Unread {
-		if hold := e.cfg.HoldUnread; hold != nil {
-			intake.OnCommit(ctx, func() { hold(key, resolved) })
-		}
 		return false, nil
 	}
 	note := "Legion did not admit this issue: " + refused.Refusal + ". Set its repository (" + setRepositoryHint + ") and move it to todo again."

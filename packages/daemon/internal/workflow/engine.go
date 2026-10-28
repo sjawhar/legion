@@ -55,11 +55,6 @@ type Config struct {
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
 	Repositories Repositories
-	// HoldUnread is told, once its fact commits, of each issue the workflow did not record because
-	// its repository resolved Unread (left out for now, GitHub not answering its installation read):
-	// the daemon holds it and admits it once the repository is served (its holdForRead). Nil holds
-	// none.
-	HoldUnread func(key, resolved string)
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.

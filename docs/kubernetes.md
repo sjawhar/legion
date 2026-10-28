@@ -5355,11 +5355,12 @@ issue's pod (every role of it alike) and the image probe's.
   with the App it lacks; a repository whose installation read fails (any failure but GitHub's
   answer, an installation or a 404, a read longer than 15 s included; each read is bounded on its
   own, never the check as a whole, so a slow GitHub that answers is served) is left out for now,
-  named under `repositories.refused` with the App, the repository and the failure; an issue
-  handed to Legion on it, by a live event, in the boot's listing or by `release_children`, is
-  held in the daemon rather than refused, its event acknowledged, nothing said on it, and
-  admitted, parents first (a child whose Dispatch parent is unrecorded stays held until the
-  parent is recorded), once the repository is served, and the mapping is read again, 30 s
+  named under `repositories.refused` with the App, the repository and the failure; an event of
+  an issue on it is applied and acknowledged with nothing said on it and nothing kept, and once
+  GitHub answers, the daemon recovers the repository: one read of Dispatch's project listing,
+  applied as the boot applies it, to the unrecorded issues on it or under a parent on it (a
+  labelled root admitted, a child of a live tree recorded under it, parents first, a person's
+  issue left as it is), tried again on a failed listing; the mapping is read again, 30 s
   doubling to 10 min, until GitHub answers, then the repository is served with no restart (a
   served repository whose read fails stays served on its last answer, with the name and default
   branch GitHub last gave it and no further read of GitHub, and is read again the same way); a project

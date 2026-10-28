@@ -47,17 +47,18 @@ the issue to `todo` again admits it. A repository whose installation GitHub does
 (any failure but a 404, a read longer than 15 seconds included) is left out for now the same way,
 its refusal naming the App, the repository and GitHub's failure, and the daemon reads the mapping
 again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, then serves it with no
-restart. An issue handed to Legion on it meanwhile, one the boot finds waiting in `todo`, or a
-child `release_children` releases is held by the daemon rather than refused: nothing is said on
-it, its event does not hold up any other issue's admission, and it is admitted, parents before
-children, once the repository is served, with no one moving it; a child whose Dispatch parent is
-not recorded yet stays held until the parent is recorded, since Legion records a child only under
-a recorded parent. `release_children` answers such a child released, with nothing for the
-architect to retry, while the repository is still unread and the child's parent is recorded or
-held the same way (once the repository is served, the release records the child itself; under a
-parent neither recorded nor held it answers `CHILD_NOT_RECORDED`, as for a served repository). A
-held issue is held in memory, and a restart's boot listing holds it again. A hold that cannot be
-drained (its Dispatch read or apply keeps failing) is retried 30 seconds doubling to 10 minutes.
+restart. While it is left out, an event of an issue on it is applied and acknowledged with
+nothing said on it and nothing kept, so it holds up no other issue's admission. Once GitHub answers
+for the repository, the daemon recovers it: it reads Dispatch's project listing once and applies
+it as its boot does, to the issues it does not record that are on that repository, or under a
+parent on it. Each ends where its events would have ended had the repository been served: a
+labelled root is admitted, a child of a live tree is recorded under it, parents before children,
+and a person's issue is left as it is, with no one moving anything. A recovery whose listing fails
+is tried again, 30 seconds doubling to 10 minutes; a restart's boot listing is that recovery.
+While the repository is unread, `release_children` answers a todo child on it released, with
+nothing for the architect to retry, when the child's parent is recorded (the recovery records the
+child), and `REPOSITORY_READ_FAILED` naming the repository when the parent is not recorded and the
+child's or the parent's repository is unread: the architect releases it again once GitHub answers.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

@@ -93,17 +93,17 @@ func (i *installations) reads(key string) int {
 }
 
 // mappingDispatch is a Dispatch whose repository mapping is mappings, whose project listing is
-// listed, and whose issue detail is issues' entry for a key it names, the embedded issue for any
-// other. reading, when set, answers the next read of its key in issues' place, once, run with no
-// lock held: what a read sees while something else happens during it.
+// listed (counted in listings, its next listFailures reads failing), and whose issue detail is
+// issues' entry for a key it names, the embedded issue for any other.
 type mappingDispatch struct {
 	outboxDispatch
-	mu       sync.Mutex
-	mappings []dispatch.RepoProject
-	listed   []dispatch.IssueSummary
-	issues   map[string]dispatch.Issue
-	reading  map[string]func() dispatch.Issue
-	err      error
+	mu           sync.Mutex
+	mappings     []dispatch.RepoProject
+	listed       []dispatch.IssueSummary
+	listings     int
+	listFailures int
+	issues       map[string]dispatch.Issue
+	err          error
 }
 
 func (d *mappingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
@@ -115,18 +115,25 @@ func (d *mappingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProj
 func (d *mappingDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.listings++
+	if d.listFailures > 0 {
+		d.listFailures--
+		return nil, &dispatch.TransientError{Err: errors.New("Dispatch answered 502 to the listing")}
+	}
 	return append([]dispatch.IssueSummary{}, d.listed...), nil
+}
+
+// listingCount is how many project listings were asked of d.
+func (d *mappingDispatch) listingCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.listings
 }
 
 func (d *mappingDispatch) GetIssue(ctx context.Context, key string) (dispatch.Issue, error) {
 	d.mu.Lock()
-	read, hooked := d.reading[key]
-	delete(d.reading, key)
 	issue, named := d.issues[key]
 	d.mu.Unlock()
-	if hooked {
-		return read(), nil
-	}
 	if named {
 		return issue, nil
 	}
@@ -255,22 +262,6 @@ func TestEachInstallationReadIsBoundedOnItsOwn(t *testing.T) {
 	accepted, refused, err = checkMapping(context.Background(), mappings[:1], "LEGION", &installations{delay: 150 * time.Millisecond})
 	if err != nil || len(accepted) != 0 || len(refused) != 1 || !errors.Is(refused[0].readErr, context.DeadlineExceeded) {
 		t.Fatalf("checkMapping of a read longer than installReadAttempt = %#v, %#v, %v; want it refused for now as a failed read", accepted, refused, err)
-	}
-}
-
-// release_children's answer for a child the daemon holds (repositoryHeld) is held only while the
-// hold's repository is still unread: once a read of the mapping serves it, the hold is no answer,
-// and the release records the child itself rather than leave it to the next drain.
-func TestAHoldIsAnAnswerOnlyWhileItsRepositoryIsUnread(t *testing.T) {
-	w := &workflowRuntime{repositories: newRepositories("LEGION"), log: quietLogger()}
-	w.repositories.set(nil, []refusedRepository{{Repo: "zeta/tools", Reason: "could not be read", readErr: errors.New("GitHub answered 502")}})
-	w.holdForRead("LEGION-209", "zeta/tools")
-	if !w.repositoryHeld("LEGION-209") {
-		t.Fatal("LEGION-209 not held while zeta/tools is unread")
-	}
-	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, nil)
-	if w.repositoryHeld("LEGION-209") {
-		t.Fatal("LEGION-209 answered held once zeta/tools is served, want the release to record it")
 	}
 }
 

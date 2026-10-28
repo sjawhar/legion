@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,71 +142,118 @@ func TestWaveReleaseNamesTheRepositoryReadThatFailed(t *testing.T) {
 	}
 }
 
-// A todo child the daemon holds because its repository's GitHub App installation read failed
-// (Options.RepositoryHeld) is released, neither started nor held on a link, and answered OK with no
-// retry asked of the architect: the daemon records it under the tree itself once GitHub answers.
-// Answered CHILD_NOT_RECORDED, the release left the child to the architect's retry, with a notice
-// once the retries ran out, though Dispatch sends no event for a status the child already has. A
-// held child whose Dispatch parent is neither recorded nor held is still answered
-// CHILD_NOT_RECORDED: the daemon, too, records a child only under a recorded parent, so the
-// architect's retry once the parent is recorded is what records it.
-func TestWaveReleaseAnswersAChildHeldForItsRepositorysReadReleased(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		underUnrecorded bool
-	}{
-		{"under the recorded root", false},
-		{"under a parent neither recorded nor held", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t)
-			records := record.NewStore()
-			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			statuses := &statusRecorder{}
-			root, middle, child := "LEGION-208", "LEGION-210", "LEGION-209"
-			h.handler = NewServer("127.0.0.1", 8437, Options{
-				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-				Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-				Handlers: []intake.Handler{engine}, Dispatch: statuses,
-				PrepareRepository: func(_ context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
-					issue.ResolvedRepo = "zeta/tools"
-					return issue, nil
-				},
-				RepositoryHeld: func(key string) bool { return key == child },
-			}).Handler
-			h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
-			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-				return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
-			}); err != nil {
-				t.Fatalf("seed the live tree: %v", err)
-			}
-			parent := root
-			statuses.issues = map[string]dispatch.Issue{root: {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"}}
-			if tc.underUnrecorded {
-				parent = middle
-				statuses.issues[middle] = dispatch.Issue{Key: middle, ResolvedRepo: "zeta/tools", Title: middle, Status: "triage", Parent: &root, LastSeq: 2}
-			}
-			statuses.issues[child] = dispatch.Issue{Key: child, ResolvedRepo: "zeta/tools", Title: "the child", Status: "todo", Parent: &parent, LastSeq: 7}
-			architect := newLiveClaim(t, h, root, claim.RoleArchitect)
-			recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil)
-			if recordedChild(t, h, child) != nil {
-				t.Fatal("the held child was recorded, want none until the daemon admits it")
-			}
-			if tc.underUnrecorded {
-				assertFailure(t, recorder, http.StatusConflict, "CHILD_NOT_RECORDED")
-				return
-			}
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("wave release of a held child = %d: %s, want it released", recorder.Code, recorder.Body)
-			}
-			var answer WaveReleaseResponse
-			if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
-				t.Fatal(err)
-			}
-			if len(answer.Released) != 1 || answer.Released[0] != child || len(answer.Started) != 0 || len(answer.Held) != 0 {
-				t.Fatalf("wave release = %+v, want %s released, neither started nor held on a link", answer, child)
-			}
-		})
+// unreadRepositories serves every repository testRepositories serves, and zeta/tools at main
+// unless unread is set, while it answers zeta/tools as the daemon does a repository whose GitHub
+// App installation read failed: left out for now (workflow.Resolution.Unread).
+type unreadRepositories struct{ unread *atomic.Bool }
+
+func (r unreadRepositories) ResolveRepository(resolved string) (workflow.Resolution, error) {
+	if resolved != "zeta/tools" {
+		return testRepositories.ResolveRepository(resolved)
+	}
+	if r.unread.Load() {
+		return workflow.Resolution{Refusal: "the implement App's installation on zeta/tools could not be read: GitHub answered 502; Legion reads it again", LeftOut: true, Unread: true}, nil
+	}
+	return workflow.Resolution{Repo: resolved, DefaultBranch: "main", GitHubRepo: resolved}, nil
+}
+
+// While a repository's GitHub App installation read fails, release_children answers a todo child
+// on it by what the daemon will do once GitHub answers and it recovers the repository's issues from
+// Dispatch's listing. Under the recorded root, the child is answered released, neither started nor
+// held, since that recovery records it under the root. Under a parent that is not recorded, on
+// that repository, it is answered REPOSITORY_READ_FAILED naming the repository, as often as the
+// architect asks, with no release-retry record and no notice: CHILD_NOT_RECORDED's few quick
+// retries would run out in seconds of an outage and tell the architect the parent never reached
+// the daemon. Once GitHub answers and the parent is recorded, the architect's retry records the
+// child and answers it released.
+func TestWaveReleaseAnswersAChildOnAnUnreadRepositoryByWhatItsRecoveryWillDo(t *testing.T) {
+	h := newHarness(t)
+	records := record.NewStore()
+	var unread atomic.Bool
+	unread.Store(true)
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: unreadRepositories{&unread}, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	statuses := &statusRecorder{}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+		Handlers: []intake.Handler{engine}, Dispatch: statuses,
+		RepositoryUnread: func(resolved string) bool { return resolved == "zeta/tools" && unread.Load() },
+	}).Handler
+	root, child, middle, grandchild := "LEGION-208", "LEGION-209", "LEGION-210", "LEGION-211"
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
+	}); err != nil {
+		t.Fatalf("seed the live tree: %v", err)
+	}
+	statuses.issues = map[string]dispatch.Issue{
+		root:       {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		child:      {Key: child, ResolvedRepo: "zeta/tools", Title: child, Status: "todo", Parent: &root, LastSeq: 7},
+		middle:     {Key: middle, ResolvedRepo: "zeta/tools", Title: middle, Status: "todo", Parent: &root, LastSeq: 3},
+		grandchild: {Key: grandchild, ResolvedRepo: "zeta/tools", Title: grandchild, Status: "todo", Parent: &middle, LastSeq: 5},
+	}
+	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
+	release := func(key string) *httptest.ResponseRecorder {
+		t.Helper()
+		return h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{key}}, nil)
+	}
+	released := func(recorder *httptest.ResponseRecorder, key string) {
+		t.Helper()
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("wave release of %s = %d: %s, want it released", key, recorder.Code, recorder.Body)
+		}
+		var answer WaveReleaseResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+			t.Fatal(err)
+		}
+		if len(answer.Released) != 1 || answer.Released[0] != key || len(answer.Held) != 0 {
+			t.Fatalf("wave release = %+v, want %s released and held on no link", answer, key)
+		}
+	}
+	retryRow := func(key string) bool {
+		t.Helper()
+		var row *record.ReleaseRetry
+		if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+			var err error
+			row, err = records.ReleaseRetry(context.Background(), tx, key)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return row != nil
+	}
+
+	released(release(child), child)
+	if recordedChild(t, h, child) != nil {
+		t.Fatalf("%s recorded while zeta/tools is unread, want it left for the recovery", child)
+	}
+	for range 5 {
+		recorder := release(grandchild)
+		body := recorder.Body.String()
+		assertFailure(t, recorder, http.StatusBadGateway, "REPOSITORY_READ_FAILED")
+		if !strings.Contains(body, "zeta/tools is left out for now") {
+			t.Fatalf("the answer %s does not name zeta/tools", body)
+		}
+	}
+	if retryRow(grandchild) || recordedChild(t, h, grandchild) != nil {
+		t.Fatalf("%s has a release-retry record %t or a record, want neither while zeta/tools is unread", grandchild, retryRow(grandchild))
+	}
+	if rows := outboxRows(t, h, root); rows["notice"] != 0 {
+		t.Fatalf("notices to %s's architect = %d, want none", root, rows["notice"])
+	}
+
+	// GitHub answers: the recovery records the parent, as its listing does; the retry records the
+	// grandchild.
+	unread.Store(false)
+	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "daemon", "recovery-"+middle, intake.ObservedIssue(statuses.issues[middle]), engine); err != nil {
+		t.Fatal(err)
+	}
+	if recordedChild(t, h, middle) == nil {
+		t.Fatalf("%s not recorded under %s", middle, root)
+	}
+	released(release(grandchild), grandchild)
+	if got := recordedChild(t, h, grandchild); got == nil || got.Tree != root {
+		t.Fatalf("%s = %+v after the retry, want it recorded in %s's tree", grandchild, got, root)
 	}
 }
 

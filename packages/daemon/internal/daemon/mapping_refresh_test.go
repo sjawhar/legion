@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,7 +96,10 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	}
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: "LEGION", installs: installs,
 		repositories: newRepositories("LEGION"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
-		mappingChanged: make(chan struct{}, 1), holdWake: make(chan struct{}, 1)}
+		mappingChanged: make(chan struct{}, 1)}
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	w.engine, w.admission = engine, admit.New(w.records, engine, 3, "LEGION", quietLogger())
+	w.handlers = []intake.Handler{w.engine, w.admission}
 	for _, opt := range opts {
 		opt(w)
 	}
@@ -120,14 +124,11 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	return w, client, installs, stream, js
 }
 
-// rigWorkflow is the rig's engine and admission (of cap), wired to the rig's runtime as the boot
-// wires the daemon's: the engine holds an issue whose repository resolves unread in w
-// (holdForRead), and w's own applies run through both.
-func rigWorkflow(w *workflowRuntime, cap int) (*workflow.Engine, *admit.Admission) {
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, HoldUnread: w.holdForRead, DesignGate: config.DesignGateOff}, quietLogger())
-	admission := admit.New(w.records, engine, cap, "LEGION", quietLogger())
-	w.engine, w.admission, w.handlers = engine, admission, []intake.Handler{engine, admission}
-	return engine, admission
+// rigHandlers is the rig's engine and admission (of three slots), wired to the rig's runtime as the
+// boot wires the daemon's before the refresher starts, so w's own applies and recoveries run
+// through both.
+func rigHandlers(w *workflowRuntime) (*workflow.Engine, *admit.Admission) {
+	return w.engine, w.admission
 }
 
 // prepareAsDelivered prepares fact as the Dispatch consumer does, delivering it again after a
@@ -732,10 +733,11 @@ func repositoryNotes(t *testing.T, w *workflowRuntime, key string) []string {
 
 // A repository whose installation read failed at boot is read again of the daemon's own, with no
 // mapping change, until GitHub answers; it is then served as a mapping change's read serves it,
-// GitHub intake hearing it, with no restart. An issue handed to Legion on it meanwhile is held,
-// not refused, and admitted on it once it is served. A served repository whose read fails stays
-// served on its last answer and holds nothing else back; once GitHub answers for it too, the
-// daemon stops reading again.
+// GitHub intake hearing it, with no restart. An issue handed to Legion on it meanwhile is not
+// refused and nothing is said on it; once the repository is served, the daemon recovers it from
+// Dispatch's listing and admits it on it. A served repository whose read fails stays served on its
+// last answer and holds nothing else back; once GitHub answers for it too, the daemon stops
+// reading again.
 func TestARepositoryWhoseInstallationReadFailedIsServedOnceARetryReadsIt(t *testing.T) {
 	ctx := context.Background()
 	quickInstallReads(t)
@@ -753,8 +755,11 @@ func TestARepositoryWhoseInstallationReadFailedIsServedOnceARetryReadsIt(t *test
 		t.Fatal("zeta/tools served while its read still fails")
 	}
 
-	engine, admission := rigWorkflow(w, 1)
+	engine, admission := rigHandlers(w)
 	client.issue = dispatch.Issue{Key: "LEGION-301", Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 1}
+	client.mu.Lock()
+	client.listed = []dispatch.IssueSummary{{Key: "LEGION-301", Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 1}}
+	client.mu.Unlock()
 	fact := intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
 	prepared, err := w.prepareRepository(ctx, fact)
 	if err != nil {
@@ -762,9 +767,6 @@ func TestARepositoryWhoseInstallationReadFailedIsServedOnceARetryReadsIt(t *test
 	}
 	if _, err := intake.ApplyFact(ctx, w.pool, "test", "todo-1", prepared, engine, admission); err != nil {
 		t.Fatal(err)
-	}
-	if !w.repositoryHeld("LEGION-301") {
-		t.Fatal("LEGION-301 is not held for zeta/tools' read after its apply")
 	}
 	if got := recordedIssue(t, w, "LEGION-301"); got != nil {
 		t.Fatalf("LEGION-301 recorded as %+v while zeta/tools' read fails", got)
@@ -790,10 +792,7 @@ func TestARepositoryWhoseInstallationReadFailedIsServedOnceARetryReadsIt(t *test
 		return got != nil && got.Repo == "zeta/tools"
 	})
 	if notes := repositoryNotes(t, w, "LEGION-301"); len(notes) != 0 {
-		t.Fatalf("notes on LEGION-301 = %q, want none: it was held, then admitted", notes)
-	}
-	if w.repositoryHeld("LEGION-301") {
-		t.Fatal("LEGION-301 still held once admitted")
+		t.Fatalf("notes on LEGION-301 = %q, want none: it was left, then recovered", notes)
 	}
 
 	installs.setFailing(nil, "review acme/widgets")
@@ -829,16 +828,16 @@ func TestANotInstalledRepositoryStaysLeftOutWithNoReadAgain(t *testing.T) {
 }
 
 // A labelled todo root the boot's listing shows on a repository whose installation read failed is
-// held as its live event is, not refused: no note is said on it, and once a read again serves the
-// repository the root is admitted on it with no person's move. A root on a repository GitHub says
-// lacks an App is refused at boot with its note, as before.
+// not refused: no note is said on it, and once a read again serves the repository the daemon
+// recovers it from Dispatch's listing and admits it on it with no person's move. A root on a
+// repository GitHub says lacks an App is refused at boot with its note, as before.
 func TestABootListingsRootOnARepositoryWhoseReadFailedIsAdmittedOnceItIsServed(t *testing.T) {
 	ctx := context.Background()
 	quickInstallReads(t)
 	installs := &installations{missing: map[string]bool{"review acme/widgets": true}}
 	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
 	w, client, installs, _ := mappingRigWith(t, installs)
-	rigWorkflow(w, 2)
+	rigHandlers(w)
 	w.bootID = "listing-boot"
 	client.mu.Lock()
 	client.listed = []dispatch.IssueSummary{
@@ -868,8 +867,8 @@ func TestABootListingsRootOnARepositoryWhoseReadFailedIsAdmittedOnceItIsServed(t
 	if notes := repositoryNotes(t, w, "LEGION-401"); len(notes) != 0 {
 		t.Fatalf("notes on LEGION-401 = %q, want none: it was held, then admitted", notes)
 	}
-	if held := w.heldForReadReasons(); len(held) != 0 {
-		t.Fatalf("issues still held = %q, want none", held)
+	if waiting := w.recoveringReasons(); len(waiting) != 0 {
+		t.Fatalf("repositories still to recover = %q, want none", waiting)
 	}
 	if got := recordedIssue(t, w, "LEGION-402"); got != nil {
 		t.Fatalf("LEGION-402 recorded as %+v, want it left refused", got)
@@ -888,19 +887,19 @@ func within(bound time.Duration, condition func() bool) bool {
 }
 
 // A live admission event of an issue on a repository whose installation read failed is
-// acknowledged and held in the daemon, not left on the stream: the Dispatch consumer reaches the
-// position the boot's admission waits for, so a root on a served repository, which the boot's
-// listing held for that position, is admitted while the failing repository still fails, and the
-// held issue is admitted once GitHub answers for its repository, with no note on it. Held on the
-// stream, the event kept the consumer's acknowledgement floor below the boot's target, and no
-// root of the boot's listing was admitted on any repository until the failing one healed.
-func TestAHeldEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *testing.T) {
+// acknowledged, not left on the stream: the Dispatch consumer reaches the position the boot's
+// admission waits for, so a root on a served repository, which the boot's listing held for that
+// position, is admitted while the failing repository still fails, and the issue is recovered once
+// GitHub answers for its repository, with no note on it. Left on the stream, the event kept the
+// consumer's acknowledgement floor below the boot's target, and no root of the boot's listing was
+// admitted on any repository until the failing one healed.
+func TestAnUnreadEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *testing.T) {
 	ctx := context.Background()
 	quickInstallReads(t)
 	installs := &installations{}
 	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
 	w, client, installs, _, js := mappingRigJS(t, installs)
-	engine, admission := rigWorkflow(w, 2)
+	engine, admission := rigHandlers(w)
 	w.bootID, w.holdPollInterval = "held-event-boot", 10*time.Millisecond
 	failing, served := dispatch.Issue{Key: "LEGION-501", ResolvedRepo: "zeta/tools", Title: "LEGION-501", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1},
 		dispatch.Issue{Key: "LEGION-502", ResolvedRepo: "acme/widgets", Title: "LEGION-502", Status: "todo", Rank: "B", HandedOver: true, LastSeq: 1}
@@ -936,9 +935,6 @@ func TestAHeldEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *tes
 	if got := recordedIssue(t, w, failing.Key); got != nil {
 		t.Fatalf("%s recorded as %+v while zeta/tools' read fails", failing.Key, got)
 	}
-	if !w.repositoryHeld(failing.Key) {
-		t.Fatalf("%s is not held for zeta/tools' read", failing.Key)
-	}
 	if notes := repositoryNotes(t, w, failing.Key); len(notes) != 0 {
 		t.Fatalf("notes on %s = %q while it is held, want none", failing.Key, notes)
 	}
@@ -948,9 +944,6 @@ func TestAHeldEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *tes
 		got := recordedIssue(t, w, failing.Key)
 		return got != nil && got.Repo == "zeta/tools"
 	})
-	if notes := repositoryNotes(t, w, failing.Key); len(notes) != 0 {
-		t.Fatalf("notes on %s = %q, want none: it was held, then admitted", failing.Key, notes)
-	}
 }
 
 // A served repository kept on its last answer, its installation read failing, is kept with the
@@ -989,18 +982,17 @@ func TestAServedRepositoryKeptOnItsLastAnswerHoldsNoOtherRepositoryBack(t *testi
 	}
 }
 
-// Held issues are admitted parents first, as the boot listing's are: a child under a child of a
-// live tree, both held for their repository's installation read, is recorded under the tree once
-// GitHub answers, whatever order their keys sort in (LEGION-100 sorts before LEGION-99). The
-// workflow records a child only under a recorded parent, so a child admitted before its parent was
-// recorded nowhere and never held again.
-func TestHeldChildrenAreAdmittedParentsFirst(t *testing.T) {
+// A repository's recovery records its children parents first, as the boot listing does: a child
+// under a child of a live tree, both on a repository whose read failed, is recorded under the tree
+// once GitHub answers, whatever order their keys sort in (LEGION-100 sorts before LEGION-99) or
+// the listing's: the workflow records a child only under a recorded parent.
+func TestARecoveryRecordsChildrenParentsFirst(t *testing.T) {
 	ctx := context.Background()
 	quickInstallReads(t)
 	installs := &installations{}
 	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
 	w, client, installs, _ := mappingRigWith(t, installs)
-	engine, admission := rigWorkflow(w, 1)
+	engine, admission := rigHandlers(w)
 	w.bootID = "parents-first-boot"
 	root := dispatch.Issue{Key: "LEGION-98", ResolvedRepo: "acme/widgets", Title: "root", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}
 	parent := dispatch.Issue{Key: "LEGION-99", ResolvedRepo: "zeta/tools", Title: "parent", Status: "todo", Rank: "B", Parent: new(root.Key), LastSeq: 1}
@@ -1080,70 +1072,161 @@ func applyTodo(t *testing.T, w *workflowRuntime, engine *workflow.Engine, admiss
 	}
 }
 
-// An issue held for its repository's installation read that a person moves out of todo and back
-// while a drain reads it stays held: the drain reads the older status (backlog) and lets go only
-// the hold it read, not the one the issue's new todo event made meanwhile, so the issue is admitted
-// once its repository is served. A drain that let go of whatever hold the key had left the issue
-// held by nothing, labelled todo in Dispatch and never admitted.
-func TestAHoldMadeAgainWhileADrainReadsTheIssueOutlivesThatRead(t *testing.T) {
-	quickInstallReads(t)
-	installs := &installations{}
-	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
-	w, client, installs, _ := mappingRigWith(t, installs)
-	engine, admission := rigWorkflow(w, 1)
-	const key = "LEGION-601"
-	todo := dispatch.Issue{Key: key, ResolvedRepo: "zeta/tools", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}
-	client.mu.Lock()
-	client.issues = map[string]dispatch.Issue{key: todo}
-	client.mu.Unlock()
-	applyTodo(t, w, engine, admission, key, "zeta/tools", 1)
-	if !w.repositoryHeld(key) {
-		t.Fatalf("%s not held for zeta/tools' read", key)
+// show makes Dispatch show each of issues as it is, in its issue detail and in the project's
+// listing, in place of what it showed of the same key.
+func (d *mappingDispatch) show(issues ...dispatch.Issue) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.issues == nil {
+		d.issues = map[string]dispatch.Issue{}
 	}
-	var bounced atomic.Bool
-	client.mu.Lock()
-	client.reading = map[string]func() dispatch.Issue{key: func() dispatch.Issue {
-		// While the drain reads the issue, the person moves it to backlog and back to todo: the
-		// drain is answered the backlog, and the todo event at sequence 3 is applied meanwhile.
-		backlog := todo
-		backlog.Status, backlog.LastSeq = "backlog", 2
-		again := todo
-		again.LastSeq = 3
-		client.mu.Lock()
-		client.issues[key] = again
-		client.mu.Unlock()
-		applyTodo(t, w, engine, admission, key, "zeta/tools", 3)
-		bounced.Store(true)
-		return backlog
-	}}
-	client.mu.Unlock()
-	testwait.Eventually(t, "a drain read "+key+" while it bounced", bounced.Load)
-	time.Sleep(10 * installReadRetry.Max)
-	if !w.repositoryHeld(key) {
-		t.Fatalf("%s let go by the drain that read it in backlog, though its todo event held it again meanwhile", key)
-	}
-	installs.setFailing(nil, "implement zeta/tools")
-	if !within(10*time.Second, func() bool { return recordedIssue(t, w, key) != nil }) {
-		t.Fatalf("%s = %+v once zeta/tools is served, held %t; want it admitted", key, recordedIssue(t, w, key), w.repositoryHeld(key))
+	for _, issue := range issues {
+		d.issues[issue.Key] = issue
+		summary := dispatch.IssueSummary{Key: issue.Key, Title: issue.Title, Status: issue.Status, Parent: issue.Parent, Rank: issue.Rank,
+			HandedOver: issue.HandedOver, LastSeq: issue.LastSeq, ResolvedRepo: issue.ResolvedRepo}
+		d.listed = slices.DeleteFunc(d.listed, func(listed dispatch.IssueSummary) bool { return listed.Key == issue.Key })
+		d.listed = append(d.listed, summary)
 	}
 }
 
-// An event prepared while its repository was refused for a missing App (no hold at preparation)
-// whose apply, after a read of the mapping, finds the repository unread is held all the same: the
-// hold is made where the fact applies, so the issue, with nothing said on it, is admitted once
-// GitHub answers. Held only at preparation, the apply said nothing and held nothing, and the issue
-// was never admitted.
-func TestAnApplyThatFindsItsRepositoryUnreadHoldsTheIssue(t *testing.T) {
+// deliver shows issue in Dispatch and delivers its event, at its sequence, as the Dispatch consumer
+// prepares and applies one through w's handlers.
+func deliver(t *testing.T, w *workflowRuntime, client *mappingDispatch, issue dispatch.Issue) {
+	t.Helper()
+	client.show(issue)
+	fact := intake.DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Type: "issue.updated", Status: issue.Status, Title: issue.Title, Rank: issue.Rank,
+		Parent: parentKey(issue.Parent), HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+	prepared, err := prepareAsDelivered(t, w, fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := intake.ApplyFact(context.Background(), w.pool, "test", fmt.Sprintf("%s-%s-%d", issue.Key, issue.Status, issue.LastSeq), prepared, w.handlers...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// issue is a Dispatch issue key on repo in status, labelled for Legion when handed, under parent
+// ("" for none), at sequence seq.
+func issue(key, repo, status string, handed bool, parent string, seq int64) dispatch.Issue {
+	shown := dispatch.Issue{Key: key, ResolvedRepo: repo, Title: key, Status: status, Rank: "A" + key, HandedOver: handed, LastSeq: seq}
+	if parent != "" {
+		shown.Parent = new(parent)
+	}
+	return shown
+}
+
+// liveRoot admits key as a labelled todo root on served acme/widgets, so its tree is live.
+func liveRoot(t *testing.T, w *workflowRuntime, client *mappingDispatch, key string) {
+	t.Helper()
+	deliver(t, w, client, issue(key, "acme/widgets", "todo", true, "", 1))
+	if recordedIssue(t, w, key) == nil {
+		t.Fatalf("%s not admitted on acme/widgets", key)
+	}
+}
+
+// rowCount is the number of rows query counts in w's database.
+func rowCount(t *testing.T, w *workflowRuntime, query string) int {
+	t.Helper()
+	var n int
+	if err := w.pool.QueryRow(context.Background(), query).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// serveAndRecover lets GitHub answer zeta/tools' implement App read again and waits until the
+// daemon serves zeta/tools and has nothing left to recover.
+func serveAndRecover(t *testing.T, w *workflowRuntime, installs *installations) {
+	t.Helper()
+	installs.setFailing(nil, "implement zeta/tools")
+	testwait.Eventually(t, "zeta/tools served and recovered", func() bool {
+		return served(w, "zeta/tools") && len(w.recoveringReasons()) == 0
+	})
+}
+
+// A repository whose installation read fails at boot is recovered once GitHub answers for it: the
+// boot's listing admits a root on a served repository while it fails, and once it is served the
+// daemon takes the issues on it from Dispatch's listing once, as the boot would have had it been
+// served: a labelled root admitted, a child of a live tree and that child's own child recorded
+// under the tree, and a person's sub-issue under a person's epic left as it is. After that the
+// daemon reads nothing more and applies nothing more, and tells the controller nothing. The
+// per-issue hold kept the person's sub-issue held for good, reading and applying it at every
+// read of the mapping.
+func TestARepositoryUnreadAtBootIsRecoveredOnceServed(t *testing.T) {
 	ctx := context.Background()
+	quickInstallReads(t)
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	rigHandlers(w)
+	w.bootID = "recovery-boot"
+	const tree, root, child, grandchild, epic, sub = "LEGION-1000", "LEGION-1001", "LEGION-1002", "LEGION-1003", "LEGION-1004", "LEGION-1005"
+	client.show(
+		issue(tree, "acme/widgets", "todo", true, "", 1),
+		issue(root, "zeta/tools", "todo", true, "", 1),
+		issue(child, "zeta/tools", "todo", false, tree, 1),
+		issue(grandchild, "zeta/tools", "todo", false, child, 1),
+		issue(epic, "zeta/tools", "in_progress", false, "", 1),
+		issue(sub, "zeta/tools", "todo", false, epic, 1),
+	)
+	if err := w.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if recordedIssue(t, w, tree) == nil {
+		t.Fatalf("%s on served acme/widgets not admitted while zeta/tools' read fails", tree)
+	}
+	for _, key := range []string{root, child, grandchild, epic, sub} {
+		if got := recordedIssue(t, w, key); got != nil {
+			t.Fatalf("%s recorded as %+v while zeta/tools' read fails", key, got)
+		}
+	}
+	notices := rowCount(t, w, "select count(*) from outbox where kind = 'controller_notice'")
+
+	serveAndRecover(t, w, installs)
+	if recordedIssue(t, w, root) == nil {
+		t.Fatalf("%s, a labelled root on zeta/tools, not admitted once zeta/tools is served", root)
+	}
+	for _, key := range []string{child, grandchild} {
+		if got := recordedIssue(t, w, key); got == nil || got.Tree != tree {
+			t.Fatalf("%s = %+v once zeta/tools is served, want it recorded in %s's tree", key, got, tree)
+		}
+	}
+	for _, key := range []string{epic, sub} {
+		if got := recordedIssue(t, w, key); got != nil {
+			t.Fatalf("%s, a person's issue, recorded as %+v, want it left as it is", key, got)
+		}
+	}
+	listings, reads := client.listingCount(), installs.reads("implement zeta/tools")
+	facts := rowCount(t, w, "select count(*) from processed_events")
+	time.Sleep(10 * installReadRetry.Max)
+	if got := client.listingCount(); got != listings {
+		t.Fatalf("Dispatch listed %d times more once recovered, want none", got-listings)
+	}
+	if got := installs.reads("implement zeta/tools"); got != reads {
+		t.Fatalf("zeta/tools read %d times more once recovered, want none", got-reads)
+	}
+	if got := rowCount(t, w, "select count(*) from processed_events"); got != facts {
+		t.Fatalf("%d more facts applied once recovered, want none", got-facts)
+	}
+	if got := rowCount(t, w, "select count(*) from outbox where kind = 'controller_notice'"); got != notices {
+		t.Fatalf("%d controller notices queued by the recovery, want none", got-notices)
+	}
+}
+
+// Events applied while a repository's read fails say nothing and keep nothing, and the recovery
+// once it is served ends each issue where its events would have, had it been served: a root handed
+// over during the outage is admitted; one moved back to backlog during it is not, and its later
+// move to todo admits it once; one whose event was prepared while GitHub said an App was missing
+// and applied after the read failed is admitted too.
+func TestEventsDuringAnOutageEndWhereTheyWouldHaveServed(t *testing.T) {
 	quickInstallReads(t)
 	installs := &installations{missing: map[string]bool{"review zeta/tools": true}}
 	w, client, installs, _ := mappingRigWith(t, installs)
-	engine, admission := rigWorkflow(w, 1)
-	const key = "LEGION-701"
-	client.mu.Lock()
-	client.issues = map[string]dispatch.Issue{key: {Key: key, ResolvedRepo: "zeta/tools", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}}
-	client.mu.Unlock()
-	prepared, err := prepareAsDelivered(t, w, intake.DispatchIssue{Key: key, Seq: 1, Status: "todo", Title: key, Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"})
+	rigHandlers(w)
+	const handed, withdrawn, prepared404 = "LEGION-1100", "LEGION-1101", "LEGION-1102"
+	z := issue(prepared404, "zeta/tools", "todo", true, "", 1)
+	client.show(z)
+	prepared, err := prepareAsDelivered(t, w, intake.DispatchIssue{Key: z.Key, Seq: 1, Status: "todo", Title: z.Title, Rank: z.Rank, HandedOver: true, ResolvedRepo: "zeta/tools"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1152,143 +1235,190 @@ func TestAnApplyThatFindsItsRepositoryUnreadHoldsTheIssue(t *testing.T) {
 	installs.mu.Unlock()
 	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
 	read := w.requestMappingRead()
-	testwait.Eventually(t, "the read of the mapping after zeta/tools' read failed", func() bool { return w.mappingApplied.Load() >= read })
+	testwait.Eventually(t, "the read that finds zeta/tools unread", func() bool { return w.mappingApplied.Load() >= read })
 	if _, _, _, unread := w.repositories.lookup("zeta/tools"); !unread {
 		t.Fatal("zeta/tools is not unread after the read whose installation read failed")
 	}
-	if _, err := intake.ApplyFact(ctx, w.pool, "test", key+"-todo-1", prepared, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(context.Background(), w.pool, "test", z.Key+"-todo-1", prepared, w.handlers...); err != nil {
 		t.Fatal(err)
 	}
-	if got := recordedIssue(t, w, key); got != nil {
-		t.Fatalf("%s recorded as %+v while zeta/tools' read fails", key, got)
+	deliver(t, w, client, issue(handed, "zeta/tools", "todo", true, "", 1))
+	deliver(t, w, client, issue(withdrawn, "zeta/tools", "todo", true, "", 1))
+	deliver(t, w, client, issue(withdrawn, "zeta/tools", "backlog", true, "", 2))
+	for _, key := range []string{handed, withdrawn, prepared404} {
+		if got := recordedIssue(t, w, key); got != nil {
+			t.Fatalf("%s recorded as %+v while zeta/tools' read fails", key, got)
+		}
 	}
-	if notes := repositoryNotes(t, w, key); len(notes) != 0 {
-		t.Fatalf("notes on %s = %q, want none: it is held", key, notes)
+
+	serveAndRecover(t, w, installs)
+	for _, key := range []string{handed, prepared404} {
+		if recordedIssue(t, w, key) == nil {
+			t.Fatalf("%s not admitted once zeta/tools is served", key)
+		}
 	}
-	if !w.repositoryHeld(key) {
-		t.Fatalf("%s not held after an apply that found zeta/tools unread", key)
+	if got := recordedIssue(t, w, withdrawn); got != nil {
+		t.Fatalf("%s, moved to backlog during the outage, recorded as %+v", withdrawn, got)
 	}
-	installs.setFailing(nil, "implement zeta/tools")
-	if !within(10*time.Second, func() bool { return recordedIssue(t, w, key) != nil }) {
-		t.Fatalf("%s not admitted once zeta/tools is served", key)
+	deliver(t, w, client, issue(withdrawn, "zeta/tools", "todo", true, "", 3))
+	if got := recordedIssue(t, w, withdrawn); got == nil || got.LastDispatchSeq != 3 {
+		t.Fatalf("%s = %+v after its move to todo, want it admitted at that move", withdrawn, got)
+	}
+	for _, key := range []string{handed, withdrawn, prepared404} {
+		if notes := repositoryNotes(t, w, key); len(notes) != 0 {
+			t.Fatalf("notes on %s = %q, want none", key, notes)
+		}
 	}
 }
 
-// liveRoot admits key as a labelled todo root on served acme/widgets, so its tree is live.
-func liveRoot(t *testing.T, w *workflowRuntime, client *mappingDispatch, engine *workflow.Engine, admission *admit.Admission, key string) {
-	t.Helper()
-	client.mu.Lock()
-	if client.issues == nil {
-		client.issues = map[string]dispatch.Issue{}
-	}
-	client.issues[key] = dispatch.Issue{Key: key, ResolvedRepo: "acme/widgets", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}
-	client.mu.Unlock()
-	applyTodo(t, w, engine, admission, key, "acme/widgets", 1)
-	if recordedIssue(t, w, key) == nil {
-		t.Fatalf("%s not admitted on acme/widgets", key)
-	}
-}
-
-// A held child whose Dispatch parent is not recorded stays held through a drain that applies it
-// once its repository is served: that apply records nothing, since the workflow records a child
-// only under a recorded parent, and Dispatch, already showing the child todo, sends no event once
-// the parent is recorded. So the drain after the parent's record admits it. A drain that let the
-// child go on that empty apply left it unrecorded with nothing to record it.
-func TestAHeldChildUnderAnUnrecordedParentStaysHeldUntilItsParentIsRecorded(t *testing.T) {
+// A child on a served repository under a parent on a repository whose read fails, the parent a todo
+// child of a live tree, is recovered with its parent: the child's own event recorded nothing, its
+// parent then unrecorded, and the recovery records both, parent first. The per-issue hold held
+// only the parent, and the child, already todo in Dispatch, was never recorded.
+func TestAChildOnAServedRepositoryUnderAnUnreadParentIsRecovered(t *testing.T) {
 	quickInstallReads(t)
 	installs := &installations{}
 	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
 	w, client, installs, _ := mappingRigWith(t, installs)
-	engine, admission := rigWorkflow(w, 1)
-	const root, parent, child = "LEGION-900", "LEGION-901", "LEGION-902"
-	liveRoot(t, w, client, engine, admission, root)
-	client.mu.Lock()
-	client.issues[parent] = dispatch.Issue{Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "triage", Rank: "B", Parent: new(root), LastSeq: 1}
-	client.issues[child] = dispatch.Issue{Key: child, ResolvedRepo: "zeta/tools", Title: child, Status: "todo", Rank: "C", Parent: new(parent), LastSeq: 1}
-	client.mu.Unlock()
-	prepared, err := w.prepareRepository(context.Background(), intake.DispatchIssue{Key: child, Seq: 1, Status: "todo", Title: child, Rank: "C", Parent: parent, ResolvedRepo: "zeta/tools"})
-	if err != nil {
-		t.Fatal(err)
+	rigHandlers(w)
+	const root, parent, child = "LEGION-1200", "LEGION-1201", "LEGION-1202"
+	liveRoot(t, w, client, root)
+	deliver(t, w, client, issue(parent, "zeta/tools", "todo", false, root, 1))
+	deliver(t, w, client, issue(child, "acme/widgets", "todo", false, parent, 1))
+	for _, key := range []string{parent, child} {
+		if got := recordedIssue(t, w, key); got != nil {
+			t.Fatalf("%s recorded as %+v while zeta/tools' read fails", key, got)
+		}
 	}
-	if _, err := intake.ApplyFact(context.Background(), w.pool, "test", child+"-todo-1", prepared, engine, admission); err != nil {
-		t.Fatal(err)
-	}
-	if !w.isHeld(child) {
-		t.Fatalf("%s not held for zeta/tools' read", child)
-	}
-
-	installs.setFailing(nil, "implement zeta/tools")
-	testwait.Eventually(t, "zeta/tools served", func() bool { return served(w, "zeta/tools") })
-	time.Sleep(10 * installReadRetry.Max)
-	if recordedIssue(t, w, child) != nil || !w.isHeld(child) {
-		t.Fatalf("%s recorded %v, held %t under its unrecorded parent; want it held, unrecorded", child, recordedIssue(t, w, child) != nil, w.isHeld(child))
-	}
-	client.mu.Lock()
-	client.issues[parent] = dispatch.Issue{Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "todo", Rank: "B", Parent: new(root), LastSeq: 2}
-	client.mu.Unlock()
-	parentTodo, err := prepareAsDelivered(t, w, intake.DispatchIssue{Key: parent, Seq: 2, Status: "todo", Title: parent, Rank: "B", Parent: root, ResolvedRepo: "acme/widgets"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := intake.ApplyFact(context.Background(), w.pool, "test", parent+"-todo-2", parentTodo, engine, admission); err != nil {
-		t.Fatal(err)
-	}
-	if recordedIssue(t, w, parent) == nil {
-		t.Fatalf("%s not recorded under %s", parent, root)
-	}
-	if !within(10*time.Second, func() bool { got := recordedIssue(t, w, child); return got != nil && got.Tree == root }) {
-		t.Fatalf("%s = %+v once its parent is recorded, held %t; want it recorded in %s's tree", child, recordedIssue(t, w, child), w.isHeld(child), root)
+	serveAndRecover(t, w, installs)
+	for _, key := range []string{parent, child} {
+		if got := recordedIssue(t, w, key); got == nil || got.Tree != root {
+			t.Fatalf("%s = %+v once zeta/tools is served, want it recorded in %s's tree", key, got, root)
+		}
 	}
 }
 
-// The drain's apply of a held issue is a fact of its own each attempt: a fact id an earlier boot's
-// drain already applied (processed_events outlives a restart) is never reused, so the apply runs
-// and records the issue. Named by the issue and its Dispatch sequence alone, it was a duplicate
-// after the restart, ran no handler, and its hold went with nothing recorded.
-func TestADrainAfterARestartAppliesTheHeldIssueAfresh(t *testing.T) {
+// A recovery whose read of Dispatch's listing fails stays to recover, and is tried again on the
+// refresher's backoff: the next listing records the issue, and none is read after it.
+func TestARecoveryWhoseListingFailsIsTriedAgain(t *testing.T) {
+	quickInstallReads(t)
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	rigHandlers(w)
+	const key = "LEGION-1300"
+	deliver(t, w, client, issue(key, "zeta/tools", "todo", true, "", 1))
+	client.mu.Lock()
+	client.listFailures = 1
+	client.mu.Unlock()
+	serveAndRecover(t, w, installs)
+	if recordedIssue(t, w, key) == nil {
+		t.Fatalf("%s not admitted by the recovery's second listing", key)
+	}
+	time.Sleep(10 * installReadRetry.Max)
+	if got := client.listingCount(); got != 2 {
+		t.Fatalf("Dispatch listed %d times, want two: the failed listing and the one that recovered", got)
+	}
+}
+
+// A recovery while the Dispatch consumer is behind the stream holds its listing as the boot's is,
+// and admits the root once the consumer catches up, once; a second recovery in the same boot, on a
+// stream the consumer has caught up with, admits at once.
+func TestARecoveryWhileTheConsumerIsBehindAdmitsOnceItCatchesUp(t *testing.T) {
 	ctx := context.Background()
 	quickInstallReads(t)
 	installs := &installations{}
 	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
-	w, client, installs, _ := mappingRigWith(t, installs)
-	engine, admission := rigWorkflow(w, 1)
-	const key = "LEGION-950"
-	// An earlier boot's drain applied this issue's view at sequence 1 under the old id.
-	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", "held-for-read:"+key+":1", intake.DaemonBooted{Boot: 1},
-		applyFunc(func(context.Context, pgx.Tx, intake.Fact) (intake.Result, error) { return intake.Result{}, nil })); err != nil {
+	w, client, installs, _, js := mappingRigJS(t, installs)
+	engine, admission := rigHandlers(w)
+	w.bootID, w.holdPollInterval = "behind-boot", 10*time.Millisecond
+	const first, second, unrelated = "LEGION-1400", "LEGION-1401", "LEGION-1499"
+	client.show(issue(first, "zeta/tools", "todo", true, "", 1), issue(unrelated, "acme/widgets", "backlog", false, "", 1))
+	repo := "acme/widgets"
+	if _, err := js.Publish(ctx, "notifications.dispatch.issue."+unrelated+".issue.updated",
+		retainedIssueEnvelope(t, unrelated, 1499, 1, "backlog", map[string]string{"kind": "user", "id": "a-person"}, &repo)); err != nil {
 		t.Fatal(err)
 	}
-	client.mu.Lock()
-	client.issues = map[string]dispatch.Issue{key: {Key: key, ResolvedRepo: "zeta/tools", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}}
-	client.mu.Unlock()
-	applyTodo(t, w, engine, admission, key, "zeta/tools", 1)
-	if !w.isHeld(key) {
-		t.Fatalf("%s not held for zeta/tools' read", key)
+	serveAndRecover(t, w, installs)
+	if !admission.Held() || recordedIssue(t, w, first) != nil {
+		t.Fatalf("admission held %t, %s recorded %t; want the recovery held for the consumer behind the stream", admission.Held(), first, recordedIssue(t, w, first) != nil)
 	}
-	installs.setFailing(nil, "implement zeta/tools")
-	if !within(10*time.Second, func() bool { return recordedIssue(t, w, key) != nil }) {
-		t.Fatalf("%s not admitted once zeta/tools is served, held %t", key, w.isHeld(key))
+	run, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- w.consumers.Run(run, w.pool, engine, admission) }()
+	polled := make(chan struct{})
+	go func() { w.pollHoldRelease(run); close(polled) }()
+	t.Cleanup(func() { cancel(); <-done; <-polled })
+	testwait.Eventually(t, first+" admitted once the consumer caught up", func() bool { return recordedIssue(t, w, first) != nil })
+	if n := rowCount(t, w, "select count(*) from slots where issue = '"+first+"'"); n != 1 {
+		t.Fatalf("%s holds %d slots, want one", first, n)
 	}
+
+	// A served repository whose read fails is kept on its last answer, so the second outage is
+	// zeta/tools mapped again after a person unmapped it, while GitHub fails its read.
+	readMappingNow := func(what string, done func() bool) {
+		t.Helper()
+		read := w.requestMappingRead()
+		testwait.Eventually(t, what, func() bool { return w.mappingApplied.Load() >= read && done() })
+	}
+	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
+	readMappingNow("zeta/tools unmapped", func() bool {
+		_, refusal, leftOut, _ := w.repositories.lookup("zeta/tools")
+		return refusal != "" && !leftOut
+	})
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
+	readMappingNow("zeta/tools mapped again and unread", func() bool { _, _, _, unread := w.repositories.lookup("zeta/tools"); return unread })
+	client.show(issue(second, "zeta/tools", "todo", true, "", 1))
+	serveAndRecover(t, w, installs)
+	testwait.Eventually(t, second+" admitted by the second recovery", func() bool { return recordedIssue(t, w, second) != nil })
 }
 
-// A hold made while the refresher waits on nothing (its repository served, the last drain
-// finished) wakes it, so the issue is drained on the loop's first wait rather than left to the
-// next mapping change or boot.
-func TestAHoldMadeWhileTheRefresherIdlesIsDrained(t *testing.T) {
-	quickInstallReads(t)
-	w, client, _, _ := mappingRigWith(t, &installations{})
-	rigWorkflow(w, 1)
-	// The refresher finishes a read with nothing waiting, then idles on its next request.
-	read := w.requestMappingRead()
-	testwait.Eventually(t, "the refresher's read", func() bool { return w.mappingApplied.Load() >= read })
-	time.Sleep(10 * installReadRetry.Max)
-	const key = "LEGION-960"
-	client.mu.Lock()
-	client.issues = map[string]dispatch.Issue{key: {Key: key, ResolvedRepo: "zeta/tools", Title: key, Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}}
-	client.mu.Unlock()
-	// As an apply's commit hook that ran after the refresher's last drain does.
-	w.holdForRead(key, "zeta/tools")
-	if !within(10*time.Second, func() bool { return recordedIssue(t, w, key) != nil }) {
-		t.Fatalf("%s not admitted after its hold, held %t; want the hold to wake the refresher", key, w.isHeld(key))
+// The refresher reads the mapping again of its own while a repository's installation read fails, 30
+// s doubling to 10 min, and no more; once nothing waits it reads nothing of its own, and the next
+// failed read starts again at 30 s.
+func TestTheUnreadRepositoryBackoffDoublesToItsCapAndResets(t *testing.T) {
+	var mu sync.Mutex
+	var waits []time.Duration
+	var spin atomic.Bool
+	spin.Store(true)
+	fired := make(chan time.Time)
+	close(fired)
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w, _, installs, _ := mappingRigWith(t, installs, func(w *workflowRuntime) {
+		w.recheckAfter = func(d time.Duration) <-chan time.Time {
+			mu.Lock()
+			waits = append(waits, d)
+			mu.Unlock()
+			if spin.Load() {
+				return fired
+			}
+			return nil
+		}
+	})
+	rigHandlers(w)
+	recorded := func() []time.Duration {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(waits)
+	}
+	testwait.Eventually(t, "eight waits", func() bool { return len(recorded()) >= 8 })
+	spin.Store(false)
+	want := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute, 10 * time.Minute}
+	if got := recorded()[:8]; !slices.Equal(got, want) {
+		t.Fatalf("waits = %v, want %v", got, want)
+	}
+
+	installs.setFailing(nil, "implement zeta/tools")
+	w.requestMappingRead()
+	testwait.Eventually(t, "zeta/tools served and recovered", func() bool { return served(w, "zeta/tools") && len(w.recoveringReasons()) == 0 })
+	time.Sleep(100 * time.Millisecond)
+	idle := len(recorded())
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w.requestMappingRead()
+	testwait.Eventually(t, "a wait after zeta/tools' read fails again", func() bool { return len(recorded()) > idle })
+	if got := recorded()[idle]; got != 30*time.Second {
+		t.Fatalf("the first wait after the read failed again = %s, want 30s", got)
 	}
 }

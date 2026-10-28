@@ -407,13 +407,14 @@ const (
 // answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
 // retry applies the observation again once the parent is recorded. Its durable retry record bounds
 // attempts with exponential backoff; after the limit, it queues one notice to the tree architect
-// instead of asking an architect to retry forever. A child the apply did not record because its
-// repository's GitHub App installation read failed is held by the daemon (Options.RepositoryHeld,
-// asked only after the apply, and only while that repository is still unread), which records it
-// once GitHub answers: the release answers it released, neither started nor held, with nothing to
-// retry, but only while its Dispatch parent is recorded or held the same way, since the daemon too
-// records a child only under a recorded parent. Under a parent neither recorded nor held it is
-// answered CHILD_NOT_RECORDED, as on a served repository.
+// instead of asking an architect to retry forever. A child the apply did not record while a
+// repository is left out because its GitHub App installation read failed (Options.RepositoryUnread)
+// is answered by what the daemon will do once GitHub answers, when it recovers the repository's
+// issues from Dispatch's listing: under a recorded parent, on such a repository, it is answered
+// released, neither started nor held, since the recovery records it under that parent; under an
+// unrecorded parent, with its own or its parent's repository unread, REPOSITORY_READ_FAILED
+// naming the repository, with no retry record, since the outage outlasts CHILD_NOT_RECORDED's few
+// quick retries, whose last would tell the architect the parent never reached the daemon.
 func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree string, child dispatch.Issue) bool {
 	recorded, err := s.recordedIssue(r.Context(), child.Key)
 	if err != nil {
@@ -454,21 +455,33 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
 	parent := intake.ObservedIssue(child).Parent
-	if s.held != nil && s.held(child.Key) {
-		underParent := parent != "" && s.held(parent)
-		if !underParent && parent != "" {
-			above, err := s.recordedIssue(r.Context(), parent)
-			if err != nil {
-				writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", parent))
+	if s.unread != nil && parent != "" {
+		above, err := s.recordedIssue(r.Context(), parent)
+		if err != nil {
+			writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", parent))
+			return false
+		}
+		own := s.unread(observed.ResolvedRepo)
+		if above != nil && own {
+			s.log.Info("api: release_children's todo child waits for GitHub to answer its repository's installation read; the daemon records it then",
+				"issue", child.Key, "tree", tree, "repo", observed.ResolvedRepo)
+			return s.clearChildReleaseRetry(w, r, child.Key)
+		}
+		if above == nil {
+			unread := ""
+			if own {
+				unread = observed.ResolvedRepo
+			} else if s.dispatch != nil {
+				if up, err := s.dispatch.GetIssue(r.Context(), parent); err == nil && up.ResolvedRepo != "" && s.unread(up.ResolvedRepo) {
+					unread = up.ResolvedRepo
+				}
+			}
+			if unread != "" {
+				writeFailure(w, http.StatusBadGateway, "REPOSITORY_READ_FAILED", fmt.Sprintf(
+					"could not record %s: its parent %s is not recorded, and %s is left out for now because GitHub did not answer its App installation read; the daemon records both once GitHub answers; retry release_children then",
+					child.Key, parent, unread))
 				return false
 			}
-			underParent = above != nil
-		}
-		if underParent {
-			// Its repository's installation read failed: the daemon holds the child and records it
-			// under the tree once GitHub answers, so the release stands with nothing to retry.
-			s.log.Info("api: release_children's todo child is held until GitHub answers its repository's installation read", "issue", child.Key, "tree", tree)
-			return s.clearChildReleaseRetry(w, r, child.Key)
 		}
 	}
 	return s.scheduleChildReleaseRetry(w, r, tree, child, parent)
