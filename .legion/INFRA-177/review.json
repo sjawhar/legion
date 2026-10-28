@@ -2,20 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T12:54:08Z",
-  "round": 5,
-  "headReviewed": "da591f55b466bbdf3f12dd24b8f8595fc1d14e9b (code head f508510f50df; dc353901 and da591f55 add only .legion/INFRA-177/)",
-  "fingerprint": "changed by forward merges b72bb4a3 (main 460facf5) and f508510f (main 8dfaf3a7), per the comment of 2026-10-28, so a full round",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T14:58:37Z",
+  "round": 6,
+  "headReviewed": "fa54d71930de34da882f63a4a0119a9fec4530b8 (code head d0a5a0cafa83; 366909b6 and fa54d719 add only .legion/INFRA-177/)",
+  "fingerprint": "changed by forward merge d0a5a0ca (main adee0aba, conflicting commit #2436), per the comment of 2026-10-28T13:59Z, so a full round",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 2,
-  "code": "Both merges are sound: main's #2379 head runs, #2385 never-move-back fence and shared compare, and #2440 push bound are kept for review-App pushes; nothing of the handoff-only, forced or approval-carry code came back; every deleted main test pinned removed behaviour; READY's removed-.legion/ allowance holds through githubrest.ChangedFile.Status (ready_scope_test.go). Migration 0062_handoff_records follows main's 0061; recordsSchema 62 is pinned by test; Dispatch 0135; contract 41 (main 40). Every CHANGELOG.md equals main's; the pr2354-* fragments match their packages' diffs except envoy-client's.",
-  "ci": "Read 12:36Z at CI head f508510f (compare to da591f55: handoffsOnly true, 2 files): lint, typecheck, test and pr-title queued. The round-4 red (check_wake flake) passed on re-run (run 40542910070 attempt 2, per the implementer).",
-  "thermonuclear": "deep-review: Verdict APPROVE at da591f55 (3 Minor). code-quality: Verdict CHANGES at da591f55, all three findings cleanup or release notes, none correctness.",
+  "roundFiveFinding": "Fixed in d0a5a0ca: packages/envoy-client gains pr2354-Added-20261028-135519.yaml and pr2354-Changed-20261028-135521.yaml, both matching the package's diff.",
+  "code": "Merge d0a5a0ca keeps #2436 (synchronize sender, named moves, late-synchronize gap rules, pushOf by sender, Dropped warnings) with run and chain links limited to review-App pushes; nothing of the handoff-only, forced or approval-carry code came back; the one main test it deleted (TestAPushReplacesAnApprovalCarrierOfItsTwoHeads) pinned carrier replacement. The regenerated deploy_order_test.go digests were recomputed independently from main ec0263277, b5d2a262 and #2436's own trees, and a sparesAttempt mutation fails all twelve. Daemon 0062, Dispatch 0135 and contract 41 unchanged.",
+  "ci": "Read 14:58Z at CI head d0a5a0ca (compare to fa54d719: handoffsOnly true, 2 files): required lint, typecheck, test (run 40701047270) and pr-title (runs 40701574915, 40701523253) completed success. Required set re-read: lint, typecheck, test, pr-title.",
+  "thermonuclear": "deep-review: Verdict APPROVE at fa54d719 (no findings). code-quality: Verdict CHANGES at fa54d719, both findings cleanup-only, none correctness.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy-client/.changes/unreleased/", "description": "envoy-client changed (handoff-write/handoff-read in dispatch-execute.ts and dispatch-http.ts; the dispatch command acting as ENVOY_SESSION_ID ?? CLAUDE_CODE_SESSION_ID in dispatch-cli.ts; README) but has no pr2354 changie fragment, though it has a .changie.yaml and AGENTS.md's fragment rule asks one per changed package. Add an Added and a Changed fragment with `changie new --custom Issue=pr2354` (no Dispatch key), as the INFRA-138 architect asked."},
-    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "headPush (:166-182) has no caller after the merge took main's run-based advance and dropped HeadPushKnown. Fast-follow."},
-    {"severity": "minor", "file": "packages/daemon/internal/api/ready.go", "description": "unreviewedChange (:233-243) re-implements githubrest.ChangedPaths, which ready.go:177 already uses; filter removed .legion/ files, then use ChangedPaths. Fast-follow."}
-  ]
+    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "withPush (:967-969) is now a one-caller wrapper of append(clone(...)); inline it. Fast-follow."},
+    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "pathPlan's empty-path 'decides nothing' case (:169-177) is unreachable after the handoff rule went; return only planned and set decided = chained. Fast-follow."}
+  ],
+  "workspaceNote": "A go.work.sum change the review subagents' go test left in the working copy was abandoned before this handoff; it was not review work."
 }
