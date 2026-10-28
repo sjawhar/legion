@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -241,6 +242,17 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		}
 		return artifactUploadInput{}, false
 	}
+	// The parser spools a file part past a megabyte to a temporary file. net/http removes the
+	// files of the request it handed its handler, but this is a copy (the access log and the
+	// transaction tracking each wrap it with WithContext), so the server never sees them; left
+	// alone, every such upload kept its file on the pod's disk until the pod's ephemeral storage
+	// ran out. The content is read into memory below, so the files go when this returns, stored
+	// or refused.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("dispatch: remove a multipart upload's spooled files", "error", err)
+		}
+	}()
 	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
 		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false

@@ -386,11 +386,18 @@ type PullRequestOpened struct {
 func (PullRequestOpened) isFact() {}
 
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer
-// reads to fence stale observations and find its issue.
+// reads to fence stale observations and find its issue. Before is the head GitHub's synchronize
+// says the branch moved from, the move the head arrives by (classify.AdvancePullRequestHead):
+// empty from a listener that predates the field, and from the daemon's own read of the head
+// (daemon's followHead), which knows no move. Sender is the login of the account whose push moved
+// the branch (the webhook's sender), empty from a listener that predates the field and from the
+// daemon's own read.
 type PullRequestSynchronized struct {
 	Repo      string
 	Number    int
 	Branch    string
+	Before    string
+	Sender    string
 	HeadSHA   string
 	Body      string
 	UpdatedAt time.Time
@@ -577,6 +584,9 @@ type Push struct {
 	Forced *string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
+	// Sender is the login of the account that pushed (the webhook's sender), which a synchronize's
+	// sender names; empty from a listener that predates the field.
+	Sender string
 }
 
 func (Push) isFact() {}

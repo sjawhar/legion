@@ -835,8 +835,9 @@ real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, w
 inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
 box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
-`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
-`packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
+`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to the run's own copy of the
+claude-envoy plugin, which it builds from this checkout into its work directory
+(`packages/claude-envoy/scripts/build.ts --out`), with `dist/envoy-channel.js` and `legion/` fresh.
 Legion's role Apps resolve as Stage 3's do: the daemon runs `agent-secrets <implement App key> -- …`
 and `agent-secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
 `LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, so each key comes from
@@ -1968,8 +1969,9 @@ What the run touches, and nothing else:
 - `/tmp/verifiers-e2e` — the two built binaries, the boot logs, the refusal logs, the last response
   body, and the scratch `HOME` the binaries run under, so Dispatch's signing key never lands in the
   box's `~/.local/share/dispatch`. Recreated from empty each run.
-- the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
-  on ephemeral loopback ports.
+- the containers `verifiers-e2e-pg` (pgvector on PostgreSQL 18, the image CI's Dispatch service
+  runs, pinned by digest) and `verifiers-e2e-nats` (`nats:2.10 -js`), both on ephemeral loopback
+  ports.
 - two ports the kernel chose, one for `dispatch` and one for the listener, each held by
   [`lib/held-port.py`](#libheld-portpy) from that choice until its binary serves on it
   (`DISPATCH_LISTEN_FD`, `ENVOY_LISTEN_FD`). The boot refusals exit before any bind and get none.

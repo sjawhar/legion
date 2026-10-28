@@ -388,10 +388,10 @@ cd packages/envoy
 ```
 
 It prints the `DATABASE_URL` to use for development and tests. Run again, it starts or reuses the
-same `dispatch-pg` container. It refuses a `dispatch-pg` on any image but its pinned pgvector one,
-whose `vector` extension the migrations need, and prints the commands that move that container's
-data volume onto the pinned image. The database retains the migrated schema; tests only truncate
-rows they create.
+same `dispatch-pg` container, which runs its pinned image: pgvector on PostgreSQL 18, whose
+`vector` extension the migrations need. It refuses a `dispatch-pg` on any other image or major and
+prints the commands that dump that container's databases and restore them into a new container on
+the pinned image. The database retains the migrated schema; tests only truncate rows they create.
 
 
 ## Running locally
@@ -1410,7 +1410,7 @@ advisory locks (`pg_try_advisory_*` included) or `pg_sleep`, nor a function that
 given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`): `pgmigrate.Load` refuses a
 census naming any of them, bare or quoted and in any case, anywhere outside its comments and
 string literals, and refuses a Unicode escape (`U&"…"`, `U&'…'`) outright, since one can spell any
-name and no census needs it. `Load` finds the comments and literals as Postgres 16's lexer does
+name and no census needs it. `Load` finds the comments and literals as Postgres 18's lexer does
 (nested comments, `E'…'` escapes, continued and dollar-quoted literals), and the census runs with
 `standard_conforming_strings` on, so Postgres reads its literals the same way. Review is the
 control past that, since any non-zero integer a census answers is printed.
@@ -1728,7 +1728,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
 | `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
-| `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
+| `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
