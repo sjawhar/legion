@@ -47,39 +47,42 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 // A typed block's id is written so that Go and the browser editor's engine both read it back as
 // the tree holds it, whatever a browser's update set it to (TypedBlockIDAttribute): `#id` when the
 // editor's parser reads all of it as that shortcut and it holds no `&`, else `id="…"` with `&`,
-// `"`, line feeds and carriage returns as character references. U+0000 is written U+FFFD, as
-// markdown reads it (writeNulsAsReplacement).
+// `"`, line feeds and carriage returns as character references. The cases are the one table
+// @legion/contracts holds, so a client finding a block's opener in a version's markdown
+// (typedBlockIdAttribute) looks for the spelling the renderer wrote:
+// `testdata/typed-block-id-spellings.json` is generated from DISPATCH_TYPED_BLOCK_ID_SPELLINGS,
+// which `packages/contracts/src/dispatch-block-ref.test.ts` holds this file to. A typed block always
+// has an id, so the table's empty one, which the renderer refuses, is checked against the writer
+// alone. One case is this test's own: U+0000 is written U+FFFD, as markdown reads it
+// (writeNulsAsReplacement), so the id reads back with each U+0000 as U+FFFD.
 func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
-	cases := []struct{ id, opening, read string }{
-		{id: "callout-1", opening: "#callout-1"},
-		{id: "q:1", opening: "#q:1"},
-		{id: "décision", opening: "#décision"},
-		{id: "à", opening: "#à"},
-		{id: "a{b", opening: "#a{b"},
-		{id: `a\b`, opening: `#a\b`},
-		{id: "a\u00a0b", opening: "#a\u00a0b"},
-		{id: "a\u2028b", opening: "#a\u2028b"},
-		{id: "a b", opening: `id="a b"`},
-		{id: " a ", opening: `id=" a "`},
-		{id: "a\tb", opening: "id=\"a\tb\""},
-		{id: "a.b", opening: `id="a.b"`},
-		{id: "a#b", opening: `id="a#b"`},
-		{id: "a}b", opening: `id="a}b"`},
-		{id: `a"b`, opening: `id="a&#x22;b"`},
-		{id: `a\"b`, opening: `id="a\&#x22;b"`},
-		{id: "a'b", opening: `id="a'b"`},
-		{id: "a<b>=`c`", opening: "id=\"a<b>=`c`\""},
-		{id: "R&D", opening: `id="R&amp;D"`},
-		{id: "&amp;", opening: `id="&amp;amp;"`},
-		{id: "x\ny", opening: `id="x&#xA;y"`},
-		{id: "x\r\ny", opening: `id="x&#xD;&#xA;y"`},
-		{id: "c\x00d", opening: "#c\uFFFDd", read: "c\uFFFDd"},
+	raw, err := os.ReadFile("testdata/typed-block-id-spellings.json")
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	var rows []struct {
+		ID      string `json:"id"`
+		Written string `json:"written"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the shared typed block id table is empty")
+	}
+	type readBack struct{ id, opening, read string }
+	cases := []readBack{{id: "c\x00d", opening: "#c\uFFFDd", read: "c\uFFFDd"}}
+	for _, row := range rows {
+		if row.ID == "" {
+			if written := TypedBlockIDAttribute(row.ID); written != row.Written {
+				t.Errorf("TypedBlockIDAttribute(%q) = %q, want %q", row.ID, written, row.Written)
+			}
+			continue
+		}
+		cases = append(cases, readBack{id: row.ID, opening: row.Written, read: row.ID})
 	}
 	markdowns := make([]string, len(cases))
 	for index, test := range cases {
-		if test.read == "" {
-			cases[index].read = test.id
-		}
 		markdowns[index] = mustRender(t, &Node{Type: "doc", Children: []*Node{{
 			Type:     "callout",
 			Attrs:    Attrs{BlockIDAttr: test.id, "kind": "note", "title": ""},
@@ -109,33 +112,6 @@ func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
 		}
 		if id := engine.Children[0].Attrs[BlockIDAttr]; id != test.read {
 			t.Errorf("id %q: the engine reads %q with the id %q, want %q", test.id, markdowns[index], id, test.read)
-		}
-	}
-}
-
-// A typed block's id is written the way the one table @legion/contracts holds says, so a client
-// finding a block's opener in a version's markdown (typedBlockIdAttribute) looks for the spelling
-// the renderer wrote: `testdata/typed-block-id-spellings.json` is generated from
-// DISPATCH_TYPED_BLOCK_ID_SPELLINGS, which `packages/contracts/src/dispatch-block-ref.test.ts`
-// holds this file to.
-func TestTypedBlockIDAttributeWritesTheSharedTable(t *testing.T) {
-	raw, err := os.ReadFile("testdata/typed-block-id-spellings.json")
-	if err != nil {
-		t.Fatalf("read table: %v", err)
-	}
-	var rows []struct {
-		ID      string `json:"id"`
-		Written string `json:"written"`
-	}
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		t.Fatalf("parse table: %v", err)
-	}
-	if len(rows) == 0 {
-		t.Fatal("the shared typed block id table is empty")
-	}
-	for _, row := range rows {
-		if written := TypedBlockIDAttribute(row.ID); written != row.Written {
-			t.Errorf("TypedBlockIDAttribute(%q) = %q, want %q", row.ID, written, row.Written)
 		}
 	}
 }

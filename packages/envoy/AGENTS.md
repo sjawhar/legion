@@ -1718,8 +1718,9 @@ the fixture generator reads that checked-in file. A typed block is CommonMark ge
 syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
 The renderer writes the id so that both parsers read it back as the tree holds it, whatever id a
 browser set (`pmdoc.TypedBlockIDAttribute`): `#block-id` when the browser editor's parser reads
-all of it as that shortcut and it holds no `&` - no space, tab or line ending, `"`, `#`, `'`, `.`,
-`<`, `=`, `>`, backtick or `}` ends it - and `id="…"` otherwise, its `&`, `"`, line feeds and
+all of it as that shortcut and it holds no `&` - no space, tab or line ending, `#`, `.` or `}`,
+which end the shortcut, and no `"`, `'`, `<`, `=`, `>` or backtick, which make the editor read
+the line as no directive - and `id="…"` otherwise, its `&`, `"`, line feeds and
 carriage returns written as character references (`a b` is written `id="a b"`, `q:1` `#q:1`); a
 U+0000 is written U+FFFD, as markdown reads it. Both parsers read either form, `id="…"` with its
 character references decoded and no backslash escape. Go refuses what the browser editor would

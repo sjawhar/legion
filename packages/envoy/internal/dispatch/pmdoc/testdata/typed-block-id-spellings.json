@@ -12,6 +12,10 @@
     "written": "#décision"
   },
   {
+    "id": "à",
+    "written": "#à"
+  },
+  {
     "id": "a{b",
     "written": "#a{b"
   },
@@ -24,6 +28,10 @@
     "written": "#a b"
   },
   {
+    "id": "a b",
+    "written": "#a b"
+  },
+  {
     "id": "a　b",
     "written": "#a　b"
   },
@@ -34,6 +42,10 @@
   {
     "id": "a b",
     "written": "id=\"a b\""
+  },
+  {
+    "id": " a ",
+    "written": "id=\" a \""
   },
   {
     "id": "a\tb",
@@ -72,12 +84,24 @@
     "written": "id=\"a`b\""
   },
   {
+    "id": "a<b>=`c`",
+    "written": "id=\"a<b>=`c`\""
+  },
+  {
     "id": "a\"b",
     "written": "id=\"a&#x22;b\""
   },
   {
+    "id": "a\\\"b",
+    "written": "id=\"a\\&#x22;b\""
+  },
+  {
     "id": "R&D",
     "written": "id=\"R&amp;D\""
+  },
+  {
+    "id": "&amp;",
+    "written": "id=\"&amp;amp;\""
   },
   {
     "id": "x&amp;y",

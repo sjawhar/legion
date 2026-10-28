@@ -335,7 +335,7 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly { value: string; ok: boolea
  * Go's reader refuses one holding `&`, so the two never read one back alike. Go's twin is
  * `pmdoc.typedBlockIDShortcutExcluded`.
  */
-export const TYPED_BLOCK_ID_SHORTCUT_EXCLUDED = "\t\n\r \"#&'.<=>`}";
+const TYPED_BLOCK_ID_SHORTCUT_EXCLUDED = "\t\n\r \"#&'.<=>`}";
 
 /**
  * How a typed block's opening line writes the block's id, as Go's renderer
@@ -364,12 +364,15 @@ export const DISPATCH_TYPED_BLOCK_ID_SPELLINGS: readonly { id: string; written: 
   { id: "callout-1", written: "#callout-1" },
   { id: "q:1", written: "#q:1" },
   { id: "décision", written: "#décision" },
+  { id: "à", written: "#à" },
   { id: "a{b", written: "#a{b" },
   { id: "a\\b", written: "#a\\b" },
   { id: "a\u00a0b", written: "#a\u00a0b" },
+  { id: "a\u2028b", written: "#a\u2028b" },
   { id: "a\u3000b", written: "#a\u3000b" },
   { id: "a\uFFFDb", written: "#a\uFFFDb" },
   { id: "a b", written: 'id="a b"' },
+  { id: " a ", written: 'id=" a "' },
   { id: "a\tb", written: 'id="a\tb"' },
   { id: "a.b", written: 'id="a.b"' },
   { id: "a#b", written: 'id="a#b"' },
@@ -379,8 +382,11 @@ export const DISPATCH_TYPED_BLOCK_ID_SPELLINGS: readonly { id: string; written: 
   { id: "a=b", written: 'id="a=b"' },
   { id: "a>b", written: 'id="a>b"' },
   { id: "a`b", written: 'id="a`b"' },
+  { id: "a<b>=`c`", written: 'id="a<b>=`c`"' },
   { id: 'a"b', written: 'id="a&#x22;b"' },
+  { id: 'a\\"b', written: 'id="a\\&#x22;b"' },
   { id: "R&D", written: 'id="R&amp;D"' },
+  { id: "&amp;", written: 'id="&amp;amp;"' },
   { id: "x&amp;y", written: 'id="x&amp;amp;y"' },
   { id: "x\ny", written: 'id="x&#xA;y"' },
   { id: "x\ry", written: 'id="x&#xD;y"' },
