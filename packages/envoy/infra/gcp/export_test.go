@@ -45,6 +45,8 @@ type DispatchSettings struct {
 	AppKeySecretKey    string
 	AppCPU             string
 	AppMemory          string
+	AppEphemeral       string
+	ProxyEphemeral     string
 	PprofPort          int
 }
 
@@ -69,6 +71,8 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		AppKeySecretKey:    s.appKeySecretKey,
 		AppCPU:             s.appResources.appCPU,
 		AppMemory:          s.appResources.appMemory,
+		AppEphemeral:       s.appResources.appEphemeralStorage,
+		ProxyEphemeral:     s.appResources.proxyEphemeralStorage,
 		PprofPort:          s.pprofPort,
 	}
 	if rolling := strategy.rollingUpdate; rolling != nil {
