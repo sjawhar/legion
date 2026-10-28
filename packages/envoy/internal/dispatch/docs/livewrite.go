@@ -76,6 +76,13 @@ type liveWrite struct {
 	updates    [][]byte
 	// versions are the doc_updates versions updates were appended at, one each.
 	versions []persistence.Version
+	// marginRooms names, for each of updates, the room document a margin write's fork was
+	// warm-built from (applyMargin), held weakly as forkedFrom is: its publish tags the update
+	// margin-only when it reaches that same room instance (liveWriteOrigin.marginOnly). It is the
+	// zero pointer for every other update, and for a margin write made on a cold fork, which no
+	// room was behind. recordLiveOperation appends it beside the update, so the two never fall
+	// out of step.
+	marginRooms []weak.Pointer[crdt.Doc]
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyLive) for the version its transaction may write, and
 	// offsets each identified block's byte range in markdown from that same render.
@@ -143,6 +150,23 @@ type liveWrite struct {
 // non-zero sized because ygo compares origins by interface equality.
 type liveWriteOrigin struct {
 	slot *suppressSlot
+	// marginOnly says the update is a margin write (applyMargin) whose fork was warm-built from
+	// the very room document it is applied to, so it cannot change the document's XML fragment
+	// and the room's update observer keeps the rendering it has rather than rendering the
+	// replica again (renderedReplica.observe). The fork was room instance R's whole state, its
+	// delete set included, plus the transaction's earlier updates, which publishLiveWrite
+	// publishes into R before this one, in order, stopping at the first that fails. ygo encodes
+	// every update with the whole delete set of the document it was made on (sjawhar/ygo
+	// crdt/update.go, buildDeleteSet), so every delete the margin update carries is already in R
+	// but the marks map value it replaced, and every struct it adds is an item of the marks map.
+	// The replica is R as of the commit before this one (the update log's order), so neither the
+	// fragment nor its rendering can move. A margin write made on a cold fork is never tagged: its
+	// room stood behind the durable head, and the store it forked holds another process's deletes
+	// R lacks, which the update carries in. Nor is one published into a room replaced or reloaded
+	// since its fork, which can lack deletes the fork held (a browser update whose append failed).
+	// It is set inside the publish's Apply, against the document the update reaches
+	// (publishLiveUpdate).
+	marginOnly bool
 }
 
 // joinedLiveWrite is the calling transaction's open write to artifactID, if it has one.
@@ -653,7 +677,7 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 	// which loads the room when no room holds the document (coldFork).
 	write.releaseFork()
 	for index, update := range write.updates {
-		err := s.publishLiveUpdate(write.artifactID, update, write.versions[index])
+		err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], write.marginRooms[index])
 		if err == nil {
 			continue
 		}
@@ -725,7 +749,11 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 // bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
 // room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
 // stranded persistence on this goroutine, which would otherwise wait on this slot for good.
-func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version) error {
+//
+// marginRoom is the room document a margin write's fork was warm-built from, or the zero pointer
+// (liveWrite.marginRooms). The update is tagged margin-only when the document it reaches is that
+// one (liveWriteOrigin.marginOnly).
+func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, marginRoom weak.Pointer[crdt.Doc]) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &liveWriteOrigin{slot: slot}
@@ -739,6 +767,12 @@ func (s *Service) publishLiveUpdate(room string, update []byte, version persiste
 			// would be refused everything until it reloaded.
 			advanceRoomCursor(&instance.cursor, version)
 		}
+		// Tagged against the document the update is applied to, which Apply hands here, rather
+		// than the one the room held when the publish began: a room replaced or reloaded in
+		// between is another document, which can lack deletes the fork held, and its observer
+		// renders the update as it renders any other.
+		forked := marginRoom.Value()
+		origin.marginOnly = forked != nil && forked == doc
 		return crdt.ApplyUpdateV1(doc, update, origin)
 	})
 	if err != nil {
@@ -776,7 +810,7 @@ func (s *Service) finishLiveWrite(write *liveWrite) {
 	}
 	write.finished = true
 	write.releaseFork()
-	write.updates = nil
+	write.updates, write.marginRooms = nil, nil
 	state := write.state
 	state.mu.Lock()
 	state.liveWriter = nil

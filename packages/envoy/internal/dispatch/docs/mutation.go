@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"weak"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -131,8 +132,10 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // write whose room failed before that append, keeps the rendering on the transaction's write for a
 // version it writes later, and refreshes the document's anchors against the tree in the same
 // transaction (writeVersionTx). Only once all of that is done is op recorded, so a refusal anywhere
-// in it leaves abandon to drop the fork and the rendering.
-func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool) error {
+// in it leaves abandon to drop the fork and the rendering. marginRoom is recorded beside the
+// update (liveWrite.marginRooms): the room a margin write's fork was warm-built from, which its
+// publish tags the update against, and the zero pointer for every other write.
+func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool, marginRoom weak.Pointer[crdt.Doc]) error {
 	// Every write is refused when the live state it leaves could not be decoded, the one check
 	// that decodes a whole second copy of the document. The caller has let go of whatever tree it
 	// held from before the change, so the decode runs beside the fork and the tree the change left,
@@ -171,6 +174,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	op.write.anchorsTree = rendered.tree
 	op.write.updates = append(op.write.updates, update)
 	op.write.versions = append(op.write.versions, version)
+	op.write.marginRooms = append(op.write.marginRooms, marginRoom)
 	op.recorded = true
 	return nil
 }
@@ -275,7 +279,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
 	before, weighedFrom = nil, nil
-	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, contentChanged); err != nil {
+	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, contentChanged, weak.Pointer[crdt.Doc]{}); err != nil {
 		return err
 	}
 	if contentChanged {
@@ -319,6 +323,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 //     marks the weigh counts (anchorWatch) are on the unchanged tree, so they carry what they
 //     carried and their weigh never refuses - it walks every mark of the tree to say so
 //     (anchorText) - and an unchanged rendering is never weighed.
+//   - It records beside its update the room its fork was warm-built from (liveWrite.marginRooms),
+//     so the room's update observer, which would render the publish only to find the same
+//     markdown, keeps its rendering instead when the update reaches that same room
+//     (liveWriteOrigin.marginOnly says why that is exact).
 //
 // It returns websocket.ErrNoChanges when the write changed nothing, and a panic in it as its error
 // (recoverMutation), as applyLive does.
@@ -353,7 +361,15 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if err := margin.refusal(); err != nil {
 		return err
 	}
-	return s.recordLiveOperation(ctx, &op, actor, rendered, false)
+	// The room the fork was warm-built from, which the publish tags the update against
+	// (liveWriteOrigin.marginOnly). A cold fork was built from the stored document, with no room
+	// behind it, so it names none; write.cold says so directly rather than leaving it to coldFork
+	// to have cleared forkedFrom.
+	var room weak.Pointer[crdt.Doc]
+	if !op.write.cold {
+		room = op.write.forkedFrom
+	}
+	return s.recordLiveOperation(ctx, &op, actor, rendered, false, room)
 }
 
 // joinedSchemaError is the error a joined operation answers for err, a failure it met after it

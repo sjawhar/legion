@@ -345,7 +345,8 @@ func (r *renderedReplica) lockForUpdate() {
 
 // observe is the update observer's turn with the replica: it waits for mu (lockForUpdate), drains
 // the room's update log, and moves the replica through each update the log hands over, in commit
-// order, rendering after each (updateChangesMarkdown). It calls classify, when given, with each
+// order, rendering after each (updateChangesMarkdown) but a margin write's publish it can prove
+// changes no text (liveWriteOrigin.marginOnly). It calls classify, when given, with each
 // update, whether that update changed the room's rendered markdown, and the tree it rendered when
 // it did - nil otherwise, and valid only during the call - still holding mu, so the room's own
 // record of what each update introduced moves forward in commit order. The observer is the one
@@ -367,6 +368,22 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], classify)
 			return
+		}
+		// A margin write's publish into the room its fork was warm-built from changes no text
+		// (liveWriteOrigin.marginOnly): the fork was this room's whole state, delete set
+		// included, plus the transaction's earlier updates, all published into it before this
+		// one, so every delete the update carries is already here but the marks map value it
+		// replaced, and every struct it adds is a marks map item. The replica is the room as of
+		// the commit before it, so the fragment it renders and the rendering it keeps stand as
+		// they are, and rendering again would only find the same markdown. A cold fork's
+		// update, or one published into a room replaced or reloaded since its fork, carries no
+		// tag and renders as any other; so does one on a replica that keeps no rendering, the
+		// document being outside the schema, where the render is what says what it is now.
+		if published, ok := update.Origin.(*liveWriteOrigin); ok && published.marginOnly && r.markdown != nil {
+			if classify != nil {
+				classify(update, false, nil)
+			}
+			continue
 		}
 		changed, tree := r.updateChangesMarkdown(room)
 		if classify != nil {
