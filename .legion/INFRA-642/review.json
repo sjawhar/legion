@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-642",
+  "completed": "2026-10-28T13:09:44Z",
+  "decision": "approved",
+  "reviewedCodeHead": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection). CI head 1834eeb8: every required check completed success, all dispatch/envoy lanes success; compare 1834eeb8...6f0c5e30 handoffsOnly true, 2 files.",
+  "threads": "0 review threads (GraphQL totalCount 0).",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present at 1834eeb8, each with surface, command, observation and negative control.",
+  "mergeRule": "Architect's rule (dispatch://INFRA-642 comment 50350dd4): whole-process passes (implementer max head 428.37 < min base 432.10; tester max head 437.81 < min base 444.58). Function share fell ~1.9 points vs ~4.6 needed (0.084/0.912/2); it fell in every run, so it does not contradict. Recorded under Not proven / risk.",
+  "thermonuclear": "At 6f0c5e30: deep review found no defect. Code quality found 4 cleanup-only items; 3 went to Fast-follow, and the 4th (livewrite.go:118-122 comment wording) is not a defect: that sentence is about ApplyOps/ReplaceText, each still once per Join.",
+  "critical": 0,
+  "important": 0,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
+      "description": "Cleanup (Fast-follow): lines 608-697 copy appendSchemaInvalidUpdate, appendTextEmbed, appendNestedLink and the corruption table from api/schema_repair_test.go:17-100; move them into docs/testhooks.go."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
+      "description": "Cleanup (Fast-follow): the new file has 1,567 lines; split it into fixtures, flows and comparison."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
+      "description": "Cleanup (Fast-follow): errors are compared by name strings and turned back with a hand-kept asError switch; keep the real error and use errors.Is."
+    }
+  ]
+}
