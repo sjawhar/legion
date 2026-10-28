@@ -496,8 +496,7 @@ test.describe("agents page pins", () => {
       const staleRow = agentRow(page, stale.session_id);
       const conversation = staleRow.getByRole("list", { name: "Conversation with Stale" });
       const fold = page.getByRole("button", { name: /^Inactive/ });
-      // What the navigation's badge shows, read from the server: the phone keeps that link in a
-      // menu, so the count is the one surface every project has.
+      // What the navigation's badge shows, read from the server.
       const unread = async () =>
         (await (await page.request.get("/api/v1/me/agents/state")).json())[stale.session_id]
           ?.unread_replies ?? 0;

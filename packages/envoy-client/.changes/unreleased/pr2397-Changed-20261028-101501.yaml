@@ -1,0 +1,28 @@
+kind: Changed
+body: |-
+    `dispatch issue`, `dispatch ask` and `dispatch doc-edit` print the related-item check their
+    write got right under the line naming what was written, in exactly one of three forms, so a
+    check that never ran cannot read as one that found nothing: `Related items (searched
+    by meaning and keywords):` (or `keywords only: <why>`) with one line per item, an ask item
+    followed by `Ask: open`, `Ask: answered by <who> at <when>, chose "<option>"` and its
+    `Answer text:`, or `Ask: closed …`; `Related-item check searched (<mode>) and found nothing.`;
+    or `No related-item check was made: <reason>. Search before you rely on this being new:
+    dispatch search --project <KEY> --query '<words>'`, the words the server's `search_query` or
+    else the first three words of four or more letters of the text it checked. A past decision,
+    followed by the same `Ask:` and `Answer text:` lines when the server sends its latest answer,
+    and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
+    follow the form. A
+    `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
+    form for each, in document order. These replace `Possibly related, found by search:` and
+    `Related-item search was skipped: <reason>.`. A server that sends no check result, or the
+    older shapes (`missing` alone, items with no `outcome`, nothing with no `outcome`, a count of
+    new decision blocks with no checks), maps to one of the forms, the not-made one when it says
+    nothing; a result this client cannot read prints the not-made form, and advice that fails to
+    render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
+    `Created` line and the form. `dispatch issue` on an external issue Dispatch already holds says
+    it already holds it and that nothing was created (`Dispatch already holds <KEY>: <title> →
+    <link>; nothing was created`), instead of `Created`, and prints no related-item check
+    (`DispatchClient.issue` answers `created`, true only for Dispatch's 201).
+time: 2026-10-28T10:15:01.354505305Z
+custom:
+    Issue: pr2397

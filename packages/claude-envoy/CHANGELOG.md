@@ -1,15 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- The `dispatch` command (`dist/dispatch.js`) prints the related-item check an issue, an ask or a
-  new decision block got right under the line naming the write, as what it found and how it
-  searched, that it found nothing, or that no check was made, why, and the `dispatch search` to
-  run instead, and `dispatch related --project <KEY> --title … --text …` runs that check on a
-  draft and writes nothing; the bundled tool descriptions carry both, since `dist/` was
-  regenerated (INFRA-568).
 - The channel server delivers once each Envoy message the session missed while its NATS
   subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
   listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
@@ -71,6 +65,12 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
 

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// relatedCheckAllowance is the most a write waits on its related-item check (INFRA-568): the
+	// relatedCheckAllowance is the most a write waits on its related-item check: the
 	// meaning search's relatedMeaningAllowance and the time the keyword search may still need
 	// after it. At its end only the keyword search can still be running, and the check answers
 	// that it was not made rather than hold the write longer.
@@ -336,7 +336,7 @@ type relatedPick struct {
 }
 
 // relatedCheck is the related-item check every issue create, ask and new decision block runs
-// (INFRA-568), and the no-write related route. It never fails and never returns nil: what it did
+// as a write's, and the no-write related route. It never fails and never returns nil: what it did
 // not do, it says in the result. It waits at most relatedAllowance.
 //
 // It resolves the project when the input does not name it, then starts two things at once: stage

@@ -92,8 +92,8 @@ one-connection pool of its own, and that connection's pid is read in `pg_locks` 
 holder's transaction. Counting every backend behind the holder was not enough, because the seeded
 spec's settlement queues behind the same locks (found in review of sjawhar/legion#2217).
 
-**Note 2026-10-27 (INFRA-568):** the 300 ms allowance this record measured is gone. INFRA-568
-replaced LEGION-550's keyword suggestions with the related-item check, which searches by meaning
+**Note 2026-10-27:** the 300 ms allowance this record measured is gone. The related-item check
+replaced LEGION-550's keyword suggestions; it searches by meaning
 and by the project's rarest words and makes a write wait for it at most 5 s
 (`relatedCheckAllowance`, `internal/dispatch/api/suggestions.go`); `computeAndPersistSuggestions`
 and `writeSuggestionTimeout` were removed with the old step. The seam this record describes

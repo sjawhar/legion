@@ -299,6 +299,18 @@ type SearchIssue struct {
 	Status string `json:"status"`
 }
 
+// SearchAsk is where an ask hit stands, read when the search ran, so a reader of the hit knows
+// whether the question still waits on a human and, once it does not, how it was settled.
+// Answer is the ask's current answer when it is answered; on a resolved ask it is the last
+// answer its ask.answered events recorded, the only place the answer survives on a row that
+// document settlement retracted while it was answered, and nil when nobody answered.
+// Answer.Selected is an empty list, never null, when the answer chose no option.
+type SearchAsk struct {
+	State      string         `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *AskAnswer     `json:"answer,omitempty"`
+	Resolution *AskResolution `json:"resolution,omitempty"`
+}
+
 // SearchResult is one ranked Dispatch search hit.
 type SearchResult struct {
 	Kind  string      `json:"kind"`
@@ -312,21 +324,9 @@ type SearchResult struct {
 	Snippet  string          `json:"snippet"`
 	Rank     float64         `json:"rank"`
 	Href     string          `json:"href"`
-	// Ask is where an ask hit stands, filled by attachAskStates; nil on every other kind, and on
-	// an ask hit whose row was gone by the time it read.
+	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
+	// the read of its state keeps it nil too.
 	Ask *SearchAsk `json:"ask,omitempty"`
-}
-
-// SearchAsk is where an ask hit stands: State is "open", "answered" or "resolved", as the asks
-// row holds it. Answer is the latest answer of an answered ask (asks.answer, which a re-answer
-// overwrites), and on a resolved ask the last answer a person gave before it was closed, read
-// from its ask.answered events, when it has one (rows settlement retracted while answered keep
-// their answer only there). Resolution is set when the ask is resolved. Answer.Selected is
-// never null: no option chosen is an empty list.
-type SearchAsk struct {
-	State      string         `json:"state"`
-	Answer     *AskAnswer     `json:"answer,omitempty"`
-	Resolution *AskResolution `json:"resolution,omitempty"`
 }
 
 // SearchResponse is one page of the fused search result list.
@@ -392,7 +392,7 @@ type DuplicateCandidate struct {
 	Href        string `json:"href"`
 }
 
-// WriteSuggestion is one item the related-item check (INFRA-568) judges like what was just filed:
+// WriteSuggestion is one item the related-item check judges like what was just filed:
 // a search hit over the same project. Ask is where an ask item stands (its latest answer, who gave
 // it, when and the options chosen; or its resolution; or open). AnsweredBy and AnsweredAt repeat
 // the answer's user and time on the ask Suggestions.Decision names, for clients built before Ask.
@@ -408,7 +408,7 @@ type WriteSuggestion struct {
 	AnsweredAt *time.Time      `json:"answered_at,omitempty"`
 }
 
-// Suggestions is the related-item check's result (INFRA-568) on a newly created issue or ask: the
+// Suggestions is the related-item check's result on a newly created issue or ask: the
 // three items most like it (Related, one per owner) and, when an answered ask already settles the
 // same question, that decision (Decision). The check never refuses the write; it waits at most
 // five seconds, and says what it did.
@@ -433,7 +433,7 @@ type Suggestions struct {
 }
 
 // RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in
-// related_checks within one window went (INFRA-568), so a deploy's checks can be counted against
+// related_checks within one window went, so a deploy's checks can be counted against
 // its targets. Project, SourceKind, From and To echo the filters, each null when not given (every
 // project, every source kind, no lower or upper bound); From is inclusive and To exclusive.
 //
@@ -1034,6 +1034,25 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
+// that chose no option sends `"selected":[]`, never null, though rows and ask.answered events
+// written before answers stored an empty list hold null there.
+func (a *AskAnswer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain AskAnswer
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Selected == nil {
+		value.Selected = []string{}
+	}
+	*a = AskAnswer(value)
+	return nil
 }
 
 // OpenAskOwner identifies the issue or standalone project document holding an ask.

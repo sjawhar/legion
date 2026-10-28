@@ -249,7 +249,7 @@ issue of the project they compete with, from a Dispatch server into a JSONL file
 `TestRelatedRecallOnDuplicates` (`internal/dispatch/api`). A pair is a done issue whose close
 reason names one other issue that covers it: `Duplicate of`, `Duplicate:`, `Folded into`,
 `Covered by` or `Superseded by`, in any case, followed by a Dispatch issue reference
-(`dispatch://<KEY>`, a bare `<KEY>` of one of the server's projects, or an `/issues/<KEY>` link).
+(a Dispatch link to `<KEY>`, a bare `<KEY>` of one of the server's projects, or an `/issues/<KEY>` link).
 The close reason is the issue's last top-level message posted at or before its close, the message
 `dispatch issue-update --status done --reason` posts just before the close; the `issue.closed`
 event carries no reason. A reason naming only a pull request, several issues or the issue itself

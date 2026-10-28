@@ -19,7 +19,7 @@ export interface RelatedCheckContext {
 }
 
 /**
- * The related-item check's lines (INFRA-568). They hold exactly one of three forms, so a check
+ * The related-item check's lines. They hold exactly one of three forms, so a check
  * that never ran cannot read as one that found nothing: the items it found and how it searched,
  * that it searched and found nothing, or that no check was made, why, and the `dispatch search` to
  * run instead. A past decision, with where its ask stands, and the titles a forced create went
@@ -73,7 +73,7 @@ export function relatedCheckLines(
 }
 
 /**
- * A document edit's lines about the decision blocks it added (INFRA-568): `Decision block <id>:`
+ * A document edit's lines about the decision blocks it added: `Decision block <id>:`
  * and that block's check form, in document order, each searched by its own question. A server
  * predating the checks only counts the new blocks, so the edit gets one not-made line for all of
  * them, searched by `context.text`. An edit that added none, or a server predating even the

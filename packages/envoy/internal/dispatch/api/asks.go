@@ -275,7 +275,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
-	// INFRA-568. An ask on an issue searches that issue's project and, normally, rides its check's
+	// The related-item check. An ask on an issue searches that issue's project and, normally, rides its check's
 	// result on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the result alone, as does
 	// an issue ask whose write-advice read failed. The check resolves the project itself under its

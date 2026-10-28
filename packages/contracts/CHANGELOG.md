@@ -1,24 +1,18 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- The related-item check's result (INFRA-568). `Suggestions` gains `outcome`
-  (`RelatedCheckOutcome`: `found` | `none` | `not_made`), `search` (`RelatedCheckSearch`:
-  `meaning_and_keywords` | `keywords_only`), `search_note`, `search_query` and `title_matches`
-  (`DuplicateCandidate[]`, a forced issue create's title overlaps), each optional so an older
-  server's shape still reads; `missing` stays, set whenever the check was not made.
-  `SearchResult` and `WriteSuggestion` gain `ask?: SearchAsk`, where an ask hit stands
-  (`{state: "open"}`, `{state: "answered", answer}` or `{state: "resolved", resolution, answer?}`).
-  `WriteAdvice` gains `decision_block_checks?: DecisionBlockCheck[]` (`{block_id, question,
-  suggestions}`) for a document edit's new decision blocks. `RelatedCheckInput` is the body of
-  `POST /api/v1/projects/{key}/related`, and `RelatedChecksReport` / `RelatedCheckTiming` the
-  answer of `GET /api/v1/related-checks`. `dispatchToolSpecs` gains `dispatch_related` (the check
-  on a `title` and `text` of a `project`, with `exclude_issue` and `keywords_only`, writing
-  nothing), and `dispatch_issue`, `dispatch_ask` and `dispatch_doc_edit` say the result names what
-  the check found, that it found nothing, or that it was not made and why, after at most five
-  seconds.
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
+
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
   `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30

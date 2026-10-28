@@ -270,7 +270,7 @@ func TestSuggestionsDecisionIsNotReorderedByOwnerStatus(t *testing.T) {
 
 // lockedSuggestionAllowance bounds only the time from the call's start to its query queuing
 // behind the test's lock: the project lookup's first statement, or the term picker's statement.
-// The worst whole filing on record under load was 737 ms (INFRA-56).
+// The worst whole filing on record under load was 737 ms.
 const lockedSuggestionAllowance = 5 * time.Second
 
 // suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs the related-item check on a

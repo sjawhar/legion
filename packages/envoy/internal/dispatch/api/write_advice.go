@@ -37,7 +37,7 @@ type writeAdvice struct {
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
 	*editBlocks
-	// Suggestions is the related-item check's result (INFRA-568), set only on an issue or ask
+	// Suggestions is the related-item check's result, set only on an issue or ask
 	// creation; nil (omitted) everywhere else.
 	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
 }
@@ -261,7 +261,7 @@ type editBlocks struct {
 	DecisionBlockChecks []decisionBlockCheck `json:"decision_block_checks,omitempty"`
 }
 
-// decisionBlockCheck is one added decision block's related-item check (INFRA-568): the block, its
+// decisionBlockCheck is one added decision block's related-item check: the block, its
 // question, and the check's result.
 type decisionBlockCheck struct {
 	BlockID     string             `json:"block_id"`

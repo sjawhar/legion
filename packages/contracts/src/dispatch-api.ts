@@ -224,7 +224,7 @@ export interface WriteAdvice {
    */
   readonly decision_blocks_added?: number;
   /**
-   * INFRA-568: the related-item check each of a document edit's new decision blocks got, in
+   * The related-item check each of a document edit's new decision blocks got, in
    * document order; a block past the fifth in one edit answers `not_made`. Omitted when the edit
    * added none, and absent from a Dispatch server predating the check, which only counts them in
    * `decision_blocks_added`.
@@ -237,7 +237,7 @@ export interface WriteAdvice {
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
-   * The related-item check (LEGION-550, INFRA-568), set on an issue or ask creation: the items
+   * The related-item check (LEGION-550), set on an issue or ask creation: the items
    * most like what was just filed, any past decision that matches, and what the check did
    * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
    * search to the end says why in `missing`.
@@ -1427,6 +1427,13 @@ export type SearchOwner =
       readonly name: string;
     };
 
+/** Where an ask hit stands, read when the search ran. `answer` on a resolved ask is the last
+ *  answer a person gave before it was closed (rows document settlement retracted while answered). */
+export type SearchAsk =
+  | { readonly state: "open" }
+  | { readonly state: "answered"; readonly answer: AskAnswer }
+  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
+
 export interface SearchResult {
   readonly kind: SearchResultKind;
   /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
@@ -1448,22 +1455,10 @@ export interface SearchResult {
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
-  /**
-   * Where an ask hit stands, read when the search ran: set on every ask hit from a Dispatch of
-   * this release, absent on other kinds, from an older Dispatch, and on an ask deleted between
-   * the search and that read.
-   */
+  /** Where the ask stands: present on every `ask` hit from a Dispatch of this release, absent on
+   *  every other kind and on any hit from an older Dispatch. */
   readonly ask?: SearchAsk;
 }
-
-/** Where an ask hit stands, read when the search ran. `answer` on an answered ask is its latest
- *  answer (a re-answer replaces it); on a resolved ask it is the last answer a person gave before
- *  it was closed (rows settlement retracted while answered), when it had one. `answer.selected`
- *  is `[]` when no option was chosen. Mirrors `model.SearchAsk`. */
-export type SearchAsk =
-  | { readonly state: "open" }
-  | { readonly state: "answered"; readonly answer: AskAnswer }
-  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
 
 /** The four paging fields a Dispatch that supports search paging always answers together. */
 export interface SearchResultsPage {
@@ -1555,7 +1550,7 @@ export interface DuplicateCandidate {
 }
 
 /**
- * One item the related-item check (LEGION-550, INFRA-568) judges like what was just filed: a
+ * One item the related-item check (LEGION-550) judges like what was just filed: a
  * search hit over the same project. `ask` is where an ask item stands (absent from an older
  * Dispatch). `answered_by`/`answered_at` are set only when this is `Suggestions.decision` — the
  * "past decision" case, where the agent needs who answered and when, not just a link — and repeat
@@ -1582,14 +1577,14 @@ export type RelatedCheckOutcome = "found" | "none" | "not_made";
 export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
 
 /**
- * The related-item check's result (LEGION-550, INFRA-568) on a newly created issue or ask, on
+ * The related-item check's result (LEGION-550) on a newly created issue or ask, on
  * each new decision block of a document edit, and as the whole answer of the no-write related
  * route: the three items most like it (`related`, one per owner, always an array) and, when an
  * answered ask already settles the same question, that decision (`decision`). The check never
  * refuses the write; it waits at most five seconds.
  *
- * A Dispatch predating INFRA-568 sends only `related`, `decision` and `missing`; every other
- * field is absent there. From INFRA-568 on, `outcome` is always set, `search` is set unless the
+ * A Dispatch predating the check's outcome sends only `related`, `decision` and `missing`; every other
+ * field is absent there. From that release on, `outcome` is always set, `search` is set unless the
  * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
  * `search_query` is two or three of the words the keyword search used, spelled as the text spells
  * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles

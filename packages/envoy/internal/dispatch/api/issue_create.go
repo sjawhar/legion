@@ -188,7 +188,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The title-overlap refusal, and under force the same overlaps named in the result instead
-	// (INFRA-568): a forced create is told what it forced past, but a slow or failing overlap read
+	// a forced create is told what it forced past, but a slow or failing overlap read
 	// must not refuse a create its caller already insisted on, so it is bounded on its own and its
 	// failure only logged.
 	var titleMatches []model.DuplicateCandidate
@@ -422,7 +422,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		advice.documentBlocks = readDocumentBlocks(markdown)
 	}
-	// INFRA-568: the related-item check runs after the write committed, whatever writeAdvice
+	// The related-item check runs after the write committed, whatever writeAdvice
 	// answered, and waits at most relatedAllowance; its result rides the advice, or advice of its
 	// own when the write-advice read failed.
 	suggestions := s.relatedCheck(r.Context(), relatedInput{

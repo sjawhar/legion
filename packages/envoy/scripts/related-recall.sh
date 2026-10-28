@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Copies one project's pairs of issues closed one into the other, and every other issue they
 # compete with, from a Dispatch server into a JSONL file, for TestRelatedRecallOnDuplicates
-# (internal/dispatch/api) to score the related-item check on (INFRA-568). A pair is a done issue
+# (internal/dispatch/api) to score the related-item check on. A pair is a done issue
 # whose close reason names one other issue that covers it: "Duplicate of", "Duplicate:", "Folded
 # into", "Covered by" or "Superseded by", in any case, followed by a Dispatch issue reference
-# (dispatch://KEY, a bare KEY-123 of one of the server's projects, or an /issues/KEY link). The
+# (a Dispatch link to KEY, a bare KEY-123 of one of the server's projects, or an /issues/KEY link). The
 # close reason is the issue's last top-level message posted at or before its close: closing with a
 # reason posts the reason as a message just before the close (envoy-client's
 # dispatch_issue_update), and the issue.closed event carries no reason. A reason naming only a pull
@@ -110,7 +110,7 @@ projects="$(get /projects | jq -c '[.[].key]')"
 # shellcheck disable=SC2016 # $row, $key and the rest are jq's variables, not shell expansions
 readonly close_reason='
 def refs($projects):
-  [ (match("dispatch://([A-Za-z][A-Za-z0-9_]*-[0-9]+)([A-Za-z0-9_/#-]?)"; "g"),
+  [ (match("dispatch:/{2}([A-Za-z][A-Za-z0-9_]*-[0-9]+)([A-Za-z0-9_/#-]?)"; "g"),
      match("https?://[^\\s/]+/issues/([A-Za-z][A-Za-z0-9_]*-[0-9]+)([A-Za-z0-9_/#-]?)"; "g")
       | select((.captures[1].string // "") == "") | {offset, key: (.captures[0].string | ascii_upcase)}),
     (match("[A-Za-z0-9_/:#.-]+"; "g") | (.string | sub("[.:]+$"; "")) as $token

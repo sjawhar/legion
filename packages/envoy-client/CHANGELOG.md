@@ -1,32 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Changed
 
-- `dispatch issue`, `dispatch ask` and `dispatch doc-edit` print the related-item check their
-  write got right under the line naming what was written, in exactly one of three forms, so a
-  check that never ran cannot read as one that found nothing (INFRA-568): `Related items (searched
-  by meaning and keywords):` (or `keywords only: <why>`) with one line per item, an ask item
-  followed by `Ask: open`, `Ask: answered by <who> at <when>, chose "<option>"` and its
-  `Answer text:`, or `Ask: closed …`; `Related-item check searched (<mode>) and found nothing.`;
-  or `No related-item check was made: <reason>. Search before you rely on this being new:
-  dispatch search --project <KEY> --query '<words>'`, the words the server's `search_query` or
-  else the first three words of four or more letters of the text it checked. A past decision,
-  followed by the same `Ask:` and `Answer text:` lines when the server sends its latest answer,
-  and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
-  follow the form. A
-  `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
-  form for each, in document order. These replace `Possibly related, found by search:` and
-  `Related-item search was skipped: <reason>.`. A server that sends no check result, or the
-  older shapes (`missing` alone, items with no `outcome`, nothing with no `outcome`, a count of
-  new decision blocks with no checks), maps to one of the forms, the not-made one when it says
-  nothing; a result this client cannot read prints the not-made form, and advice that fails to
-  render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
-  `Created` line and the form. `dispatch issue` on an external issue Dispatch already holds says
-  it already holds it and that nothing was created (`Dispatch already holds <KEY>: <title> →
-  <link>; nothing was created`), instead of `Created`, and prints no related-item check
-  (`DispatchClient.issue` answers `created`, true only for Dispatch's 201).
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
 - `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
@@ -72,10 +49,6 @@
 
 ### Added
 
-- `dispatch related --project <KEY> [--title <title>] [--text <text>] [--exclude-issue <KEY>]
-  [--keywords-only]` runs the related-item check a new issue or ask gets, through
-  `POST /api/v1/projects/{key}/related` (`DispatchClient.related`), writes nothing, and prints the
-  check's form as `dispatch issue` does (INFRA-568). Use it to check a draft before filing it.
 - `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
   pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
   `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
@@ -211,6 +184,15 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
 
 - `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
   envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse

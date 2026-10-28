@@ -17,7 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// The tests in this file measure the related-item check (INFRA-568) on a corpus copied from a
+// The tests in this file measure the related-item check on a corpus copied from a
 // Dispatch server by scripts/related-recall.sh. They are env-gated so CI never runs them, and they
 // set no bound by default: they print what they measured, which is quoted on the pull request.
 
@@ -249,7 +249,7 @@ func recallStagePair(t *testing.T, database *store.Store, corpus recallCorpus, p
 	}
 }
 
-// recallOldQuery is the check's query before INFRA-568, suggestionQuery as it stood at 08c345f7,
+// recallOldQuery is the check's query before this rebuild, suggestionQuery as it stood at 08c345f7,
 // kept here only to measure the new keyword search against: up to 40 distinct words of the text
 // joined with OR for websearch_to_tsquery.
 func recallOldQuery(text string) string {
@@ -333,7 +333,7 @@ func recallListed(ctx context.Context, srv *server, project, query string, resul
 	return listed
 }
 
-// TestRelatedRecallOnDuplicates is INFRA-568's acceptance 3: for each pair of issues one was
+// TestRelatedRecallOnDuplicates measures the check's recall of duplicates: for each pair of issues one was
 // closed into ("Duplicate of", "Folded into" and the other wordings related-recall.sh reads),
 // does the related-item check list the earlier-filed issue (the target), searching with the
 // later-filed one's text as it was filed (the query) against every other issue of its project?

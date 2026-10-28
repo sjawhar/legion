@@ -19,7 +19,7 @@ import (
 
 const (
 	// relatedTermLimit is the most lexemes the related-item check's keyword query ORs together
-	// (INFRA-568): More Like This keeps a text's 25 most distinctive terms, and a check's text can
+	// as More Like This does: it keeps a text's 25 most distinctive terms, and a check's text can
 	// be a 10,000-word spec.
 	relatedTermLimit = 25
 	// relatedMatchBudget bounds the chosen terms' summed df, and with it how many rows their OR
@@ -162,7 +162,7 @@ func refreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 }
 
 // RunSearchTermStatsRefresh rebuilds every project's term statistics, the related-item check's df
-// and N (INFRA-568), at boot and then every interval, until ctx is done. Each pass runs under
+// and N, at boot and then every interval, until ctx is done. Each pass runs under
 // searchTermStatsLease for one interval, so one process refreshes per interval however many serve
 // the database; leases is required, as it is of every leased loop.
 func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
@@ -399,8 +399,8 @@ type relatedCandidate struct {
 	known  bool
 }
 
-// pickRelatedTerms chooses the related-item check's keywords from text (INFRA-568's More Like
-// This): each lexeme scored tf × idf, idf = ln(1 + (N − df + 0.5)/(df + 0.5)) (Lucene's BM25
+// pickRelatedTerms chooses the related-item check's keywords from text (as More Like
+// This does): each lexeme scored tf × idf, idf = ln(1 + (N − df + 0.5)/(df + 0.5)) (Lucene's BM25
 // idf), where df is how many of the project's items hold it and N how many items the project
 // has. It keeps at most relatedTermLimit lexemes by score, ties by lower df then lexeme, and drops
 // a lexeme no other item holds (df 0), one in more than a tenth of the project (past

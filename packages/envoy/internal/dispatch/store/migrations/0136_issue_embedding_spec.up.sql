@@ -1,5 +1,5 @@
 -- 0136_issue_embedding_spec.up.sql
--- INFRA-568: an issue's vector is its title and its spec, not its title alone, so the related-item
+-- An issue's vector is its title and its spec, not its title alone, so the related-item
 -- check, which embeds a new issue's title and spec, compares like with like, and an issue whose
 -- title is terse is still found by what its spec says. The spec is the markdown of the latest
 -- version of the issue's primary document, raw, ask-block markup included, as 0074 embeds every

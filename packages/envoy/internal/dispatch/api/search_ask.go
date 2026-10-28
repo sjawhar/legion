@@ -8,81 +8,56 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// attachAskStates fills Ask on every ask hit of results, in place: where the ask stands, its
-// latest answer and its resolution. It reads the hits' rows by primary key after whatever query
-// produced them, so it serves any result list (search's, the related-item check's) without a
-// column in the shared search SQL, whose rows carry an issue key in place of a uuid for issue
-// hits. A list with no ask hit costs nothing.
-//
-// asks.answer is always the latest answer, since a re-answer overwrites it. A resolved ask holds
-// no answer on its row, but one that settlement retracted while it was answered still has its
-// person's answer in its ask.answered events, so for resolved hits alone it reads those
-// (loadAskAnswersByAsk) and keeps the last. An ask a concurrent delete removed between the search
-// and this read keeps Ask nil, so nothing claims a state that was not read.
+// attachAskStates sets Ask, in place, on every ask hit of a search page: the ask's state, its
+// answer and its resolution, read from its row through docs.ScanAsk. A resolved ask's
+// answer is the last one its ask.answered events recorded (loadAskAnswersByAsk), since a row
+// that document settlement retracted while it was answered keeps its answer nowhere else; those
+// events are read only when the page holds a resolved ask. One query reads every ask hit's row,
+// and a page with no ask hit reads nothing. An ask removed after the search ran has no row left
+// and keeps Ask nil.
 func (s *server) attachAskStates(ctx context.Context, q queryer, results []model.SearchResult) error {
-	var ids []string
-	for _, result := range results {
-		if result.Kind == "ask" {
-			ids = append(ids, result.ID)
+	indexByID := map[string]int{}
+	var askIDs []string
+	for index := range results {
+		if results[index].Kind == "ask" {
+			indexByID[results[index].ID] = index
+			askIDs = append(askIDs, results[index].ID)
 		}
 	}
-	if len(ids) == 0 {
+	if len(askIDs) == 0 {
 		return nil
 	}
-	rows, err := q.Query(ctx, `select id::text, state, answer, resolution from asks where id = any($1::uuid[])`, ids)
+
+	rows, err := q.Query(ctx, `select `+docs.AskColumns+` from asks a where a.id = any($1::uuid[])`, askIDs)
 	if err != nil {
-		return fmt.Errorf("load ask states: %w", err)
+		return fmt.Errorf("load search ask states: %w", err)
 	}
 	defer rows.Close()
-	states := make(map[string]*model.SearchAsk, len(ids))
-	var resolved []string
+	var resolvedIDs []string
 	for rows.Next() {
-		var id string
-		var answer, resolution []byte
-		state := &model.SearchAsk{}
-		if err := rows.Scan(&id, &state.State, &answer, &resolution); err != nil {
-			return fmt.Errorf("scan ask state: %w", err)
+		ask, err := docs.ScanAsk(rows)
+		if err != nil {
+			return fmt.Errorf("scan search ask state: %w", err)
 		}
-		if state.Answer, err = docs.DecodeAskAnswer(answer); err != nil {
-			return err
+		if ask.State == "resolved" {
+			resolvedIDs = append(resolvedIDs, ask.ID)
 		}
-		if state.Resolution, err = docs.DecodeAskResolution(resolution); err != nil {
-			return err
-		}
-		if state.State == "resolved" {
-			resolved = append(resolved, id)
-		}
-		states[id] = state
+		results[indexByID[ask.ID]].Ask = &model.SearchAsk{State: ask.State, Answer: ask.Answer, Resolution: ask.Resolution}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("load ask states: %w", err)
+		return fmt.Errorf("load search ask states: %w", err)
 	}
-	rows.Close()
-	if len(resolved) > 0 {
-		answers, err := s.loadAskAnswersByAsk(ctx, q, resolved)
+
+	if len(resolvedIDs) > 0 {
+		answers, err := s.loadAskAnswersByAsk(ctx, q, resolvedIDs)
 		if err != nil {
-			return err
+			return fmt.Errorf("load search ask answers: %w", err)
 		}
-		for _, id := range resolved {
+		for _, id := range resolvedIDs {
 			if history := answers[id]; len(history) > 0 {
-				last := history[len(history)-1]
-				states[id].Answer = &last
+				results[indexByID[id]].Ask.Answer = &history[len(history)-1]
 			}
 		}
-	}
-	for index := range results {
-		if results[index].Kind != "ask" {
-			continue
-		}
-		state, ok := states[results[index].ID]
-		if !ok {
-			continue
-		}
-		// Selected is never null on the wire: no option chosen is an empty list.
-		if state.Answer != nil && state.Answer.Selected == nil {
-			state.Answer.Selected = []string{}
-		}
-		results[index].Ask = state
 	}
 	return nil
 }
