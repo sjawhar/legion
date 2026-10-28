@@ -1,0 +1,6 @@
+kind: Fixed
+body: |-
+  Indented code keeps the whitespace-only lines after it that the browser keeps (four or more
+  columns past its container, and the shorter blank lines between them), and those lines no longer
+  spread a list or a list item, so a document reads in the editor as in a comment and a past
+  version. A stored document is read anew at its next read.

@@ -1904,7 +1904,9 @@ five or more columns in allows, by a wide ordered marker, spaces or tabs - or ri
 on the line after the quote's last, is refused when it holds more than one line: the browser
 editor's parser keeps the list or quote open across the code's first line, which it does not
 continue, and reads the code's later lines as a second code block. A blank line before the code
-ends a quote, so there the code is read whole.
+ends a quote, so there the code is read whole. Code right after such a list, or right after a quote
+with no blank line between, keeps none of the whitespace-only lines after it, which that parser
+leaves to the list or quote it holds open (`codeColumns.Close`).
 A fenced code block whose language - the info string's first word - holds a backslash escape or a
 character reference is refused: that parser decodes both, and goldmark keeps them as written. What
 it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
@@ -2002,7 +2004,11 @@ and spreads nothing, even where the code's text drops it, unless a quote between
 (`keepsBlankLinesAfter`). The code's text drops that line where it ends a list item or a footnote
 definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a
 table), or a quote no container opens right after, and keeps it before a quote, a list item or a
-definition, as that parser reads it (`blankTaker`). A list item decides by what follows its list only
+definition, as that parser reads it (`blankTaker`). Indented code keeps the whitespace-only lines
+after it that hold four or more columns past where its container's content starts (a list item
+measured from its content, a footnote definition from its own start), and the shorter blank lines
+between them, as that parser reads it, so they are its text, less one final line ending, and space
+nothing (`codeColumns`, `holdCodeLines`). A list item decides by what follows its list only
 inside its own quote or typed block; past one, that container's rule decides, so a typed block's
 fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
