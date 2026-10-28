@@ -92,7 +92,7 @@ func TableDescendantIDs(doc *Node) (map[string][]string, error) {
 			descendants(child, ids, seen)
 		}
 	}
-	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+	Walk(doc, func(node *Node) bool {
 		if node.Type != "table" {
 			return true
 		}

@@ -1,29 +1,25 @@
 import { expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
-import { join, resolve } from "node:path"
-import { claudeAgent, legionPluginDifferences } from "../scripts/build"
-
-const packageRoot = resolve(import.meta.dir, "..")
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { buildLegionPlugin, claudeAgent } from "../scripts/build"
 
 // The daemon's boot requires legion/.claude-plugin/plugin.json under LEGION_CLAUDE_PLUGIN_DIR
 // (packages/daemon/internal/daemon/tools.go), and a Claude Code pane loads the directory with
-// --plugin-dir: generated from the repository's skills/ and pi-legion's agents, so it is held to a
-// fresh generation here, as dist/ is in dist-fresh.test.ts.
-test("the committed legion/ is what a fresh generation writes", async () => {
-  const stale = await legionPluginDifferences(join(packageRoot, "legion"))
-  if (stale.length > 0) {
-    throw new Error(
-      `legion/ is stale (${stale.join(", ")}): run \`bun scripts/build.ts\` on the pinned Bun and commit the result`,
-    )
-  }
-})
-
+// --plugin-dir. It is generated from the repository's skills/ and pi-legion's agents, and only main's
+// Rebuild Claude Envoy plugin workflow commits it, so the test below reads a fresh generation.
 test("the Legion plugin is named legion, so its skills and agents load as legion:<name>", async () => {
-  const manifest = JSON.parse(
-    await readFile(join(packageRoot, "legion", ".claude-plugin", "plugin.json"), "utf8"),
-  ) as { readonly name: string }
-  expect(manifest.name).toBe("legion")
-})
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-legion-"))
+  try {
+    await buildLegionPlugin(scratch)
+    const manifest = JSON.parse(
+      await readFile(join(scratch, ".claude-plugin", "plugin.json"), "utf8"),
+    ) as { readonly name: string }
+    expect(manifest.name).toBe("legion")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}, 30_000)
 
 test("an agent's tools take Claude Code's names, and its autoloaded skills its skills field", () => {
   const source = [
