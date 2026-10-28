@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -348,6 +349,61 @@ func TestAnUploadTheServerCannotSpoolIsItsOwnFailure(t *testing.T) {
 	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "big.bin"}, "big.bin", "application/octet-stream", make([]byte, 2<<20), "alice")
 	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"code":"INTERNAL"`) {
 		t.Fatalf("a part the server cannot spool: status=%d body=%s, want 500 INTERNAL", response.Code, response.Body.String())
+	}
+}
+
+// The parser spools a file part past a megabyte to a temporary file, which net/http removes only
+// for the request it handed its handler; the upload parses a copy the access log and the
+// transaction tracking made, so through a real server every such upload left its file behind
+// until the pod's ephemeral storage ran out and the kubelet evicted it. The upload removes the
+// files itself, whether it stores the file or refuses the request after parsing it.
+func TestAnUploadLeavesNoSpooledFileBehind(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	spool := t.TempDir()
+	t.Setenv("TMPDIR", spool)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	for _, row := range []struct {
+		name   string
+		fields map[string]string
+		status int
+	}{
+		{name: "stored", fields: map[string]string{"name": "big.bin"}, status: http.StatusCreated},
+		{name: "refused after parsing", fields: map[string]string{"name": "big.bin", "content": "inline"}, status: http.StatusBadRequest},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			body, bodyType, err := apitest.MultipartUpload(row.fields, "big.bin", "application/octet-stream", make([]byte, 2<<20))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/issues/"+issue.Key+"/artifacts", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Content-Type", bodyType)
+			request.Header.Set("X-Dispatch-User", "alice")
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			answer, _ := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode != row.status {
+				t.Fatalf("status=%d body=%s, want %d", response.StatusCode, answer, row.status)
+			}
+			left, err := os.ReadDir(spool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(left) != 0 {
+				names := make([]string, 0, len(left))
+				for _, entry := range left {
+					names = append(names, entry.Name())
+				}
+				t.Fatalf("the upload left %v in its temporary directory", names)
+			}
+		})
 	}
 }
 
