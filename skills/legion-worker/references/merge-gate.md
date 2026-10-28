@@ -53,9 +53,9 @@ it, and any other change to the head voids it.
   push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
   comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
   nothing: tell the architect and do not approve. A required check
-  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that job
-  alone, once, then wait — never the whole run, which runs every job of it again. Find its run and
-  job at the CI head: the head's runs
+  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that run's
+  failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
+  succeeded too. Find the run and job at the CI head: the head's runs
   (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<ci head>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
   then each candidate run's jobs
   (`gh api repos/<o>/<r>/actions/runs/<run-id>/jobs --jq '.jobs[] | [.id, .name, .status, .conclusion] | @tsv'`).
