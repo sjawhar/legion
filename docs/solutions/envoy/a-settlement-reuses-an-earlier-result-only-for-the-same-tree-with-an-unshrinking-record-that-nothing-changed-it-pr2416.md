@@ -24,9 +24,9 @@ module: packages/envoy/internal/dispatch/docs
   block and drops its repair from `repairs`, so `repairs` alone can end empty after the tree was
   touched. Count the list nothing shrinks as well (`rewrites`).
 - Write the invariant at the reuse site and in `packages/envoy/AGENTS.md`'s settlement paragraph.
-  Name the issues that change the read path and must keep it. No test enforces "only
-  `reconcileAskBlocks` changes `read`". A new in-place writer that is not recorded silently
-  versions a stale tree.
+  Name the code paths that change the read and must keep it (`readSettlementTree`,
+  `sweepUnrecordedMarks`). No test enforces "only `reconcileAskBlocks` changes `read`". A new
+  in-place writer that is not recorded silently versions a stale tree.
 - Treat a reuse condition written in a parent issue's ranking or design note as a hypothesis.
   Check it against the code, and use the wrong condition as the negative control of your tests.
 
@@ -42,4 +42,5 @@ module: packages/envoy/internal/dispatch/docs
   unstamped read. Under it, 42 of 126 versions in an equivalence run on 21 real specs differed
   from the room: every "repair the room already holds" case and every "stamp that minted
   nothing" case (PR #2416 body, `E2E (implementer)`). Removing either half of the correct
-  condition fails one of the two regression tests (the tester's line in the same body).
+  condition fails one of the two regression tests: with `versioned != read` alone the repair test
+  fails, and with `reconciliation.changedTree()` alone the stamp test fails.

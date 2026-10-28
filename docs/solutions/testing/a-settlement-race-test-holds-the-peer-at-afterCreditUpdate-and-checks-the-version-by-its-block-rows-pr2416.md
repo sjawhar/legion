@@ -35,7 +35,9 @@ module: packages/envoy/internal/dispatch/docs
 - With `beforeObserveUpdate`, both new tests wrote no version (`latest version = 2, want 3`).
   With `afterCreditUpdate` they pass `-count=5 -race` (`settlement_render_once_test.go:44-51,111-115`;
   the hooks are documented at `service.go:161-174`).
-- Under the fix ranking's `len(slots) > 0`, the stamp test fails only on the block rows: the
-  pasted callout is still indexed under the id of the callout it copies, while the markdown
-  assertion alone could not tell (PR #2416 evidence comment). The tester showed
-  `versioned != read` alone fails the repair test and `changedTree()` alone fails the stamp test.
+- Under the fix ranking's `len(slots) > 0`, the stamp test fails on the block rows: the pasted
+  callout is still indexed under the id of the callout it copies. The markdown assertion would
+  fail too, since a typed block always renders its id (`pmdoc/schema.go:286-290`) and the reused
+  rendering shows the copy as `#note` where the room shows its stamped id. The block-row check
+  fails first only because it runs first (`settlement_render_once_test.go:147-148`). Removing
+  `changedTree()` fails the repair test, and removing `versioned != read` fails the stamp test.
