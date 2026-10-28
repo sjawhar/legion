@@ -2,15 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-605",
-  "completed": "2026-10-28T13:20:00Z",
+  "completed": "2026-10-28T16:30:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2445",
   "proof": [
+    {
+      "criterion": "Tester round 1's two defects are fixed: the room and connection caps hold for sockets that open at once and refuse with 503 only (DR-16); the head tracker is not trusted on a half-open LISTEN connection, so a cold read sees another process's committed write within the 10 s bound (DR-08)",
+      "surface": "Dispatch's Go suites in internal/dispatch/docs against a real Postgres 17.11 in the issue pod: ten real document websockets opened at once through the service's ServeHTTP, and two Services on one database with the reader's LISTEN connection behind a TCP proxy that goes silent without closing",
+      "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=5 -run TestConcurrentSocketOpensStayWithinTheCapsAndAreRefusedWith503 ./internal/dispatch/docs/ ; go test -count=3 -v -run TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen ./internal/dispatch/docs/ ; then the whole docs (ok 584.6 s) and api (ok 827.9 s) packages, cmd/dispatch, store, events, pglisten, loadtest, -tags multiprocess ./cmd/dispatch (ok 281.5 s), and -race ./internal/dispatch/docs/ (ok 1124.7 s)",
+      "observed": "the tester's two red tests pass unmodified: caps 5/5 (and under -race); half-open 3/3, the write seen 2.95 s after it committed each run (bound 10 s); every lane above ok",
+      "headSha": "2fdeabab72111f512696671e0bc5fea14e45c1ad",
+      "negativeControl": "at the tester's commits on 411492d8 both tests fail: '10 sockets opened at once on 10 documents: 10 admitted and 10 rooms live, want at most the room cap of 2', '... the rest answered map[401:7]', and 'the reader still reads \"Write 0.\\n\" 10.006s after the other service's write committed while its LISTEN connection was half-open, want \"Write 1.\\n\" within 10s'"
+    },
     {
       "criterion": "Each finding (DR-03, DR-04, DR-08, DR-10, DR-11, DR-14, DR-16) is fixed with a test, red on the base and green at the head",
       "surface": "Dispatch's Go suites in internal/dispatch/docs, api and cmd/dispatch against a real Postgres 17.11 (ICU template1) in the issue pod",
       "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -timeout 45m ./internal/dispatch/docs/ ; go test -count=1 -timeout 55m ./internal/dispatch/api/ ; go test -count=1 ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/events/ ./internal/pglisten/ ./loadtest/ ; go test -tags multiprocess ./cmd/dispatch ; go test -race ./internal/dispatch/docs/ ./internal/dispatch/api/",
-      "observed": "all ok at c0e85657 (docs 716.8 s, api 1015.3 s, multiprocess 327.2 s, race docs 1593.7 s, race api 1656.1 s); the head 59a3aeae changes only loadtest/ and INFRA-589's files beyond it, whose loadtest tests pass there. The 14 red tests pass: 20 queued updates in 1 transaction of 3 round trips with 0 shared-pool connections; 0 evictor head reads for 100 own updates and 10 live writes; 0 rooms-pool reads for 100 cached cold reads; at most 3 settlement wake-ups for a 500 ms lag; 1 lock statement at shutdown; 1 issue read and 1 caller read and 0 room walks per socket open; 0/1 renders warm/cold; 4 round trips under the commit-order lock for 20 changed anchors; class shares ygo's slice; losing preload released; read budget 256 MiB/1 GiB/64 MiB; /debug/vars dispatch_rooms names 2 rooms and 2 connections",
-      "headSha": "59a3aeae1864e6704815fd3f81677e8120a641b2",
+      "observed": "all ok at c0e85657 (docs 716.8 s, api 1015.3 s, multiprocess 327.2 s, race docs 1593.7 s, race api 1656.1 s); the head 59a3aeae changes only loadtest/ and INFRA-589's files beyond it, whose loadtest tests pass there. The 14 red tests pass: 20 queued updates in 1 transaction of 3 round trips with 0 shared-pool connections; 0 evictor head reads for 100 own updates and 10 live writes; 0 rooms-pool reads for 100 cached cold reads; at most 3 settlement wake-ups for a 500 ms lag; 1 lock statement at shutdown; 1 issue read and 1 caller read and 0 room walks per socket open; 0/1 renders warm/cold; 4 round trips under the commit-order lock for 20 changed anchors; class shares ygo's slice; losing preload released; read budget 256 MiB/1 GiB/64 MiB; /debug/vars dispatch_rooms names 2 rooms and 2 connections; round 2 re-ran every lane at 2fdeabab: docs ok 584.6 s, api ok 827.9 s, multiprocess ok 281.5 s, race docs ok 1124.7 s",
+      "headSha": "2fdeabab72111f512696671e0bc5fea14e45c1ad",
       "negativeControl": "the same tests at the test commits on the base (pklruqkq, wuzuoumx over c3d09eec) fail for the reason each tests: '20 queued updates committed in 20 transactions ... 10 round trips ... 20 connections of the shared request pool', 'the evictor read the document's head 101 times ... want 0', '100 cold reads ... took 100 connections of the rooms pool', 'the settlement woke 361 times ... want at most 3', 'sent 46 lock statements ... want 1', 'a cold open read the document's issue 4 times', '20 changed anchors made 175 round trips ... against 4'"
     },
     {
@@ -33,14 +41,17 @@
     "packages/envoy/loadtest/editors.go, pgwire.go, rooms.go (new), proxy.go, run.go, tables.go, guard.go, stack.sh, run-step.sh, README.md",
     "tests: docs room_appends_test.go, head_tracker_test.go, settlement_wait_test.go, socket_admission_test.go, room_memory_test.go, anchor_refresh_test.go (new), and wrappers in shutdown_test.go, service_test.go, room_recovery_test.go, interleaved_peers_test.go, anchor_blocks_test.go; api socket_admission_test.go, live_write_test.go, server_test.go; cmd/dispatch dispatch_rooms_test.go, shutdown_test.go, settings_test.go; store pool_test.go; events broker_test.go; loadtest pgwire_test.go, editors_test.go, tables_test.go, guard_test.go",
     ".dispatch/architecture/dispatch-docs.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/CHANGELOG.md",
-    "dispatch://INFRA-514/artifact/architecture-review-md versions 7 and 8 (a Done line under each of DR-03, DR-04, DR-08, DR-10, DR-11, DR-14, DR-16, and the DR-02 measurement)"
+    "dispatch://INFRA-514/artifact/architecture-review-md versions 7 and 8 (a Done line under each of DR-03, DR-04, DR-08, DR-10, DR-11, DR-14, DR-16, and the DR-02 measurement)",
+    "round 2: docs/roomstate.go, docs/websocket.go, docs/service.go, docs/testhooks.go (slot reservations); docs/head_tracker.go, docs/stale_room.go, docs/head_tracker_test.go (trust window, ping, unit test); packages/envoy/.changes/unreleased/pr2445-Fixed-20261028-150000.yaml (changie fragment; CHANGELOG.md restored to the base); room_appends.go and loadtest/README.md (issue keys removed); AGENTS.md, cmd/dispatch/README.md, .dispatch/architecture/dispatch-docs.md"
   ],
   "trickyParts": [
     "A batch is the call's own update and the run queued after it, decided under the room's state lock before the store call and only shrunk after the document lock (a member another batch stored is dropped); every committing transaction marks what it stored before it releases the locks, and an update stored alone is a batch of one with the same protocol, so no update is stored twice (TestALoneUpdateAndABatchHoldingItStoreItOnce, three orders).",
     "The gate reads the room cursor once the document's lock is held (appendGate.throughUnderLock): read before the lock, a settlement or live write holding it meanwhile moves the cursor and the gate would refuse wrongly.",
     "The batched owed-settlement row folds last_actor and main's last_person exactly as one-at-a-time appends leave them (owedUpdates; TestABatchLeavesThePendingAuthorRowsOneAtATimeAppendsLeave with person/session/two-peer cases).",
     "Own writes end in the head tracker through store.AfterCommit before the committing call returns, so a process reads its own writes; a transaction the pool did not open marks the document untrusted until its next head notification.",
-    "Shutdown: browser appends no longer strand a shared connection on a dead database, which exposed a pre-existing hang: pool.Close waited forever on a connection taken after the drain saw the pools idle. closePool now follows the drain's silent-probe rule, with the health pool closed last."
+    "Shutdown: browser appends no longer strand a shared connection on a dead database, which exposed a pre-existing hang: pool.Close waited forever on a connection taken after the drain saw the pools idle. closePool now follows the drain's silent-probe rule, with the health pool closed last.",
+    "Socket caps are reservations: ServeHTTP claims a connection slot by compare-and-swap and a room slot in roomSlots (one slot per room however many sockets share it) before the load; the load takes over the reserved room slot, the unload or the socket's end frees it, and authorize no longer checks a cap, so the cap answers 503 before the upgrade and never 401.",
+    "Head-tracker trust needs a recent delivery: headTrustWindow 3 s since the LISTEN connection last delivered anything, computed at each call; the evictor pings dispatch_doc_ping from the shared pool after each quiet second (headPingAfter), bounded at 1 s, so a saturated pool lets trust lapse and reads fall back to the store."
   ],
   "deviations": [
     "DR-10 (in spec v2, not in the approved plan) is done here for its write half; the architect was told and did not object; the walk stays INFRA-512's.",
@@ -51,15 +62,18 @@
     "TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget strands a shared connection with a request waiting on a project row lock, since browser appends no longer strand one; its bound is recomputed from the constants that path includes.",
     "Connection total is 91 per server, from 83 (main's page said 82 and undercounted the lease pool by one); the plan said 89.",
     "Before/after runs use legion/INFRA-589 9692d2fd (main 1b859ea3 plus the harness) as 'before', not c3d09eec: it differs from the head only by this branch's change and has the same migrations, so the comparison isolates it. Five runs per side per step, plus a three-run REST-only control.",
-    "Room loads warm one room-appends connection; while any per-room evictor decision runs, the listener rechecks its deferrals every 100 ms (pglisten has no outside wake)."
+    "Room loads warm one room-appends connection; while any per-room evictor decision runs, the listener rechecks its deferrals every 100 ms (pglisten has no outside wake).",
+    "Main was not merged forward this round: sjawhar/legion#2369 is still open, so store.ConnectionsPerProcess and infra/gcp dispatchConnectionsPerPod (main only) are counted in the round that merges main once #2369 lands.",
+    "Two Dispatch keys remain in added lines: main's own LEGION-513 and LEGION-484 references in a packages/envoy/AGENTS.md paragraph this change rewrapped."
   ],
   "openQuestions": [
     "INFRA-514's architect holds the merge until INFRA-512's per-keystroke render fix (DR-02) is on main; then main is merged forward and steps 1x and editors-10x-over-0.25x are re-run, 5 runs per side, with both numbers in the PR body.",
     "The shutdown budget can exceed the stop grace (pre-existing on main); INFRA-592 takes it by the architect's decision.",
-    "INFRA-556 changed the agreed gate to take each update's observed time (queueAppendGate(..., observed time.Time)); whichever merges second adopts it: the batch keeps the prefix of members observed within closeMargin of an issue's close.",
-    ".legion/INFRA-589/ handoffs arrive with the harness merge; INFRA-589's retro removes them on main before this branch is merged forward."
+    ".legion/INFRA-589/ handoffs arrive with the harness merge; INFRA-589's retro removes them on main before this branch is merged forward.",
+    "INFRA-556 changed the agreed gate to take each update's observed time; whichever merges second adopts it."
   ],
   "discoveredComplexity": [
     "With database throttling of typing gone, DR-02's per-keystroke whole-document render is the next limit for editing load on 2 cores (render CPU 17.6 s -> 31.6 s per window at 1x; two thirds of Dispatch CPU at 200 editors)."
-  ]
+  ],
+  "round": 2
 }
