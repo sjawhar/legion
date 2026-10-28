@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-713",
+  "completed": "2026-10-28T19:59:30Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-check round, as the architect asked: diff since the last verified head 315813eb read with jj, no browser re-run. The real-surface verification of round 1 (pod runs at 315813eb, record https://github.com/sjawhar/legion/pull/2470#issuecomment-6476602287) stands, because no file under packages/ changed."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Re-check: the change since the last verified head is only the rename of the two docs/solutions learnings to -pr2470.md, with no Dispatch key in them",
+      "surface": "The issue branch legion/INFRA-713 at origin",
+      "command": "jj diff --summary --from 315813eb6f1b --to legion/INFRA-713@origin; jj diff --summary --from 7baa0ad4260a --to 59d2978409f5; grep -n -E '\\b(INFRA|LEGION|LEGSMOKE)-[0-9]+|dispatch://' docs/solutions/*/*pr2470.md; jj diff --from 315813eb6f1b --to legion/INFRA-713@origin -- packages | wc -l",
+      "observed": "Outside .legion/, the diff adds only docs/solutions/testing/a-browser-row-that-needs-work-to-outlast-a-deadline-holds-the-worker-rather-than-trusting-a-slow-input-pr2470.md and docs/solutions/testing/a-ci-negative-control-for-a-browser-row-changes-a-value-the-earlier-gates-accept-and-runs-on-its-own-throwaway-pull-request-pr2470.md. Commit 59d29784 renames the two -INFRA-713.md files to these. The key grep finds nothing. The diff under packages/ has 0 lines. No *INFRA-713* file remains under docs/solutions.",
+      "headSha": "fda14ae1a17a4f2e8a4b52ab67c7941e21d0dd86",
+      "negativeControl": "The same key grep over the two files at the retro head 7baa0ad4 (…-INFRA-713.md) matches 1 and 2 lines of their text and both file names, so the check tells the old files from the new ones; the diff of 7baa0ad4..59d29784 shows exactly two R (rename) rows."
+    },
+    {
+      "criterion": "A1 CI and A2 CI (left unverified in round 1, now read): the row passes in CI's dispatch job in the four projects, and the control fails there",
+      "surface": "CI dispatch job on GitHub-hosted runners",
+      "command": "gh run view 40732897855 -R sjawhar/legion --job 123006375476 --log; gh run view 40732919704 -R sjawhar/legion --job 123006617590 --log; grep 'too large to draw'",
+      "observed": "Issue PR, head 315813eb, job success: ✓ [chromium] (6.4 s), [iphone] (6.3 s), [webkit] (7.2 s), [firefox] (7.0 s) at mermaid.e2e.ts:216, no retry of the row, 1211 passed. Control PR #2471, head da4fb160 (RENDER_TIME_LIMIT_MS = 600_000), job failure: ✘ in the same four projects (16.6-17.3 s), each at mermaid.e2e.ts:269:27, expect(locator).toHaveText failed.",
+      "headSha": "315813eb6f1b429c0c2aa9aa432d29eecb4f6981",
+      "negativeControl": "Control PR #2471 run 40732919704 is the negative control: the refusal disabled by the limit raised to 600_000, and the row fails in all four projects on the same job and runner class."
+    }
+  ],
+  "notes": [
+    "Bare gates at the new code head 59d2978409f5: CI runs 40758644324 (Legion Envoy and Contracts), 40758644286 (Docs), 40758644283 (Tests) and 40758644325 (PR Title) were queued at 19:58Z. They are read as queued and not waited for. The head fda14ae1 carries .legion/ only, with the skip-checks trailer.",
+    "The diff changes no runtime or test code, so no smoke run applies beyond round 1's pod runs."
+  ]
+}
