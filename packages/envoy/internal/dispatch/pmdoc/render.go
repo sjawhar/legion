@@ -916,7 +916,8 @@ func nulAsReplacement(text string) string {
 // code block's language), or in a block's id - as U+FFFD (nulAsReplacement). node is the
 // rendering's own copy (StripAnchorMarks clones each node's and mark's attributes). A typed block's
 // other attributes are written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its
-// parser unquotes back, so they keep it; its id is written bare, `#` and the id.
+// parser unquotes back, so they keep it; its id is written as TypedBlockIDAttribute writes it, with
+// no such escape.
 func writeNulsAsReplacement(node *Node) {
 	node.Text = nulAsReplacement(node.Text)
 	if !IsTypedBlock(node.Type) {

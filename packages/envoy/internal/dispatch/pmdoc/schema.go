@@ -166,6 +166,11 @@ func validateBlockSchema(value BlockSchema) error {
 			if !directiveName(name) {
 				return fmt.Errorf("type %q attribute %q is invalid", typ.Name, name)
 			}
+			// A typed block's markdown reads `id="…"` as its block id (TypedBlockIDAttribute), and
+			// its tree holds that id as blockId, so neither can name an attribute.
+			if name == "id" || name == BlockIDAttr {
+				return fmt.Errorf("type %q attribute %q names the block id, which no attribute may", typ.Name, name)
+			}
 			if err := validateAttributeSchema(typ.Name, name, attr); err != nil {
 				return err
 			}
@@ -420,7 +425,7 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 	if !ok || id == "" {
 		return "", fmt.Errorf("%w: typed block %q is missing blockId", ErrSchema, n.Type)
 	}
-	parts := []string{"#" + id}
+	parts := []string{TypedBlockIDAttribute(id)}
 	names := make([]string, 0, len(typ.Attributes))
 	for name := range typ.Attributes {
 		names = append(names, name)

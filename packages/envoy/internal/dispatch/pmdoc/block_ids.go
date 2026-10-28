@@ -57,7 +57,7 @@ func RepeatedBlockID(live, next, named *Node) error {
 	var repeated error
 	walkBlockIDs(named, func(id string) bool {
 		if written[id] > 1 && written[id] > held[id] {
-			repeated = fmt.Errorf("block id %q would name two blocks; give one of them another id, or omit {#%s} to have one minted", id, id)
+			repeated = fmt.Errorf("block id %q would name two blocks; give one of them another id, or omit {%s} to have one minted", id, TypedBlockIDAttribute(id))
 			return false
 		}
 		return true
@@ -145,7 +145,8 @@ func EnsureBlockIDsCount(tree *Node) (stamped int) {
 // browser's update can set any string, so such an id is minted again as a missing one is. Every
 // other id stays: the browser editor keeps whatever a pasted typed block's `#id` names up to a
 // quote, `#`, `.`, `<`, `=`, `>`, a backtick, `}` or whitespace (`q:1`, `décision`), and an ask row
-// or anchor stored under such an id is found by it.
+// or anchor stored under such an id is found by it. A typed block's markdown writes any such id so
+// that it reads back (TypedBlockIDAttribute).
 func storedBlockID(node *Node) (string, bool) {
 	id, _ := node.Attrs[BlockIDAttr].(string)
 	return id, id != "" && strings.IndexByte(id, 0) < 0

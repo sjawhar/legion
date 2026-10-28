@@ -230,12 +230,15 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []
 // pointer's pair is a mention's. A pointer writes a pair only from the node uniqueBlocks keeps for
 // its block id, the first holder of the id with an offset, and only when that node is the typed
 // block holding it (its type is the pointer's BlockType). pmdoc.BlockPointers already lists none
-// of a typed block repeating the id of a typed block before it; this catches an earlier holder
-// that is not typed (a paragraph), whose id the version write's tree carries and the markdown the
-// reconciliation reads back does not, so both paths write the same rows. A holder with no offset
-// (a list item, a table cell) is never a node, so a typed block after it is the id's node and
-// keeps its pointers. One whose block is no node (an id past the bound, say) or not its own
-// writes nothing and is charged against no mention.
+// of a typed block repeating the id of a typed block before it. The type check keeps a typed
+// block's pointers off a first holder of its id that is not typed (a paragraph, a heading). It is
+// not what makes the two paths agree: a typed block's id reads back from the markdown as the tree
+// holds it (pmdoc.TypedBlockIDAttribute), so the version write, indexing the tree, and the
+// reconciliation, reading the markdown back, list the same pointers under that id and resolve it
+// to the same node of the same render, and without the check both would write the same wrong edge
+// from that holder. A holder with no offset (a list item, a table cell) is never a node, so a typed
+// block after it is the id's node and keeps its pointers. One whose block is no node (an id past
+// the bound, say) or not its own writes nothing and is charged against no mention.
 func pointerPairs(nodes []model.ArtifactBlock, pointers []Pointer) ([]blockPair, map[heldTarget]int) {
 	if len(pointers) == 0 {
 		return nil, nil

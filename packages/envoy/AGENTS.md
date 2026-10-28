@@ -1716,7 +1716,17 @@ Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/block
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
 syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
-Both parsers close it at a line of at least as many colons as the opener, indented less than four
+The renderer writes the id so that both parsers read it back as the tree holds it, whatever id a
+browser set (`pmdoc.TypedBlockIDAttribute`): `#block-id` when the browser editor's parser reads
+all of it as that shortcut and it holds no `&` - no whitespace, `"`, `#`, `'`, `.`, `<`, `=`, `>`,
+backtick or `}` ends it - and `id="…"` otherwise, its `&`, `"`, line feeds and carriage returns
+written as character references (`a b` is written `id="a b"`, `q:1` `#q:1`); a U+0000 is written
+U+FFFD, as markdown reads it. Both parsers read either form, `id="…"` with its character
+references decoded and no backslash escape. Go refuses what the browser editor would read another
+way or not at all: a shortcut holding `&`, which it decodes, or ending at `#`, `.` or `}`, an id
+written twice, an `id` with no value or an empty one, and a `blockId` attribute. A block schema
+declares no attribute named `id` or `blockId`.
+Both parsers close a typed block at a line of at least as many colons as the opener, indented less than four
 columns past where its lines start, whatever block inside it the line would otherwise continue - a
 paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text
 written within that reach of a typed block fenced with three colons, and at a typed block's own
@@ -2059,12 +2069,17 @@ row. A typed block repeating the id of a typed block before it in document order
 (`pmdoc.BlockPointers`), and `refs.IndexBlocks` writes a pointer only from the id's node, the first
 holder of the id that the render gives an offset, when that node is the typed block holding it
 (its type): a later typed holder's values are neither edges, nor charged against the first
-holder's mentions. Only typed ids count in `BlockPointers` because only they are the same in the
-tree a version write indexes and in the markdown the reconciliation reads back (a paragraph's id
-is not written there), so both paths write the same rows; a list item or table cell before a typed
-block has no offset and is never the node, so the typed block keeps its pointers. The refusal
-checks `BlockPointers`' pointers, so a pointer a write introduces on a later holder of a typed id
-is never judged; settlement's `EnsureBlockIDs` then gives that block a fresh id, and its pointer
+holder's mentions. Only typed ids count in `BlockPointers` because only they are written in the
+markdown, each so that it reads back as the tree holds it (`pmdoc.TypedBlockIDAttribute`; a U+0000
+is written U+FFFD, and `BlockPointers` lists the id so), and so are the same in the tree a version
+write indexes and in the markdown the reconciliation reads back (a paragraph's id is not written
+there): both paths write the same rows. A list item or table cell before a typed block has no
+offset and is never the node, so the typed block keeps its pointers. The type check does not make
+the paths agree; it keeps a typed block's pointers off a first holder of its id that is not typed
+(a paragraph, a heading), from which both paths would otherwise write the same wrong edge. The
+refusal checks `BlockPointers`' pointers, so a pointer a write introduces on a later holder of a
+typed id is never judged, and the index writes no edge for it while it repeats the id;
+settlement's `EnsureBlockIDs` then gives that block a fresh id, and its pointer
 becomes an edge it was never refused for, while the readers still hide a disallowed target
 (`block_ref_listed`). That needs a repeat the live document already carries, since a write cannot
 make one (`RepeatedBlockID`). `heldByABlock` hides the citing document's own `mentions` edge behind a block row of any kind,

@@ -33,11 +33,14 @@ type BlockPointer struct {
 //
 // A typed block repeating the id of a typed block before it in document order lists none: the
 // block index takes the first holder of an id for its node (refs.IndexBlocks). Only typed blocks
-// count here, because only their ids are certain to be the same in the tree a version write
-// indexes and in the markdown the reconciliation reads back (a paragraph's id is not written in
-// markdown, and a list item or table cell has no offset, so it is never the index's node). An
-// earlier holder that is not typed but has an offset (a paragraph) is caught by the index itself,
-// which writes a pointer only from a node of the pointer's own block type (refs.IndexBlocks).
+// count here, because only their ids are written in markdown, and so are the same in the tree a
+// version write indexes and in the markdown the reconciliation reads back: the rendering writes a
+// typed block's id so that it reads back as the tree holds it (TypedBlockIDAttribute), each U+0000
+// aside, which it writes U+FFFD (writeNulsAsReplacement), so each block is listed under its id as
+// written. A paragraph's id is not written in markdown, and a list item or table cell has no
+// offset, so it is never the index's node. An earlier holder that is not typed but has an offset
+// (a paragraph) is caught by the index itself, which writes a pointer only from a node of the
+// pointer's own block type (refs.IndexBlocks).
 func BlockPointers(tree *Node) []BlockPointer {
 	if len(schemaLinkKinds) == 0 {
 		return nil
@@ -45,19 +48,19 @@ func BlockPointers(tree *Node) []BlockPointer {
 	var pointers []BlockPointer
 	held := make(map[string]struct{})
 	Walk(tree, func(node *Node) bool {
+		typ, typed := typedBlock(node.Type)
+		if !typed {
+			return true
+		}
 		id, _ := node.Attrs[BlockIDAttr].(string)
-		if id != "" && IsTypedBlock(node.Type) {
+		id = nulAsReplacement(id)
+		if id != "" {
 			if _, repeated := held[id]; repeated {
 				return true
 			}
 			held[id] = struct{}{}
 		}
-		names, ok := schemaPointerAttributes[node.Type]
-		if !ok {
-			return true
-		}
-		typ, _ := typedBlock(node.Type)
-		for _, name := range names {
+		for _, name := range schemaPointerAttributes[node.Type] {
 			refs, _ := stringSlice(node.Attrs[name])
 			for _, ref := range refs {
 				target, canonical := text.CanonicalBlockRef(ref)
@@ -80,8 +83,11 @@ func BlockPointers(tree *Node) []BlockPointer {
 // that name. A nil prior (a new document, or one outside the schema) holds none. A pointer the
 // write leaves unchanged is never refused, so a target retyped elsewhere blocks no unrelated edit.
 // Its pointers are BlockPointers', so a typed block repeating the id of a typed block before it is
-// never checked, as the block index never writes its pointers. A typed block repeating the id of
-// an earlier paragraph is checked, though the index writes no edge for it either.
+// never checked. The block index writes no edge for it while it repeats the id, but settlement's
+// EnsureBlockIDs then gives it a fresh id, and its unchecked pointer becomes an edge, which the
+// readers hide while its target has a type the attribute does not allow (block_ref_listed). A
+// typed block repeating the id of an earlier paragraph is checked, though the index writes no edge
+// for it either.
 //
 // resolve is called at most once, with the target of each introduced pointer whose attribute has
 // targets, and returns the current types of the blocks they name by node id (text.TargetID); none
@@ -119,8 +125,8 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (map
 	for _, pointer := range introduced {
 		for _, typ := range types[text.TargetID(pointer.Target)] {
 			if !slices.Contains(pointer.Targets, typ) {
-				return fmt.Errorf("%w: typed block %q #%s attribute %q points at %s, a %q block; it points only at %s",
-					ErrBlockPointer, pointer.BlockType, pointer.Block, pointer.Attribute, pointer.Ref, typ, strings.Join(pointer.Targets, ", "))
+				return fmt.Errorf("%w: typed block %q %s attribute %q points at %s, a %q block; it points only at %s",
+					ErrBlockPointer, pointer.BlockType, TypedBlockIDAttribute(pointer.Block), pointer.Attribute, pointer.Ref, typ, strings.Join(pointer.Targets, ", "))
 			}
 		}
 	}
