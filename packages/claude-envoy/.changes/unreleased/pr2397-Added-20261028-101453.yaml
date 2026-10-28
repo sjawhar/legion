@@ -4,8 +4,7 @@ body: |-
     new decision block got right under the line naming the write, as what it found and how it
     searched, that it found nothing, or that no check was made, why, and the `dispatch search` to
     run instead, and `dispatch related --project <KEY> --title … --text …` runs that check on a
-    draft and writes nothing; the bundled tool descriptions carry both, since `dist/` was
-    regenerated.
+    draft and writes nothing.
 time: 2026-10-28T10:14:53.8148722Z
 custom:
     Issue: pr2397
