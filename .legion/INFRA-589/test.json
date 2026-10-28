@@ -2,60 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T12:00:00Z",
-  "round": 6,
-  "headTested": "0ad55022016a6eca87857f78b9d37dd06ae8a704 (code head d32d754f, the forward merge of main; meta.json build_commit 0ad55022, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120). I reseeded with the merged build: stack.sh seed --force, migration 134, 1,043 s. box_busy_before was 1.1-3.7%. The stack is stopped; the seed is kept.",
-  "rebaseRecheck": "Unchanged-diff fingerprint 1e673f40 -> d32d754f: 4d6cb22956731f04b09bf349b53bb0638582f381b9be08a7f10b55ed78df85c9 -> 07cabb65e96b47f28252e2a8f4cf77361d83cd9209e5fcfdc8da7e448c2d7fad, changed. A diff of the two branch diffs shows one difference: the packages/envoy/CHANGELOG.md entry moved into packages/envoy/.changes/unreleased/pr2369-Added-20261028-102101.yaml, main's changie format. No code line differs. Because the fingerprint changed, and the merge brought main's Dispatch (migrations 0130-0134, all plain SQL in one migration transaction), which the harness builds and measures, I ran a full real-surface round, not only the bare gates.",
+  "completed": "2026-10-28T13:55:00Z",
+  "round": 8,
+  "headTested": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd (code head 8530db16; meta.json build_commit 405dfe70, build_dirty false)",
+  "surface": "The branch diff, and the packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod: LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120), seed at migration 134, box_busy_before 1.0%. The stack is stopped.",
+  "scope": "8530db16 changes comments, README.md prose, the header comments of the route-mix file built into the binary, and the changelog fragment's name. I checked that no non-comment line of a .go, .sh or .txt file changed. Behaviour was proven in round 7 at 945d9940, so this round re-checked the key search and ran one smoke step, which also proves the edited route-mix file still parses.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I confirmed MERGEABLE, recomputed both fingerprints and diffed the two branch diffs: the only difference is the changelog fragment, as the implementer reported. I re-ran its smoke step after reseeding at the merged build, then the rest of A1-A6, the stack-exit failure, the unread-commit fix, the run lock and the negative controls."
+    "how": "Re-ran the implementer's key search over the branch's added lines outside .legion/: 3 matches, all the {key_ref} placeholder (README.md:456, routes-2026-10-26-1719Z.txt:15, routes.go:148). Read the fragment: pr2369-Added-20261028-133210.yaml, Issue: pr2369. Ran a smoke step at this head."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Tester round-5 failure: the head merges with main and its own diff is unchanged in code",
-      "surface": "GitHub pull request #2369; jj fingerprint per skill legion-worker/references/conflicts-and-rewrites.md",
-      "command": "gh pr view 2369 -R sjawhar/legion --json mergeable,mergeStateStatus; the unchanged-diff fingerprint at 1e673f40 and d32d754f; diff of the two fingerprinted branch diffs",
-      "observed": "MERGEABLE (merge state BLOCKED, awaiting review and checks); fingerprint 4d6cb229... -> 07cabb65...; the only difference is CHANGELOG.md's entry replaced by .changes/unreleased/pr2369-Added-20261028-102101.yaml. CI at d32d754f when read: changes, lint, typecheck and pr-title success; test in progress; envoy-go, envoy-e2e-local and envoy-smoke queued. CI steps for run-step.test.sh and common.test.sh are still in envoy-and-contracts.yaml after the merge (lines 1118, 1121)",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "at the previous head bdc451d3 GitHub reported CONFLICTING and ran no checks at all"
+      "criterion": "Tester round-7 failure: text this branch adds outside .legion/ carries no Dispatch issue key, project key or dispatch:// link, apart from the {key_ref} placeholder; the changelog fragment names the pull request",
+      "surface": "the branch diff against main (what the squash merge puts on main)",
+      "command": "jj diff --from 'fork_point(main@origin | @-)' --to @- --git '~.legion' | grep '^+' | grep -v '^+++' | grep -cE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://'; grep -rnE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://' packages/envoy/loadtest packages/envoy/.changes/unreleased/; ls packages/envoy/.changes/unreleased/",
+      "observed": "3 added lines match, all the placeholder: README.md:456 '`{key_ref}`: `dispatch://<key>`', routes-2026-10-26-1719Z.txt:15 '(URL-escaped dispatch://<key>)', routes.go:148 'url.QueryEscape(\"dispatch://\"+is.Key)'. Fragment pr2369-Added-20261028-133210.yaml with kind Added and Issue: pr2369; INFRA-589-load-test-harness.yaml is gone. The new commit subject carries no key. No non-comment line of a loadtest .go, .sh or .txt file changed in 8530db16.",
+      "headSha": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd",
+      "negativeControl": "at round 7's head 945d9940 the same search found 19 lines, including the fragment's 'Issue: INFRA-589'"
     },
     {
-      "criterion": "A1/A3 on the merged build: seed through Dispatch, five kinds, N sessions, delivery from arrival and from commit",
+      "criterion": "A1/A3 and A5 still hold after the wording change, including the edited default route-mix file, which is built into the binary",
       "surface": "packages/envoy/loadtest CLI",
-      "command": "stack.sh setup && stack.sh start && stack.sh seed --force; run-step.sh smoke-r6 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20",
-      "observed": "seed migration 134, 1,043 s, 4 projects / 1,000 issues / 8,000 comments / 10,004 events; smoke-r6 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, 50 registered, delivery p50/p99 from arrival 379/1,560 ms, from commit 33/423, clock_anomalies 0, commits_error null, all read-error counts 0, 179 SSE frames, no mark in TABLES.md",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "--event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1; route mix POST on line 3 -> 'line 3: method \"POST\" is refused', exit 1; events max id 10004 before and after"
-    },
-    {
-      "criterion": "A4 on the merged build: the 1x step reproduces the first knee",
-      "surface": "same",
-      "command": "run-step.sh step-1x-r6 --events 4 --sessions 400 --requests 60; run-step.sh step-1x-report-mix-r6 ... --event-mix report-2026-10-27; the series' step-1x",
-      "observed": "step-1x-r6: lock held 100%, waiters p50 45, 1.29 of 3.99 events/s, receipts 1,165/1,165; series 1x: held 100%, waiters 43, 1.19; report mix: held 100%, waiters 48, 2.90 of 3.83 (root report step-1x 2.89 of 4.12)",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "the series' step-0.25x: lock held 8.7%, waiters p50 0, 0.98 of 0.98 committed"
-    },
-    {
-      "criterion": "Earlier fixes on the merged build: a stack exit fails the step, unread commit rows are marked, one run per root, the guard refuses production",
-      "surface": "same",
-      "command": "run-step.sh killed-r6 ... with kill -KILL <pids.dispatch> 45 s into the window, and run-step.sh conc-r6 during it; stack.sh loadgen run -allow-foreign with every flag for the local stack and -pg .../postgres (no trigger); stack.sh loadgen run -allow-foreign with -url $DISPATCH_URL -listener $ENVOY_URL and the stack's tokens",
-      "observed": "killed-r6 EXIT=1 'dispatch (pid 32578) exited during the step ...', row '(dispatch exited)'; conc-r6 refused 'in use by another run (pid 32126 ...: bash packages/envoy/loadtest/run-step.sh killed-r6 ...)'; foreign-notrigger rc=1, rows '(commit rows not read)' with '1.00 / 1.03 / -' and '(- / n)'; production run rc=1 'guard: dispatch check failed ... answered 401'; no token in any step file or output",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "production Dispatch, the party the guard must refuse: refused with 401 before any write; -url $DISPATCH_URL without -allow-foreign refused before any connection"
-    },
-    {
-      "criterion": "A2, A5, A6 on the merged build",
-      "surface": "same; README.md",
-      "command": "run-series.sh; run-step.sh routes-alt-r6 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series, smoke-r6 and foreign-notrigger TABLES.md searched in backticks in README.md",
-      "observed": "series-20261028T112009Z exit 0, one build line, all six steps build 0ad55022, each with summary.json, TABLES.md, cpu.pprof, heap.pprof, 8 tables, lock held 9%, 31%, 100%, 94%, 0%, 69%, no commits_error, no stack exit; routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0; 47 headers, 0 missing",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "run-step.sh during a running step refused (conc-r6, above)"
+      "command": "run-step.sh smoke-r8 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; README header search",
+      "observed": "exit 0; 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, clock_anomalies 0, all read-error counts 0; route mix 'routes-2026-10-26-1719Z.txt (embedded)' with 18 routes, 899/899 2xx; 47 table headers all defined in README.md",
+      "headSha": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd",
+      "negativeControl": "the route-mix parser refuses a bad file before any request (round 7 at 945d9940: POST on line 3 refused, exit 1); this round's file has only comment changes, and the run read all 18 routes"
     }
   ],
   "observations": [
-    "1x committed on the merged build: 1.29 and 1.19 events/s, lock held 100%; within the spread of earlier rounds (0.23-1.95)."
+    "Wording only, for the reviewer: README.md lines 886-888 and 889-891, edited this round, break onto short lines ('document-room sampler', 'into this package, so that'), where the README elsewhere wraps at 100 characters.",
+    "CI at code head 8530db16 when read: changes, lint, typecheck, test and pr-title queued. GitHub reports MERGEABLE."
   ]
 }

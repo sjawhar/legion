@@ -54,6 +54,11 @@ type callResult struct {
 
 func (r callResult) ok() bool { return r.err == nil && r.status/100 == 2 }
 
+// transient is a failure worth retrying: a transport error, 429 or 5xx.
+func (r callResult) transient() bool {
+	return r.err != nil || r.status == http.StatusTooManyRequests || r.status >= 500
+}
+
 // arrival is when the request reached Dispatch's socket, or its start when the trace never saw
 // the write complete.
 func (r callResult) arrival() int64 {
@@ -126,8 +131,7 @@ func (a *api) callRaw(ctx context.Context, method, path string, w who, contentTy
 func (a *api) callRetry(ctx context.Context, method, path string, w who, body any) callResult {
 	for attempt := 0; ; attempt++ {
 		res := a.call(ctx, method, path, w, body)
-		transient := res.err != nil || res.status == http.StatusTooManyRequests || res.status >= 500
-		if res.ok() || !transient || attempt >= 6 || ctx.Err() != nil {
+		if res.ok() || !res.transient() || attempt >= 6 || ctx.Err() != nil {
 			return res
 		}
 		time.Sleep(time.Second)

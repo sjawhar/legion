@@ -62,11 +62,13 @@ func TestOpenLoopSchedule(t *testing.T) {
 
 // TestAForeignRunsMetaHoldsNoTokenOrPassword: under -allow-foreign the tokens and the URLs are
 // flags, and meta.json records them as the normalized flag list: each token as <redacted>, each URL
-// without its password (its user stays). Neither meta.json nor the log holds a token or a password.
+// without its userinfo, the user too, since nats.go takes a user with no password as the auth
+// token; a comma-separated -nats server list or -pg host list loses every element's. Neither
+// meta.json nor the log holds a token, a password or a NATS token user.
 func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 	t.Setenv("LOADTEST_ROOT", t.TempDir())
-	const agent, listener, password = "agent-token-7f3a", "listener-token-9c1e", "url-password-51d2"
-	pg := "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"
+	const agent, listener, password, natsToken = "agent-token-7f3a", "listener-token-9c1e", "url-password-51d2", "nats-token-4b2e"
+	pg := "postgres://127.0.0.1:1/dispatch?sslmode=disable"
 	for _, c := range []struct {
 		args, want []string
 	}{
@@ -83,9 +85,26 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 				"-pg", "postgres://postgres:" + password + "@127.0.0.1:1/dispatch?sslmode=disable&password=" + password,
 			},
 			want: []string{
-				"-allow-foreign=true", "-listener=http://agent@127.0.0.1:2", "-listener-token=" + redacted,
-				"-nats=nats://loadgen@127.0.0.1:3", "-nats-mon=http://monitor@127.0.0.1:4", "-pg=" + pg,
-				"-pprof=http://pprof@127.0.0.1:5", "-token=" + redacted, "-url=http://agent@127.0.0.1:1",
+				"-allow-foreign=true", "-listener=http://127.0.0.1:2", "-listener-token=" + redacted,
+				"-nats=nats://127.0.0.1:3", "-nats-mon=http://127.0.0.1:4", "-pg=" + pg,
+				"-pprof=http://127.0.0.1:5", "-token=" + redacted, "-url=http://127.0.0.1:1",
+			},
+		},
+		{
+			// A -nats URL whose user is the NATS token.
+			args: []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-nats", "nats://" + natsToken + "@127.0.0.1:3"},
+			want: []string{"-allow-foreign=true", "-listener-token=" + redacted, "-nats=nats://127.0.0.1:3", "-token=" + redacted},
+		},
+		{
+			// A -nats server list and a -pg host list, credentials in more than the first element.
+			args: []string{
+				"-allow-foreign", "-token", agent, "-listener-token", listener,
+				"-nats", "nats://" + natsToken + "@127.0.0.1:3,nats://loadgen:" + password + "@127.0.0.1:6",
+				"-pg", "postgres://postgres:" + password + "@127.0.0.1:1,127.0.0.1:2/dispatch?sslmode=disable",
+			},
+			want: []string{
+				"-allow-foreign=true", "-listener-token=" + redacted, "-nats=nats://127.0.0.1:3,nats://127.0.0.1:6",
+				"-pg=postgres://127.0.0.1:1,127.0.0.1:2/dispatch?sslmode=disable", "-token=" + redacted,
 			},
 		},
 	} {
@@ -108,7 +127,7 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, secret := range []string{agent, listener, password} {
+		for _, secret := range []string{agent, listener, password, natsToken} {
 			if strings.Contains(string(meta), secret) || strings.Contains(logged.String(), secret) {
 				t.Fatalf("%q: meta.json or the log holds a token or a password:\n%s\n%s", c.args, meta, logged.String())
 			}

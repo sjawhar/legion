@@ -4,7 +4,8 @@
 #
 # die MESSAGE prints MESSAGE, prefixed with the script's name, and exits 1. note MESSAGE prints
 # MESSAGE with the same prefix and goes on. usage prints the script's header comment, from its
-# second line to its `set -euo` line, and exits 2.
+# second line to its `set -euo` line, and exits 2. abs_file FLAG FILE prints FILE's absolute path
+# and dies, naming FLAG, when FILE is not a file.
 #
 # resolve_paths sets SRC to LOADTEST_SRC (default: the checkout holding this file) and ROOT to
 # LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest, created), both as physical paths, and
@@ -48,6 +49,12 @@ die() {
 }
 
 note() { printf '%s: %s\n' "${0##*/}" "$*" >&2; }
+
+# abs_file FLAG FILE: FILE's absolute path, refused when it is not a file.
+abs_file() {
+  [ -f "$2" ] || die "$1 names $2, which is not a file"
+  printf '%s/%s\n' "$(cd -- "$(dirname -- "$2")" && pwd -P)" "$(basename -- "$2")"
+}
 
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2

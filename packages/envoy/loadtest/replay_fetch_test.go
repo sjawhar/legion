@@ -271,19 +271,36 @@ func TestOpenAsks(t *testing.T) {
 		mkEvent(t, 6, "PRJ-1", "ask.follower_added", mins(-16), sess("s1"), map[string]any{"ask_id": "a3", "session_id": "s4"}),
 		mkEvent(t, 7, "PRJ-1", "ask.resolved", mins(-15), sess("s1"), ask("a3", "resolved", nil)),
 		mkEvent(t, 8, "PRJ-1", "ask.resolved", mins(1), sess("s1"), ask("a1", "resolved", nil)),
+		// A typed ask block resolved before at is kept with its resolution; one resolved in the
+		// window stands as it was at at.
+		mkEvent(t, 9, "PRJ-1", "ask.opened", mins(-14), sess("s1"), ask("a4", "open", map[string]any{"block_id": "b4"})),
+		mkEvent(t, 10, "PRJ-1", "ask.resolved", mins(-13), sess("s2"), ask("a4", "resolved", map[string]any{
+			"block_id": "b4", "block_artifact": map[string]any{"id": "d1", "slug": "s", "primary": true},
+			"resolution": map[string]any{"kind": "retracted", "reason": "why", "actor": sess("s2"), "at": mins(-13).Format(time.RFC3339Nano)}})),
+		mkEvent(t, 11, "PRJ-1", "ask.opened", mins(-12), sess("s1"), ask("a5", "open", map[string]any{"block_id": "b5"})),
+		mkEvent(t, 12, "PRJ-1", "ask.resolved", mins(2), sess("s2"), ask("a5", "resolved", map[string]any{
+			"block_id": "b5", "resolution": map[string]any{"kind": "resolved", "reason": "why", "actor": sess("s2"), "at": mins(2).Format(time.RFC3339Nano)}})),
 	}
 	rec, err := buildState("PRJ", tAt, tUntil, []issueLog{{Key: "PRJ-1", Number: 1, Events: evs}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	asks := rec.State.Issues[0].Asks
-	if len(asks) != 2 || asks[0].ID != "a1" || asks[0].State != "answered" || asks[0].Answer == nil || asks[0].Answer.User != "u1" {
+	if len(asks) != 4 || asks[0].ID != "a1" || asks[0].State != "answered" || asks[0].Answer == nil || asks[0].Answer.User != "u1" {
 		t.Fatalf("asks %+v", asks)
 	}
 	a2 := asks[1]
 	if a2.Kind != "approval" || a2.Approval == nil || a2.Approval.Version != 3 || a2.Approval.RequestedVersion != 2 ||
 		a2.BlockArtifactID == nil || *a2.BlockArtifactID != "d1" || *a2.BlockID != "b1" {
 		t.Fatalf("approval ask %+v", a2)
+	}
+	a4 := asks[2]
+	if a4.ID != "a4" || a4.State != "resolved" || a4.Resolution == nil || a4.Resolution.Kind != "retracted" || a4.Resolution.Reason != "why" ||
+		a4.Resolution.By.ID != "s2" || !a4.Resolution.At.Equal(mins(-13)) || a4.BlockArtifactID == nil || *a4.BlockArtifactID != "d1" {
+		t.Fatalf("resolved typed ask block %+v", a4)
+	}
+	if a5 := asks[3]; a5.ID != "a5" || a5.State != "open" || a5.Resolution != nil {
+		t.Fatalf("typed ask block resolved in the window %+v", a5)
 	}
 }
 

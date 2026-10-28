@@ -2,37 +2,36 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T10:50:00Z",
-  "round": 6,
-  "answersTestFailures": "test.json (tester round 5) failure 1: the head was CONFLICTING with main, so no CI ran. Forward merge of main (36f305c0) plus d32d754f restoring packages/envoy/infra/go.work.sum to main's copy; the PR's changelog entry moved into a changie fragment (main's #2419). No code change.",
+  "completed": "2026-10-28T14:15:00Z",
+  "round": 9,
+  "answersReview": "review.json round 4 at code head 8530db16: two correctness findings, fixed in f93dbc53 per the architect's cap, each with a test that fails on 8530db16; threads PRRT_kwDORFy7ds6xHEDv and PRRT_kwDORFy7ds6xHED0 answered and resolved.",
   "proof": [
     {
-      "criterion": "The head merges cleanly with main and its diff is unchanged apart from the changelog's move into a fragment",
-      "surface": "GitHub pull request #2369 and the branch diff",
-      "command": "gh pr view 2369 -R sjawhar/legion --json mergeable; the unchanged-diff fingerprint at 02bc158a and d32d754f (skill conflicts-and-rewrites), and a diff of the two branch diffs",
-      "observed": "MERGEABLE at d32d754f; fingerprint 4d6cb229... -> 07cabb65...; the only difference is packages/envoy/CHANGELOG.md (now identical to main's) replaced by packages/envoy/.changes/unreleased/pr2369-Added-20261028-102101.yaml (changie v1.26.0, kind Added, Issue pr2369), whose text adds one clause for the round-4 fix; posted at https://github.com/sjawhar/legion/pull/2369#issuecomment-6466777374",
-      "headSha": "d32d754f00fafb068a3c5db6efa81002ea3545d7",
-      "negativeControl": "the same read gave CONFLICTING at bdc451d3 (tester round 5)"
+      "criterion": "Finding 1: a sampler whose context has ended keeps no sample, so no zero or negative value enters the statistics",
+      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest; and the unit test",
+      "command": "run-step.sh smoke-r13 --events 2 --sessions 50 --requests 10 --duration 60s --grace 2s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; cd packages/envoy && go test -run TestSamplerMarksNoReadThatFailedOnceTheStepEnded ./loadtest",
+      "observed": "exit 0; pg_conns_total min 31 over 13 samples, goroutines min 135, nats_in/out 10.3/22.1 msgs/s, pg/pprof/nats read errors 0, receipts 580/580; the test passes",
+      "headSha": "f93dbc536e5277b00fc1fe3c74c7032e50e15597",
+      "negativeControl": "with 8530db16's sample.go (go test -overlay) the test fails: one sample is kept after the context ended"
     },
     {
-      "criterion": "Bare gates at the merged head: the harness and its tests still work, and main's new store.ConnectionsPerProcess test passes on the merge",
-      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest; Go unit tests",
-      "command": "run-step.sh merged-r6 --events 2 --sessions 50 --requests 10 --duration 60s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; cd packages/envoy && go test ./loadtest && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && go test -run 'Connections|PoolSize|SharedPool' ./internal/dispatch/store/; cd infra && go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/",
-      "observed": "merged-r6 exit 0 at build d32d754f (build_dirty false, migration 134 on a seed at 129): committed/offered 16/16, 22/22, 20/20, 35/35, 23/23, receipts 580/580, clock_anomalies 0, commits_error null, no mark in TABLES.md; go test ok; 4 and 5 PASS; store and infra/gcp tests ok",
-      "headSha": "d32d754f00fafb068a3c5db6efa81002ea3545d7",
-      "negativeControl": "run-step.test.sh refuses a second run on a held root (4 PASS, file unmodified)"
+      "criterion": "Finding 2: meta.json and every printed endpoint hold no -nats user and no password, for a single URL and for a comma-separated list",
+      "surface": "same pod and CLI",
+      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign ... -nats 'nats://<token>@127.0.0.1:14222,nats://loadgen:<password>@127.0.0.1:14222' -pg 'postgres://postgres:<password>@127.0.0.1:15432,127.0.0.1:15432/dispatch?sslmode=disable' ...; loadgen tables; grep -cF each secret over every step file, TABLES.md, stdout and stderr",
+      "observed": "exit 0, committed 31/31, receipts 155/155; NATS token matches 0, password matches 0, bearer token matches 0; meta.json '-nats=nats://127.0.0.1:14222,nats://127.0.0.1:14222' and '-pg=postgres://127.0.0.1:15432,127.0.0.1:15432/dispatch?sslmode=disable'",
+      "headSha": "f93dbc536e5277b00fc1fe3c74c7032e50e15597",
+      "negativeControl": "with 8530db16's guard.go (go test -overlay) TestAForeignRunsMetaHoldsNoTokenOrPassword (token-user case, list case) and TestGuardPrintsNoURLPassword fail"
     }
   ],
   "filesChanged": [
-    "merge of main (36f305c0): packages/envoy/CHANGELOG.md set to main's copy; packages/envoy/.changes/unreleased/pr2369-Added-20261028-102101.yaml (new)",
-    "packages/envoy/infra/go.work.sum restored to main's copy (d32d754f)"
+    "packages/envoy/loadtest/sample.go, sample_test.go",
+    "packages/envoy/loadtest/guard.go, guard_test.go, run_test.go",
+    "packages/envoy/loadtest/README.md (meta.json row and the guard's URL rule)"
   ],
   "trickyParts": [
-    "go test in packages/envoy/infra rewrote infra/go.work.sum in the merge commit; d32d754f puts main's copy back so the PR does not touch it."
+    "redactURL drops the whole userinfo (user and password) of every comma-separated element, parsing an element without a scheme (later hosts of a Postgres URL) under a stand-in scheme; the URL check accepts lists whose first element has a scheme and whose others name a host."
   ],
-  "deviations": [
-    "changelog-fold.test.sh was not run locally: it requires a release build of changie on PATH, and a `go install` build reports version 'vdev'. CI's install-changie action provides the release build."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
 }

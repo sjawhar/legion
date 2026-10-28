@@ -799,7 +799,7 @@ func TestReplaySendResolvesAndSkips(t *testing.T) {
 	recs := newCollector[reqRec](16)
 	var wg sync.WaitGroup
 	for _, a := range p.Actions {
-		wg.Go(func() { rr.do(context.Background(), srv.URL, "tok", a, recs) })
+		wg.Go(func() { rr.do(context.Background(), srv.URL, "tok", a, time.Now(), recs) })
 	}
 	wg.Wait()
 	reply := false

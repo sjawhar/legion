@@ -61,6 +61,7 @@ const (
 	idComment         = "comment"
 	idAsk             = "ask"
 	idResolve         = "resolve"
+	idAskResolve      = "ask-resolve"
 	idAnswer          = "answer"
 	idFallbackComment = "fallback-comment"
 	idFallbackAsk     = "fallback-ask"
@@ -68,10 +69,9 @@ const (
 
 func runReplaySeed(args []string) error {
 	fs := flag.NewFlagSet("replay-seed", flag.ContinueOnError)
-	var ef endpointFlags
-	ef.register(fs)
+	var df dbFlags
+	df.register(fs)
 	bundleDir := fs.String("bundle", "", "replay bundle directory")
-	db := fs.String("db", "", "database name, overriding the Postgres URL's")
 	keysFile := fs.String("keys-file", "", "issue keys to seed (others become placeholders)")
 	workers := fs.Int("workers", 3, "issues seeded in parallel")
 	opsLog := fs.String("ops-log", "", "CSV file with one row per write")
@@ -82,17 +82,13 @@ func runReplaySeed(args []string) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if *bundleDir == "" || *db == "" {
+	if *bundleDir == "" || *df.db == "" {
 		return fmt.Errorf("-bundle and -db are required")
 	}
 	if *workers < 1 {
 		return fmt.Errorf("-workers must be at least 1")
 	}
-	ep, err := ef.resolve()
-	if err != nil {
-		return err
-	}
-	pgURL, err := withDatabase(ep.pg, *db)
+	ep, pgURL, err := df.url()
 	if err != nil {
 		return err
 	}
@@ -123,7 +119,7 @@ func runReplaySeed(args []string) error {
 		b: b, api: newAPI(ep.dispatch, ep.token, *workers*2+2), pool: pool, rngSeed: *rngSeed,
 		dispatchPID: ep.pids["dispatch"], workers: *workers,
 		lg: log.New(os.Stderr, "replay-seed ", log.LstdFlags), start: time.Now(),
-		marks: map[string]int{}, counts: map[string]int{}, rules: map[string]int{},
+		marks: map[string]int{}, counts: map[string]int{}, rules: map[string]int{}, skipped: map[string]int{},
 	}
 	if *opsLog != "" {
 		f, err := os.Create(*opsLog)
@@ -190,10 +186,9 @@ func (s *replaySeeder) run(ctx context.Context, plans []seedIssuePlan) error {
 		return err
 	}
 	s.ids = ids
-	s.skipped = map[string]int{}
 	seeded := 0
 	for _, p := range plans {
-		if !p.Placeholder {
+		if !p.placeholder() {
 			seeded++
 		}
 	}
@@ -205,7 +200,7 @@ func (s *replaySeeder) run(ctx context.Context, plans []seedIssuePlan) error {
 	defer close(stop)
 
 	// Step 0: the project.
-	if _, err := s.write(ctx, "project-create", "", 0, "", "project", s.b.State.Project, "POST", "/api/v1/projects", seedWho(),
+	if _, err := s.write(ctx, "project-create", "", 0, "", "project", s.b.State.Project, "POST", "/api/v1/projects", who{},
 		jsonBody(map[string]any{"key": s.b.State.Project, "name": s.b.State.Project, "actor": sessionActor(replaySeedActorID)}), http.StatusConflict); err != nil {
 		return err
 	}
@@ -222,7 +217,7 @@ func (s *replaySeeder) run(ctx context.Context, plans []seedIssuePlan) error {
 	for _, p := range plans {
 		g.Go(func() error {
 			var err error
-			if p.Placeholder {
+			if p.placeholder() {
 				err = s.finishIssue(gctx, p)
 			} else {
 				err = s.seedIssue(gctx, p)
@@ -292,8 +287,6 @@ func jsonBody(v any) rawBody {
 	return rawBody{"application/json", b}
 }
 
-func seedWho() who { return who{} }
-
 // actorOf is how the seed acts as a logged actor: a session through the agent bearer with the
 // session named in the body, a user through the identity header.
 func actorOf(a *replayActor) (who, map[string]any, error) {
@@ -302,10 +295,7 @@ func actorOf(a *replayActor) (who, map[string]any, error) {
 	}
 	switch a.Kind {
 	case "session":
-		actor := map[string]any{"kind": "session", "id": a.ID}
-		if a.Origin != nil {
-			actor["origin"] = a.Origin
-		}
+		_, actor := actorFor(*a)
 		return who{}, actor, nil
 	case "user":
 		return who{person: a.ID}, nil, nil
@@ -323,21 +313,25 @@ func withActor(body map[string]any, actor map[string]any) map[string]any {
 
 // write sends one write, retrying a transport error, 429 or 5xx with backoff, and records it in the
 // counts and the ops log. A 2xx or a status in ok returns the body; any other status is a
-// *seedError.
+// *seedError. A write the seed's context ended returns that context's error alone: its cause is
+// the error another issue's write failed with (errgroup), and wrapped here it would read as this
+// write's own refusal (anchored would take another write's 413 for its quote's).
 func (s *replaySeeder) write(ctx context.Context, kind, issue string, docBytes int, docID, step, logged, method, path string, w who, body rawBody, ok ...int) ([]byte, error) {
 	backoff := 250 * time.Millisecond
 	for attempt := 0; ; attempt++ {
 		before := s.ticks()
 		res := s.api.callRaw(ctx, method, path, w, body.contentType, body.payload)
 		after := s.ticks()
-		transient := res.err != nil || res.status == http.StatusTooManyRequests || res.status >= 500
-		if transient && attempt < 10 && ctx.Err() == nil {
+		if res.transient() && attempt < 10 && ctx.Err() == nil {
 			s.lg.Printf("%s %s: transient status %d (%v); retrying in %s", step, logged, res.status, errClass(res.err), backoff)
 			time.Sleep(backoff)
 			backoff = min(2*backoff, 8*time.Second)
 			continue
 		}
 		if res.err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("%s %s: %w", step, logged, ctx.Err())
+			}
 			return nil, fmt.Errorf("%s %s: %w", step, logged, res.err)
 		}
 		accepted := res.ok()
@@ -391,21 +385,11 @@ func (s *replaySeeder) ticks() int64 {
 	if s.ops == nil || s.dispatchPID == 0 {
 		return -1
 	}
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", s.dispatchPID))
-	if err != nil {
+	p, ok := readProcStat(s.dispatchPID)
+	if !ok {
 		return -1
 	}
-	i := bytes.LastIndexByte(b, ')')
-	if i < 0 {
-		return -1
-	}
-	f := strings.Fields(string(b[i+1:]))
-	if len(f) < 13 {
-		return -1
-	}
-	u, _ := strconv.ParseInt(f[11], 10, 64)
-	st, _ := strconv.ParseInt(f[12], 10, 64)
-	return u + st
+	return int64(p.utime + p.stime)
 }
 
 func (s *replaySeeder) addMark(docID string, n int) {
@@ -454,33 +438,11 @@ func (s *replaySeeder) createIssue(ctx context.Context, p seedIssuePlan) error {
 	if err == nil {
 		return s.mapIssue(ctx, p, key, primary)
 	}
-	var w who
-	var actor map[string]any
-	body := map[string]any{"project": s.b.State.Project, "title": placeholderTitle, "force": true}
-	docBytes := 0
-	if p.Placeholder {
-		actor = sessionActorAny(replaySeedActorID)
-	} else {
-		if w, actor, err = actorOf(p.Issue.CreatedBy); err != nil {
-			return fmt.Errorf("issue %s: %w", p.Key, err)
-		}
-		pa := primaryArtifact(p.Issue)
-		if pa == nil {
-			return fmt.Errorf("issue %s has no primary document in the bundle", p.Key)
-		}
-		text, err := s.docText(pa)
-		if err != nil {
-			return err
-		}
-		body["title"] = p.Issue.Title
-		plan, err := docPlan(p.Issue, pa, text)
-		if err != nil {
-			return err
-		}
-		body["spec"] = firstVersionText(p.Issue, pa, text, plan)
-		docBytes = len(body["spec"].(string))
+	w, body, docBytes, err := s.issueBody(p)
+	if err != nil {
+		return err
 	}
-	res, err := s.write(ctx, "issue-create", p.Key, docBytes, "", "issue-create", p.Key, "POST", "/api/v1/issues", w, jsonBody(withActor(body, actor)))
+	res, err := s.write(ctx, "issue-create", p.Key, docBytes, "", "issue-create", p.Key, "POST", "/api/v1/issues", w, jsonBody(body))
 	if err != nil {
 		return err
 	}
@@ -494,19 +456,46 @@ func (s *replaySeeder) createIssue(ctx context.Context, p seedIssuePlan) error {
 	return s.mapIssue(ctx, p, created.Key, created.PrimaryArtifactID)
 }
 
+// issueBody is the issue-create body of p, as whom it is sent and the size of the spec it carries
+// (a placeholder carries none).
+func (s *replaySeeder) issueBody(p seedIssuePlan) (who, map[string]any, int, error) {
+	body := map[string]any{"project": s.b.State.Project, "title": placeholderTitle, "force": true}
+	if p.placeholder() {
+		_, actor, _ := actorOf(nil)
+		return who{}, withActor(body, actor), 0, nil
+	}
+	w, actor, err := actorOf(p.Issue.CreatedBy)
+	if err != nil {
+		return w, nil, 0, fmt.Errorf("issue %s: %w", p.Key, err)
+	}
+	pa := primaryArtifact(p.Issue)
+	if pa == nil {
+		return w, nil, 0, fmt.Errorf("issue %s has no primary document in the bundle", p.Key)
+	}
+	text, err := s.docText(pa)
+	if err != nil {
+		return w, nil, 0, err
+	}
+	plan, err := docPlan(p.Issue, pa, text)
+	if err != nil {
+		return w, nil, 0, err
+	}
+	spec := firstVersionText(p.Issue, pa, text, plan)
+	body["title"], body["spec"] = p.Issue.Title, spec
+	return w, withActor(body, actor), len(spec), nil
+}
+
 func (s *replaySeeder) mapIssue(ctx context.Context, p seedIssuePlan, key, primary string) error {
 	if key != p.Key {
 		return fmt.Errorf("issue number %d was created as %s, want %s: the numbering no longer matches the bundle", p.Number, key, p.Key)
 	}
-	if !p.Placeholder {
+	if !p.placeholder() {
 		if err := s.ids.put(ctx, idArtifact, primaryArtifact(p.Issue).ID, primary); err != nil {
 			return err
 		}
 	}
 	return s.ids.put(ctx, idIssue, p.Key, key)
 }
-
-func sessionActorAny(id string) map[string]any { return map[string]any{"kind": "session", "id": id} }
 
 func primaryArtifact(is *replayIssue) *replayArtifact {
 	for i := range is.Artifacts {
@@ -546,46 +535,54 @@ type issueDoc struct {
 	is    *replayIssue
 }
 
-// answeredBlocks are the indexes into is.Asks of the answered typed ask blocks on document a, and
-// the version each answer lands at.
-func answeredBlocks(is *replayIssue, a *replayArtifact) (asks, versions []int) {
+// blockSteps are the ask steps of the typed ask blocks on document a, each with the version it
+// lands at: an answered block's answer; a resolved block's answer, if it was answered, then its
+// resolve.
+func blockSteps(is *replayIssue, a *replayArtifact) (steps []askStep, versions []int) {
 	for i, ask := range is.Asks {
-		if ask.BlockID != nil && ask.State == "answered" && ask.BlockArtifactID != nil && *ask.BlockArtifactID == a.ID {
-			asks = append(asks, i)
+		if ask.BlockID == nil || ask.BlockArtifactID == nil || *ask.BlockArtifactID != a.ID {
+			continue
+		}
+		if ask.State == "answered" || (ask.State == "resolved" && ask.Answer != nil) {
+			steps = append(steps, askStep{Ask: i})
 			versions = append(versions, ask.AnswerVersion)
 		}
+		if ask.State == "resolved" {
+			steps = append(steps, askStep{Ask: i, Resolve: true})
+			versions = append(versions, ask.ResolveVersion)
+		}
 	}
-	return asks, versions
+	return steps, versions
 }
 
 func docPlan(is *replayIssue, a *replayArtifact, text string) (historyPlan, error) {
-	asks, versions := answeredBlocks(is, a)
-	p, err := planHistory(text, a.VersionSizes, a.Version, asks, versions)
+	steps, versions := blockSteps(is, a)
+	p, err := planHistory(text, a.VersionSizes, a.Version, steps, versions)
 	if err != nil {
 		return p, fmt.Errorf("document %s: %w", a.ID, err)
 	}
 	return p, nil
 }
 
-// blockIDs are the block ids of the asks at the given indexes.
-func blockIDs(is *replayIssue, asks []int) map[string]bool {
+// blockIDs are the block ids of the steps' asks.
+func blockIDs(is *replayIssue, steps []askStep) map[string]bool {
 	ids := map[string]bool{}
-	for _, i := range asks {
-		ids[*is.Asks[i].BlockID] = true
+	for _, st := range steps {
+		ids[*is.Asks[st.Ask].BlockID] = true
 	}
 	return ids
 }
 
 // firstVersionText is what a document is created with: its text at At when its whole history is
-// that version, else the base (the text less the plan's run, every answer stripped) and a
-// padding paragraph that makes version 1 plan.Sizes[0] bytes.
+// that version, else the base (the text less the plan's run, every answered or resolved block
+// stripped to open) and a padding paragraph that makes version 1 plan.Sizes[0] bytes.
 func firstVersionText(is *replayIssue, a *replayArtifact, text string, p historyPlan) string {
-	asks, _ := answeredBlocks(is, a)
+	steps, _ := blockSteps(is, a)
 	if p.Restore == 1 {
 		return text
 	}
-	base := stripAnswers(baseText(text, p.RunStart, p.RunEnd), blockIDs(is, asks))
-	pad := padText(p.Sizes[0]-len(base)-padOverhead(len(base)), 1)
+	base := stripAnswers(baseText(text, p.RunStart, p.RunEnd), blockIDs(is, steps))
+	pad := padAt(p.Sizes[0] - len(base) - padOverhead(len(base)))
 	if base == "" {
 		return pad + "\n"
 	}
@@ -698,8 +695,8 @@ func (s *replaySeeder) ensureDoc(ctx context.Context, key string, d *issueDoc) e
 	}
 	if local == "" {
 		text := firstVersionText(d.is, d.a, d.text, d.plan)
-		res, err := s.write(ctx, "doc-create", key, len(text), "", "doc-create", d.a.ID, "POST", "/api/v1/issues/"+key+"/artifacts", seedWho(),
-			jsonBody(map[string]any{"name": d.a.Name, "content": text, "actor": sessionActorAny(replaySeedActorID)}))
+		res, err := s.write(ctx, "doc-create", key, len(text), "", "doc-create", d.a.ID, "POST", "/api/v1/issues/"+key+"/artifacts", who{},
+			jsonBody(docCreateBody(d.a.Name, text)))
 		if err != nil {
 			return err
 		}
@@ -711,10 +708,20 @@ func (s *replaySeeder) ensureDoc(ctx context.Context, key string, d *issueDoc) e
 	return s.ids.put(ctx, idArtifact, d.a.ID, local)
 }
 
+// docCreateBody is the body that creates a document of an issue with its version 1 text.
+func docCreateBody(name, text string) map[string]any {
+	return map[string]any{"name": name, "content": text, "actor": sessionActor(replaySeedActorID)}
+}
+
 // adoptArtifact finds an artifact of the issue by name that no logged id maps to yet: one a killed
 // seed created without recording it.
 func (s *replaySeeder) adoptArtifact(ctx context.Context, key, name string) (string, error) {
-	rows, err := s.pool.Query(ctx, `select id::text from artifacts where issue_key = $1 and name = $2 order by created_at`, key, name)
+	return s.adoptUnmapped(ctx, idArtifact, `select id::text from artifacts where issue_key = $1 and name = $2 order by created_at`, key, name)
+}
+
+// adoptUnmapped is the first id query returns that no logged id of kind maps to yet, "" when none.
+func (s *replaySeeder) adoptUnmapped(ctx context.Context, kind, query string, args ...any) (string, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return "", err
 	}
@@ -722,9 +729,8 @@ func (s *replaySeeder) adoptArtifact(ctx context.Context, key, name string) (str
 	if err != nil {
 		return "", err
 	}
-	mapped := s.ids.locals(idArtifact)
 	for _, id := range found {
-		if !mapped[id] {
+		if !s.ids.mapped(kind, id) {
 			return id, nil
 		}
 	}
@@ -766,7 +772,7 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 		var buf bytes.Buffer
 		mw := multipart.NewWriter(&buf)
 		_ = mw.WriteField("name", a.Name)
-		actor, _ := json.Marshal(sessionActorAny(replaySeedActorID))
+		actor, _ := json.Marshal(sessionActor(replaySeedActorID))
 		_ = mw.WriteField("actor", string(actor))
 		h := textproto.MIMEHeader{}
 		h.Set("Content-Disposition", multipart.FileContentDisposition("file", a.Name))
@@ -781,7 +787,7 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 		if err := mw.Close(); err != nil {
 			return err
 		}
-		res, err := s.write(ctx, "file-create", key, 0, "", "file-create", a.ID, "POST", "/api/v1/issues/"+key+"/artifacts", seedWho(),
+		res, err := s.write(ctx, "file-create", key, 0, "", "file-create", a.ID, "POST", "/api/v1/issues/"+key+"/artifacts", who{},
 			rawBody{mw.FormDataContentType(), buf.Bytes()})
 		if err != nil {
 			return err
@@ -795,12 +801,12 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 
 // history takes a document from the version it stands at to its logged version as its plan says
 // (planHistory): each padded version resizes the padding paragraph so the version changes size by
-// its planned change from the version Dispatch stored before it (historyPlan.padLen; a version
-// whose size does not change gets padding of the same length with other words); an answer version
-// re-sends that typed ask block's answer, a change Dispatch makes; the restore version removes the
-// padding and puts the run back. Version 1's own size is free: no change is compared for it. Every
-// step must write exactly one version, and each padded or restored version must change size by
-// exactly its planned change.
+// its planned change from the version Dispatch stored before it (historyPlan.padLen), sending only
+// the paragraph's changed tail (padNext, padEdit); an ask step version re-sends that typed ask
+// block's answer or resolve, a change Dispatch makes; the restore version deletes the padding
+// paragraph by its block id and puts the run back. Version 1's own size is free: no change is
+// compared for it. Every step must write exactly one version, and each padded or restored version
+// must change size by exactly its planned change.
 func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]*issueDoc, d *issueDoc) error {
 	p := d.plan
 	cur, err := s.maxVersion(ctx, d.local)
@@ -810,13 +816,10 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 	if cur < 1 || cur > p.Final {
 		return fmt.Errorf("history %s: document stands at version %d, logged version %d", d.a.ID, cur, p.Final)
 	}
-	edit := func(n int, ops ...any) error {
-		size, _, err := s.versionSize(ctx, d.local, n-1)
-		if err != nil {
-			return err
-		}
-		if _, err := s.write(ctx, "history-edit", key, size, d.local, "history-edit", fmt.Sprintf("%s@%d", d.a.ID, n), "POST", "/api/v1/artifacts/"+d.local+"/edits", seedWho(),
-			jsonBody(map[string]any{"ops": ops, "actor": sessionActorAny(replaySeedActorID)})); err != nil {
+	// edit writes version n over version n-1, which is size bytes.
+	edit := func(n, size int, ops []any) error {
+		if _, err := s.write(ctx, "history-edit", key, size, d.local, "history-edit", fmt.Sprintf("%s@%d", d.a.ID, n), "POST", "/api/v1/artifacts/"+d.local+"/edits", who{},
+			jsonBody(historyEditBody(ops))); err != nil {
 			return err
 		}
 		if got, err := s.maxVersion(ctx, d.local); err != nil {
@@ -833,58 +836,55 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 		}
 		pad := currentPad(markdown)
 		switch {
-		case len(p.AnswerAt[n]) > 0:
+		case len(p.AskAt[n]) > 0:
+			// The version's answers and resolves are sent back to back, inside Dispatch's settle
+			// delay, so that together they write exactly one version, as production's did.
 			if err := s.waitSettled(ctx, key, []string{d.local}); err != nil {
 				return err
 			}
-			for _, i := range p.AnswerAt[n] {
-				a := &d.is.Asks[i]
+			for _, st := range p.AskAt[n] {
+				a := &d.is.Asks[st.Ask]
 				local, err := s.ensureAsk(ctx, key, docs, a)
 				if err != nil {
 					return err
 				}
-				if err := s.answer(ctx, key, docs, a, local); err != nil {
+				step := s.answer
+				if st.Resolve {
+					step = s.resolveAsk
+				}
+				if err := step(ctx, key, docs, a, local); err != nil {
 					return err
 				}
 			}
+			if err := s.waitVersion(ctx, d, n); err != nil {
+				return fmt.Errorf("history %s: the answers and resolves of version %d: %w", d.a.ID, n, err)
+			}
 			continue
 		case n == p.Restore:
-			var ops []any
-			if pad != "" {
-				ops = append(ops, map[string]any{"op": "delete", "find": pad})
+			ops, err := s.restoreOps(ctx, d, markdown, pad)
+			if err != nil {
+				return err
 			}
-			if p.RunEnd > p.RunStart {
-				insert := map[string]any{"op": "insert", "markdown": d.text[p.RunStart:p.RunEnd], "after": "end"}
-				if p.RunEnd < len(d.text) {
-					block, err := s.headingBlock(ctx, d, markdown)
-					if err != nil {
-						return err
-					}
-					delete(insert, "after")
-					insert["before"] = "block:" + block
-				}
-				ops = append(ops, insert)
-			}
-			if err := edit(n, ops...); err != nil {
+			if err := edit(n, size, ops); err != nil {
 				return err
 			}
 			_, got, err := s.versionSize(ctx, d.local, n)
 			if err != nil {
 				return err
 			}
-			var later []int
-			for v, asks := range p.AnswerAt {
+			var later []askStep
+			for v, steps := range p.AskAt {
 				if v > n {
-					later = append(later, asks...)
+					later = append(later, steps...)
 				}
 			}
 			want := stripAnswers(d.text, blockIDs(d.is, later))
 			if !sameMasked(got, want) {
-				return fmt.Errorf("history %s: the restored version %d has %d bytes and differs from the text at At less its later answers (%d bytes)", d.a.ID, n, len(got), len(want))
+				return fmt.Errorf("history %s: the restored version %d has %d bytes and differs from the text at At less its later answers and resolves (%d bytes)", d.a.ID, n, len(got), len(want))
 			}
 			if len(later) > 0 {
-				// Its size rests on the later answers' changes matching production's; the
-				// check compares them.
+				// Its size rests on the later answers' and resolves' changes matching
+				// production's; the check compares them.
 				continue
 			}
 		default:
@@ -895,8 +895,7 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 			if l < padMin {
 				return fmt.Errorf("history %s: version %d would hold padding of %d bytes, under %d", d.a.ID, n, l, padMin)
 			}
-			next := nextPad(pad, l, n)
-			if err := edit(n, map[string]any{"op": "replace", "find": pad, "with": next}); err != nil {
+			if err := edit(n, size, []any{padEditOp(pad, padNext(pad, l))}); err != nil {
 				return err
 			}
 		}
@@ -922,15 +921,89 @@ func (s *replaySeeder) versionSize(ctx context.Context, artifactID string, n int
 // currentPad is the padding paragraph a padded version ends with, empty when it has none.
 func currentPad(markdown string) string {
 	lines := strings.Split(strings.TrimRight(markdown, "\n"), "\n")
-	if last := lines[len(lines)-1]; strings.HasPrefix(last, padText(5, 0)) {
+	if last := lines[len(lines)-1]; strings.HasPrefix(last, padToken) {
 		return last
 	}
 	return ""
 }
 
-// headingBlock is the local block id of the heading the plan's run goes back before: the block
-// whose range starts at that heading line's occurrence nearest the run's offset in markdown.
-func (s *replaySeeder) headingBlock(ctx context.Context, d *issueDoc, markdown string) (string, error) {
+// historyEditBody is the body of a history edit made of ops.
+func historyEditBody(ops []any) map[string]any {
+	return map[string]any{"ops": ops, "actor": sessionActor(replaySeedActorID)}
+}
+
+// padEditOp is the replace that turns padding paragraph cur into next (padEdit).
+func padEditOp(cur, next string) map[string]any {
+	find, with := padEdit(cur, next)
+	return map[string]any{"op": "replace", "find": find, "with": with}
+}
+
+// restoreEditOps are the restore version's ops: the padding paragraph's block padBlock deleted by
+// its id ("" when the version holds none), so the body never carries the padding, and the run
+// inserted back before the heading block beforeBlock, or at the end when beforeBlock is "".
+func restoreEditOps(padBlock, run, beforeBlock string) []any {
+	var ops []any
+	if padBlock != "" {
+		ops = append(ops, map[string]any{"op": "delete", "block": padBlock})
+	}
+	if run != "" {
+		insert := map[string]any{"op": "insert", "markdown": run, "after": "end"}
+		if beforeBlock != "" {
+			delete(insert, "after")
+			insert["before"] = "block:" + beforeBlock
+		}
+		ops = append(ops, insert)
+	}
+	return ops
+}
+
+// restoreOps are the restore version's ops over markdown, the version before it, which ends with
+// the padding paragraph pad: the blocks are read from Dispatch for the paragraph's block id and, for
+// a run that does not reach the text's end, the id of the heading it goes back before (headingAt).
+func (s *replaySeeder) restoreOps(ctx context.Context, d *issueDoc, markdown, pad string) ([]any, error) {
+	p := d.plan
+	res := s.api.call(ctx, "GET", "/api/v1/artifacts/"+d.local+"/blocks", who{}, nil)
+	if !res.ok() {
+		return nil, &seedError{step: "blocks-read", logged: d.a.ID, status: res.status, code: dispatchCode(res.body)}
+	}
+	var blocks []struct {
+		ID   string `json:"id"`
+		From int    `json:"from"`
+	}
+	if err := json.Unmarshal(res.body, &blocks); err != nil {
+		return nil, fmt.Errorf("blocks-read %s: undecodable response", d.a.ID)
+	}
+	blockAt := func(what string, from int) (string, error) {
+		for _, b := range blocks {
+			if b.From == from {
+				return b.ID, nil
+			}
+		}
+		return "", fmt.Errorf("history %s: no block starts at %s (offset %d)", d.a.ID, what, from)
+	}
+	padBlock, run, before := "", d.text[p.RunStart:p.RunEnd], ""
+	if pad != "" {
+		id, err := blockAt("the padding paragraph", strings.LastIndex(markdown, pad))
+		if err != nil {
+			return nil, err
+		}
+		padBlock = id
+	}
+	if run != "" && p.RunEnd < len(d.text) {
+		at, err := headingAt(d, markdown)
+		if err != nil {
+			return nil, err
+		}
+		if before, err = blockAt("the heading after the run", at); err != nil {
+			return nil, err
+		}
+	}
+	return restoreEditOps(padBlock, run, before), nil
+}
+
+// headingAt is the offset in markdown of the heading the plan's run goes back before: that heading
+// line's occurrence nearest the run's offset.
+func headingAt(d *issueDoc, markdown string) (int, error) {
 	heading := d.text[d.plan.RunEnd:]
 	if i := strings.IndexByte(heading, '\n'); i >= 0 {
 		heading = heading[:i]
@@ -951,25 +1024,9 @@ func (s *replaySeeder) headingBlock(ctx context.Context, d *issueDoc, markdown s
 		off = at + 1
 	}
 	if best < 0 {
-		return "", fmt.Errorf("history %s: the heading after the run is not in the document", d.a.ID)
+		return 0, fmt.Errorf("history %s: the heading after the run is not in the document", d.a.ID)
 	}
-	res := s.api.call(ctx, "GET", "/api/v1/artifacts/"+d.local+"/blocks", seedWho(), nil)
-	if !res.ok() {
-		return "", &seedError{step: "blocks-read", logged: d.a.ID, status: res.status, code: dispatchCode(res.body)}
-	}
-	var blocks []struct {
-		ID   string `json:"id"`
-		From int    `json:"from"`
-	}
-	if err := json.Unmarshal(res.body, &blocks); err != nil {
-		return "", fmt.Errorf("blocks-read %s: undecodable response", d.a.ID)
-	}
-	for _, b := range blocks {
-		if b.From == best {
-			return b.ID, nil
-		}
-	}
-	return "", fmt.Errorf("history %s: no block starts at the heading after the run (offset %d)", d.a.ID, best)
+	return best, nil
 }
 
 // sameMasked says whether two markdowns are equal once answered_at is masked.
@@ -1060,10 +1117,9 @@ func (s *replaySeeder) unmappedComments(ctx context.Context, key string) ([]loca
 	if err != nil {
 		return nil, err
 	}
-	mapped := s.ids.locals(idComment)
 	var out []localComment
 	for _, c := range all {
-		if !mapped[c.id] {
+		if !s.ids.mapped(idComment, c.id) {
 			out = append(out, c)
 		}
 	}
@@ -1107,24 +1163,22 @@ func (s *replaySeeder) comment(ctx context.Context, key string, docs map[string]
 	if ok, err := s.adoptComment(ctx, c, anchorDoc, orphans); ok || err != nil {
 		return err
 	}
-	w, actor, err := actorOf(&c.Actor)
-	if err != nil {
-		return fmt.Errorf("comment %s: %w", c.ID, err)
-	}
-	body := withActor(map[string]any{"body": c.Body}, actor)
+	parent, ask := "", ""
 	if c.ReplyTo != nil {
-		parent, ok := s.ids.get(idComment, *c.ReplyTo)
-		if !ok {
+		var ok bool
+		if parent, ok = s.ids.get(idComment, *c.ReplyTo); !ok {
 			return fmt.Errorf("comment %s replies to %s, which is not seeded", c.ID, *c.ReplyTo)
 		}
-		body["reply_to"] = parent
 	}
 	if c.AskID != nil && c.ReplyTo == nil {
-		ask, ok := s.ids.get(idAsk, *c.AskID)
-		if !ok {
+		var ok bool
+		if ask, ok = s.ids.get(idAsk, *c.AskID); !ok {
 			return fmt.Errorf("comment %s is on ask %s, which is not seeded", c.ID, *c.AskID)
 		}
-		body["ask_id"] = ask
+	}
+	w, body, err := commentBody(c, parent, ask)
+	if err != nil {
+		return err
 	}
 	docBytes, docID := 0, ""
 	if d := docs[st.RootDoc]; d != nil && st.Kind == commentReply {
@@ -1141,17 +1195,35 @@ func (s *replaySeeder) comment(ctx context.Context, key string, docs map[string]
 	if d == nil {
 		return fmt.Errorf("comment %s is anchored on %s, which is not one of the issue's seeded documents", c.ID, c.Anchor.ArtifactID)
 	}
-	local, fellBack, err := s.anchored(ctx, string(commentAnchored), key, d, c.ID, c.Anchor, w, "/api/v1/issues/"+key+"/comments", body)
+	_, err = s.anchored(ctx, string(commentAnchored), key, d, c.ID, c.Anchor, w, "/api/v1/issues/"+key+"/comments", body)
+	return err
+}
+
+// commentBody is the body that posts comment c, as whom: a reply names its local parent, a root on
+// an ask its local ask (anchored adds an anchored root's anchor).
+func commentBody(c *replayComment, parent, ask string) (who, map[string]any, error) {
+	w, actor, err := actorOf(&c.Actor)
 	if err != nil {
-		return err
+		return w, nil, fmt.Errorf("comment %s: %w", c.ID, err)
 	}
-	if fellBack {
-		if err := s.ids.put(ctx, idFallbackComment, c.ID, local); err != nil {
-			return err
-		}
+	body := withActor(map[string]any{"body": c.Body}, actor)
+	if parent != "" {
+		body["reply_to"] = parent
 	}
-	s.addMark(d.local, 1)
-	return s.ids.put(ctx, idComment, c.ID, local)
+	if ask != "" {
+		body["ask_id"] = ask
+	}
+	return w, body, nil
+}
+
+// anchorField is a write's anchor on local document doc at quote (and its occurrence, when the
+// choice pinned one).
+func anchorField(doc, quote string, c anchorChoice) map[string]any {
+	anchor := map[string]any{"artifact": doc, "quote": quote}
+	if c.Occurrence != nil {
+		anchor["occurrence"] = *c.Occurrence
+	}
+	return anchor
 }
 
 func (s *replaySeeder) mapCreated(ctx context.Context, kind, logged string, res []byte) error {
@@ -1191,11 +1263,12 @@ func (s *replaySeeder) recordAnchor(ctx context.Context, kind, logged, local str
 // anchored posts an anchored comment or ask where chooseAnchor puts it: the logged quote, or a
 // sentence of the logged block or of the nearest surviving block, trying the choice's candidates
 // in order; when Dispatch refuses the logged quote, the choice is made again without it. It
-// records the branch and returns the local id and whether the quote is not the logged one.
-func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueDoc, logged string, a *replayAnchor, w who, path string, body map[string]any) (string, bool, error) {
-	rowKind := idComment
+// records the branch, the fallback when the quote is not the logged one, the document's new mark
+// and the mapping, and returns the local id.
+func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueDoc, logged string, a *replayAnchor, w who, path string, body map[string]any) (string, error) {
+	rowKind, fallbackKind := idComment, idFallbackComment
 	if kind == "ask" {
-		rowKind = idAsk
+		rowKind, fallbackKind = idAsk, idFallbackAsk
 	}
 	var last error
 	for _, skip := range []bool{false, true} {
@@ -1204,22 +1277,27 @@ func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueD
 			break
 		}
 		for _, quote := range choice.Candidates {
-			anchor := map[string]any{"artifact": d.local, "quote": quote}
-			if choice.Occurrence != nil {
-				anchor["occurrence"] = *choice.Occurrence
-			}
-			body["anchor"] = anchor
+			body["anchor"] = anchorField(d.local, quote, choice)
 			res, err := s.write(ctx, kind, key, len(d.text), d.local, kind, logged, "POST", path, w, jsonBody(body))
 			if err == nil {
 				local := idOf(res)
 				if local == "" {
-					return "", false, fmt.Errorf("%s %s: no id in the response", kind, logged)
+					return "", fmt.Errorf("%s %s: no id in the response", kind, logged)
 				}
-				return local, quote != a.Quote, s.recordAnchor(ctx, rowKind, logged, local, d, choice)
+				if err := s.recordAnchor(ctx, rowKind, logged, local, d, choice); err != nil {
+					return "", err
+				}
+				if quote != a.Quote {
+					if err := s.ids.put(ctx, fallbackKind, logged, local); err != nil {
+						return "", err
+					}
+				}
+				s.addMark(d.local, 1)
+				return local, s.ids.put(ctx, rowKind, logged, local)
 			}
 			var se *seedError
 			if !errors.As(err, &se) || se.status/100 != 4 {
-				return "", false, err
+				return "", err
 			}
 			s.lg.Printf("%s %s: quote refused (branch %s, status %d code %q)", kind, logged, choice.Branch, se.status, se.code)
 			last = err
@@ -1230,9 +1308,9 @@ func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueD
 		}
 	}
 	if last == nil {
-		return "", false, fmt.Errorf("%s %s cannot be anchored: document %s has no usable sentence", kind, logged, d.a.ID)
+		return "", fmt.Errorf("%s %s cannot be anchored: document %s has no usable sentence", kind, logged, d.a.ID)
 	}
-	return "", false, fmt.Errorf("%s %s cannot be anchored: every candidate was refused, the last with %w", kind, logged, last)
+	return "", fmt.Errorf("%s %s cannot be anchored: every candidate was refused, the last with %w", kind, logged, last)
 }
 
 func (s *replaySeeder) resolve(ctx context.Context, key string, docs map[string]*issueDoc, c replayComment) error {
@@ -1300,23 +1378,7 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 	if local, ok := s.ids.get(idAsk, a.ID); ok {
 		return local, nil
 	}
-	mapped := s.ids.locals(idAsk)
-	adopt := func(query string, args ...any) (string, error) {
-		rows, err := s.pool.Query(ctx, query, args...)
-		if err != nil {
-			return "", err
-		}
-		found, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			return "", err
-		}
-		for _, id := range found {
-			if !mapped[id] {
-				return id, nil
-			}
-		}
-		return "", nil
-	}
+	adopt := func(query string, args ...any) (string, error) { return s.adoptUnmapped(ctx, idAsk, query, args...) }
 	switch {
 	case a.BlockID != nil:
 		// A typed ask block lives in its document's text, which the history wrote; settlement
@@ -1339,15 +1401,11 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 			return "", err
 		}
 		if local == "" {
-			w, actor, err := actorOf(&a.Author)
+			w, body, err := approvalBody(a)
 			if err != nil {
-				return "", fmt.Errorf("ask %s: %w", a.ID, err)
+				return "", err
 			}
-			body := map[string]any{}
-			if summary := approvalSummary(a.Question); summary != "" {
-				body["summary"] = summary
-			}
-			res, err := s.write(ctx, "ask", key, len(d.text), d.local, "approval-request", a.ID, "POST", "/api/v1/artifacts/"+d.local+"/approval-requests", w, jsonBody(withActor(body, actor)))
+			res, err := s.write(ctx, "ask", key, len(d.text), d.local, "approval-request", a.ID, "POST", "/api/v1/artifacts/"+d.local+"/approval-requests", w, jsonBody(body))
 			if err != nil {
 				return "", err
 			}
@@ -1364,17 +1422,9 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 	if local != "" {
 		return local, s.ids.put(ctx, idAsk, a.ID, local)
 	}
-	w, actor, err := actorOf(&a.Author)
+	w, body, err := questionBody(a)
 	if err != nil {
-		return "", fmt.Errorf("ask %s: %w", a.ID, err)
-	}
-	options := a.Options
-	if options == nil {
-		options = []replayAskOption{}
-	}
-	body := withActor(map[string]any{"question": a.Question, "kind": "question", "options": options, "multiple": a.Multiple}, actor)
-	if a.Urgency != "" {
-		body["urgency"] = a.Urgency
+		return "", err
 	}
 	path := "/api/v1/issues/" + key + "/asks"
 	if a.Anchor == nil {
@@ -1388,23 +1438,60 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 	if d == nil {
 		return "", fmt.Errorf("ask %s is anchored on %s, which is not one of the issue's seeded documents", a.ID, a.Anchor.ArtifactID)
 	}
-	local, fellBack, err := s.anchored(ctx, "ask", key, d, a.ID, a.Anchor, w, path, body)
+	return s.anchored(ctx, "ask", key, d, a.ID, a.Anchor, w, path, body)
+}
+
+// approvalBody is the approval request body of approval ask a, as whom.
+func approvalBody(a *replayAsk) (who, map[string]any, error) {
+	w, actor, err := actorOf(&a.Author)
 	if err != nil {
-		return "", err
+		return w, nil, fmt.Errorf("ask %s: %w", a.ID, err)
 	}
-	if fellBack {
-		if err := s.ids.put(ctx, idFallbackAsk, a.ID, local); err != nil {
-			return "", err
-		}
+	body := map[string]any{}
+	if summary := approvalSummary(a.Question); summary != "" {
+		body["summary"] = summary
 	}
-	s.addMark(d.local, 1)
-	return local, s.ids.put(ctx, idAsk, a.ID, local)
+	return w, withActor(body, actor), nil
+}
+
+// questionBody is the body that opens question ask a, as whom (anchored adds an anchor).
+func questionBody(a *replayAsk) (who, map[string]any, error) {
+	w, actor, err := actorOf(&a.Author)
+	if err != nil {
+		return w, nil, fmt.Errorf("ask %s: %w", a.ID, err)
+	}
+	options := a.Options
+	if options == nil {
+		options = []replayAskOption{}
+	}
+	body := withActor(map[string]any{"question": a.Question, "kind": "question", "options": options, "multiple": a.Multiple}, actor)
+	if a.Urgency != "" {
+		body["urgency"] = a.Urgency
+	}
+	return w, body, nil
+}
+
+// answerBody is the body that answers question ask a, whose edited_at is editedAt.
+func answerBody(a *replayAsk, editedAt json.RawMessage) map[string]any {
+	body := map[string]any{"selected": nonNil(a.Answer.Selected), "expected_edited_at": editedAt}
+	if a.Answer.Text != nil {
+		body["text"] = *a.Answer.Text
+	}
+	return body
+}
+
+// askResolveBody is the body that resolves ask a as its logged resolution says, as whom.
+func askResolveBody(a *replayAsk) (who, map[string]any, error) {
+	w, actor, err := actorOf(&a.Resolution.By)
+	if err != nil {
+		return w, nil, fmt.Errorf("ask-resolve %s: %w", a.ID, err)
+	}
+	return w, withActor(map[string]any{"kind": a.Resolution.Kind, "reason": a.Resolution.Reason}, actor), nil
 }
 
 // answer re-sends an answered ask's answer as the answering user: an approval through a review, a
 // question (a typed ask block's too) through POST /asks/{id}/answer. A typed ask block's answer
-// rewrites its block, which Dispatch versions once settled: it must write exactly one version, the
-// one historyTarget left for it.
+// rewrites its block, which Dispatch versions once settled; history waits for that version.
 func (s *replaySeeder) answer(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, local string) error {
 	if _, ok := s.ids.get(idAnswer, a.ID); ok {
 		return nil
@@ -1440,30 +1527,46 @@ func (s *replaySeeder) answer(ctx context.Context, key string, docs map[string]*
 		if err != nil {
 			return err
 		}
-		body := map[string]any{"selected": nonNil(a.Answer.Selected), "expected_edited_at": editedAt}
-		if a.Answer.Text != nil {
-			body["text"] = *a.Answer.Text
-		}
-		docBytes, docID, before := 0, "", 0
+		body := answerBody(a, editedAt)
+		docBytes, docID := 0, ""
 		if block != nil {
 			docBytes, docID = len(block.text), block.local
-			if err := s.waitSettled(ctx, key, []string{block.local}); err != nil {
-				return err
-			}
-			if before, err = s.maxVersion(ctx, block.local); err != nil {
-				return err
-			}
 		}
 		if _, err := s.write(ctx, "answer", key, docBytes, docID, "answer", a.ID, "POST", "/api/v1/asks/"+local+"/answer", w, jsonBody(body)); err != nil {
 			return err
 		}
-		if block != nil {
-			if err := s.waitVersion(ctx, block, before+1); err != nil {
-				return fmt.Errorf("answer %s: %w", a.ID, err)
-			}
-		}
 	}
 	return s.ids.put(ctx, idAnswer, a.ID, local)
+}
+
+// resolveAsk resolves a resolved typed ask block as its resolving actor through POST
+// /asks/{id}/resolve with the logged resolution's kind and reason. Dispatch writes state="resolved"
+// into the block, which it versions once settled; history waits for that version.
+func (s *replaySeeder) resolveAsk(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, local string) error {
+	if _, ok := s.ids.get(idAskResolve, a.ID); ok {
+		return nil
+	}
+	if a.Resolution == nil {
+		return fmt.Errorf("ask %s is resolved with no resolution in the bundle", a.ID)
+	}
+	if a.BlockArtifactID == nil || docs[*a.BlockArtifactID] == nil {
+		return fmt.Errorf("ask %s: a resolved typed ask block names no seeded document", a.ID)
+	}
+	block := docs[*a.BlockArtifactID]
+	var state string
+	if err := s.pool.QueryRow(ctx, `select state from asks where id = $1`, local).Scan(&state); err != nil {
+		return err
+	}
+	if state != "resolved" {
+		w, body, err := askResolveBody(a)
+		if err != nil {
+			return err
+		}
+		if _, err := s.write(ctx, "resolve", key, len(block.text), block.local, "ask-resolve", a.ID, "POST", "/api/v1/asks/"+local+"/resolve", w, jsonBody(body)); err != nil {
+			return err
+		}
+	}
+	return s.ids.put(ctx, idAskResolve, a.ID, local)
 }
 
 // waitVersion waits (up to two minutes) until the document owes no settlement and stands at
@@ -1496,7 +1599,7 @@ func (s *replaySeeder) waitVersion(ctx context.Context, d *issueDoc, want int) e
 // askEditedAt is the ask's edited_at as Dispatch serves it (GET /api/v1/asks/{id}), which an
 // answer must send back as expected_edited_at: a string, or null for an ask never edited.
 func (s *replaySeeder) askEditedAt(ctx context.Context, logged, local string) (json.RawMessage, error) {
-	res := s.api.call(ctx, "GET", "/api/v1/asks/"+local, seedWho(), nil)
+	res := s.api.call(ctx, "GET", "/api/v1/asks/"+local, who{}, nil)
 	if !res.ok() {
 		return nil, &seedError{step: "ask-read", logged: logged, status: res.status, code: dispatchCode(res.body)}
 	}
@@ -1521,7 +1624,7 @@ func (s *replaySeeder) askEditedAt(ctx context.Context, logged, local string) (j
 // --- step 5: fields and claim --------------------------------------------------------------------
 
 func (s *replaySeeder) finishIssue(ctx context.Context, p seedIssuePlan) error {
-	res := s.api.call(ctx, "GET", "/api/v1/issues/"+p.Key, seedWho(), nil)
+	res := s.api.call(ctx, "GET", "/api/v1/issues/"+p.Key, who{}, nil)
 	if !res.ok() {
 		return &seedError{step: "issue-read", logged: p.Key, status: res.status, code: dispatchCode(res.body)}
 	}
@@ -1530,8 +1633,8 @@ func (s *replaySeeder) finishIssue(ctx context.Context, p seedIssuePlan) error {
 		return fmt.Errorf("issue-read %s: undecodable response", p.Key)
 	}
 	if patch := issuePatch(cur, p.Issue); patch != nil {
-		patch["actor"] = sessionActorAny(replaySeedActorID)
-		if _, err := s.write(ctx, "patch", p.Key, 0, "", "patch", p.Key, "PATCH", "/api/v1/issues/"+p.Key, seedWho(), jsonBody(patch)); err != nil {
+		patch["actor"] = sessionActor(replaySeedActorID)
+		if _, err := s.write(ctx, "patch", p.Key, 0, "", "patch", p.Key, "PATCH", "/api/v1/issues/"+p.Key, who{}, jsonBody(patch)); err != nil {
 			return err
 		}
 	}
@@ -1554,10 +1657,20 @@ type idStore struct {
 	pool *pgxpool.Pool
 	mu   sync.Mutex
 	m    map[[2]string]string
+	// byLocal counts, by kind, the logged ids that map to each local id.
+	byLocal map[string]map[string]int
+}
+
+func newIDStore(pool *pgxpool.Pool, m map[[2]string]string) *idStore {
+	s := &idStore{pool: pool, m: map[[2]string]string{}, byLocal: map[string]map[string]int{}}
+	for k, v := range m {
+		s.set(k, v)
+	}
+	return s
 }
 
 func loadIDStore(ctx context.Context, pool *pgxpool.Pool) (*idStore, error) {
-	s := &idStore{pool: pool, m: map[[2]string]string{}}
+	s := newIDStore(pool, nil)
 	rows, err := pool.Query(ctx, `select kind, logged_id, local_id from loadtest.replay_ids`)
 	if err != nil {
 		return nil, err
@@ -1568,9 +1681,24 @@ func loadIDStore(ctx context.Context, pool *pgxpool.Pool) (*idStore, error) {
 		if err := rows.Scan(&k, &l, &v); err != nil {
 			return nil, err
 		}
-		s.m[[2]string{k, l}] = v
+		s.set([2]string{k, l}, v)
 	}
 	return s, rows.Err()
+}
+
+// set maps k to local, keeping byLocal; the caller holds s.mu or has not shared s yet.
+func (s *idStore) set(k [2]string, local string) {
+	kind := k[0]
+	if old, ok := s.m[k]; ok {
+		if s.byLocal[kind][old]--; s.byLocal[kind][old] == 0 {
+			delete(s.byLocal[kind], old)
+		}
+	}
+	s.m[k] = local
+	if s.byLocal[kind] == nil {
+		s.byLocal[kind] = map[string]int{}
+	}
+	s.byLocal[kind][local]++
 }
 
 func (s *idStore) get(kind, logged string) (string, bool) {
@@ -1586,20 +1714,15 @@ func (s *idStore) put(ctx context.Context, kind, logged, local string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[[2]string{kind, logged}] = local
+	s.set([2]string{kind, logged}, local)
 	return nil
 }
 
-func (s *idStore) locals(kind string) map[string]bool {
+// mapped says whether a logged id of kind maps to local.
+func (s *idStore) mapped(kind, local string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := map[string]bool{}
-	for k, v := range s.m {
-		if k[0] == kind {
-			out[v] = true
-		}
-	}
-	return out
+	return s.byLocal[kind][local] > 0
 }
 
 func (s *idStore) count(kind string) int {

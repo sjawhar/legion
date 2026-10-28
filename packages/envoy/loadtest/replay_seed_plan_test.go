@@ -30,10 +30,7 @@ func TestPlanIssuesPlaceholders(t *testing.T) {
 	}
 	var placeholders []string
 	for _, p := range plans {
-		if p.Placeholder != (p.Issue == nil) {
-			t.Fatalf("%s: Placeholder %v with issue %v", p.Key, p.Placeholder, p.Issue != nil)
-		}
-		if p.Placeholder {
+		if p.placeholder() {
 			placeholders = append(placeholders, p.Key)
 		}
 	}
@@ -50,7 +47,7 @@ func TestPlanIssuesPlaceholders(t *testing.T) {
 		if p.Number != i+1 {
 			t.Fatalf("plan %d has number %d: numbering must hold", i, p.Number)
 		}
-		if !p.Placeholder {
+		if !p.placeholder() {
 			seeded = append(seeded, p.Key)
 		}
 	}
@@ -105,7 +102,9 @@ func resolvedC(windowRefs bool) func(*replayComment) {
 func onAsk(ask string) func(*replayComment) { return func(c *replayComment) { c.AskID = new(ask) } }
 
 func TestPlanCommentsSelectionAndOrder(t *testing.T) {
-	is := &replayIssue{Key: "PRJ-1", Asks: []replayAsk{{ID: "ask-open"}}, Comments: []replayComment{
+	// ask-gone is a resolved typed ask block the bundle keeps: its thread is skipped like a thread
+	// on an ask the bundle does not hold.
+	is := &replayIssue{Key: "PRJ-1", Asks: []replayAsk{{ID: "ask-open"}, {ID: "ask-gone", State: "resolved", BlockID: new("b1")}}, Comments: []replayComment{
 		cmt("r1", 1, anchoredOn("d1", "quote one")),
 		cmt("r2", 2, resolvedC(false)),
 		cmt("r3", 3, resolvedC(true), anchoredOn("d1", "quote three")),

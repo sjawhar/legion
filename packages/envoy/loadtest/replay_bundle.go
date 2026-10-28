@@ -9,10 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -187,7 +188,8 @@ type replayAnchor struct {
 	Orphaned   bool    `json:"orphaned"`
 }
 
-// replayAsk is one ask open at At, with what re-creating it needs. POST
+// replayAsk is one ask at At, with what re-creating it needs: an ask open or answered at At, or a
+// typed ask block resolved before At whose block is in its document's text at At. POST
 // /api/v1/issues/{key}/asks takes question, kind, options, multiple, urgency, anchor
 // {artifact, quote} and actor; an approval ask is opened by the server when a document's review is
 // requested (Approval), and a typed ask block lives in its document (BlockID, BlockArtifactID),
@@ -195,7 +197,7 @@ type replayAnchor struct {
 type replayAsk struct {
 	ID        string            `json:"id"`
 	Kind      string            `json:"kind"`  // question or approval
-	State     string            `json:"state"` // open or answered
+	State     string            `json:"state"` // open, answered, or resolved (a typed ask block only)
 	Question  string            `json:"question"`
 	Options   []replayAskOption `json:"options,omitempty"`
 	Multiple  bool              `json:"multiple"`
@@ -213,6 +215,11 @@ type replayAsk struct {
 	// settlement carried the answer (the first listed version created at or after the answer); 0
 	// when the listing names none at or below the document's Version.
 	AnswerVersion int `json:"answer_version,omitempty"`
+	// Resolution is a resolved typed ask block's resolution; ResolveVersion the version of its
+	// block's document the resolve wrote (the first listed version created at or after the
+	// resolve), 0 when the listing names none at or below the document's Version.
+	Resolution     *replayAskResolution `json:"resolution,omitempty"`
+	ResolveVersion int                  `json:"resolve_version,omitempty"`
 }
 
 // replayAskOption is one answer choice.
@@ -227,6 +234,14 @@ type replayAskAnswer struct {
 	Selected []string  `json:"selected,omitempty"`
 	Text     *string   `json:"text,omitempty"`
 	At       time.Time `json:"at"`
+}
+
+// replayAskResolution is how and by whom an ask was resolved: kind is resolved or retracted.
+type replayAskResolution struct {
+	Kind   string      `json:"kind"`
+	Reason string      `json:"reason"`
+	By     replayActor `json:"by"`
+	At     time.Time   `json:"at"`
 }
 
 // replayAskApproval is the document version an approval ask asks a human to approve.
@@ -274,8 +289,10 @@ type replayCounts struct {
 	CommentsOpen      int `json:"comments_open"`
 	CommentsResolved  int `json:"comments_resolved"`
 	AnchoredOpen      int `json:"anchored_open"`
-	AsksOpen          int `json:"asks_open"`
-	WindowEvents      int `json:"window_events"`
+	AsksOpen          int `json:"asks_open"` // asks open or answered at At
+	// AsksResolvedBlocks counts the resolved typed ask blocks the state keeps.
+	AsksResolvedBlocks int `json:"asks_resolved_blocks"`
+	WindowEvents       int `json:"window_events"`
 	// WindowByType counts window events per event type.
 	WindowByType          map[string]int `json:"window_by_type"`
 	CreatedDocs           int            `json:"created_docs"`
@@ -299,7 +316,8 @@ type replayCounts struct {
 	BlockMapsUnavailable int `json:"block_maps_unavailable"`
 	// AnchorRules counts the state's and the window's anchors by the chooseAnchor branch each
 	// takes on the text at At (logged_quote, in_logged_block, nearest_surviving_block,
-	// unanchorable); window anchors on documents not in the state are not counted.
+	// no_block_map, unanchorable); an anchor on a document with no text at At (one not in the
+	// state, say) counts as no_text.
 	AnchorRules map[string]int `json:"anchor_rules"`
 }
 
@@ -339,7 +357,9 @@ type replayBundle struct {
 	State  replayState
 	Roster []replayRosterEntry
 	Meta   replayMeta
-	Window []replayEvent
+	// MetaSHA256 is bundle.meta.json's sha256, as readBundle read it.
+	MetaSHA256 string
+	Window     []replayEvent
 }
 
 // readFile reads a bundle file by its slash path (a replayArtifact.TextPath, say).
@@ -355,6 +375,7 @@ func readBundle(dir string) (*replayBundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	b.MetaSHA256 = sha256Hex(metaBytes)
 	if err := json.Unmarshal(metaBytes, &b.Meta); err != nil {
 		return nil, fmt.Errorf("%s: %w", bundleMetaFile, err)
 	}
@@ -363,11 +384,7 @@ func readBundle(dir string) (*replayBundle, error) {
 			return nil, fmt.Errorf("%s does not list %s", bundleMetaFile, need)
 		}
 	}
-	paths := make([]string, 0, len(b.Meta.Files))
-	for p := range b.Meta.Files {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(b.Meta.Files))
 	for _, p := range paths {
 		data, err := b.readFile(p)
 		if err != nil {
@@ -430,11 +447,6 @@ func keepIssue(rngSeed uint64, issueKey string, f float64) bool {
 	binary.LittleEndian.PutUint64(seed[:], rngSeed)
 	_, _ = h.Write(seed[:])
 	_, _ = h.Write([]byte(issueKey))
-	x := h.Sum64()
-	x ^= x >> 30
-	x *= 0xbf58476d1ce4e5b9
-	x ^= x >> 27
-	x *= 0x94d049bb133111eb
-	x ^= x >> 31
+	x := splitmix64(h.Sum64())
 	return float64(x>>11)/float64(1<<53) < f
 }

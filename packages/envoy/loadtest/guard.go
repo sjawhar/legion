@@ -132,29 +132,66 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 
 // tokenFlags are the endpoint flags whose values are bearer tokens, and urlFlags those whose values
 // are URLs. meta.json records the run's flags with each token replaced by redacted and each URL
-// without its password (recordedArgs, redactURL).
+// without its userinfo (recordedArgs, redactURL).
 var (
 	tokenFlags = []string{"-token", "-listener-token"}
 	urlFlags   = []string{"-url", "-listener", "-nats", "-nats-mon", "-pprof", "-pg"}
 )
 
-// redactURL is raw without the password of its userinfo (the user stays) and without a password
-// query parameter (a Postgres URL can carry one), for every place that records or prints an
-// endpoint. A value that does not parse as a URL with a scheme, such as a keyword/value connection
-// string, is redacted whole, since no password in it can be found for sure.
+// redactURL is raw without the userinfo of any of its comma-separated servers and without a
+// password query parameter (a Postgres URL can carry one), for every place that records or prints
+// an endpoint. The whole userinfo goes, the user name too: nats.go takes a user name with no
+// password as the auth token. A -nats value can list several servers (nats.Connect splits it at
+// commas) and a -pg value several hosts, so each element loses its own. An element that does not
+// parse is redacted whole, since no credential in it can be found for sure.
 func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" {
-		return redacted
+	elements := strings.Split(raw, ",")
+	for i, element := range elements {
+		u, scheme, err := parseURLElement(element)
+		if err != nil {
+			elements[i] = redacted
+			continue
+		}
+		u.User = nil
+		if q := u.Query(); q.Has("password") {
+			q.Del("password")
+			u.RawQuery = q.Encode()
+		}
+		elements[i] = u.String()
+		if !scheme {
+			elements[i] = strings.TrimPrefix(elements[i], elementScheme)
+		}
 	}
-	if _, ok := u.User.Password(); ok {
-		u.User = url.User(u.User.Username())
+	return strings.Join(elements, ",")
+}
+
+// elementScheme stands in for the scheme of a list element that has none (the hosts after the
+// first in a Postgres URL, "postgres://u@h1,h2/db"), so that url.Parse reads its host.
+const elementScheme = "x://"
+
+// parseURLElement parses one comma-separated element of an endpoint flag; scheme reports whether
+// the element named its own scheme.
+func parseURLElement(element string) (u *url.URL, scheme bool, err error) {
+	element = strings.TrimSpace(element)
+	scheme = strings.Contains(element, "://")
+	if !scheme {
+		element = elementScheme + element
 	}
-	if q := u.Query(); q.Has("password") {
-		q.Del("password")
-		u.RawQuery = q.Encode()
+	u, err = url.Parse(element)
+	return u, scheme, err
+}
+
+// isURLList reports whether v is a URL with a scheme and a host, or a comma-separated list whose
+// first element is one and whose every other element names a host (a NATS server list, or the
+// hosts of a Postgres URL).
+func isURLList(v string) bool {
+	for i, element := range strings.Split(v, ",") {
+		u, scheme, err := parseURLElement(element)
+		if err != nil || u.Host == "" || (i == 0 && !scheme) {
+			return false
+		}
 	}
-	return u.String()
+	return true
 }
 
 // foreignFlagError refuses an endpoint flag that names something other than the stack's own.
@@ -237,11 +274,9 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 			return endpoints{}, &foreignFlagError{Flag: field.flag}
 		case field.given != "":
 			// A foreign URL that does not parse would reach an error that prints it whole,
-			// password included; the refusal names the flag alone.
-			if slices.Contains(urlFlags, field.flag) {
-				if u, err := url.Parse(field.given); err != nil || u.Scheme == "" || u.Host == "" {
-					return endpoints{}, fmt.Errorf("%s is not a URL with a scheme and a host", field.flag)
-				}
+			// credentials included; the refusal names the flag alone.
+			if slices.Contains(urlFlags, field.flag) && !isURLList(field.given) {
+				return endpoints{}, fmt.Errorf("%s is not a URL with a scheme and a host, or a comma-separated list of them", field.flag)
 			}
 			*field.dst = field.given
 		default:

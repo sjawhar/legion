@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const anchorDoc = "# Title line\n\nThe first paragraph sentence is here. It has another sentence too.\n\n" +
@@ -115,8 +117,54 @@ func TestPadText(t *testing.T) {
 		if len(p) != n || strings.HasSuffix(p, " ") || !strings.HasPrefix(p, "zqpad") || strings.ContainsAny(p, fallbackSyntax) {
 			t.Fatalf("padText(%d) = %q", n, p)
 		}
-		if q := nextPad(p, n, 3); q == p || len(q) != n {
-			t.Fatalf("nextPad must change the bytes, not the size: %q %q", p, q)
+	}
+}
+
+// TestPadEdits walks padding paragraphs through growths, shrinks and unchanged sizes and holds
+// each edit to padEdit's promise: applied to the paragraph its find occurs in once, it gives the
+// next paragraph, and it carries the change and under 40 bytes besides.
+func TestPadEdits(t *testing.T) {
+	base := "Some text.\n\n## Heading\n\nMore text.\n"
+	sizes := []int{8, 8, 9, 9, 10, 19, 20, 21, 21, 29, 30, 31, 500, 500, 501, 499, 12, 12, 8, 4000, 3990, 3990, 3981, 3981, 9, 9, 8}
+	pad := padAt(sizes[0])
+	for i, n := range sizes[1:] {
+		next := padNext(pad, n)
+		if len(next) != n || next == pad || strings.HasSuffix(next, " ") || !strings.HasPrefix(next, padToken) || strings.ContainsAny(next, fallbackSyntax) {
+			t.Fatalf("step %d: padding %q after %q", i, next, pad)
+		}
+		find, with := padEdit(pad, next)
+		doc := base + "\n" + pad + "\n"
+		if strings.Count(doc, find) != 1 || !strings.HasSuffix(pad, find) {
+			t.Fatalf("step %d: find %q is not the padding's unique tail in %q", i, find, pad)
+		}
+		if got := strings.Replace(doc, find, with, 1); got != base+"\n"+next+"\n" {
+			t.Fatalf("step %d: replace gives %q, want padding %q", i, got, next)
+		}
+		if change := abs(len(next) - len(pad)); len(find)+len(with) > change+40 {
+			t.Fatalf("step %d: %d to %d bytes sent find %d and with %d bytes", i, len(pad), len(next), len(find), len(with))
+		}
+		pad = next
+	}
+	if w := padWord(26*26*26*26 - 1); w != padToken+"zzzz" || padWord(27) != padToken+"aabb" {
+		t.Fatalf("pad words %q %q", w, padWord(27))
+	}
+}
+
+func TestJSONPrefix(t *testing.T) {
+	for _, s := range []string{"", "plain words", "q\"uote\\ <a href=\"x\">&amp;</a>\n\t\r\b\f\x01\x1f", "caf\u00e9 \u2028\u2029 \U0001F600 \xff\xfe end", strings.Repeat("ab<\n", 50)} {
+		enc := jsonPrefix(s)
+		b, _ := json.Marshal(s)
+		if enc[len(s)] != len(b)-2 {
+			t.Fatalf("%q: jsonPrefix %d, json.Marshal %d", s, enc[len(s)], len(b)-2)
+		}
+		for k := range len(s) {
+			if !utf8.RuneStart(s[k]) {
+				continue
+			}
+			b, _ := json.Marshal(s[:k])
+			if enc[k] != len(b)-2 {
+				t.Fatalf("%q[:%d]: jsonPrefix %d, json.Marshal %d", s, k, enc[k], len(b)-2)
+			}
 		}
 	}
 }
@@ -144,16 +192,38 @@ func TestPlanHistorySizes(t *testing.T) {
 	if !strings.HasPrefix(text[p.RunStart:], "## ") && p.RunStart != 0 {
 		t.Fatal("a run starts at a section")
 	}
-	// Answers: the answer's version keeps its place, and one past the end takes the last version.
-	p, err = planHistory(text, real, 5, []int{0, 1}, []int{3, 0})
+	// Ask steps: an answer's or resolve's version keeps its place, and one past the end takes the
+	// last free version.
+	p, err = planHistory(text, real, 5, []askStep{{Ask: 0}, {Ask: 1, Resolve: true}}, []int{3, 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(p.AnswerAt[3], []int{0}) || !slices.Equal(p.AnswerAt[5], []int{1}) || p.Restore != 4 {
-		t.Fatalf("answers %v restore %d", p.AnswerAt, p.Restore)
+	if !slices.Equal(p.AskAt[3], []askStep{{Ask: 0}}) || !slices.Equal(p.AskAt[5], []askStep{{Ask: 1, Resolve: true}}) || p.Restore != 4 {
+		t.Fatalf("ask steps %v restore %d", p.AskAt, p.Restore)
 	}
 	// A missing size counts and is taken as unchanged.
 	if p, _ := planHistory(text, []int{300, -1, len(text)}, 3, nil, nil); p.Missing != 1 {
 		t.Fatalf("missing %d", p.Missing)
+	}
+}
+
+// TestChooseRunFitsTheRestoreBody: the restore edit carries its run whole, so a run whose encoded
+// markdown is over the bound is never chosen, however much the history needs removed; the longest
+// run that fits stands in.
+func TestChooseRunFitsTheRestoreBody(t *testing.T) {
+	one := "## One\n\n" + strings.Repeat("plain words. ", 10) + "\n\n"
+	two := "## Two\n\n" + strings.Repeat("\"quoted\" <tag> & words.\n", 10) + "\n"
+	text := "Intro.\n\n" + one + two
+	start, end := chooseRun(text, len(one)+len(two), 1<<20)
+	if text[start:end] != one+two {
+		t.Fatalf("unbounded: run %q", text[start:end])
+	}
+	enc := jsonPrefix(two)[len(two)]
+	if enc <= len(one) || len(two) >= enc {
+		t.Fatalf("the escaped section must encode longer than the plain one: %d, %d", enc, len(one))
+	}
+	start, end = chooseRun(text, len(one)+len(two), enc-1)
+	if text[start:end] != "Intro.\n\n"+one {
+		t.Fatalf("bounded under the escaped section's %d encoded bytes: run %q", enc, text[start:end])
 	}
 }

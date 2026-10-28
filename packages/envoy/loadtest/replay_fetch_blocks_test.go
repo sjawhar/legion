@@ -18,23 +18,50 @@ func TestVersionSizes(t *testing.T) {
 	}
 }
 
-func TestSetAnswerVersions(t *testing.T) {
+func TestSetBlockVersions(t *testing.T) {
 	at := tAt
+	res := func(at time.Time) *replayAskResolution {
+		return &replayAskResolution{Kind: "resolved", Reason: "r", By: replayActor{Kind: "session", ID: "s1"}, At: at}
+	}
 	st := replayState{Issues: []replayIssue{{Key: "PRJ-1", Exists: true,
 		Artifacts: []replayArtifact{{ID: "d1", Kind: "doc", Version: 4}},
 		Asks: []replayAsk{
 			{ID: "a1", State: "answered", BlockID: new("b1"), BlockArtifactID: new("d1"), Answer: &replayAskAnswer{At: at}},
 			{ID: "a2", State: "answered", BlockID: new("b2"), BlockArtifactID: new("d1"), Answer: &replayAskAnswer{At: at.Add(time.Hour)}},
 			{ID: "a3", State: "open", BlockID: new("b3"), BlockArtifactID: new("d1")},
+			{ID: "a4", State: "resolved", BlockID: new("b4"), BlockArtifactID: new("d1"), Resolution: res(at.Add(30 * time.Second))},
+			{ID: "a5", State: "resolved", BlockID: new("b5"), BlockArtifactID: new("d1"), Resolution: res(at.Add(time.Hour))},
 		}}}}
 	byID := map[string]listedArtifact{"d1": {ID: "d1", Versions: []listedVersion{
 		{Number: 2, CreatedAt: at.Add(-time.Minute)}, {Number: 3, CreatedAt: at.Add(time.Second)},
 		{Number: 4, CreatedAt: at.Add(time.Minute)}, {Number: 5, CreatedAt: at.Add(2 * time.Hour)},
 	}}}
-	setAnswerVersions(&st, byID)
+	setBlockVersions(&st, byID)
 	asks := st.Issues[0].Asks
 	if asks[0].AnswerVersion != 3 || asks[1].AnswerVersion != 0 || asks[2].AnswerVersion != 0 {
 		t.Fatalf("answer versions %d %d %d: the first version at or after the answer, none past Version", asks[0].AnswerVersion, asks[1].AnswerVersion, asks[2].AnswerVersion)
+	}
+	if asks[3].ResolveVersion != 4 || asks[4].ResolveVersion != 0 || asks[3].AnswerVersion != 0 {
+		t.Fatalf("resolve versions %d %d (answer %d): the first version at or after the resolve, none past Version", asks[3].ResolveVersion, asks[4].ResolveVersion, asks[3].AnswerVersion)
+	}
+}
+
+func TestDropResolvedOutsideText(t *testing.T) {
+	res := &replayAskResolution{Kind: "retracted", Reason: "r", At: tAt}
+	st := replayState{Issues: []replayIssue{{Key: "PRJ-1", Exists: true, Asks: []replayAsk{
+		{ID: "kept", State: "resolved", BlockID: new("b1"), BlockArtifactID: new("d1"), Resolution: res},
+		{ID: "gone", State: "resolved", BlockID: new("b2"), BlockArtifactID: new("d1"), Resolution: res},
+		{ID: "nodoc", State: "resolved", BlockID: new("b1"), Resolution: res},
+		{ID: "open", State: "open", BlockID: new("b9"), BlockArtifactID: new("d1")},
+		{ID: "plain", State: "answered"},
+	}}}}
+	dropResolvedOutsideText(&st, map[string]string{"d1": "Intro.\n\n:::ask{#b1 urgency=\"med\" state=\"resolved\"}\nQ\n:::\n\nb2 is named but not a block.\n"})
+	var ids []string
+	for _, a := range st.Issues[0].Asks {
+		ids = append(ids, a.ID)
+	}
+	if !slices.Equal(ids, []string{"kept", "open", "plain"}) {
+		t.Fatalf("asks %v: a resolved block is kept only when its block is in its document's text; open and answered asks stay", ids)
 	}
 }
 
@@ -107,11 +134,11 @@ func TestPlanHistoryTypedAskDocument(t *testing.T) {
 	text := "Intro.\n\n" + ask + "\n## Later\n\n" + strings.Repeat("later section words. ", 30) + "\n"
 	// Version 3 carries the answer (production's change there is the answer's), the rest pads.
 	real := []int{400, 420, 520, 300, len(text)}
-	p, err := planHistory(text, real, 5, []int{0}, []int{3})
+	p, err := planHistory(text, real, 5, []askStep{{Ask: 0}}, []int{3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(p.AnswerAt[3], []int{0}) || p.Restore != 5 || p.Flipped != 0 || p.Unreachable != 0 {
+	if !slices.Equal(p.AskAt[3], []askStep{{Ask: 0}}) || p.Restore != 5 || p.Flipped != 0 || p.Unreachable != 0 {
 		t.Fatalf("plan %+v", p)
 	}
 	if strings.Contains(text[p.RunStart:p.RunEnd], ":::ask") {

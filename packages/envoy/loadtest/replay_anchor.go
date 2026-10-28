@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // The branches chooseAnchor takes, by name, as replay-fetch counts them, the seed records them
@@ -99,11 +100,13 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	pick := func(branch, id string, start, end int, cands []string) anchorChoice {
 		return anchorChoice{Branch: branch, BlockID: id, Start: start, End: end, Candidates: fallbackOrder(rngSeed, docID, itemID, cands)}
 	}
+	useLogged := !skipLogged && !orphaned && quote != ""
 	if bm == nil || len(bm.Blocks) == 0 {
-		if !skipLogged && !orphaned && quote != "" && strings.Count(text, quote) == 1 {
+		if useLogged && strings.Count(text, quote) == 1 {
 			return anchorChoice{Branch: ruleNoBlockMap, Start: 0, End: len(text), Candidates: []string{quote}}
 		}
-		if c := spanCandidates(text, 0, len(text)); len(c) > 0 {
+		// fallbackCandidates already keeps only sentences unique in the whole text.
+		if c := fallbackCandidates(text); len(c) > 0 {
 			return pick(ruleNoBlockMap, "", 0, len(text), c)
 		}
 		return anchorChoice{Branch: ruleUnanchorable}
@@ -116,7 +119,7 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	// Rule 1: a logged quote that is not orphaned and occurs once in the text is no substitute, so
 	// it is used whether or not its logged block survives. Its span is its block's when the quote
 	// lies inside it, else the quote itself.
-	if !skipLogged && !orphaned && quote != "" && strings.Count(text, quote) == 1 {
+	if useLogged && strings.Count(text, quote) == 1 {
 		q := strings.Index(text, quote)
 		if located && q >= start && q+len(quote) <= end {
 			return anchorChoice{Branch: ruleLoggedQuote, BlockID: blockID, Start: start, End: end, Candidates: []string{quote}}
@@ -125,7 +128,7 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	}
 	// A logged quote repeated in the text but once inside its located block: that occurrence,
 	// counted under in_logged_block.
-	if located && !skipLogged && !orphaned && quote != "" {
+	if located && useLogged {
 		k, at, inside := 0, -1, 0
 		for i, off := 0, 0; ; i++ {
 			j := strings.Index(text[off:], quote)
@@ -149,26 +152,11 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	}
 	ref := top
 	if !found {
-		ref = -1
-		if quote != "" {
-			for i, b := range bm.Blocks {
-				if strings.Contains(b.Text, quote) {
-					ref = i
-					break
-				}
-			}
-		}
-		if ref < 0 {
-			rel := 0.5
-			if i := strings.Index(text, quote); quote != "" && i >= 0 && len(text) > 0 {
-				rel = float64(i) / float64(len(text))
-			}
-			ref = min(len(bm.Blocks)-1, int(rel*float64(len(bm.Blocks))))
-		}
+		ref = refByQuote(text, bm, quote)
 	}
 	for d := 0; d < len(bm.Blocks); d++ {
 		for _, i := range []int{ref - d, ref + d} {
-			if i < 0 || i >= len(bm.Blocks) || (d == 0 && i != ref) || (found && i == top && located) {
+			if i < 0 || i >= len(bm.Blocks) || (found && i == top && located) {
 				continue
 			}
 			if s, e, ok := locate(text, bm.Blocks[i].Text); ok {
@@ -182,6 +170,24 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 		}
 	}
 	return anchorChoice{Branch: ruleUnanchorable}
+}
+
+// refByQuote is where the search for the nearest surviving block starts when the logged block id
+// is not among the current blocks: the first block whose text holds the logged quote, else the
+// block at the quote's relative position in text (the middle when the quote is not in text).
+func refByQuote(text string, bm *replayBlockMap, quote string) int {
+	if quote != "" {
+		for i, b := range bm.Blocks {
+			if strings.Contains(b.Text, quote) {
+				return i
+			}
+		}
+	}
+	rel := 0.5
+	if i := strings.Index(text, quote); quote != "" && i >= 0 {
+		rel = float64(i) / float64(len(text))
+	}
+	return min(len(bm.Blocks)-1, int(rel*float64(len(bm.Blocks))))
 }
 
 // substituteAnchor is chooseAnchor for the replay source's window anchors: given a document's
@@ -198,33 +204,49 @@ func substituteAnchor(text string, bm *replayBlockMap, blockID, quote string, rn
 
 // historyPlan is how a document's synthetic history reproduces production's version sizes. Every
 // version below Restore is the base (the text at At with the run [RunStart, RunEnd) removed and the
-// answers not yet given stripped) plus a padding paragraph of synthetic words at the end, sized so
-// the version has Sizes[n-1] bytes. Version Restore removes the padding and inserts the run back
-// (before the heading at RunEnd, or at the end), giving the text at At less the answers still to
-// come; the versions after it are those answers. AnswerAt maps a version to the answered typed ask
-// blocks (indexes into the issue's asks) whose answer it carries.
+// typed ask blocks still to be answered or resolved stripped) plus a padding paragraph of synthetic
+// words at the end (padAt), sized so the version has Sizes[n-1] bytes. Version Restore removes the
+// padding and inserts the run back (before the heading at RunEnd, or at the end) in one edit, giving
+// the text at At less the ask steps still to come. AskAt maps a version to the ask steps (a typed ask
+// block's answer or resolve, a change Dispatch makes) it carries.
 type historyPlan struct {
 	Final            int
 	Sizes            []int
 	Restore          int
 	RunStart, RunEnd int
-	AnswerAt         map[int][]int
+	AskAt            map[int][]askStep
 	// Flipped counts versions whose size change is production's with the sign flipped, because
 	// the base cannot be made small enough; Missing the versions production lists no size for
-	// (taken as unchanged); Fixed the answer versions, whose change Dispatch decides.
+	// (taken as unchanged).
 	Flipped, Missing int
 	// Unreachable counts versions no sign can reach: raised to the smallest size the base and a
 	// padding paragraph take, so their change differs from production's.
 	Unreachable int
 }
 
+// askStep is one write of a typed ask block that Dispatch versions: the answer of the issue's ask
+// at index Ask, or its resolve.
+type askStep struct {
+	Ask     int
+	Resolve bool
+}
+
 // padMin is the shortest padding paragraph a version carries.
 const padMin = 8
+
+// maxJSONBody is the largest JSON request body Dispatch takes (maxJSONRequestBytes at 35efd326;
+// a larger one is refused 413 REQUEST_TOO_LARGE) and the largest document it stores
+// (pmdoc.MaxDocumentBytes, 413 CAP_EXCEEDED).
+const maxJSONBody = 1 << 20
+
+// restoreEnvelope bounds what the restore edit's body holds beside its run's encoded markdown: the
+// padding block's delete, the insert's anchor and the actor.
+const restoreEnvelope = 1024
 
 // padLen is the length of padded version n's padding paragraph: version n-1's (prevPad bytes)
 // changed by the planned size change, so version n changes size by exactly the plan's change
 // whatever size Dispatch stored version n-1 at: version 1's base canonicalised to other bytes than
-// sent, or an answer version whose change differs from production's. A padding paragraph is plain
+// sent, or an ask step version whose change differs from production's. A padding paragraph is plain
 // words, which Dispatch stores as sent. The stored padding, not the seeder's memory, is prevPad,
 // so a resumed seed continues alike.
 func (p historyPlan) padLen(n, prevPad int) int { return prevPad + p.Sizes[n-1] - p.Sizes[n-2] }
@@ -266,19 +288,21 @@ func sectionStarts(text string) []int {
 	return starts
 }
 
-// chooseRun picks the run of whole sections to remove: the shortest one of at least need bytes
-// holding no typed ask block, else (none is long enough) the longest one holding none. Both ends
-// are section starts (the end may be the text's end). It returns 0, 0 when need <= 0 or no run
-// qualifies.
-func chooseRun(text string, need int) (int, int) {
+// chooseRun picks the run of whole sections to remove. It considers the runs that hold no typed ask
+// block and whose markdown, JSON-encoded, takes at most maxJSON bytes (the restore edit re-inserts
+// the run whole, in one body): the shortest one of at least need bytes, else (none is long enough)
+// the longest one. Both ends are section starts (the end may be the text's end). It returns 0, 0
+// when need <= 0 or no run qualifies.
+func chooseRun(text string, need, maxJSON int) (int, int) {
 	if need <= 0 {
 		return 0, 0
 	}
 	starts := append(sectionStarts(text), len(text))
+	enc := jsonPrefix(text)
 	bestS, bestE, longS, longE := 0, 0, 0, 0
 	for i := 0; i < len(starts)-1; i++ {
 		for j := i + 1; j < len(starts); j++ {
-			if strings.Contains(text[starts[i]:starts[j]], ":::ask") {
+			if strings.Contains(text[starts[i]:starts[j]], ":::ask") || enc[starts[j]]-enc[starts[i]] > maxJSON {
 				break
 			}
 			n := starts[j] - starts[i]
@@ -294,6 +318,44 @@ func chooseRun(text string, need int) (int, int) {
 		return bestS, bestE
 	}
 	return longS, longE
+}
+
+// jsonCost is how many bytes encoding/json's Marshal writes, inside a string's quotes, for the
+// character starting at s[i], and that character's length in s: an invalid byte is written as
+// U+FFFD (3 bytes), U+2028 and U+2029 escaped (TestJSONPrefix holds it to Marshal).
+func jsonCost(s string, i int) (cost, size int) {
+	if b := s[i]; b < utf8.RuneSelf {
+		switch {
+		case b == '\\' || b == '"' || b == '\b' || b == '\f' || b == '\n' || b == '\r' || b == '\t':
+			return 2, 1
+		case b < 0x20 || b == '<' || b == '>' || b == '&':
+			return 6, 1
+		}
+		return 1, 1
+	}
+	c, size := utf8.DecodeRuneInString(s[i:])
+	switch {
+	case c == utf8.RuneError && size == 1:
+		return 3, 1
+	case c == '\u2028' || c == '\u2029':
+		return 6, size
+	}
+	return size, size
+}
+
+// jsonPrefix is, for each k in [0, len(text)] that starts a character (or ends text), the length of
+// text[:k] JSON-encoded without its quotes.
+func jsonPrefix(text string) []int {
+	enc := make([]int, len(text)+1)
+	for i := 0; i < len(text); {
+		cost, size := jsonCost(text, i)
+		for k := i + 1; k <= i+size; k++ {
+			enc[k] = enc[i]
+		}
+		enc[i+size] += cost
+		i += size
+	}
+	return enc
 }
 
 // baseText is the text with the run removed. A run reaching the end leaves the blank line before
@@ -314,11 +376,10 @@ func baseText(text string, runStart, runEnd int) string {
 
 // planHistory plans a document's history from production's version sizes (sizes[n-1] for version
 // n, -1 when unlisted), its text at At (whose size Dispatch keeps, so local size n is sizes[n-1] -
-// sizes[final-1] + len(text)), and the version each answered typed ask block's answer lands at
-// (answerVersions[i] for ask index answerAsks[i]; one under 2 or past final takes the last free
-// version).
-func planHistory(text string, sizes []int, final int, answerAsks, answerVersions []int) (historyPlan, error) {
-	p := historyPlan{Final: final, AnswerAt: map[int][]int{}}
+// sizes[final-1] + len(text)), and the version each typed ask block's answer or resolve lands at
+// (versions[i] for steps[i]; one under 2 or past final takes the last free version).
+func planHistory(text string, sizes []int, final int, steps []askStep, versions []int) (historyPlan, error) {
+	p := historyPlan{Final: final, AskAt: map[int][]askStep{}}
 	real := make([]int, final)
 	for n := range final {
 		switch {
@@ -326,29 +387,29 @@ func planHistory(text string, sizes []int, final int, answerAsks, answerVersions
 			real[n] = sizes[n]
 		case n > 0:
 			real[n] = real[n-1]
-			p.Missing++
+			fallthrough
 		default:
 			p.Missing++
 		}
 	}
 	free := final
-	for i, ask := range answerAsks {
-		v := answerVersions[i]
+	for i, st := range steps {
+		v := versions[i]
 		if v < 2 || v > final {
-			for free > 1 && len(p.AnswerAt[free]) > 0 {
+			for free > 1 && len(p.AskAt[free]) > 0 {
 				free--
 			}
 			v = free
 		}
-		p.AnswerAt[v] = append(p.AnswerAt[v], ask)
+		p.AskAt[v] = append(p.AskAt[v], st)
 	}
 	p.Restore = final
-	for p.Restore > 1 && len(p.AnswerAt[p.Restore]) > 0 {
+	for p.Restore > 1 && len(p.AskAt[p.Restore]) > 0 {
 		p.Restore--
 	}
-	for v := range p.AnswerAt {
+	for v := range p.AskAt {
 		if v <= 1 {
-			return p, fmt.Errorf("an answer cannot land at version %d", v)
+			return p, fmt.Errorf("an answer or resolve cannot land at version %d", v)
 		}
 	}
 	local := func(n int) int { return real[n-1] - real[final-1] + len(text) }
@@ -357,19 +418,19 @@ func planHistory(text string, sizes []int, final int, answerAsks, answerVersions
 		p.Sizes[n-1] = local(n)
 	}
 	if p.Restore == 1 {
-		if len(p.AnswerAt) > 0 {
-			return p, fmt.Errorf("every version is an answer: no version is left to create the document")
+		if len(p.AskAt) > 0 {
+			return p, fmt.Errorf("every version is an answer or resolve: no version is left to create the document")
 		}
 		return p, nil
 	}
 	// The run: long enough that the smallest padded version still holds padMin bytes of padding
 	// over the base. The floor is taken over the unstripped base, the largest any version's base
-	// gets as answers land.
+	// gets as ask steps land.
 	smallest := len(text)
 	for n := 1; n < p.Restore; n++ {
 		smallest = min(smallest, local(n))
 	}
-	p.RunStart, p.RunEnd = chooseRun(text, len(text)+padOverhead(len(text))+padMin-smallest)
+	p.RunStart, p.RunEnd = chooseRun(text, len(text)+padOverhead(len(text))+padMin-smallest, maxJSONBody-restoreEnvelope)
 	base := baseText(text, p.RunStart, p.RunEnd)
 	floor := len(base) + padOverhead(len(base)) + padMin
 	// Walk back from Restore: each padded version is the next one less production's change; one
@@ -378,7 +439,7 @@ func planHistory(text string, sizes []int, final int, answerAsks, answerVersions
 	for n := p.Restore - 1; n >= 1; n-- {
 		d := real[n] - real[n-1]
 		size := p.Sizes[n] - d
-		if len(p.AnswerAt[n+1]) == 0 && size < floor && d != 0 {
+		if len(p.AskAt[n+1]) == 0 && size < floor && d != 0 {
 			size = p.Sizes[n] + d
 			p.Flipped++
 		}
@@ -397,8 +458,9 @@ var (
 	stateAttr    = regexp.MustCompile(` state="[^"]*"`)
 )
 
-// stripAnswers is text with the typed ask blocks named in ids written as Dispatch stores an
-// unanswered block: no answered_by, answered_at, selected or answer, and state "open".
+// stripAnswers is text with the typed ask blocks named in ids written as Dispatch stores an open
+// block: no answered_by, answered_at, selected or answer, and state "open" (an answered or a
+// resolved block alike).
 func stripAnswers(text string, ids map[string]bool) string {
 	if len(ids) == 0 {
 		return text
@@ -432,16 +494,88 @@ func padText(n int, salt int) string {
 	return s
 }
 
-// nextPad is padding of n bytes that differs from prev, so a version whose size does not change
-// still changes its bytes.
-func nextPad(prev string, n, salt int) string {
-	s := padText(n, salt)
-	if s == prev {
-		if s[len(s)-1] == 'y' {
-			s = s[:n-1] + "z"
-		} else {
-			s = s[:n-1] + "y"
+// The padding paragraph of n bytes is padAt(n): the first n bytes of the pad stream, the words
+// padWord(0), padWord(1), ... joined by single spaces (a last byte that would be a space is an x).
+// Each word is padToken and four lowercase letters, so a whole word occurs once in a document (no
+// document holds padToken, docText). Growing the paragraph by d appends the stream's next d bytes
+// and shrinking it by d drops its last d, each sent as a replace of only the paragraph's tail
+// (padEdit), and a version whose size does not change swaps its last whole word for the word's
+// digit form or back (padSwap): every padding edit's body holds the change and under 40 bytes of
+// padding besides, however long the paragraph.
+const padWordLen = len(padToken) + 4
+
+// padStride is the distance between two words' starts in the pad stream.
+const padStride = padWordLen + 1
+
+// padWord is the pad stream's word i (i < 26^4, so a stream of up to 4.5 MB, past any document).
+func padWord(i int) string {
+	b := []byte(padToken + "aaaa")
+	for k := len(b) - 1; k >= len(padToken); k-- {
+		b[k] = 'a' + byte(i%26)
+		i /= 26
+	}
+	return string(b)
+}
+
+// padAt is the padding paragraph of n bytes.
+func padAt(n int) string {
+	var b strings.Builder
+	b.Grow(n + padStride)
+	for i := 0; b.Len() < n; i++ {
+		if i > 0 {
+			b.WriteByte(' ')
 		}
+		b.WriteString(padWord(i))
+	}
+	s := b.String()[:n]
+	if strings.HasSuffix(s, " ") {
+		s = s[:n-1] + "x"
 	}
 	return s
+}
+
+// padSwap is pad with its last whole word swapped between the stream's word and its digit form
+// (padToken and four digits, a word no stream holds), the same length and other bytes; a paragraph
+// too short for a whole word swaps its last byte between y and z.
+func padSwap(pad string) string {
+	if len(pad) < padWordLen {
+		last := byte('y')
+		if pad[len(pad)-1] == 'y' {
+			last = 'z'
+		}
+		return pad[:len(pad)-1] + string(last)
+	}
+	j := (len(pad) - padWordLen) / padStride
+	at := j * padStride
+	word := padWord(j)
+	if pad[at:at+padWordLen] == word {
+		word = fmt.Sprintf("%s%04d", padToken, j%10000)
+	}
+	return pad[:at] + word + pad[at+padWordLen:]
+}
+
+// padEdit is the replace that turns padding paragraph cur into next: find is cur from the start of
+// the last whole word at or before the first byte they differ in (from cur's start when it holds no
+// whole word), with is next from there. The find starts with a whole word, which occurs once in the
+// document (padSwap's digit form too, which only the last word ever takes), or is the whole
+// paragraph, the document's only text holding padToken: so it occurs once.
+func padEdit(cur, next string) (find, with string) {
+	k := 0
+	for k < len(cur) && k < len(next) && cur[k] == next[k] {
+		k++
+	}
+	at := 0
+	if len(cur) >= padWordLen {
+		at = min(k, len(cur)-padWordLen) / padStride * padStride
+	}
+	return cur[at:], next[at:]
+}
+
+// padNext is the padding paragraph of n bytes that follows cur: padAt(n), or cur swapped (padSwap)
+// when that is cur itself, so a version whose size does not change still changes its bytes.
+func padNext(cur string, n int) string {
+	if next := padAt(n); next != cur {
+		return next
+	}
+	return padSwap(cur)
 }
