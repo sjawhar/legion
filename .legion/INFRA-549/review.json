@@ -2,42 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T09:59:40Z",
-  "round": 3,
-  "reviewedCodeHead": "f589463471e3",
-  "decision": "approved",
+  "completed": "2026-10-28T14:24:00Z",
+  "round": 4,
+  "reviewedCodeHead": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 3,
-  "threads": {
-    "PRRT_kwDORFy7ds6wmI-h": "round 1, accepted: fixed in 90d28d94626a",
-    "PRRT_kwDORFy7ds6wmI-o": "round 1, accepted: fixed in 8bf4bfe7451e",
-    "PRRT_kwDORFy7ds6wmI-t": "round 1, accepted: fixed in 22e1c3aef576",
-    "PRRT_kwDORFy7ds6wndgk": "round 2, accepted: fixed in f589463471e3 (disk growth pins maxFileStoreGb)",
-    "PRRT_kwDORFy7ds6wndgp": "round 2, accepted: fixed in f589463471e3 (depends-on rationale for both annotations, pinned without a session user)",
-    "PRRT_kwDORFy7ds6wndgv": "round 2, accepted: fixed in f589463471e3 (earlier listener build advertised during its wait; CHANGELOG names INFRA-557)"
-  },
+  "important": 2,
+  "minor": 2,
+  "rebaseCheck": "Last review APPROVE at cf7b85d1 (fingerprint f4aefcc8..., fork 5fbe7ca5); head 4013403b (fingerprint 2ad25775..., fork 91d30dea): changed (clusteredhub_autopilot.go, loopbackPort, changie fragments, workflow comment), so a new round with the thermonuclear pair.",
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/envoy/infra/README.md",
-      "description": "Not a defect: step 6 previews nothing when the floor of 0.9 times the new diskSizeGb equals the pinned limit; 'remove it' refers to step 5's pin, which a streamMaxBytes hub never made."
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
+      "description": "loopbackPort binds 127.0.0.1:0, closes the socket and returns the port. The nine hub-server ports are drawn one after another (:765) and fixed into each server's args, so two draws can coincide (17 of 20,000 nine-port draws in this sandbox; cmdtest.FreeTCPPort's own doc recorded CI run 40162140539 hitting it). hubServer.start retries with the same args, so all 10 startBound attempts fail on 'address already in use' and the natslive lane this PR adds to CI goes red at random. Draw the ports with every listener held until all are drawn, or draw a server's ports again on each retry, or follow internal/testnats/cluster.go's convention."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
+      "description": "autopilotPodSize holds the hub and tailnet pods to autopilotPodMinCPU/MinMemory (500m/512Mi), which the base now documents (dispatch.go:99-103) as the floor of a pod with pod anti-affinity or safe-to-evict; the clustered hub's pods carry neither. GKE's general-purpose floor for them is 250m/512Mi (no bursting) or 50m/52MiB (bursting). So a natsCpu of 300m or a tailnet.listener.cpu of 150m is refused with 'below which Autopilot raises it', which is false. Give the hub its own floor or state the conservative choice truthfully in the refusal and docs (clusteredhub.go:44-47, README)."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/docs/nats-hub.md",
-      "description": "Not a defect: with an earlier listener build the host leaves the Service after tailnetHealthFall failed answers (about 15 s after the listener exits), not at the exit; the text describes a build the same paragraph forbids."
+      "file": "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
+      "description": "Fast-follow (no behaviour change): podPriorityClass repeats the base's inline rule in newDispatchDisruption (dispatch.go:749-758); Dispatch could call it with identical text."
     },
     {
       "severity": "minor",
       "file": "PR body",
-      "description": "My own 'Not proven / risk' lines were stale (round-2 request now done; disk-growth steps 3-6 were run by the tester against kube-apiserver and kube-controller-manager); corrected in the body, no commit."
+      "description": "Size and Chain lines are stale after the merges (tailnet_service.go and dispatch.go are now the base's; fork 91d30dea)."
     }
   ],
+  "outsideThisPR": "TestDispatchConnectionsPerPodIsTheServers fails at this head and at the base (dispatchConnectionsPerPod 83 in gcp/dispatch.go:97 vs store.ConnectionsPerProcess 84, store/pool.go:307; main has 83 too); this PR touches neither file. Reported to the controller. The f5894634 Legion Envoy and Contracts failure was internal/bus tests of the base, green on the base since 81cf8c12.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at f5894634 (two Minors: step 6 empty preview case; stale PR body lines). Pinning yields an identical pod template; kubectl jsonpath valid; depends-on rationale and INFRA-557 text match the code.",
-    "codeQuality": "Verdict: CHANGES at f5894634, docs precision only (step 6 'remove it' for streamMaxBytes hubs; host leaves the Service ~15 s after the listener exits). Judged Minor, not defects: see keyFindings."
+    "deepReview": "Verdict: APPROVE at 253b920c (four Minors: loopbackPort collision, Autopilot floor condition, duplicated rules, stale body). Merge resolutions sound; tailnet_service.go at base identical to the approved copy; changie fragments match .changie.yaml; natslive Chart|Cluster ok in 30.96 s.",
+    "codeQuality": "Verdict: CHANGES at 253b920c (podPriorityClass duplicate, cleanup; loopbackPort collision, correctness)."
   },
-  "ci": "legion/INFRA-546 requires no check (no ruleset with required checks, branch not protected). At f589463471e3 every pull_request run (Tests, Legion Envoy and Contracts, Docs, PR Title) is queued; no run has executed on this pull request at any head, since the repository's runners hold 178 queued runs with the oldest in-progress started 05:58Z. Compare f589463471e3...a2797f01: handoffsOnly true, 2 files. Told to the architect.",
-  "verifiedLocally": "At f589463471e3: gofmt clean on gcp, go vet -tags pulumilive,natslive ./gcp/ ok, go test -run 'TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange|TestClusteredNatsHubChartValues' ./gcp/ ok. Round 2: the changed gcp tests passed at 22e1c3ae."
+  "ci": "legion/INFRA-546 requires no check and is not protected. At 253b920c: typecheck and pr-title success; build, changes, lint, test and Legion Envoy and Contracts, Tests, Docs queued. Compare 253b920c...4013403b handoffsOnly true, 2 files.",
+  "verifiedLocally": "At 253b920c: gofmt clean, go vet -tags pulumilive,natslive ./... ok, go test ./core/ ./provider/ ok, go test ./gcp/ ok except TestDispatchConnectionsPerPodIsTheServers (base) and the two mkfs.ext4 data-disk tests (skipped)."
 }
