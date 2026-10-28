@@ -230,7 +230,11 @@ envelope on `notifications.envoy.exceptions.<original-topic>`. So does a role-la
 refuses because no live session holds the role: that refusal is still answered `404`, and the
 exception goes out behind the answer, on a goroutine of its own, so it never delays it. This adds
 a bus signal only: no Legion consumer acts on a peer's refusal. Upgrade every Legion daemon before
-the listener, because an older daemon logs every refused notice's new reason as malformed. The
+the listener: an older daemon reads either refusal reason as malformed and logs
+`ERROR role-lane exception not re-held` once for each refused attempt to publish its own notice. A
+held notice row tries again after 1, 2, 4, 8, 16 and 32 s and then every 64 s, and only the oldest
+held notice of each architect publishes, so that is about seven ERROR lines in the first minute and
+then one every 64 s for each architect whose role is unheld while it has a notice to deliver. The
 exception payload preserves the original delivery fields:
 
 | Field | Meaning |

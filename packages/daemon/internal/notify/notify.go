@@ -23,12 +23,11 @@ const refusalBodyLimit = 4096
 
 // ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
 // claimed it, or its holder's registration lapsed (writeRoleHolderError,
-// packages/envoy/cmd/listener/api.go). It is the ordinary state before a role's session claims it,
-// not a broken publish path, so a caller can hold what it published until one does.
+// packages/envoy/cmd/listener/role_holder.go). It is the ordinary state before a role's session
+// claims it, not a broken publish path, so a caller can hold what it published until one does.
+// Publish returns it only for a 404 whose body names a roleholder reason; any other 404, such as a
+// route an older listener lacks, is a plain refusal.
 var ErrNoHolder = errors.New("no live session holds the role")
-
-// A listener 404 that names a roleholder reason is ErrNoHolder. A 404 without one is some other
-// refusal — a route an older listener lacks — and never ErrNoHolder.
 
 // RoleTopicPrefix is the Envoy subject a role token is reached on (ROLE_TOPIC_PREFIX,
 // packages/contracts/src/subject.ts): a notice goes to its architect's, and a review-stuck notice

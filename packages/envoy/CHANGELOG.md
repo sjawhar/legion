@@ -1029,14 +1029,6 @@
 
 ### Changed
 
-- A role publish the listener refuses because no live session holds the role (`unclaimed` or
-  `holder_lapsed`) still answers the same `404`, and now also publishes one core-NATS exception on
-  `notifications.envoy.exceptions.<role topic>`. It is published after the `404` is written and does
-  not delay the answer. Its `payload` is left out when the refused payload is larger than 64 KiB.
-  This adds the bus signal only; no Legion consumer acts on a peer's refusal. **Upgrade every Legion
-  daemon before this listener**: an older daemon reads either reason as malformed and logs
-  `ERROR role-lane exception not re-held` once for each refused notice while it runs beside this
-  listener.
 - **Breaking:** `envoy-infra:gcp:Dispatch` takes two new required inputs: `tailnetService`, the
   Tailscale Service the front door hosts, which must resolve to `svc:<hostname>` (pass the `Name`
   output of the consumer's `tailscale.Service`, so the Serve ConfigMap and the front door wait for
