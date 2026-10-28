@@ -2621,8 +2621,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
   document version included. A person's reaches a claimant only through a subscription to the
   issue topic, or as the route when it notifies; an agent's only through that subscription, since
   an agent's event of these types never notifies and so takes no route copy either, except that a
-  claimant following the ask gets, as a follower, every event on that ask but its own and a quiet
-  `ask.edited`: an agent's or a person's answer, hand-back, resolution or non-quiet edit of the
+  claimant following the ask gets, as a follower, these events on that ask, other than its own: an
+  agent's or a person's answer, hand-back, resolution or non-quiet edit of the
   ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs
   outside the `notify` gate). A
   `comment.created` whose mentions resolved to the claimant is left to the mention once the
