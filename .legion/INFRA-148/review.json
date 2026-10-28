@@ -2,32 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T17:36:05Z",
-  "round": 4,
+  "completed": "2026-10-28T11:16:02Z",
+  "round": 5,
   "decision": "changes_requested",
-  "reviewedCodeHead": "4e965add424383a95543cdb98d9d84f4b49a1c29",
-  "scope": "What changed since 555220b3: the merge of main 3d789a90 (renumbering) and the refresher URL fix 33b1f07a with the tester's red test 1502ee12. The round-3 changes were found clean at 21da602e (see the backward-move reason).",
+  "reviewedCodeHead": "7069ebe5a53d119a138ad3f464b8a8ca2bdf24ec",
+  "scope": "As the architect narrowed it: the failing-token-command fix, the timing checks moved to the design's bound, the cross-URL test asserting its reason, and the required checks. The changelog-fragment move, the removal of Dispatch keys from added lines and three merges of main were also checked for behaviour.",
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/claude-envoy/hooks/session-hook.ts:434",
-      "description": "Hides an error. The refresher writes `dispatch_url: dispatch.enabled ? dispatch.url : null`, but the hook compares it at :329 with sessionDispatchUrl, which is set without reading the token. So when the `!` token command fails (not signed in, exit 3), the refresher records null and the URLs never match. The hook drops the refresher's real error ('dispatch.token's command exited with status 3') and says 'the refresher read no Dispatch, not the Dispatch envoy.json names now', which is false. Both thermonuclear agents reproduced it with the committed dist. Fix: record the URL the refresher targeted, with the same function the hook uses (sessionDispatchUrl/dispatchUrl), so a matching URL carries the refresher's own text. Add a test with a token command that fails fast."
+      "file": "packages/claude-envoy/hooks/session-hook.ts:338",
+      "description": "The carry rule became `other === null || dispatchUrl === undefined || other === dispatchUrl`. Recording the targeted URL at :443 already fixes the failing-token case with the strict comparison `outcome.dispatch_url === (dispatchUrl ?? null)`; the two extra branches add new behaviour. (a) While envoy.json cannot be read (the hook's dispatchUrl is undefined), a refresher that targeted another Dispatch hands its list to the hook, shown as fresh: the list from another Dispatch URL the architect required never to stand in. (b) A refresher that ran while envoy.json was broken (dispatch_url null) hands its stale failure line to a hook for Dispatch A, so A's cached list is dropped. Reproduced by both thermonuclear agents against the committed bundle (/legion/scratch/tmp/r5-repro.ts); the round-4 bundle behaved correctly in both. No test reaches either branch."
     },
     {
       "severity": "minor",
-      "file": "packages/claude-envoy/tests/answers-hook.test.ts",
-      "description": "The timing checks flake on a loaded pod: the reviewer saw 2 of 3 full-file runs fail ('a quick one gives the bearer at once' at :338, and the new cross-URL test at :439, each because the refresher had not finished 800-833 ms after the hook started), and the tester saw 2 of 7 fail on `wallMs < 1000`. The claude-envoy job is not in the required set (lint, typecheck, test, pr-title). Since this round requests changes anyway, the request asks for the checks to assert the bounds the design states, not wall time from process start."
+      "file": "packages/claude-envoy/tests/answers-hook.test.ts:216",
+      "description": "Acceptance note: the 800 ms value is no longer pinned (printDeadline and notFinishedReason use the imported constant), and DEADLINE_SLACK_MS = 1000 lets the hook print and exit up to 1,000 ms past its deadline."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/claude-envoy/hooks/session-hook.ts:419",
+      "description": "Acceptance note: the tests-only timing-file write is outside the try, so an unwritable ENVOY_ANSWERS_TIMING_FILE makes the hook exit 1 after printing. Unset in production, so nothing is written there."
     }
   ],
-  "mergeCheck": "PR diff before the merge (fd05f188..555220b3) and after it (2df3353c..3d789a90) differ only in the renumbering 0130/0131/0132 -> 0135/0136/0137 and its references (envoy CHANGELOG, cmd/dispatch README, sessionanswers comments, migration headers). main@origin 2dbeca18 ends at 0134. No old number is left for these three migrations. check-dist: 'dist/ and legion/ match a fresh build'. GitHub reports the PR MERGEABLE.",
-  "acceptanceNotes": [
-    "The new cross-URL test passes even if the hook times out before reading the outcome; asserting the mismatch reason would prove the branch runs.",
-    "A hook can drop the list of a refresher it started itself, when an earlier refresher for another URL finished between the hook's start and its lock check; the next hook carries it from answers.json."
+  "verified": [
+    "The failing-token error now reaches the hook (test at answers-hook.test.ts:745).",
+    "The cross-URL test asserts `the refresher read <before>, not the Dispatch envoy.json names now` (:737).",
+    "answers-hook.test.ts passed 3 of 3 full-file runs on this pod (14 pass each); envoy-client session-answers, dispatch-cli and dispatch-execute tests 381 pass.",
+    "Changelog fragments follow AGENTS.md and each package's .changie.yaml; the only Dispatch keys left in added lines are in .legion/ and Legion's own LEGION-1 fixtures.",
+    "The merges keep migrations 0135-0137 after main's 0134 and move main's askgate imports to dispatch-session-directory; no other importer of the moved functions is left.",
+    "Local check-dist cannot run: main now pins Bun 1.4.4 and the pod has 1.3.14."
   ],
-  "ci": "CI head 4e965add (compare to 094377cf is .legion/ only). At review lint, typecheck, test and pr-title were queued. This request does not wait on CI.",
-  "thermonuclear": "deep-review: CHANGES (false reason on a failing token command). code-quality: CHANGES (the same finding). Both ran at 094377cf.",
+  "ci": "Required set lint, typecheck, test, pr-title. CI head 7069ebe5 (compare to 382a7fe1 is .legion/ only). At review lint, typecheck and pr-title passed and test was in progress. This request does not wait on CI.",
+  "thermonuclear": "deep-review: CHANGES (carry rule). code-quality: CHANGES (carry rule). Both ran at 382a7fe1.",
   "threads": "Every earlier thread has my answer; no new thread before this round."
 }
