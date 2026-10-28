@@ -1398,7 +1398,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 // this run gets from being luck.
 func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 	pair := newPair(t)
-	waitOutABucketBoundary(t, pair, redeliver.Interval)
+	waitOutABucketBoundary(t, redeliver.Interval)
 	fake := startGitHubFake(t)
 	// Nothing is held here: this row is about two passes that never meet, so the first one must
 	// finish and give the lease back before the second process exists.
@@ -1442,7 +1442,7 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 // watches a second process legitimately sweep rather than skip; this waits the boundary out
 // instead, on the clock both processes share with this test (one host), and waits at most the
 // margin it needs.
-func waitOutABucketBoundary(t *testing.T, _ *dispatchPair, period time.Duration) {
+func waitOutABucketBoundary(t *testing.T, period time.Duration) {
 	t.Helper()
 	// What one run of the row needs inside the bucket: two process starts and their first ticks.
 	const margin = 45 * time.Second

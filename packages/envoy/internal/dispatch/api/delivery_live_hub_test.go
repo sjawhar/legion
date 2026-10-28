@@ -1156,13 +1156,13 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: rig.database, Identity: headerIdentity(rig.database), AgentTokens: sharedAgentTokens(t, "agent-token"),
-		ServerURL: "https://dispatch.example", Docs: documents, Events: other, Lifetime: t.Context(),
+		ServerURL: "https://dispatch.example", Docs: documents, Events: other,
 	})
 	if err != nil {
 		t.Fatalf("the other task's dependencies: %v", err)
 	}
 	otherTask := http.NewServeMux()
-	t.Cleanup(Register(otherTask, deps))
+	t.Cleanup(Register(otherTask, t.Context(), deps))
 	patchHubIssue(t, otherTask, key, map[string]any{"title": "Ship the widgets"})
 	delta := conn.delta(t, 3*time.Second, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {

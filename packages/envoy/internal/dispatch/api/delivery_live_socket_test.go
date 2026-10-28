@@ -21,7 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// deliverySocketRig is the API test server behind a real listener and run on a Lifetime, so Register
+// deliverySocketRig is the API test server behind a real listener and run on a lifetime, so Register
 // builds the delivery hub and mounts GET /ws/delivery as production does.
 type deliverySocketRig struct {
 	handler  http.Handler
@@ -29,12 +29,12 @@ type deliverySocketRig struct {
 	served   *server
 	host     string
 	url      string
-	// stop ends the server's Lifetime, as the signal that shuts Dispatch down does.
+	// stop ends the server's lifetime, as the signal that shuts Dispatch down does.
 	stop context.CancelFunc
 }
 
 // newDeliverySocketRig starts the rig on options; listen, when given, wraps the server's listener.
-// The Lifetime derives from the test's context, which ends before the test's cleanups wait out the
+// The lifetime derives from the test's context, which ends before the test's cleanups wait out the
 // sockets and the hub.
 func newDeliverySocketRig(t *testing.T, options testServerOptions, listen func(net.Listener) net.Listener) *deliverySocketRig {
 	t.Helper()

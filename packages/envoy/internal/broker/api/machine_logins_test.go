@@ -394,7 +394,7 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 			t.Fatalf("renew with the pod's own token = %d %s, want 200", status, code)
 		}
 		records = nil
-		slog.SetDefault(slog.New(capturingHandler{records: &records}))
+		restore = logtest.Swap(t, capturingHandler{records: &records})
 		if status, code := renew(t, key, id, nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
 			t.Fatalf("renew with no body after renewing with the token = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
 		}

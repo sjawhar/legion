@@ -77,6 +77,37 @@ func QueuedBehind(ctx context.Context, holder pgx.Tx, pid uint32) (bool, error) 
 	return queued, nil
 }
 
+// WaitForQueuedBehind waits up to within for the backend pid, the one connection a call under
+// test runs on, to queue behind a lock holder's transaction owns (QueuedBehind), polling through
+// holder's own connection. It returns the call's answer and true if the call answers on answered
+// before its backend has queued: such a call never waited on the lock, and the caller fails with
+// what it answered. It fails the test if within passes first; a within of 0 sets no deadline, for
+// a call that ends on its own and so answers on answered if it never queues.
+func WaitForQueuedBehind[T any](t testing.TB, holder pgx.Tx, pid uint32, answered <-chan T, within time.Duration) (T, bool) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+	for {
+		select {
+		case answer := <-answered:
+			return answer, true
+		default:
+		}
+		queued, err := QueuedBehind(ctx, holder, pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if queued {
+			var none T
+			return none, false
+		}
+		if within > 0 && time.Now().After(deadline) {
+			t.Fatalf("backend %d never queued behind the lock within %s", pid, within)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // WaitForStatementBehind waits up to within for a session of database whose current statement is
 // exactly statement to queue behind a lock holder's transaction owns (QueuedBehind), and returns
 // that session's backend process id, or 0 if none did. It is for a call under test that runs in

@@ -48,13 +48,13 @@ func TestEventStreamClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
-		StreamHeartbeat: 20 * time.Millisecond, Lifetime: t.Context(),
+		StreamHeartbeat: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps))
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -105,13 +105,13 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
-		AgentStream: agentstream.NewMemory(), StreamHeartbeat: 20 * time.Millisecond, Lifetime: t.Context(),
+		AgentStream: agentstream.NewMemory(), StreamHeartbeat: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps))
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -283,13 +283,13 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	t.Cleanup(func() { _ = rig.documents.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: rig.documents, Events: broker,
-		StreamHeartbeat: heartbeat, Lifetime: t.Context(),
+		StreamHeartbeat: heartbeat,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps))
 	rig.sockets = &servedSockets{finished: make(map[string]chan struct{})}
 	rig.server = httptest.NewServer(rig.sockets.serve(mux.ServeHTTP))
 	t.Cleanup(rig.server.Close)

@@ -95,16 +95,7 @@ type Deps struct {
 	// Files holds uploaded files' bytes outside Postgres (cmd/dispatch: DISPATCH_FILE_STORE_BUCKET);
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
-	Files files.Store
-	// Lifetime bounds work a handler starts and does not wait for, and every event stream and
-	// delivery socket: it is the process's own context, cancelled when the server is shutting
-	// down, so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines
-	// behind, and ends each open stream (streamEvents, streamAgentConversation) and closes each
-	// delivery socket with 1012 so http.Server.Shutdown is not held for its whole budget by a
-	// connection that never goes idle. The delivery hub and the event stream relay run on it.
-	// Required: Register refuses a Deps without one, since nothing would ever end the work it
-	// bounds; a test passes its own t.Context().
-	Lifetime         context.Context
+	Files            files.Store
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
 	// its caller again, a document socket and a delivery socket resolve their caller again
@@ -134,8 +125,6 @@ type DepsInput struct {
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
 	Events   *events.Broker
-	// Lifetime is the process context background work runs on; see Deps.Lifetime.
-	Lifetime context.Context
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App           *auth.AppConfig
@@ -211,7 +200,6 @@ func NewDeps(input DepsInput) (Deps, error) {
 		AgentStream:      input.AgentStream,
 		AgentSecrets:     agentSecretsClient,
 		Files:            input.Files,
-		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
 	}, nil
@@ -243,7 +231,17 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 }
 
 type server struct {
-	deps            Deps
+	deps Deps
+	// lifetime bounds work a handler starts and does not wait for, and every event stream and
+	// delivery socket: it is the process's own context, cancelled when the server is shutting
+	// down, so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines
+	// behind, and ends each open stream (streamEvents, streamAgentConversation) and closes each
+	// delivery socket with 1012 so http.Server.Shutdown is not held for its whole budget by a
+	// connection that never goes idle. The delivery hub and the event stream relay run on it.
+	// Register sets it from its lifetime parameter and refuses a nil one, since nothing would
+	// ever end the work it bounds; a test passes its own t.Context(). A server a test builds
+	// directly (directServer) has none unless the test sets it.
+	lifetime        context.Context
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
@@ -304,18 +302,19 @@ type queryer interface {
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
 // The server holds the delivery hub (LEGION-690), which starts its goroutines on the first
-// subscription and runs them until Deps.Lifetime ends, and mounts GET /ws/delivery beside the
-// document websocket, under the same wrappers. It also holds the event stream relay (INFRA-66),
-// which every open SSE connection reads and which starts its own listening connection on the
-// first of them, also on Deps.Lifetime. The returned wait blocks until the hub, every delivery
-// socket and the relay have ended. Call it only after Lifetime has been cancelled and before the
-// database pool closes.
+// subscription and runs them until lifetime ends, and mounts GET /ws/delivery beside the document
+// websocket, under the same wrappers. It also holds the event stream relay (INFRA-66), which every
+// open SSE connection reads and which starts its own listening connection on the first of them,
+// also on lifetime. lifetime is the process's own context, cancelled when the server is shutting
+// down (server.lifetime says what else it ends). The returned wait blocks until the hub, every
+// delivery socket and the relay have ended. Call it only after lifetime has been cancelled and
+// before the database pool closes.
 //
-// Register panics when deps has no Lifetime: the hub and the relay would run on no context that
-// ever ends, so they would outlive the process's shutdown, or the test that built the server, and
-// the returned wait would block for ever once an SSE connection had started the relay.
-func Register(mux *http.ServeMux, deps Deps) func() {
-	s := register(mux, deps)
+// Register panics when lifetime is nil: the hub and the relay would run on no context that ever
+// ends, so they would outlive the process's shutdown, or the test that built the server, and the
+// returned wait would block for ever once an SSE connection had started the relay.
+func Register(mux *http.ServeMux, lifetime context.Context, deps Deps) func() {
+	s := register(mux, lifetime, deps)
 	return s.waitBackground
 }
 
@@ -327,17 +326,17 @@ func (s *server) waitBackground() {
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes. It is also called with a Deps holding only
-// a Lifetime, as TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay
-// cheap and must not dial or read the nil Store: whatever reaches the database or the network
-// starts later, from a handler, the relay's first subscriber or the hub's.
-func register(mux *http.ServeMux, deps Deps) *server {
-	if deps.Lifetime == nil {
-		panic("api.Register: Deps.Lifetime is required: it is the context that ends the delivery hub, the event stream relay and every broadcast delivery (a test passes t.Context())")
+// relay a test waits out before its database closes. It is also called with an empty Deps, as
+// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and must
+// not dial or read the nil Store: whatever reaches the database or the network starts later, from
+// a handler, the relay's first subscriber or the hub's.
+func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
+	if lifetime == nil {
+		panic("api.Register: the lifetime parameter is required: it is the context that ends the delivery hub, the event stream relay and every broadcast delivery (a test passes t.Context())")
 	}
-	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
-	s.eventRelay = newEventStreamRelay(s, deps.Lifetime)
-	s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
+	s := &server{deps: deps, lifetime: lifetime, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
+	s.eventRelay = newEventStreamRelay(s, lifetime)
+	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {

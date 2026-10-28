@@ -578,7 +578,7 @@ func (s *server) deliverBroadcast(messages []model.Message, delivery string, act
 		go func() {
 			defer wait.Done()
 			for message := range pending {
-				ctx := store.WithTransactionTracking(s.deps.Lifetime)
+				ctx := store.WithTransactionTracking(s.lifetime)
 				// Bound to the attempt the write opened. A human who changes the mode from the
 				// agent card while this worker is queued settles that attempt and sends their
 				// own; the worker must then send nothing, because an attempt of its own would

@@ -201,7 +201,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
-	shutdown := s.deps.Lifetime.Done()
+	shutdown := s.lifetime.Done()
 	for {
 		select {
 		case <-r.Context().Done():

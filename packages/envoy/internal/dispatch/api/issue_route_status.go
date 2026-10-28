@@ -119,7 +119,7 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 		// the request that started it, whose end must not end it and whose values (its
 		// transaction-tracking mark among them) belong to that request alone; the fetch bound
 		// still limits it, and a shutdown ends it.
-		go s.fetchRouteRoster(s.deps.Lifetime, fetch)
+		go s.fetchRouteRoster(s.lifetime, fetch)
 	}
 	cache.mu.Unlock()
 	select {

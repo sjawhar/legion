@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 type testSuggestionOwner struct {
@@ -259,14 +260,14 @@ const lockedSuggestionAllowance = 5 * time.Second
 
 // suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs computeAndPersistSuggestions on
 // a server whose suggestion allowance is lockedSuggestionAllowance, and answers what it returned.
-// The call runs on a one-connection store of its own, so the backend the poll watches in pg_locks
-// is the call's and no other. Counting every backend queued behind the lock is not enough: the
-// issue create the tests seed schedules the spec's settlement, which queues behind the same locks
-// on the shared pool, so that count passed a call that never waited (sjawhar/legion#2217 review).
-// It fails at once when the call answers before its own backend has queued behind that lock, so a
-// passing caller's answer is one the allowance ended while the query waited there. Nothing here
-// times the call: a step run outside the allowance waits behind the lock until go test's
-// -timeout ends the run, naming the test.
+// The call runs on a one-connection store of its own, so the backend the wait watches
+// (storetest.WaitForQueuedBehind) is the call's and no other. Counting every backend queued
+// behind the lock is not enough: the issue create the tests seed schedules the spec's settlement,
+// which queues behind the same locks on the shared pool, so that count passed a call that never
+// waited (sjawhar/legion#2217 review). It fails at once when the call answers before its own
+// backend has queued behind that lock, so a passing caller's answer is one the allowance ended
+// while the query waited there. Nothing here times the call: a step run outside the allowance
+// waits behind the lock until go test's -timeout ends the run, naming the test.
 func suggestionsBehindLock(
 	t *testing.T, deps Deps, table, project, text string, source suggestionSource,
 ) *model.Suggestions {
@@ -310,25 +311,8 @@ func suggestionsBehindLock(
 	go func() {
 		answered <- srv.computeAndPersistSuggestions(context.Background(), project, text, source)
 	}()
-	for {
-		select {
-		case s := <-answered:
-			t.Fatalf("computeAndPersistSuggestions answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
-		default:
-		}
-		var waiting bool
-		if err := lockTx.QueryRow(context.Background(), `
-			select exists (
-				select 1 from pg_locks
-				where pid = $1 and not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-			)
-		`, callPID).Scan(&waiting); err != nil {
-			t.Fatalf("read whether the call's backend waits on the lock on %s: %v", table, err)
-		}
-		if waiting {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
+	if s, early := storetest.WaitForQueuedBehind(t, lockTx, callPID, answered, 0); early {
+		t.Fatalf("computeAndPersistSuggestions answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
 	}
 	return <-answered
 }
@@ -493,7 +477,7 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 // took 5.046 s and no test in the package reddened — is what the field this change added makes
 // possible (INFRA-56).
 func TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound(t *testing.T) {
-	if got := register(http.NewServeMux(), Deps{Lifetime: t.Context()}).suggestionAllowance(); got != 300*time.Millisecond {
+	if got := register(http.NewServeMux(), t.Context(), Deps{}).suggestionAllowance(); got != 300*time.Millisecond {
 		t.Fatalf("the server a deployment runs allows %s for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise", got)
 	}
 }

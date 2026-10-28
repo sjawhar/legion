@@ -66,7 +66,6 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      events.NewBroker(),
-		Lifetime:    t.Context(),
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL
@@ -77,7 +76,7 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps))
 	return mux
 }
 

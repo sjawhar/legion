@@ -323,8 +323,9 @@ func TestReplyUnderAnAnsweredAskRecordsNoTurn(t *testing.T) {
 // oneConnectionHandler serves deps's routes from a store of one connection of its own and answers
 // that connection's backend process id, so every statement a request sent through it makes on
 // deps.Store runs on that one backend, and a test watches the backend that request waits on
-// (storetest.QueuedBehind) rather than count every session queued behind a lock. Its listener,
-// broker and document service are deps's, so what it writes is what the test's own handler reads.
+// (storetest.WaitForQueuedBehind) rather than count every session queued behind a lock. Its
+// listener, broker and document service are deps's, so what it writes is what the test's own
+// handler reads.
 func oneConnectionHandler(t *testing.T, deps Deps) (http.Handler, uint32) {
 	t.Helper()
 	config := deps.Store.Pool.Config()
@@ -347,7 +348,7 @@ func oneConnectionHandler(t *testing.T, deps Deps) (http.Handler, uint32) {
 	callDeps := deps
 	callDeps.Store = callStore
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, callDeps))
+	t.Cleanup(Register(mux, t.Context(), callDeps))
 	return mux, pid
 }
 
@@ -422,23 +423,8 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 			callHandler, callPID := oneConnectionHandler(t, deps)
 			replied := make(chan *httptest.ResponseRecorder, 1)
 			go func() { replied <- agentReply(callHandler) }()
-			for deadline := time.Now().Add(10 * time.Second); ; {
-				select {
-				case response := <-replied:
-					t.Fatalf("the agent's reply answered %d before it queued behind the owner row: %s", response.Code, response.Body.String())
-				default:
-				}
-				queued, err := storetest.QueuedBehind(ctx, hold, callPID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if queued {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("the agent's reply never queued behind the owner row")
-				}
-				time.Sleep(2 * time.Millisecond)
+			if response, early := storetest.WaitForQueuedBehind(t, hold, callPID, replied, 10*time.Second); early {
+				t.Fatalf("the agent's reply answered %d before it queued behind the owner row: %s", response.Code, response.Body.String())
 			}
 			var humanReplyID string
 			if err := database.Pool.QueryRow(ctx, `

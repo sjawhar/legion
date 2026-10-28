@@ -88,14 +88,13 @@ func newCorpusSearchHandler(t *testing.T, databaseURL string) http.Handler {
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("create corpus API dependencies: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps))
 	return mux
 }
 
