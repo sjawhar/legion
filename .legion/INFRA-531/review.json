@@ -2,35 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-531",
-  "completed": "2026-10-28T18:12:00Z",
-  "round": 1,
-  "codeHead": "a60f8177b08ecd48ab0facff422d369d9c935366",
+  "completed": "2026-10-28T20:27:00Z",
+  "round": 2,
+  "codeHead": "634c38240f4fbd8a4eaec90579171aedd5ea6aa0",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 0,
-  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection) all completed/success at CI head a60f8177; compare a60f8177...b00a59ad touches only .legion/ (2 files). Non-required reds are not this change: envoy-go fails only cmd/listener TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering (pmdoc ok 242.9s); dispatch fails mermaid.e2e.ts:194 x4 and recipients-claim.e2e.ts:310, address-links.e2e.ts 3/3 pass.",
-  "thermonuclear": "Both run at a60f8177: deep review CHANGES (3 Medium, reproduced below), code quality CHANGES (4 structure findings).",
+  "important": 3,
+  "minor": 1,
+  "ci": "Not read as a verdict: GitHub reports the pull request CONFLICTING/DIRTY against main, and every workflow for 634c3824 has been queued since 19:29 UTC (GitHub runs no checks on a conflicting head). Main's commits since the merge base 690c0136, among them #2427 (render a document's markdown at lower cost), changed render.go, render_inline.go, escape.go, parse.go and packages/envoy/AGENTS.md.",
+  "thermonuclear": "Both run at 634c3824. Deep review: the four round-1 fixes hold; one Medium (raw-HTML `<`) and two Minors. Code quality: round-1 structure findings resolved; render_inline.go at 1053 lines, a keep-open early return that 42,653 inputs show changes no output, a pass-through decoder wrapper, escapeDestination's guard duplicating its loop.",
+  "roundOneThreads": "All six answered and accepted as fixed: PRRT_kwDORFy7ds6xQUx2, PRRT_kwDORFy7ds6xQUx4 (autolink class; raw HTML is a new finding), PRRT_kwDORFy7ds6xQUx8, PRRT_kwDORFy7ds6xQUyA, PRRT_kwDORFy7ds6xQUyH, PRRT_kwDORFy7ds6xQUyN.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render.go:803-837",
-      "description": "Destinations are now decoded (parse.go:955), so &#9;/&#10;/&#13;/&#12; become raw TAB/LF/CR/FF in the href and escapeDestination writes them raw. Reproduced: [x](https://a.b/?q=a&#10;b) and [x](a&#9;b) are accepted at base 690c0136 and refused at the head ('reads back otherwise'); [x](a&#12;b) is stored with a raw form feed, which goldmark links and a CommonMark reader (no control characters in a destination) does not."
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:616",
+      "description": "The `<` escape asks only autolinkAt, so a text `<` that the run's later markdown closes into inline raw HTML (open tag, comment, processing instruction, declaration) is written raw. Reproduced with ParseForWrite: `Set \\<input value=me@x.cc> in the form.`, `Use \\<a href=https://x.cc/> here.`, `x &lt;!-- see x;https://a.bc/ --> y`, `x &lt;?php x;a@b.cc ?> y` are accepted at main 690c0136 and refused at 634c3824 (reads back as 'Set  in the form.' and so on)."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/escape.go:109 (reached via render_inline.go:233)",
-      "description": "The `<` escape judges one text node; the new readers split text at addresses after punctuation, so a text `<` and a later `>` land in different nodes and the written markdown forms one angle autolink. Reproduced: &lt;mailto:x;a@b.cc>, &lt;javascript:alert(1);'a@b.cc'>, &lt;javascript:void(0);www.a.b> accepted at base, refused at the head; the head's rendering reads back as one link with href javascript:alert(1);'[a@b.cc](mailto:a@b.cc)'. No spelling escapes `<`."
+      "file": "pull request",
+      "description": "The head conflicts with main (render.go, render_inline.go, escape.go, parse.go, AGENTS.md changed by #2427 and others), so no required check runs; merge main and run the proofs again at the merged head."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:2086",
+      "description": "'So each reads back' is true only for &#9;, &#10;, &#12;, &#13;; every other control byte's reference decodes to U+FFFD in both readers, so a live-tree href holding one changes on its first write. Correct the sentence."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:151-168,197-245",
-      "description": "Spelling search grew from ~37 to 383 worst-case spellings, each a full write plus up to 3 read-backs of the run. Reproduced on the deep review's adversarial paragraph: ParseForWrite 64 KiB 1.45 s vs 0.16 s at base, 256 KiB 5.7 s vs 0.64 s (both refuse); a typical address-heavy paragraph is unchanged (0.45 s vs 0.47 s at 256 KiB). Many flag combinations write identical bytes; skip a spelling whose bytes were already read back, and pass the flags as one struct (six positional bools today)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/linkify.go:1005-1050",
-      "description": "decodedOffsets re-implements decodeMarkdownText branch for branch, and pieceOffsets.at silently leaves the address as text when the two disagree (length check at 1016): one decoder returning text and offsets together removes the drift and the silent fallback. Same round: isBareEmailLink (render.go:740-753) re-derives findEmails' acceptance and already disagrees (true for '@b.test', which findEmails rejects); and linkify.go grew to 1050 lines holding both engine readers — move the transform half (from line 561) to its own file."
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
+      "description": "Structure, this round: render_inline.go is 1053 lines (move the spelling search to its own file); the keep-open early return at 683-688 resets three fields by hand and changes no output; decodeMarkdownTextOffsets is a one-caller wrapper; escapeDestination's fast-path guard repeats its loop's cases."
     }
   ]
 }
