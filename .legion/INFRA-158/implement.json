@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-158",
+  "completed": "2026-10-28T09:06:20Z",
+  "proof": [
+    {
+      "criterion": "Eighteenth forward merge resolves main's conflicts after the second retro, regenerates the claude-envoy bundles under the pinned Bun, changes no hand-written file, and leaves the pull request mergeable with the change's tests green",
+      "surface": "the merged tree's builds and claude-envoy check-dist under Bun 1.4.4; real Postgres 17 with pgvector for the docs, refs, api and cmd/dispatch suites; GitHub's mergeability",
+      "command": "bun scripts/build.ts --check (Bun 1.4.4); go build ./... ; go vet ./internal/dispatch/... ./cmd/dispatch/ (and -tags multiprocess); go test -count=1 ./internal/dispatch/docs/ ; go test ./cmd/dispatch/ ./internal/dispatch/refs/ ; go test -run 'Repair|Unloadable|TestClosingAnIssue|TestTheBlockIndex|Reopen|Close' ./internal/dispatch/api/ ; tsc --noEmit in packages/dispatch ; biome check on the touched packages ; gh pr view 2233 --json mergeable",
+      "observed": "check-dist: dist/ and legion/ match a fresh build; docs ok (594 s), cmd/dispatch ok (132 s), refs ok, api subset ok; typecheck and biome clean; MERGEABLE. Fingerprint 1281f2e2 -> 475d2094: per-file comparison shows only dist/dispatch.js, dist/envoy-channel.js and dist/session-hook.js differ, the same changes with bundler names renumbered",
+      "headSha": "7975b8c31ad70caa3cca8c2ea2e2c950bd517a9b",
+      "negativeControl": "At 903b5dc5 GitHub reported CONFLICTING (five changelogs and three claude-envoy bundles) and ran no checks"
+    }
+  ],
+  "filesChanged": [
+    "eighteenth forward merge 7975b8c3: packages/{claude-envoy,contracts,envoy,pi-envoy,pi-legion}/CHANGELOG.md (both sides kept); packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js regenerated"
+  ],
+  "deviations": [
+    "The workspace was recreated before this round, so the local harness was rebuilt under /legion/scratch/tmp: Bun 1.4.4 (the new pin) and Postgres 17.5 with pgvector 0.8.7 on 127.0.0.1:5433.",
+    "The second retro removed .legion/INFRA-158/; this round writes the handoff afresh, so the next retro removes it again before READY."
+  ]
+}
