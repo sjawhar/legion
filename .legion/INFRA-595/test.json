@@ -2,37 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T17:10:00Z",
-  "round": "the changelog key removal after retro",
+  "completed": "2026-10-28T08:52:45Z",
+  "round": "rebase re-check after the third conflict merge",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6448408894",
-  "testedHead": "14dd62c791a29f32559e13750282a10c5048ac18",
-  "previousTestedHead": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6464714039",
+  "evidencePreviousCheck": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6448408894",
+  "testedHead": "597ccab0a5c1e4a37804508447f1c9d138bf1683",
+  "rebaseRecheck": {
+    "oldHead": "14dd62c791a29f32559e13750282a10c5048ac18",
+    "newHead": "597ccab0a5c1e4a37804508447f1c9d138bf1683",
+    "fingerprintOld": "74de82f156cad20ee4756dfff438b71fdbb95c06aff408a05d06d5395d84ba6e",
+    "fingerprintNew": "74de82f156cad20ee4756dfff438b71fdbb95c06aff408a05d06d5395d84ba6e",
+    "verdict": "unchanged: bare gates only"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's greps independently over the PR diff (fork point against main@origin, without .legion) and every commit message from the fork point to 14dd62c7. Neither names INFRA-<n>, LEGION-<n> or dispatch://. jj diff c5ecb79f..369fb669 outside .legion and docs/solutions is the one CHANGELOG line, as the implementer says."
+    "how": "I computed the conflicts-and-rewrites fingerprint myself, with the fork point against \"main\"@origin and without .legion and docs/solutions. It is 74de82f1…ba6e at 14dd62c7 (the head my E2E line named) and at 597ccab0, the same value the implementer reports. GitHub reports the PR MERGEABLE. The PR's added lines name no Dispatch key."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Nothing the PR lands on main names a Dispatch key in author-written text; behaviour unchanged.",
-      "surface": "the pull request's diff against main and its commit messages, which the squash merge carries onto main",
-      "command": "jj diff --git --from 'fork_point(main@origin | 369fb6697503)' --to 369fb6697503 '~.legion' | grep -E '^\\+' | grep -cE 'INFRA-[0-9]|LEGION-[0-9]|dispatch://'; jj log -r 'fork_point(main@origin | 14dd62c791a2)..14dd62c791a2' --no-graph -T description | grep -cE 'INFRA-[0-9]|LEGION-[0-9]|dispatch://'",
-      "observed": "0 added lines and 0 commit messages name a key. The only non-ledger, non-retro change since c5ecb79f is the removal of '(INFRA-595).' from packages/envoy/CHANGELOG.md",
-      "headSha": "14dd62c791a29f32559e13750282a10c5048ac18",
-      "negativeControl": "the same added-line grep at c5ecb79f: 1 match, '+  (INFRA-595).' in the CHANGELOG entry"
-    },
-    {
-      "criterion": "Behaviour visible to callers unchanged (the listener's CI summary loop at the head that merges).",
-      "surface": "the real envoy-listener binary built from 14dd62c7, on a testnats natsd with 30,000 CI records, ENVOY_CI_DEBOUNCE=5s; the PR's checks on GitHub",
-      "command": "diff -rq --exclude=CHANGELOG.md of the git-archive packages/envoy trees of c5ecb79f and 14dd62c7; GOWORK=off go build ./cmd/listener; bash $TMPDIR/infra595-test/smoke.sh listener-head6 out-smoke-head6; gh api repos/sjawhar/legion/commits/14dd62c7…/check-runs",
-      "observed": "no difference outside CHANGELOG.md. Idle: 3 ticks in 60 s (0.0005 cores), the 300 waiting records settled. A signed check_run got HTTP 200 and pr.42.checks settled once, 5.7 s after the post. CI at 14dd62c7: build, changes, lint, test, typecheck and pr-title queued when read; the PR is MERGEABLE",
-      "headSha": "14dd62c791a29f32559e13750282a10c5048ac18",
-      "negativeControl": "the same check_run signed with a wrong secret: HTTP 401 and no settlement"
+      "criterion": "Behaviour visible to callers unchanged (rebase re-check, bare gates only: CI read on GitHub and the smoke check).",
+      "surface": "the real envoy-listener binary built from the merged tree 597ccab0 (which brings main's cmd/listener changes), on a testnats natsd with 30,000 CI records, ENVOY_CI_DEBOUNCE=5s; the PR's checks on GitHub",
+      "command": "the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md for 14dd62c7 and 597ccab0; git archive 597ccab0a5c1 packages/envoy && GOWORK=off go build ./cmd/listener; bash $TMPDIR/infra595-test/smoke.sh listener-head7 out-head7 (a smoke rig rebuilt after the workspace was recreated: seed, idle /proc/<pid>/stat over 60 s, signed and wrongly signed check_run, held gauge across a recreated bucket); gh api repos/sjawhar/legion/commits/597ccab0…/check-runs",
+      "observed": "fingerprints equal. Idle: 1 tick in 60 s (0.0002 cores), the 300 waiting records settled. A signed check_run got HTTP 200 and pr.42.checks settled once, 5.7 s after the post. Held gauge across a recreated envoy_ci_state: 2 -> 0 -> 1. CI at 597ccab0: build, changes, lint, test, typecheck and pr-title queued when read; the PR is MERGEABLE",
+      "headSha": "597ccab0a5c1e4a37804508447f1c9d138bf1683",
+      "negativeControl": "the same check_run signed with a wrong secret: HTTP 401 and no pr.42.checks settlement in the 8 s after it"
     }
   ],
   "observations": [
-    "The handoff commit 14dd62c7 adds .legion/INFRA-595/implement.json again after retro's removal in 2fed59b9, and this test handoff adds test.json beside it. Both must be removed again before READY, so that no .legion/ reaches main."
+    "As at 14dd62c7, .legion/INFRA-595/implement.json and this test.json are on the branch. Both must be removed again before READY, so that no .legion/ reaches main."
   ]
 }
