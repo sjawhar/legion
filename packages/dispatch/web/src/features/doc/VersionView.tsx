@@ -94,11 +94,10 @@ export function VersionView({
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlight !== undefined && embedded === undefined);
       if (embedded !== undefined && highlight !== undefined) {
-        const focusHighlight = () => editor.focusMark(highlight.id);
-        focusHighlight();
+        editor.focusMark(highlight.id);
         // A diagram above the quote that draws after this focus pushes it down, so the focus
         // runs again once the diagrams have drawn; the cleanup drops it once unmounted.
-        disposeRefocus = refocusAfterDiagrams(focusHighlight, () => mounted);
+        disposeRefocus = refocusAfterDiagrams(() => editor.focusMark(highlight.id));
       }
     };
     mount().catch((error: unknown) => {

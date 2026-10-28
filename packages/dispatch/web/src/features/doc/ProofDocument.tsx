@@ -424,16 +424,14 @@ export function ProofDocument({
       installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
       const blockLink = window.location.hash;
       // A diagram above the block that draws after this focus pushes the block down, so the focus
-      // runs again once the diagrams have drawn, while the hash still names this block. The
-      // returned dispose drops it when this editor unbinds.
+      // runs again once the diagrams have drawn, while the hash still names this block.
       let disposeRefocus = () => {};
       if (blockLink.startsWith("#b-")) {
-        const focusLinkedBlock = () => handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
-        focusLinkedBlock();
-        disposeRefocus = refocusAfterDiagrams(
-          focusLinkedBlock,
-          () => window.location.hash === blockLink
-        );
+        const linkedBlockId = decodeURIComponent(blockLink.slice(3));
+        handle.focusBlock(linkedBlockId);
+        disposeRefocus = refocusAfterDiagrams(() => {
+          if (window.location.hash === blockLink) handle.focusBlock(linkedBlockId);
+        });
       }
       setSearchHighlights(handle.view.dom, highlightTermRef.current);
       marginRef.current.registerDocument({

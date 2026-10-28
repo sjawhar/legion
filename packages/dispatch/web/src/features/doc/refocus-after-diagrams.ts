@@ -15,12 +15,11 @@ const READER_ACTIONS = ["pointerdown", "wheel", "touchstart", "keydown"] as cons
  * from the cache already) nothing can move the target, so it does not run again and the target
  * is pulsed once.
  *
- * It runs only while `stillWanted()` holds when the diagrams settle, and only if the reader has
- * not pressed, scrolled, touched or typed since this was called, so a reader who moved on is
- * never pulled back. Returns the dispose, which removes the listeners and drops the re-run; the
- * listeners also go once the diagrams settle.
+ * It runs only if the reader has not pressed, scrolled, touched or typed since this was called,
+ * so a reader who moved on is never pulled back. Returns the dispose, which removes the listeners
+ * and drops the re-run; the listeners also go once the diagrams settle.
  */
-export function refocusAfterDiagrams(refocus: () => void, stillWanted: () => boolean): () => void {
+export function refocusAfterDiagrams(refocus: () => void): () => void {
   if (!mermaidDrawsWaiting()) return () => {};
   let done = false;
   const stop = () => {
@@ -34,7 +33,7 @@ export function refocusAfterDiagrams(refocus: () => void, stillWanted: () => boo
   void mermaidDrawsSettled().then(() => {
     if (done) return;
     stop();
-    if (stillWanted()) refocus();
+    refocus();
   });
   return stop;
 }

@@ -16,8 +16,8 @@ import { type MermaidDrawer, type MermaidDrawing, showMermaidSvg } from "./merma
 /** How long after the last edit of a mermaid block's source the view asks for a new drawing. */
 export const EDIT_REDRAW_DELAY_MS = 300;
 
-/** The rules lib.css gave `.proof-mermaid-svg` before the diagram moved into a shadow root, which
- *  no page rule reaches. */
+/** The diagram's sizing, in its shadow root's own sheet, since no page rule (lib.css) reaches
+ *  inside the root. */
 const EDITOR_SHEET =
   "svg{display:block;width:100%;min-width:640px;height:auto}@media (max-width:720px){svg{min-width:520px}}";
 
@@ -139,13 +139,10 @@ class MermaidCodeBlockView implements NodeView {
     this.stopDrawing();
   }
 
-  /** Preview and status hidden, the `pre` inside the open source disclosure: the layout a
-   *  drawing or a refusal later fills without moving the `pre`. */
+  /** Preview and status (both hidden until an answer fills them) above the `pre` inside the open
+   *  source disclosure: the layout a drawing or a refusal later fills without moving the `pre`. */
   private showMermaidLayout(): void {
     this.dom.classList.add("proof-mermaid-block");
-    this.preview.hidden = true;
-    this.status.hidden = true;
-    this.status.textContent = "";
     this.sourceDetails.append(this.pre);
     this.dom.replaceChildren(this.preview, this.status, this.sourceDetails);
   }

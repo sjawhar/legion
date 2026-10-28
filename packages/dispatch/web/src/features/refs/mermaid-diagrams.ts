@@ -372,7 +372,9 @@ export function requestMermaidDrawing(source: string, draw: LateDraw): () => voi
     cancelled = true;
     const waiting = requests.get(normalised);
     const at = waiting?.indexOf(draw) ?? -1;
-    if (at >= 0) waiting?.splice(at, 1);
+    // A draw already run, refused or cleared left no list behind to empty, so nothing to drop.
+    if (waiting === undefined || at < 0) return;
+    waiting.splice(at, 1);
     if (dropQueued) return;
     dropQueued = true;
     queueMicrotask(dropAbandoned);
