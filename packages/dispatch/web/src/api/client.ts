@@ -44,6 +44,7 @@ import type {
   DeliverySettings,
   DeliverySettingsInput,
   DispatchUser,
+  DocumentReferenceSummary,
   EditCommentInput,
   Event,
   GraphReferences,
@@ -52,6 +53,7 @@ import type {
   IssueAskRow,
   IssueAskThreadRow,
   IssueDetails,
+  IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
   ListUsersResponse,
@@ -111,13 +113,18 @@ export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
+  /** How long the server asked the caller to wait before trying again (`Retry-After` in
+   *  delta-seconds, as Dispatch sends with a 503 refusing excess load), in milliseconds;
+   *  undefined when the response carried none. */
+  readonly retryAfterMs: number | undefined;
 
-  constructor(status: number, payload: ErrorPayload) {
+  constructor(status: number, payload: ErrorPayload, retryAfterMs?: number) {
     super(payload.error ?? `Dispatch request failed (${status})`);
     this.name = "ApiError";
     this.code = payload.code;
     this.status = status;
     this.state = payload.state;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -275,7 +282,14 @@ function pathWithQuery(path: string, values: object): string {
 
 async function errorFrom(response: Response): Promise<ApiError> {
   const payload = (await response.json().catch(() => ({}))) as ErrorPayload;
-  return new ApiError(response.status, payload);
+  // `Retry-After` is read as delta-seconds only: an HTTP-date (Dispatch never sends one) or any
+  // other value is no delay.
+  const retryAfter = response.headers.get("Retry-After")?.trim();
+  return new ApiError(
+    response.status,
+    payload,
+    retryAfter !== undefined && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1_000 : undefined
+  );
 }
 
 export class DispatchApiClient {
@@ -440,6 +454,12 @@ export class DispatchApiClient {
 
   getIssue(key: string): Promise<IssueDetails> {
     return this.json<IssueDetails>(`/api/v1/issues/${pathSegment(key)}`);
+  }
+
+  /** What a reference to the issue or one of its documents shows: title, status and each
+   *  document's name, kind and latest version, without the full issue read. */
+  getIssueSummary(key: string): Promise<IssueReferenceSummary> {
+    return this.json<IssueReferenceSummary>(`/api/v1/issues/${pathSegment(key)}/summary`);
   }
 
   patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
@@ -680,6 +700,14 @@ export class DispatchApiClient {
   getProjectArtifact(key: string, slug: string): Promise<Artifact> {
     return this.json<Artifact>(
       `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
+    );
+  }
+
+  /** What a reference to a project document shows: name, kind and latest version, without its
+   *  versions. */
+  getProjectDocumentSummary(key: string, slug: string): Promise<DocumentReferenceSummary> {
+    return this.json<DocumentReferenceSummary>(
+      `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}/summary`
     );
   }
 
