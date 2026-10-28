@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T16:55:00Z",
+  "completed": "2026-10-28T09:00:00Z",
   "proof": [
     {
       "criterion": "Each cause found in Dispatch or Envoy is fixed with a test: a person's reply reaches the issue's claimant (no route) and every session in its thread and the thread document's authors; a person's comment on an issue with no route and no session claim reaches the primary document's session authors.",
       "surface": "Local Dispatch stack: the Dispatch server binary built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, driven over the HTTP API with person-header and agent-bearer requests.",
       "command": "/legion/scratch/tmp/infra596-rig/run.sh head (BET-15's sequence on RIG-1: S-writer edits the spec, S-claim claims with no route, the person posts an anchored comment, S-claim replies and resolves, the person replies and reopens; then RIG-2: nobody claims or routes, S-spec edits the spec, the person comments on the conversation)",
       "observed": "RIG-1 person's reply comment.created (event 9) reached notifications.dispatch.issue.RIG-1.comment.created, notifications.agent.S-claim and notifications.agent.S-writer, the same three in events.published_destinations; the reopen (event 8) only the issue topic. RIG-2 person's conversation comment (event 12) reached notifications.agent.S-spec beside the issue topic.",
-      "headSha": "969be5239a3ab322727b3900f09fe0f40c77efe4",
+      "headSha": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
       "negativeControl": "/legion/scratch/tmp/infra596-rig/run.sh main (server built from main 448a41003a17): the same reply and the RIG-2 comment reached only their issue topics, as BET-15's events 4314/4315 did in production."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "The dispatch CLI bundled from the head (packages/envoy-client/bin/dispatch.ts, as build-dispatch-cli.sh bundles it) against the same local Dispatch.",
       "command": "/legion/scratch/tmp/infra596-rig/run.sh head, step: dispatch doc-read --issue RIG-1 --artifact spec (output in /legion/scratch/tmp/infra596-rig/head/doc-read.txt)",
       "observed": "'Open anchored threads:' then the reopened root (id, author, quote, body) and both replies with author, time and full body, including the person's reopening reply.",
-      "headSha": "969be5239a3ab322727b3900f09fe0f40c77efe4",
+      "headSha": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
       "negativeControl": "run.sh main: main's CLI printed only 'Open anchored asks/comments: comment <id>'; a resolved thread is absent from the head's output (unit test in dispatch-execute.test.ts)."
     },
     {
@@ -33,7 +33,7 @@
       "surface": "report.ts over the run's files attached to INFRA-596; the uploaded documents dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md (version 2) and dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-pairs-tsv.",
       "command": "R=<dir with the comment-delivery-* files, each fetched with dispatch doc-read … | tail -n +3>; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md",
       "observed": "Exit 0. First line: 'Total 1055 = delivered 795 + not delivered 44 (no-target 14, not-addressed:claimant 19, running-no-row 11, every other cause 0) + unknown 216'; pairs 'Total 1128 = delivered 810 + not delivered 65 + unknown 253'. At this head (report split into five modules) the document sha256 is still 0631201835fd…, pairs bd067fb6…;, pairs sha256 bd067fb6…; the document read back from INFRA-514 equals the report's output byte for byte (doc-read's trailing 'Document token' line aside), the pairs TSV likewise.",
-      "headSha": "969be5239a3ab322727b3900f09fe0f40c77efe4",
+      "headSha": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
       "negativeControl": "A counts file whose rows_without_id is 1, a duplicated receipts row, a listed pair missing from receipts.tsv, or counts that disagree with the rows make report.ts exit 1 naming the line or rows (comment-delivery.test.ts); a pair whose session the store does not hold is reported unknown, never delivered."
     },
     {
@@ -41,7 +41,7 @@
       "surface": "Dispatch's outbox against a real Postgres and a recording sender (the package's real-process harness), as scanBatch/publishBatch run it in production.",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/outbox/ -count=1 -run 'TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTopic|TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed' -v",
       "observed": "Store error (artifact_versions.authors made a JSON scalar, SQLSTATE 22023): the comment records published_destinations [issue topic] (and the route on a routed issue) and is backed off; a message.created in the same batch is published. Cancelled context: every comment of the batch is released (published_at null, attempt_count 0, next_attempt_at null). Whole outbox package green.",
-      "headSha": "969be5239a3ab322727b3900f09fe0f40c77efe4",
+      "headSha": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
       "negativeControl": "At 86599d457b94 the same tests fail: published_destinations [] for the failed comment, and attempt_count 1 with a retry delay after a stop."
     },
     {
@@ -98,7 +98,8 @@
     "Review round 2: the skill's route prohibition moved into its Legion sentence (\"never write its status or route\") so it covers issues under a Legion tree within the 2,000-word guard (e28a3d7c2ad0). The reviewer's named dead-code cleanup was done in this round (97e2b115645f): one considerDocument closure, no second uuid parse, deliveryaudit's psql binding moved into its test, the report's classes one first-match chain, and four refusals production cannot reach removed with their tests (no class; not delivered without a cause; unmapped cause; identity failure, all made impossible by construction). The October document's sha256 is unchanged.",
     "Review round 3: the comment-delivery test's temporary directory uses node:os tmpdir(); describeCause returns CauseEntry and an unknown cause part throws (render.ts's ?./?? and compareCauses' unknown-part rank removed); claude-envoy CHANGELOG entry added, all at the architect's direction (e1b1ab46654c).",
     "The dispatch skill change and its two changelog lines are in sjawhar/legion#2417 (branch infra-596-dispatch-skill), split out of #2366 at the INFRA-514 architect's direction; the review rule that prompted the split was withdrawn (16:33Z), and #2417 stays separate, goes through its own review, and merges after #2366 (merged by another session). #2366 changes no skill (577d1dc1afc8).",
-    "Test round 4 (verdict fail: the pull request conflicted with main 2df3353c, so GitHub ran no checks at 577d1dc1): forward merge 969be5239a3a kept both new packages/envoy/CHANGELOG.md entries; fingerprint unchanged (825a73c9…), recorded in a PR comment; GitHub now reports it mergeable."
+    "Test round 4 (verdict fail: the pull request conflicted with main 2df3353c, so GitHub ran no checks at 577d1dc1): forward merge 969be5239a3a kept both new packages/envoy/CHANGELOG.md entries; fingerprint unchanged (825a73c9…), recorded in a PR comment; GitHub now reports it mergeable.",
+    "CI round (red test at 16191b48, job 122325058297): the failures were packages/daemon check_wake tests under -race, which this pull request does not change; main fixed that rig in 2dbeca18b. The pull request also conflicted with main b295a3fb, so forward merge fb909998478e brings main in: four CHANGELOG conflicts kept both sides, claude-envoy dist rebuilt with the pinned Bun 1.4.4. The fingerprint changed only in the generated dist (without it both heads give f8bf00ea…). On the merge both daemon tests pass with and without -race (local Postgres and nats-server via LEGION_TEST_NATS_URL), and the outbox and deliveryaudit suites pass."
   ],
   "openQuestions": [
     "INFRA-49 (the controller's daily report issue) needs a route to role:legion-infra-controller; the INFRA-514 architect asked the controller to set it.",
