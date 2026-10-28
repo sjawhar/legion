@@ -5,6 +5,15 @@ site covering Legion, Dispatch and the Secrets Broker. The `docs` job of `.githu
 builds it on every pull request and push to `main` whose change its `docs` filter matches, and its
 `docs-deploy` job publishes that build to GitHub Pages on a push to `main`.
 
+Every push to `main` is a CI run of its own, so two docs builds can finish out of commit order. Only
+the build of the newest `main` commit that selects docs is published: at the end of a push's docs
+build, the job reads `main`'s tip, and when a later commit changed a file the `docs` filter matches,
+that later commit's run publishes, so this run's `docs-deploy` is skipped. A skipped deploy never
+enters the `pages` concurrency group, so the deploys that do enter it arrive in commit order, and a
+newer arrival only ever replaces an older pending one. The published site therefore ends at the
+newest docs-selecting commit's build. If that build fails, the site stays at the last one published
+until a later push selects docs again.
+
 ## Run it
 
 It is a root Bun workspace, so the repository's `bun install` installs it. Building also needs Go

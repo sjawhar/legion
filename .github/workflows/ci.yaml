@@ -456,6 +456,10 @@ jobs:
               # server on the socket scripts/e2e/lib/held-port.py holds (run-server.sh:37).
               - 'packages/dispatch/**'
               - 'scripts/e2e/lib/held-port.py'
+              # The newest step reads this filter from ci.yaml through the check's filter reader
+              # and path model.
+              - '.github/scripts/ci_filter_coverage.py'
+              - '.github/scripts/workflow_paths.py'
               - 'packages/proof-editor/src/**'
               - 'packages/contracts/src/**'
               # generators/dispatch-tools.ts:12 imports envoy-client's dispatch-command.ts;
@@ -1375,14 +1379,17 @@ jobs:
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   # Builds the documentation site (docs/site) on every change that could change it, and
-  # docs-deploy publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to
-  # main that builds it. The site's reference pages are generated from packages/ and skills/ at
-  # build time, scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes, and
-  # the built site is checked with the private-name guard; the docs filter names all of them.
+  # docs-deploy publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on a push to main
+  # that builds it, unless a later main commit also selects docs (its own run publishes then). The
+  # site's reference pages are generated from packages/ and skills/ at build time,
+  # scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes, and the built
+  # site is checked with the private-name guard; the docs filter names all of them.
   docs:
     needs: changes
     if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-24.04
+    outputs:
+      newest: ${{ steps.newest.outputs.newest }}
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.
     services:
@@ -1471,6 +1478,35 @@ jobs:
       # checks the sources.
       - name: Check the built site has no private name, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh docs/site/dist
+      # Each push to main is a CI run of its own, so two docs builds can finish out of commit order.
+      # Only the build of the newest main commit that selects docs is published: this step reads
+      # main's tip now, and when a file the docs filter matches changed between this commit and it,
+      # a later run builds and publishes that tree, so this run's docs-deploy is skipped. A skipped
+      # job never enters the `pages` group, so the deploys that do enter it arrive in commit order,
+      # and a newer arrival only ever replaces an older pending one. docs/site/README.md says so.
+      - name: Find whether a later main commit selects docs
+        id: newest
+        if: github.event_name == 'push'
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          git diff --name-only "$GITHUB_SHA" FETCH_HEAD > "$RUNNER_TEMP/later-changes"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 - "$RUNNER_TEMP/later-changes" \
+            >> "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          import yaml
+          from ci_filter_coverage import changes_filters
+          from workflow_paths import PathsFilter
+          problems = []
+          filters, quantifiers = changes_filters(yaml.safe_load(open(".github/workflows/ci.yaml")), problems)
+          if problems or "docs" not in filters:
+              sys.exit(f"::error::cannot read the docs filter: {problems}")
+          docs = PathsFilter(filters["docs"], quantifiers["docs"])
+          later = [path for path in open(sys.argv[1]).read().split() if docs.covers(path)]
+          if later:
+              print(f"main's tip changed {later[0]} (and {len(later) - 1} more docs input(s)) after this "
+                    "commit; its run publishes the site", file=sys.stderr)
+          print(f"newest={'false' if later else 'true'}")
+          PY
       - if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
@@ -1485,9 +1521,12 @@ jobs:
 
   docs-deploy:
     needs: docs
-    if: github.event_name == 'push'
+    # Skipped when a later main commit selects docs (the docs job's newest step), so an older
+    # commit's site never replaces a newer one, and only the newest build enters the group.
+    if: github.event_name == 'push' && needs.docs.outputs.newest == 'true'
     runs-on: ubuntu-24.04
-    # One deployment at a time, and a queued one is never cancelled half-way.
+    # One deployment at a time, and a running one is never cancelled half-way; a newer arrival
+    # replaces a pending one, which is always older, since only newest builds arrive.
     concurrency:
       group: pages
       cancel-in-progress: false

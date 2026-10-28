@@ -363,6 +363,8 @@ GATES = [
         (BUILD_BINARIES, f"docs/site/scripts/generate.ts:116 runs it ({at('docs', 'Build the docs site')})"),
         (RUN_SERVER, f"packages/dispatch/e2e/harness-listeners.ts:74 runs it ({at('docs', 'Take the screenshots')})"),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
+        (".github/scripts/ci_filter_coverage.py", f"{at('docs', 'Find whether a later main commit selects docs')}: reads the docs filter with changes_filters"),
+        (".github/scripts/workflow_paths.py", f"{at('docs', 'Find whether a later main commit selects docs')}: PathsFilter"),
         # broker-refgen (docs/site/generators/broker-reference.sh:14) parses these at run time.
         (f"{ENVOY}/internal/broker/api/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:15,173)"),
         (f"{ENVOY}/internal/broker/config/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/config.go:11,36)"),
