@@ -43,7 +43,7 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 }
 
 // replayRun replays pr's open run: its steps from its anchor, with the run's pushes and every push
-// the pull request holds that carries an approval across - which no fact drops (keptPushes), so
+// the pull request holds that carries an approval across - which no fact drops (unspentPushes), so
 // the run does not keep a copy of them - less every push whose move the anchor had already made: a
 // push redelivered after its move was judged before the run opened is spent there, as it is when
 // it arrives first. The run stays open from its first head judged with no chain of pushes, its

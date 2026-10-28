@@ -380,6 +380,91 @@ process ending between the two) is shown again as a card. Inside one sweep repla
 go out in stream order; nothing orders them against live ones. `scripts/smoke-replay.sh` is the
 live proof (`scripts/README.md`).
 
+## AskGate
+
+AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent before it posts. The
+README's "AskGate" section says what it reviews, the switch, the modes and the model role.
+`envoy.ts` binds it only in a session that has Dispatch: it reads the session's own envoy.json
+with the variables over it (`readEnvoyConfig` and `dispatchSettings`, with `checkout: null`), or
+the session's settings with its checkout's file, so a checkout can turn the gate on (its own
+server and token) but never off: one that turns off the Dispatch of its own directory leaves the
+gate bound, since a later command can still pass that with `DISPATCH_URL`. A session or a pod
+with no Dispatch has no write to review and gets no gate; the test runs at load, so a session that
+turns Dispatch on later has none either. In such a session `envoy.ts` reads the switch
+(`askgateSetting` in `@legion/envoy-client/envoy-config`, the top-level `askgate` section of that
+file) and calls `registerAskGate` unless that switch is off.
+`registerAskGate` (`askgate.ts`) registers the gate's one
+`tool_call` handler at once, in the factory, after `envoy.ts`'s own, and starts the load of Oh My
+Pi's own modules through string-literal `import()`, declared in `../pi-shared/src/omp-host.d.ts`.
+Each call waits for the load. Once the modules load, the core binds to a `pi` that keeps its
+`tool_call` handler, which the registered one runs, and passes every other event to the real `pi`,
+so no call passes between the load and the binding. A load that fails (a module, an
+`OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
+is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
+the error and `askgate.enabled`, and records a `load-failed` entry. A session with no envoy.json
+location has no Dispatch either, since its `dispatch` command works the file out by the same rule,
+so nothing binds there. `session_start` waits for the
+load and shows a load failure, a switch that does not parse or a location it could not work out as
+a notice. `askgate-core.ts` holds
+every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
+with fakes. The reader takes one form, the literal grammar of one `dispatch` call
+(`dispatchCommandHead`, the README's "The form the gate reads"), and refuses no call by reading
+any other: a call in another form runs, and an `eval` cell is not read.
+
+Enforcement is the `dispatch` CLI's (`@legion/envoy-client/askgate-marker`, the README's
+"Everything else runs"). While the gate is bound, `envoy.ts`'s top-level instance writes one
+owner-only file for its own process into the `askgate/` record directory of the CLI state
+directory of every session id it binds (`bindDispatchSession`), keeps each until shutdown (a shell
+or kernel started before a switch still acts as the old session), and on a clean exit removes its
+own files and its marker store; the CLI's daily prune (`sweepStores`) removes the store of a
+process that crashed. `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when it is unset, so a
+command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it cannot
+write after a switch is a UI notice at once. For each literal call it lets run, the gate mints one
+single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review or a
+deliberate pass to the dry run's arguments and to the sha256 of each file the argv names
+(`fileOperands`), as the gate read it in place; argv-only for a call no verdict stands behind and
+for a `task` subagent's literal call. A marker goes when its call ends or at shutdown, and the CLI
+refuses one older than two hours (`MARKER_MAX_AGE_MS`). The CLI reads each named file once,
+consumes one matching marker by unlinking it before it posts a gated write under a live record,
+sends an upload's bytes from that same read, and, when the session chose block, refuses a write
+with no matching marker (`gatedWrite`, the one predicate both sides use); a file that changed after
+the review matches none and gets the advice to send the call again in a later message. In warn mode,
+the default for these checks, the CLI writes the ledger line before it posts. The gate writes the
+checks' mode into the session's own record for the CLI (`checkMode`: block only when the session
+chose it; `setRecordMode` keys it per session, so a switch never changes another session's mode),
+apart from the verdict's mode (`sessionMode`, block by default); `envoy.ts` turns each write the
+CLI logged as unmarked into an `unmarked` entry, and the gate appends a cause note
+(`nonLiteralCause`, `causeNote`) to the result of a call outside the literal form that the CLI
+refused. A gate that did not load refuses each literal call at the hook (`loadFailureGate`) and
+mints nothing; it writes no mode, so a write that reaches the CLI — one outside the literal form,
+or a subagent's literal one — posts with its warning, unless the session set `OMP_ASKGATE=block`,
+which `bindDispatchSession` writes into the record at the bind. Precision comes first: the gate
+refuses no call that holds no Dispatch write. Every other way a write passes
+unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the
+agent's own command as written (`UNREVIEWED_OUTCOMES`): a gate that fails breaks no valid write.
+The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
+model. The review's deadline is held 5 s under `extensionHandlers.toolCallTimeoutMs`, so at that
+key's 30 s default a review often times out and the write posts unreviewed: a session that loads
+this plugin sets the key to 120000 or more (the README's "The time limit"), and a deadline under
+30 s logs one warning at bind.
+`rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
+upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
+
+AskGate reviews the writes of a cooperating agent. It is no sandbox, and nothing in it is
+designed as one: a process that runs as the same user defeats it. That process can turn the gate
+off in its own envoy.json, or point the session at another envoy.json through `OMP_PROFILE`,
+`PI_CODING_AGENT_DIR`, `ENVOY_CONFIG_FILE`, `XDG_CONFIG_HOME` or `HOME` in the launching shell
+(the variables `envoyConfigPath` reads, in that order). Keep every check that is there; add none
+that only an attacker of that kind would need.
+
+The CLI's check covers the CLI alone: not a direct HTTP request to Dispatch, an older or a
+different `dispatch` binary, or a same-user process that removes the record or a marker, sets
+`DISPATCH_SESSION_ID` or `DISPATCH_STATE_DIR` itself to act as another session id or state
+directory, or otherwise goes around the CLI. claude-envoy has no Dispatch write
+tool over MCP; Claude Code writes through the CLI under host `claude`, where no record exists.
+Record such a form here rather than chase it with a scan: a refusal that stops a call holding no
+Dispatch write costs more than a construct a cooperating agent never writes.
+
 ## Legion
 
 The Legion lifecycle is not this package's. The daemon contract (`legion.daemonApiVersion`, the
@@ -638,7 +723,8 @@ state never nudges.
 | Legion lifecycle | `../pi-legion/` | The daemon client, the claim and controller sessions, the `legion` tool and the phase stall are `@sjawhar/pi-legion`'s: see `packages/pi-legion/AGENTS.md` |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
-| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no section with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
+| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
+| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules.md` and the three prompt files, `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and `scripts/askgate-report.ts` the report over the `advisor-gate` entries |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |

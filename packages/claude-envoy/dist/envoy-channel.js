@@ -39266,23 +39266,304 @@ ${trailer}`,
 }
 
 // ../envoy-client/src/dispatch-session-state.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
-  closeSync,
+  closeSync as closeSync2,
   fstatSync,
+  mkdirSync as mkdirSync2,
+  openSync as openSync2,
+  readdirSync as readdirSync2,
+  readFileSync as readFileSync2,
+  readSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  statSync as statSync2,
+  writeFileSync as writeFileSync2
+} from "fs";
+import { homedir } from "os";
+import { join as join2 } from "path";
+
+// ../envoy-client/src/askgate-marker.ts
+import { createHash, randomBytes } from "crypto";
+import {
+  closeSync,
+  constants,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
-  readSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { isAbsolute, join, resolve } from "path";
+var ASKGATE_RECORD = "askgate";
+var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
+var MARKERS = "markers";
+var ALWAYS_GATED = {
+  dispatch_ask: true,
+  dispatch_message: true,
+  dispatch_edit_ask: true,
+  dispatch_comment: true,
+  dispatch_doc_edit: true,
+  dispatch_request_approval: true
+};
+var MARKDOWN_NAME = /\.md$/i;
+var MARKDOWN_PATH = /\.(md|markdown)$/i;
+function uploadIsDocument(args) {
+  const { content, name, path } = args;
+  return typeof content === "string" || typeof name === "string" && MARKDOWN_NAME.test(name.trim()) || typeof path === "string" && MARKDOWN_PATH.test(path);
+}
+function gatedWrite(tool, args) {
+  if (ALWAYS_GATED[tool] === true)
+    return true;
+  const { spec } = args;
+  if (tool === "dispatch_issue")
+    return spec !== undefined;
+  if (tool === "dispatch_artifact")
+    return uploadIsDocument(args);
+  return false;
+}
+var digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function argvDigest(argv) {
+  return digest(argv);
+}
+function argsDigest(args) {
+  return digest(args);
+}
+function fileOperands(argv) {
+  const [command, ...flags] = argv;
+  const files = [];
+  for (let index = 0;index < flags.length; index++) {
+    const word = flags[index];
+    const eq = word.indexOf("=");
+    const flag = eq === -1 ? word : word.slice(0, eq);
+    const named = flag.startsWith("--") && flag.endsWith("-file");
+    if (!named && !(command === "artifact" && flag === "--path"))
+      continue;
+    const operand = eq === -1 ? flags[index + 1] : word.slice(eq + 1);
+    if (operand !== undefined && operand !== "-")
+      files.push({ flag, operand });
+  }
+  return files;
+}
+function operandPath(cwd, file) {
+  if (file.flag === "--path")
+    return resolve(cwd, file.operand);
+  return isAbsolute(file.operand) ? file.operand : `${cwd}/${file.operand}`;
+}
+function bytesDigest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+function processStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+function ownerLive(owner) {
+  if (owner.start !== null)
+    return processStart(owner.pid) === owner.start;
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return !hasErrnoCode(error, "ESRCH");
+  }
+}
+function isOwner(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const { pid, start, store } = value;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
+}
+function parseOwner(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!isOwner(data) || !("v" in data) || data.v !== 2)
+    return;
+  const { pid, start, store, mode } = data;
+  return {
+    owner: { pid, start, store },
+    mode: mode === "block" ? "block" : "warn"
+  };
+}
+var OWNER_FILE = ".json";
+var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+function storeTouched(store) {
+  const own = statSync(store).mtimeMs;
+  try {
+    return Math.max(own, statSync(join(store, MARKERS)).mtimeMs);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT"))
+      return own;
+    throw error;
+  }
+}
+function sweepStores(root, now) {
+  const parent = join(root, "askgate");
+  let names;
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = STORE_NAME.exec(name);
+    if (match === null)
+      continue;
+    const store = join(parent, name);
+    try {
+      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
+        continue;
+      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
+        continue;
+      rmSync(store, { recursive: true, force: true });
+    } catch {}
+  }
+}
+function askgateState(dir) {
+  const record = join(dir, ASKGATE_RECORD);
+  let names;
+  try {
+    names = readdirSync(record);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT"))
+      return { kind: "off" };
+    return { kind: "broken", problem: `${record}, could not be read: ${messageFor(error)}` };
+  }
+  const live = [];
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE))
+      continue;
+    const file = join(record, name);
+    let text;
+    try {
+      text = readFileSync(file, "utf-8");
+    } catch (error) {
+      if (hasErrnoCode(error, "ENOENT"))
+        continue;
+      return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
+    }
+    const parsed = parseOwner(text);
+    if (parsed === undefined)
+      return { kind: "broken", problem: `${file}, is not an AskGate record` };
+    if (ownerLive(parsed.owner))
+      live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+  }
+  if (live.length === 0)
+    return { kind: "off" };
+  for (const { file, store } of live) {
+    try {
+      if (!statSync(join(store, MARKERS)).isDirectory())
+        throw new Error("not a directory");
+    } catch (error) {
+      return {
+        kind: "broken",
+        problem: `${file}, names the marker store ${store}, which cannot be read: ${messageFor(error)}`
+      };
+    }
+  }
+  return {
+    kind: "on",
+    stores: live.map(({ store }) => store),
+    mode: live.some(({ mode }) => mode === "block") ? "block" : "warn"
+  };
+}
+var isFileDigest = (value) => typeof value === "object" && value !== null && typeof value.flag === "string" && typeof value.operand === "string" && typeof value.sha256 === "string";
+function readMarker(file) {
+  let text;
+  try {
+    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      text = readFileSync(fd, "utf-8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return;
+  }
+  try {
+    const data = JSON.parse(text);
+    if (typeof data !== "object" || data === null)
+      return;
+    const { v, argv, args, files, createdAt } = data;
+    if (v !== 2 || typeof argv !== "string" || typeof createdAt !== "number")
+      return;
+    if (args !== null && typeof args !== "string")
+      return;
+    if (!Array.isArray(files) || !files.every(isFileDigest))
+      return;
+    return { argv, args, files, createdAt };
+  } catch {
+    return;
+  }
+}
+function consumeMarker(stores, argv, args, files, now) {
+  const key = argvDigest(argv);
+  const reviewed = argsDigest(args);
+  let changed;
+  let mismatched = false;
+  let expired = false;
+  const usable = [];
+  for (const store of stores) {
+    const dir = join(store, MARKERS);
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith(`${key}.`))
+        continue;
+      const file = join(dir, name);
+      const marker = readMarker(file);
+      if (marker === undefined || marker.argv !== key)
+        continue;
+      if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
+        expired = true;
+        rmSync(file, { force: true });
+        continue;
+      }
+      if (marker.args !== null) {
+        const differs = marker.files.find((bound, index) => bound.flag !== files[index]?.flag || bound.operand !== files[index]?.operand || bound.sha256 !== files[index]?.sha256);
+        if (differs !== undefined) {
+          changed ??= { flag: differs.flag, operand: differs.operand };
+          continue;
+        }
+        if (marker.files.length !== files.length || marker.args !== reviewed) {
+          mismatched = true;
+          continue;
+        }
+      }
+      usable.push({ file, bound: marker.args !== null });
+    }
+  }
+  usable.sort((a, b) => Number(b.bound) - Number(a.bound));
+  for (const { file } of usable) {
+    try {
+      unlinkSync(file);
+      return { ok: true };
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT"))
+        throw error;
+    }
+  }
+  if (changed !== undefined)
+    return {
+      ok: false,
+      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      changed
+    };
+  return {
+    ok: false,
+    why: mismatched ? "its arguments differ from the ones AskGate reviewed" : expired ? "its AskGate marker expired before it ran" : "this call carries no AskGate marker"
+  };
+}
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
@@ -42801,7 +43082,9 @@ ${trailer.join(`
       const content = optionalString(args, "content");
       const artifactInput = content === undefined ? {
         name,
-        file: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))),
+        file: input.uploadBytes === undefined ? Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))) : new Blob([new Uint8Array(input.uploadBytes)], {
+          type: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))).type
+        }),
         ...summary === undefined ? {} : { summary },
         actor
       } : {
@@ -43052,20 +43335,20 @@ function sessionStateRoot(env) {
   const stateDir = env["DISPATCH_STATE_DIR"];
   if (stateDir)
     return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  return join(sessionStateRoot(env), "sessions", sessionId);
+  return join2(sessionStateRoot(env), "sessions", sessionId);
 }
 function ensureDirectory(dir) {
-  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
+  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 function readIfPresent(path) {
   try {
-    return readFileSync(path, "utf-8");
+    return readFileSync2(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
@@ -43074,14 +43357,14 @@ function readIfPresent(path) {
 }
 function writeAtomically(path, text) {
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, text, { mode: PRIVATE_FILE });
-  renameSync(temporary, path);
+  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
+  renameSync2(temporary, path);
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join(dir, "state.json");
+  const path = join2(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -43105,7 +43388,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -43114,7 +43397,7 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}
+  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
 `, { mode: PRIVATE_FILE });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
@@ -43124,12 +43407,12 @@ function recordOutcome(dir, sessionId, follows, entry) {
 }
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
-  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join(dir, "pictures");
-  const path = join(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
+  const pictures = join2(dir, "pictures");
+  const path = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
   } catch (error) {
     if (!hasErrnoCode(error, "EEXIST"))
       throw error;
@@ -43137,32 +43420,32 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join(dir, "out");
+  const out = join2(dir, "out");
   ensureDirectory(out);
-  const path = join(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync(path, text, { mode: PRIVATE_FILE });
+  const path = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync2(path, text, { mode: PRIVATE_FILE });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join(dir, "title"), title);
+  writeAtomically(join2(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join(dir, "title")) || undefined;
+  return readIfPresent(join2(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join(root, PRUNED_STAMP);
+  const stamp = join2(root, PRUNED_STAMP);
   try {
-    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join(root, "sessions");
+  const sessions = join2(root, "sessions");
   let entries = [];
   try {
-    entries = readdirSync(sessions, { withFileTypes: true });
+    entries = readdirSync2(sessions, { withFileTypes: true });
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
@@ -43170,18 +43453,19 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join(sessions, entry.name);
+    const dir = join2(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
-        rmSync(dir, { recursive: true, force: true });
+      if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+        rmSync2(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
         throw error;
     }
   }
+  sweepStores(root, now);
   ensureDirectory(root);
-  writeFileSync(stamp, "", { mode: PRIVATE_FILE });
+  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
 }
 
 // ../envoy-client/src/nats-auth.ts
@@ -43206,15 +43490,15 @@ function natsAuthOptions(seed) {
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   existsSync,
   lstatSync,
   mkdtempSync,
-  openSync as openSync2,
-  readFileSync as readFileSync3,
+  openSync as openSync3,
+  readFileSync as readFileSync4,
   readlinkSync,
-  rmSync as rmSync2,
-  statSync as statSync2
+  rmSync as rmSync3,
+  statSync as statSync3
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
 import * as path from "path";
@@ -43306,14 +43590,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync2(filePath, "utf8");
+    contents = readFileSync3(filePath, "utf8");
   } catch (error) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
   }
@@ -43411,6 +43695,7 @@ var CheckoutFileSchema = looseObject({
   $schema: string2().optional(),
   dispatch: DispatchSectionSchema.optional()
 });
+var AskgateSectionSchema = strictObject({ enabled: boolean2().optional() });
 function offWithNotice(notice) {
   return { enabled: false, notice, error: null };
 }
@@ -43447,7 +43732,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync3(filePath, "utf-8");
+    raw = readFileSync4(filePath, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -43491,7 +43776,7 @@ function runCommand(command, env, cwd) {
   try {
     chmodSync(directory, 448);
     const output = path.join(directory, "stdout");
-    const fd = openSync2(output, "wx", 384);
+    const fd = openSync3(output, "wx", 384);
     let result;
     try {
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
@@ -43506,7 +43791,7 @@ function runCommand(command, env, cwd) {
     } catch (error) {
       return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
     } finally {
-      closeSync2(fd);
+      closeSync3(fd);
     }
     try {
       process.kill(-result.pid, "SIGKILL");
@@ -43523,7 +43808,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync3(output, "utf-8").trim();
+    const value = readFileSync4(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -43534,7 +43819,7 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync2(directory, { recursive: true, force: true });
+    rmSync3(directory, { recursive: true, force: true });
   }
 }
 function fileValue(value, field, filePath, env) {
@@ -43558,7 +43843,7 @@ function fileValue(value, field, filePath, env) {
 }
 function statDevice(directory) {
   try {
-    return statSync2(directory).dev;
+    return statSync3(directory).dev;
   } catch {
     return;
   }
@@ -43619,7 +43904,8 @@ function readEnvoyConfig(filePath, env, options) {
       kind: "valid",
       path: checkoutPath,
       dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
     };
   }
   const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
@@ -44914,6 +45200,9 @@ function startNotice(config, dispatch, envoy, nats) {
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null)
     parts.push(checkout.envoyError);
+  if (checkout?.kind === "valid" && checkout.askgateError !== null) {
+    parts.push(checkout.askgateError);
+  }
   if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
@@ -48586,9 +48875,9 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync5, readlinkSync as readlinkSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename as basename2, join as join3, resolve as resolve2, sep } from "path";
+import { basename as basename2, join as join4, resolve as resolve3, sep } from "path";
 var PLUGIN_SERVER = "envoy";
 var CHANNEL_FLAGS = {
   "--channels": false,
@@ -48826,7 +49115,7 @@ function claudeChannelGate(input) {
     why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`
   };
 }
-var MANAGED_SETTINGS_HINT = `${join3(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
+var MANAGED_SETTINGS_HINT = `${join4(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
 function cacheDirectoryName(marketplace) {
   return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
 }
@@ -48869,7 +49158,7 @@ function processCommandLine(pid, executable = processExecutable) {
   let commandLine;
   if (process.platform === "linux") {
     try {
-      const pieces = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00");
+      const pieces = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\x00");
       let trailing = 0;
       while (pieces.length > 0 && pieces.at(-1) === "") {
         pieces.pop();
@@ -48906,7 +49195,7 @@ function processCommandLine(pid, executable = processExecutable) {
 function parentProcess(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) && parent > 0 ? parent : undefined;
     }
@@ -48947,7 +49236,7 @@ var INLINE_MARKETPLACE = "inline";
 function loadedMarketplace(pluginRoot, bundlePath, commandLine) {
   if (commandLine !== undefined) {
     const { argv, cwd } = commandLine;
-    const root = resolve2(pluginRoot);
+    const root = resolve3(pluginRoot);
     for (let index = 1;index < argv.length; index++) {
       const argument = argv[index] ?? "";
       if (argument === "--")
@@ -48956,7 +49245,7 @@ function loadedMarketplace(pluginRoot, bundlePath, commandLine) {
       const flag = equals === -1 ? argument : argument.slice(0, equals);
       if (flag === "--plugin-dir" || flag === "--plugin-dir-no-mcp") {
         const value = equals === -1 ? argv[index + 1] : argument.slice(equals + 1);
-        if (value !== undefined && resolve2(cwd, value) === root)
+        if (value !== undefined && resolve3(cwd, value) === root)
           return INLINE_MARKETPLACE;
       }
       if (equals === -1)
@@ -48996,7 +49285,7 @@ var COMPOSITION_KEYS = new Set([
 ]);
 function readChannelSettings(file, asSource = false) {
   try {
-    const value = JSON.parse(readFileSync4(file, "utf8"));
+    const value = JSON.parse(readFileSync5(file, "utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return;
     if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key)))
@@ -49012,15 +49301,15 @@ function readChannelSettings(file, asSource = false) {
   }
 }
 function channelAllowlist(directories) {
-  const remote = readChannelSettings(join3(directories.configDirectory, "remote-settings.json"), true);
-  const dropIns = join3(directories.managedDirectory, "managed-settings.d");
+  const remote = readChannelSettings(join4(directories.configDirectory, "remote-settings.json"), true);
+  const dropIns = join4(directories.managedDirectory, "managed-settings.d");
   let dropInFiles = [];
   try {
-    dropInFiles = readdirSync2(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join3(dropIns, name));
+    dropInFiles = readdirSync3(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join4(dropIns, name));
   } catch {
     dropInFiles = [];
   }
-  const files = [join3(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file) => readChannelSettings(file)).filter((settings) => settings !== undefined);
+  const files = [join4(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file) => readChannelSettings(file)).filter((settings) => settings !== undefined);
   const lists = files.map((settings) => settings.list).filter((list) => list !== undefined);
   const fileList = lists.length === 0 ? undefined : lists.flat();
   const behavior = remote?.behavior ?? files.find((settings) => settings.behavior)?.behavior;
@@ -49034,7 +49323,7 @@ function detectClaudeChannel(input) {
     return { loaded: true };
   if (override === "0")
     return { loaded: false, why: "ENVOY_CHANNEL_LOADED=0" };
-  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join3(homedir3(), ".claude");
+  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join4(homedir3(), ".claude");
   const commandLine = claudeCommandLine(input.claudePid);
   const pluginRoot = input.environment["CLAUDE_PLUGIN_ROOT"]?.trim();
   const plugin = pluginRoot ? {
@@ -49064,12 +49353,12 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { readFile } from "fs/promises";
-import { basename as basename3, join as join5 } from "path";
+import { basename as basename3, join as join6 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync5 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join4 } from "path";
+import { dirname as dirname2, join as join5 } from "path";
 async function writeAtomicStateFile(file, contents) {
   await mkdir(dirname2(file), { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -49087,7 +49376,7 @@ async function pruneStateDirectory(directory, isStale) {
     throw error;
   });
   for (const entry of entries) {
-    const file = join4(directory, entry);
+    const file = join5(directory, entry);
     if (!await isStale(file))
       continue;
     await rm(file, { recursive: true, force: true });
@@ -49102,7 +49391,7 @@ async function writtenLongAgo(file) {
 }
 var TITLES_DIRECTORY = "titles";
 function sessionTitleFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+  return join5(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
 }
 async function writeChosenTitle(file, title) {
   await writeAtomicStateFile(file, `${title}
@@ -49113,7 +49402,7 @@ async function removeChosenTitle(file) {
 }
 function readChosenTitleSync(file) {
   try {
-    return readFileSync5(file, "utf8");
+    return readFileSync6(file, "utf8");
   } catch {
     return;
   }
@@ -49130,7 +49419,7 @@ async function recordChosenTitle(sessionId, title) {
     await writeChosenTitle(file, chosen);
 }
 async function pruneStaleSessionTitles(stateDirectory) {
-  await pruneStateDirectory(join4(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+  await pruneStateDirectory(join5(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
 }
 
 // src/session-identity.ts
@@ -49151,14 +49440,14 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join5(stateDirectory, "sessions", String(claudePid));
+  return join6(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join5(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join6(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join5(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+  return join6(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
 
 class UnparseableRoleRecordError extends Error {
@@ -49209,14 +49498,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  await pruneStateDirectory(join5(stateDirectory, "sessions"), (file) => {
+  await pruneStateDirectory(join6(stateDirectory, "sessions"), (file) => {
     const pid = basename3(file);
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
 async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
   const own = roleStateFile(stateDirectory, currentSessionId);
-  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
+  await pruneStateDirectory(join6(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
 }
 
 // src/envoy-off.ts
@@ -49266,7 +49555,7 @@ async function serveEnvoyOff(serverInfo, refusal) {
 
 // src/legion-claim.ts
 import { readdir as readdir2, stat as stat2 } from "fs/promises";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -49355,12 +49644,12 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join6(configDir, "projects");
+  const projects = join7(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file = join6(projects, directory, name);
+      const file = join7(projects, directory, name);
       if (await stat2(file).then((info) => info.isFile(), () => false))
         return file;
     }
@@ -49649,9 +49938,9 @@ async function executeLegionTool(runtime, input, signal) {
 
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
-import { join as join7 } from "path";
+import { join as join8 } from "path";
 function replayStateFile(stateDirectory, sessionId) {
-  return join7(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
+  return join8(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
 async function readReplayState(file) {
   let text;
@@ -49680,7 +49969,7 @@ async function writeReplayState(file, snapshot) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -49703,7 +49992,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) ? parent : undefined;
     }

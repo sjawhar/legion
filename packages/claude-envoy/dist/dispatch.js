@@ -980,7 +980,301 @@ __export(exports_coerce, {
 });
 
 // ../envoy-client/bin/dispatch.ts
-import { readFileSync as readFileSync4 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
+
+// ../envoy-client/src/dispatch-cli.ts
+import { closeSync as closeSync4, constants as constants2, fstatSync as fstatSync2, openSync as openSync4, readFileSync as readFileSync5 } from "fs";
+
+// ../envoy-client/src/askgate-marker.ts
+import { createHash, randomBytes } from "crypto";
+import {
+  closeSync,
+  constants,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from "fs";
+import { isAbsolute, join, resolve } from "path";
+
+// ../envoy-client/src/errors.ts
+function messageFor(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function hasErrnoCode(error, code) {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+// ../envoy-client/src/askgate-marker.ts
+var ASKGATE_RECORD = "askgate";
+var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
+var MARKERS = "markers";
+var ALWAYS_GATED = {
+  dispatch_ask: true,
+  dispatch_message: true,
+  dispatch_edit_ask: true,
+  dispatch_comment: true,
+  dispatch_doc_edit: true,
+  dispatch_request_approval: true
+};
+var MARKDOWN_NAME = /\.md$/i;
+var MARKDOWN_PATH = /\.(md|markdown)$/i;
+function uploadIsDocument(args) {
+  const { content, name, path } = args;
+  return typeof content === "string" || typeof name === "string" && MARKDOWN_NAME.test(name.trim()) || typeof path === "string" && MARKDOWN_PATH.test(path);
+}
+function gatedWrite(tool, args) {
+  if (ALWAYS_GATED[tool] === true)
+    return true;
+  const { spec } = args;
+  if (tool === "dispatch_issue")
+    return spec !== undefined;
+  if (tool === "dispatch_artifact")
+    return uploadIsDocument(args);
+  return false;
+}
+var digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function argvDigest(argv) {
+  return digest(argv);
+}
+function argsDigest(args) {
+  return digest(args);
+}
+function fileOperands(argv) {
+  const [command, ...flags] = argv;
+  const files = [];
+  for (let index = 0;index < flags.length; index++) {
+    const word = flags[index];
+    const eq = word.indexOf("=");
+    const flag = eq === -1 ? word : word.slice(0, eq);
+    const named = flag.startsWith("--") && flag.endsWith("-file");
+    if (!named && !(command === "artifact" && flag === "--path"))
+      continue;
+    const operand = eq === -1 ? flags[index + 1] : word.slice(eq + 1);
+    if (operand !== undefined && operand !== "-")
+      files.push({ flag, operand });
+  }
+  return files;
+}
+function operandPath(cwd, file) {
+  if (file.flag === "--path")
+    return resolve(cwd, file.operand);
+  return isAbsolute(file.operand) ? file.operand : `${cwd}/${file.operand}`;
+}
+function bytesDigest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+function processStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+function ownerLive(owner) {
+  if (owner.start !== null)
+    return processStart(owner.pid) === owner.start;
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return !hasErrnoCode(error, "ESRCH");
+  }
+}
+function isOwner(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const { pid, start, store } = value;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
+}
+function parseOwner(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!isOwner(data) || !("v" in data) || data.v !== 2)
+    return;
+  const { pid, start, store, mode } = data;
+  return {
+    owner: { pid, start, store },
+    mode: mode === "block" ? "block" : "warn"
+  };
+}
+var OWNER_FILE = ".json";
+var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+function storeTouched(store) {
+  const own = statSync(store).mtimeMs;
+  try {
+    return Math.max(own, statSync(join(store, MARKERS)).mtimeMs);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT"))
+      return own;
+    throw error;
+  }
+}
+function sweepStores(root, now) {
+  const parent = join(root, "askgate");
+  let names;
+  try {
+    names = readdirSync(parent);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = STORE_NAME.exec(name);
+    if (match === null)
+      continue;
+    const store = join(parent, name);
+    try {
+      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
+        continue;
+      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
+        continue;
+      rmSync(store, { recursive: true, force: true });
+    } catch {}
+  }
+}
+function askgateState(dir) {
+  const record = join(dir, ASKGATE_RECORD);
+  let names;
+  try {
+    names = readdirSync(record);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT"))
+      return { kind: "off" };
+    return { kind: "broken", problem: `${record}, could not be read: ${messageFor(error)}` };
+  }
+  const live = [];
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE))
+      continue;
+    const file = join(record, name);
+    let text;
+    try {
+      text = readFileSync(file, "utf-8");
+    } catch (error) {
+      if (hasErrnoCode(error, "ENOENT"))
+        continue;
+      return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
+    }
+    const parsed = parseOwner(text);
+    if (parsed === undefined)
+      return { kind: "broken", problem: `${file}, is not an AskGate record` };
+    if (ownerLive(parsed.owner))
+      live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+  }
+  if (live.length === 0)
+    return { kind: "off" };
+  for (const { file, store } of live) {
+    try {
+      if (!statSync(join(store, MARKERS)).isDirectory())
+        throw new Error("not a directory");
+    } catch (error) {
+      return {
+        kind: "broken",
+        problem: `${file}, names the marker store ${store}, which cannot be read: ${messageFor(error)}`
+      };
+    }
+  }
+  return {
+    kind: "on",
+    stores: live.map(({ store }) => store),
+    mode: live.some(({ mode }) => mode === "block") ? "block" : "warn"
+  };
+}
+var isFileDigest = (value) => typeof value === "object" && value !== null && typeof value.flag === "string" && typeof value.operand === "string" && typeof value.sha256 === "string";
+function readMarker(file) {
+  let text;
+  try {
+    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      text = readFileSync(fd, "utf-8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return;
+  }
+  try {
+    const data = JSON.parse(text);
+    if (typeof data !== "object" || data === null)
+      return;
+    const { v, argv, args, files, createdAt } = data;
+    if (v !== 2 || typeof argv !== "string" || typeof createdAt !== "number")
+      return;
+    if (args !== null && typeof args !== "string")
+      return;
+    if (!Array.isArray(files) || !files.every(isFileDigest))
+      return;
+    return { argv, args, files, createdAt };
+  } catch {
+    return;
+  }
+}
+function consumeMarker(stores, argv, args, files, now) {
+  const key = argvDigest(argv);
+  const reviewed = argsDigest(args);
+  let changed;
+  let mismatched = false;
+  let expired = false;
+  const usable = [];
+  for (const store of stores) {
+    const dir = join(store, MARKERS);
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith(`${key}.`))
+        continue;
+      const file = join(dir, name);
+      const marker = readMarker(file);
+      if (marker === undefined || marker.argv !== key)
+        continue;
+      if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
+        expired = true;
+        rmSync(file, { force: true });
+        continue;
+      }
+      if (marker.args !== null) {
+        const differs = marker.files.find((bound, index) => bound.flag !== files[index]?.flag || bound.operand !== files[index]?.operand || bound.sha256 !== files[index]?.sha256);
+        if (differs !== undefined) {
+          changed ??= { flag: differs.flag, operand: differs.operand };
+          continue;
+        }
+        if (marker.files.length !== files.length || marker.args !== reviewed) {
+          mismatched = true;
+          continue;
+        }
+      }
+      usable.push({ file, bound: marker.args !== null });
+    }
+  }
+  usable.sort((a, b) => Number(b.bound) - Number(a.bound));
+  for (const { file } of usable) {
+    try {
+      unlinkSync(file);
+      return { ok: true };
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT"))
+        throw error;
+    }
+  }
+  if (changed !== undefined)
+    return {
+      ok: false,
+      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      changed
+    };
+  return {
+    ok: false,
+    why: mismatched ? "its arguments differ from the ones AskGate reviewed" : expired ? "its AskGate marker expired before it ran" : "this call carries no AskGate marker"
+  };
+}
 
 // ../../node_modules/.bun/zod@4.3.6/node_modules/zod/v4/core/core.js
 var NEVER = Object.freeze({
@@ -14686,14 +14980,6 @@ function zodSchemaApi(zod) {
     }
   };
 }
-// ../envoy-client/src/errors.ts
-function messageFor(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-function hasErrnoCode(error, code) {
-  return error instanceof Error && "code" in error && error.code === code;
-}
-
 // ../envoy-client/src/dispatch-command.ts
 var STDIN = "-";
 var BARE_WORD = /^[A-Za-z0-9_./:@%+=,-]+$/;
@@ -18871,7 +19157,9 @@ ${trailer.join(`
       const content = optionalString(args, "content");
       const artifactInput = content === undefined ? {
         name,
-        file: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))),
+        file: input.uploadBytes === undefined ? Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))) : new Blob([new Uint8Array(input.uploadBytes)], {
+          type: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))).type
+        }),
         ...summary === undefined ? {} : { summary },
         actor
       } : {
@@ -19106,23 +19394,23 @@ function asObject(value) {
 }
 
 // ../envoy-client/src/dispatch-session-state.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
-  closeSync,
+  closeSync as closeSync2,
   fstatSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
+  mkdirSync as mkdirSync2,
+  openSync as openSync2,
+  readdirSync as readdirSync2,
+  readFileSync as readFileSync2,
   readSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  statSync as statSync2,
+  writeFileSync as writeFileSync2
 } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join as join2 } from "path";
 var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 var PRIVATE_DIR = 448;
 var PRIVATE_FILE = 384;
@@ -19139,20 +19427,20 @@ function sessionStateRoot(env) {
   const stateDir = env["DISPATCH_STATE_DIR"];
   if (stateDir)
     return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  return join(sessionStateRoot(env), "sessions", sessionId);
+  return join2(sessionStateRoot(env), "sessions", sessionId);
 }
 function ensureDirectory(dir) {
-  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
+  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 function readIfPresent(path) {
   try {
-    return readFileSync(path, "utf-8");
+    return readFileSync2(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
@@ -19161,14 +19449,14 @@ function readIfPresent(path) {
 }
 function writeAtomically(path, text) {
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, text, { mode: PRIVATE_FILE });
-  renameSync(temporary, path);
+  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
+  renameSync2(temporary, path);
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join(dir, "state.json");
+  const path = join2(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -19192,7 +19480,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -19201,7 +19489,7 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}
+  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
 `, { mode: PRIVATE_FILE });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
@@ -19211,12 +19499,12 @@ function recordOutcome(dir, sessionId, follows, entry) {
 }
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
-  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join(dir, "pictures");
-  const path = join(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
+  const pictures = join2(dir, "pictures");
+  const path = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
   } catch (error) {
     if (!hasErrnoCode(error, "EEXIST"))
       throw error;
@@ -19224,32 +19512,32 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join(dir, "out");
+  const out = join2(dir, "out");
   ensureDirectory(out);
-  const path = join(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync(path, text, { mode: PRIVATE_FILE });
+  const path = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync2(path, text, { mode: PRIVATE_FILE });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join(dir, "title"), title);
+  writeAtomically(join2(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join(dir, "title")) || undefined;
+  return readIfPresent(join2(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join(root, PRUNED_STAMP);
+  const stamp = join2(root, PRUNED_STAMP);
   try {
-    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join(root, "sessions");
+  const sessions = join2(root, "sessions");
   let entries = [];
   try {
-    entries = readdirSync(sessions, { withFileTypes: true });
+    entries = readdirSync2(sessions, { withFileTypes: true });
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
@@ -19257,32 +19545,33 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join(sessions, entry.name);
+    const dir = join2(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
-        rmSync(dir, { recursive: true, force: true });
+      if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+        rmSync2(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
         throw error;
     }
   }
+  sweepStores(root, now);
   ensureDirectory(root);
-  writeFileSync(stamp, "", { mode: PRIVATE_FILE });
+  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
 }
 
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   existsSync,
   lstatSync,
   mkdtempSync,
-  openSync as openSync2,
-  readFileSync as readFileSync3,
+  openSync as openSync3,
+  readFileSync as readFileSync4,
   readlinkSync,
-  rmSync as rmSync2,
-  statSync as statSync2
+  rmSync as rmSync3,
+  statSync as statSync3
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
 import * as path from "path";
@@ -19374,14 +19663,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync2(filePath, "utf8");
+    contents = readFileSync3(filePath, "utf8");
   } catch (error) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
   }
@@ -19479,6 +19768,7 @@ var CheckoutFileSchema = looseObject({
   $schema: string2().optional(),
   dispatch: DispatchSectionSchema.optional()
 });
+var AskgateSectionSchema = strictObject({ enabled: boolean2().optional() });
 function offWithNotice(notice) {
   return { enabled: false, notice, error: null };
 }
@@ -19515,7 +19805,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync3(filePath, "utf-8");
+    raw = readFileSync4(filePath, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -19559,7 +19849,7 @@ function runCommand(command, env, cwd) {
   try {
     chmodSync(directory, 448);
     const output = path.join(directory, "stdout");
-    const fd = openSync2(output, "wx", 384);
+    const fd = openSync3(output, "wx", 384);
     let result;
     try {
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
@@ -19574,7 +19864,7 @@ function runCommand(command, env, cwd) {
     } catch (error) {
       return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
     } finally {
-      closeSync2(fd);
+      closeSync3(fd);
     }
     try {
       process.kill(-result.pid, "SIGKILL");
@@ -19591,7 +19881,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync3(output, "utf-8").trim();
+    const value = readFileSync4(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -19602,7 +19892,7 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync2(directory, { recursive: true, force: true });
+    rmSync3(directory, { recursive: true, force: true });
   }
 }
 function fileValue(value, field, filePath, env) {
@@ -19626,7 +19916,7 @@ function fileValue(value, field, filePath, env) {
 }
 function statDevice(directory) {
   try {
-    return statSync2(directory).dev;
+    return statSync3(directory).dev;
   } catch {
     return;
   }
@@ -19687,7 +19977,8 @@ function readEnvoyConfig(filePath, env, options) {
       kind: "valid",
       path: checkoutPath,
       dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
     };
   }
   const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
@@ -19970,6 +20261,9 @@ function startNotice(config, dispatch, envoy, nats) {
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null)
     parts.push(checkout.envoyError);
+  if (checkout?.kind === "valid" && checkout.askgateError !== null) {
+    parts.push(checkout.askgateError);
+  }
   if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
@@ -20290,10 +20584,12 @@ var REFUSED = 1;
 var USAGE = 2;
 var HOSTS = ["omp", "claude", "opencode"];
 var CLAUDE_OUTPUT_MAX = 25000;
+var SAME_MESSAGE = "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
 var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
 function stateWriteFailed(problem) {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
+var LITERAL_FORM = "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words\u2026>`. Each word is plain text, text in single quotes (also over more than one line), or text in double quotes with no `$`, backtick or `\\`. A `\\` at the end of a line continues the command. Before it, one `cd <path> &&` is permitted; after it, one `2>&1`, one here-document opened with a quoted delimiter (`<<'EOF'`) and one `| head -n N` or `| tail -n N`. For text with `$` or a backtick in it, use `--<field>-file - <<'EOF'`. A variable, `~`, a glob, an assignment, another redirect (`2>/dev/null`, `> file`), another pipe, another command (`;`, `&&`, `||`), a loop, xargs, `bash -c`, a script, an alias, or a process that a program or an eval cell starts carries no marker.";
 var SUBSCRIPTIONS_TIMEOUT_MS = 1500;
 function fitOutput(text, pictures, kept, limit, writeFull) {
   const whole = [text, ...pictures, ...kept].join(`
@@ -20336,14 +20632,15 @@ async function runDispatchCli(argv, rawEnv, io) {
     if (value !== undefined && value !== "")
       env[name] = value;
   }
-  const refuse = (text, code, tool) => {
+  const refuse = (text, code, tool, askgate) => {
     print(text);
     const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
       try {
         appendResult(sessionDirectory(env, sessionId), {
           tool: tool ?? "dispatch",
-          error: text.trimEnd()
+          error: text.trimEnd(),
+          ...askgate === undefined ? {} : { askgate }
         });
       } catch {}
     }
@@ -20367,7 +20664,7 @@ async function runDispatchCli(argv, rawEnv, io) {
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
+    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];
@@ -20406,6 +20703,48 @@ async function runDispatchCli(argv, rawEnv, io) {
     return refuse(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`, USAGE, parsed.tool);
   }
   const config = resolution;
+  let uploadBytes;
+  if (gatedWrite(parsed.tool, parsed.args)) {
+    const notCalled = `dispatch ${commandName(parsed.tool)} was not called:`;
+    try {
+      const gate = askgateState(dir);
+      if (gate.kind === "broken") {
+        return refuse(`${notCalled} AskGate's record for this session, ${gate.problem}, so whether AskGate reviewed this write cannot be told.`, REFUSED, parsed.tool, { mode: "block", why: gate.problem });
+      }
+      if (gate.kind === "on") {
+        const files = [];
+        for (const file of fileOperands(argv)) {
+          let bytes;
+          try {
+            const fd = openSync4(operandPath(io.cwd, file), constants2.O_RDONLY | constants2.O_NONBLOCK);
+            try {
+              if (fstatSync2(fd).isFile())
+                bytes = readFileSync5(fd);
+            } finally {
+              closeSync4(fd);
+            }
+          } catch {}
+          files.push({ ...file, sha256: bytes === undefined ? null : bytesDigest(bytes) });
+          if (file.flag === "--path" && file.operand === parsed.args.path)
+            uploadBytes = bytes;
+        }
+        const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
+        if (!spent.ok && gate.mode === "block") {
+          return refuse(spent.changed === undefined ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.` : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`, REFUSED, parsed.tool, { mode: "block", why: spent.why });
+        }
+        if (!spent.ok) {
+          try {
+            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+          } catch (error) {
+            return refuse(`${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`, REFUSED, parsed.tool);
+          }
+          print(spent.changed === undefined ? `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.` : `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${SAME_MESSAGE} Send a write in a later message than the call that changes its file.`);
+        }
+      }
+    } catch (error) {
+      return refuse(`${notCalled} AskGate's marker for this call could not be checked: ${messageFor(error)}.`, REFUSED, parsed.tool, { mode: "block", why: messageFor(error) });
+    }
+  }
   let topics;
   const readTopics = async () => {
     try {
@@ -20447,6 +20786,7 @@ async function runDispatchCli(argv, rawEnv, io) {
       tool,
       args,
       cwd: io.cwd,
+      ...uploadBytes === undefined ? {} : { uploadBytes },
       host,
       sessionId,
       sessionTitle: env.DISPATCH_SESSION_TITLE ?? readSessionTitle(dir),
@@ -20498,7 +20838,7 @@ async function runDispatchCli(argv, rawEnv, io) {
 }
 
 // ../envoy-client/bin/dispatch.ts
-var readText = (path) => readFileSync4(path === "-" ? 0 : path, "utf-8");
+var readText = (path) => readFileSync6(path === "-" ? 0 : path, "utf-8");
 var pending = [];
 var writeTo = (stream) => (text) => {
   const { promise, resolve } = Promise.withResolvers();

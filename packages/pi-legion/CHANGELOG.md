@@ -143,6 +143,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   takes its own next issue, but it changes no admission; the reference used to have the controller
   set priority and rank together so that "highest priority, then board rank" produced the plan's
   order (INFRA-188).
+
+- The skill-scenario rig has an `askgate` scenario. It seeds an issue whose one
+  comment is the person's and gives a plain session one of three prompts, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names (`facts`, `link` or `upload`). An askgate run's directory is
+  `askgate-<case>-<label>-<n>`, so the batches of the three cases keep their own runs, and
+  `rig.sh score askgate` counts each case and label on its own. `score.ts` reads AskGate's
+  verdicts from the transcript. `rig.sh profile` takes `--envoy-json <file>` and merges that object
+  into the envoy.json the label's sessions read, so a label can turn AskGate off. A `dispatch`
+  call with `--help` or `--dry-run` sends nothing, and AskGate does not review it. A call that
+  AskGate refused as unreadable got no model review. The score reads neither of these calls as a
+  verdict of the gate. A `link` run passes only when AskGate allowed its ask on a verdict: a
+  timeout, an error, a skip, an override or no entry is no review, so it fails. A `facts` run reads
+  the refused call's own gate entry, and its reason must name failure 12 (`Content 12`) and both
+  facts. The refusal text is not read for them, because it quotes the question for every failure.
+  The `link` prompt asks a choice that the person's comment leaves open, with a
+  link to that comment, because an ask whether to do what the person asked fails AskGate's rule
+  authority 6. The seeded issue's title, "Release and nightly job settings", fits the write of
+  each case.
 - Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
   container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
   generation in Linux namespaces of its own (`legion launcher role-init`), and
@@ -882,6 +900,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
+- Each skill-scenario run has a Dispatch of its own: a database named after the run in the batch's
+  Postgres, and a Dispatch server on it, which the run seeds, captures from and stops when it
+  ends. Before, the runs of a batch shared one Dispatch server. `dispatch search` searches every
+  project of its server, so in one askgate `facts`/`off` batch a run found the four other runs'
+  identical asks and did not post its own. Each run records its Dispatch in `dispatch.json`, and
+  `rig.sh score` does not score a run that records none or that names one database in one Postgres
+  with another run. A brainstorm batch now takes any number of runs.
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It
