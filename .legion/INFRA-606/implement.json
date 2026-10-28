@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T13:40:00Z",
+  "completed": "2026-10-28T15:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -108,6 +108,14 @@
       "observed": "With 20 pending attempts younger than the lease and with none pending: Index Scan using comment_deliveries_pending, actual rows=0, Buffers: shared hit=1.",
       "headSha": "da4434188526ffef16a314e92c0de33a46fbe855",
       "negativeControl": "The same statement with the index dropped has no index condition on state (the planner scanned the empty comments table instead); the tester's EXPLAIN at 12aada04 showed Seq Scan on comment_deliveries."
+    },
+    {
+      "criterion": "Each recipient gets one copy of a comment through a Dispatch kill: the outbox's abandoned-attempt copy and the stranded pass's resend are exclusive per (comment, session) (tester round 4; architect's ruling 2026-10-28T14:08Z).",
+      "surface": "The API handler with a stopped process's mention left pending and aged past the lease, the real outbox publishing comment.created, then a new mention sender's stranded passes; and the outbox against a real Postgres with a concurrent claim transaction",
+      "command": "go test ./internal/dispatch/api/ -run TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth -count=3; go test ./internal/dispatch/outbox/ -run TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst -count=1",
+      "observed": "s1 receives exactly one copy (the outbox's route copy; the stranded pass finds the attempt settled failed and sends nothing). Outbox first: the row reads failed with mentionAbandonedError and one comment.delivery receipt is appended. Claim first: the row stays pending with no receipt and the event defers (errMentionPending).",
+      "headSha": "95df981580720d7e9406090b2ba2f384f04dc37b",
+      "negativeControl": "At 28e5a571 the red test counted 2 copies, and the tester's crash.sh stored c1..c8 twice in ses-a's NATS subject after a SIGKILL."
     }
   ],
   "filesChanged": [
@@ -168,6 +176,7 @@
     "packages/envoy/internal/dispatch/events/stream_test.go",
     "packages/envoy/internal/dispatch/model/model.go",
     "packages/envoy/internal/dispatch/outbox/publisher.go",
+    "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
     "packages/envoy/internal/dispatch/store/migrations/0135_comment_deliveries_pending.census.sql",
     "packages/envoy/internal/dispatch/store/migrations/0135_comment_deliveries_pending.up.sql",
@@ -198,7 +207,8 @@
     "The Stage 3 audit falls back to the event-stream replay when production answers the log route 404 (warn-first), per the architect's ruling on review finding 3.",
     "Reviewer's fast-follow done in this round (architect's ruling): hub generations own their views and conns (nine currency guards gone), deliveryHub.feed removed, the relay and the log route share readEventsAfterID, signal(q.wake), mention process tests moved to shutdown_mentions_test.go.",
     "Two forward merges of main (both on GitHub-reported conflicts), each fingerprinted on the PR. The second takes main's outbox/publisher.go whole (#2225) and drops this branch's claim-token edit and payload reopen in favour of extending main's leftToMention.",
-    "A send that waits in its lane longer than model.DeliveryClaimLapse unclaimed is counted abandoned by main's outbox query, which then publishes the copy; the mention may also land (documented)."
+    "A send that waits in its lane longer than model.DeliveryClaimLapse unclaimed is counted abandoned by main's outbox query, which then publishes the copy; the mention may also land (documented).",
+    "The outbox settles an abandoned mention attempt only for a session or target a held-back copy asks about, so a mention no copy covers is still left to the stranded pass; settling also appends the comment.delivery receipt through the broker."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -207,6 +217,6 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 4,
-  "answersTest": "c03e536014d0fc380bcb23ce0db7e7f75076cbb2"
+  "round": 5,
+  "answersTest": "dfc17513276a404edc38e8cd98022e44ff2bd658"
 }
