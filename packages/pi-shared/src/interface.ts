@@ -16,7 +16,7 @@ import type { LegionRoleClaimBridge } from "./role-claim-bridge";
  * `task` subagent, so a per-instance callback stored here would be the last instance's, not the
  * pane's (docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md).
  */
-export const ENVOY_PLUGIN_INTERFACE_VERSION = 3;
+export const ENVOY_PLUGIN_INTERFACE_VERSION = 4;
 export const ENVOY_PLUGIN_INTERFACE_KEY = Symbol.for("legion.pi-shared.envoy-plugin-interface");
 /** Set by the Legion entry's factory to `{ from: import.meta.url, envoyInterface: <version> }`;
  * the daemon's boot gate reads it from `globalThis` to prove the Legion plugin loaded. */
@@ -39,6 +39,18 @@ export interface EnvoyPluginInterface {
   readonly injectedUserTurns: Map<string, SessionUserTurns>;
   /** The transcript of the session this process bootstrapped as its Legion identity. */
   readonly bootstrappedSession: { file: string | undefined };
+  /**
+   * The session whose first turn is the Legion controller's start turn, and when its start was
+   * sent (ms since epoch); undefined while there is none. Any claim that sends the operator's
+   * controller its start message to an idle session sets it right before the send, and the
+   * daemon-launched controller sets it right before `claims/ready`, after which the daemon sends
+   * its start prompt. A start message queued as a follow-up behind a turn the operator already
+   * started sets nothing, since that session's first run has already started. It is cleared once
+   * that session's first run starts or the session shuts down. Nothing in the Envoy entry reads it
+   * yet; it is the Envoy entry's signal to keep a card that arrived during startup from taking that
+   * first turn.
+   */
+  startupTurn: { readonly session: string; readonly sentAt: number } | undefined;
 }
 
 type EnvoyPluginInterfaceReading =
@@ -82,6 +94,7 @@ export function envoyPluginInterface(): EnvoyPluginInterface {
     },
     injectedUserTurns: new Map(),
     bootstrappedSession: { file: undefined },
+    startupTurn: undefined,
   };
   store[ENVOY_PLUGIN_INTERFACE_KEY] = created;
   return created;

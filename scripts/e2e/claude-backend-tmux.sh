@@ -8,14 +8,25 @@
 # pane is killed, comes back with `--resume` into the same Claude Code session, its transcript's
 # earlier turns intact and in its context.
 #
-# Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-# bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
-# Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
-# its work directory (0600), and the implementer's claim directory names a key command that prints
-# that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
-# transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
-# (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (this
+# Run it as `LEGION_E2E_MODEL_ROUTE=<gateway|key-file> … bash scripts/e2e/claude-backend-tmux.sh`.
+# LEGION_E2E_MODEL_ROUTE is required, as Stage 2's and Stage 3's is, and picks how the Oh My Pi
+# agents (the architect and the planner) reach their model:
+#   - `gateway`: the Hawk model gateway, as Stage 3's agents do, with
+#     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh) and
+#     hawk-token on PATH; LEGION_E2E_CLAUDE_KEY_FILE names the Claude Code pane's own key file.
+#   - `key-file`: Anthropic's own endpoint keyed by a 0600 file read fresh on every call
+#     (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. The file is
+#     LEGION_E2E_ANTHROPIC_KEY_FILE, and LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one
+#     key file serves both halves of the run; naming both puts the Claude Code pane on
+#     LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the
+#     notes name both paths.
+# The Claude Code pane's key file holds the Anthropic API key the Claude Code implementer reaches
+# its model with, and Anthropic's own `GET /v1/models` must accept it before any pane starts: the
+# run copies it once into its work directory (0600), and the implementer's claim directory names a
+# key command that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's
+# environment, no argv and no transcript.
+# The rig is Stage 3's without its GitHub ingress bridge: scratch
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `agent-secrets` (this
 # deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
 # lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
 # lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
@@ -53,11 +64,11 @@ nats_container="legion-e2ecc-nats-$$"
 daemon_pid=
 dispatch_pid=
 listener_pid=
+daemon_keeper_pid=
 watcher_pid=
 port_daemon=
 port_listener=
 port_dispatch=
-port_worker_stream=
 port_pg=
 port_nats=
 dispatch_base=
@@ -115,14 +126,20 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (stopping panes, docker, the gh calls in remove_run_branch) can
+  # hang or be ended by a second signal: the Claude pane's key copy and the key-file route's own
+  # key command, which bakes in --key-file's resolved path. Neither may survive this script on any
+  # exit, so neither is conditioned on how the rest of cleanup goes. Stages 2 and 3 do the same.
   rm -f "$work/claude-model-key" "$work/claude-key-header"
+  rm -rf "$work/model-gateway-key" || true
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
+  stop_pid "$daemon_keeper_pid"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
-  docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+  docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   remove_run_branch
   rm -rf "$work/model-gateway-cache" || true
@@ -143,51 +160,40 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---- the scratch services ------------------------------------------------------------------------
+# Each serves on a port the kernel chose, held from that choice until it serves on it (lib/rig.sh's
+# start_held); the daemon's by a keeper, so legion.yaml can name it before the daemon starts.
 start_listener() {
-  local token attempt offset result
+  local token
   token=$(cat "$work/envoy-token")
-  for attempt in 1 2 3 4 5; do
-    pick_port port_listener
-    offset=$(log_size listener)
-    ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
-      ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $port_listener to another process (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
 
 start_dispatch() {
-  local dispatch_token envoy_token pg_password attempt offset result
+  local dispatch_token envoy_token pg_password
   dispatch_token=$(cat "$work/dispatch-token")
   envoy_token=$(cat "$work/envoy-token")
   pg_password=$(cat "$work/postgres-password")
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
-  for attempt in 1 2 3 4 5; do
-    pick_port port_dispatch
-    offset=$(log_size dispatch)
-    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the operator's.
-    DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
-      DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-      DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
-      DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-      curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
-    dispatch_base="http://127.0.0.1:$port_dispatch"
-    [ "$result" != 0 ] || return 0
-    note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
-  done
-  fail "the scratch Dispatch lost its picked port five times"
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's. They are the server's alone, set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_held dispatch port_dispatch DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS "http://127.0.0.1:$port_dispatch/api/v1"
+  dispatch_base="http://127.0.0.1:$port_dispatch"
 }
 
 # The one setting under test is worker_backends; the design gate is off, so the architect's gate
@@ -196,7 +202,6 @@ write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port_daemon
-worker_stream_port: $port_worker_stream
 postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/legion?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
@@ -222,29 +227,23 @@ EOF
 }
 
 # start_daemon runs the Go daemon with the run's Claude Code launch pinned: the claude and bun it
-# resolved here, and this checkout's claude-envoy package, whose dist/envoy-channel.js is every
-# Claude Code pane's MCP server and whose legion/ is the Legion plugin the pane loads.
+# resolved here, and the claude-envoy plugin built from this checkout into the run's work directory,
+# whose dist/envoy-channel.js is every Claude Code pane's MCP server and whose legion/ is the Legion
+# plugin the pane loads. Its port is kept, so each poll of it carries a timeout: until the daemon
+# serves, a request waits unanswered.
 start_daemon() {
-  local attempt offset result
-  for attempt in 1 2 3 4 5; do
-    pick_port port_daemon
-    pick_port port_worker_stream
-    write_legion_config
-    offset=$(log_size daemon)
+  keep_port daemon_keeper port_daemon
+  write_legion_config
+  # HOME, OMP_PROFILE, PATH and the Claude Code launch are the daemon's alone, set by its env, not
+  # the held-port helper's that runs it.
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" -u ANTHROPIC_API_KEY \
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
-      LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
-      env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-      -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
-      -u ANTHROPIC_API_KEY \
-      "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
-    daemon_pid=$!
-    result=0
-    await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
-      curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Go daemon lost port $port_daemon or $port_worker_stream to another process (attempt $attempt); picking again"
-  done
-  fail "the Go daemon lost a picked port five times"
+    LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$work/claude-envoy" \
+    "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
 }
 
 # write_claude_route gives the implementer's claim its model before the claim exists: the daemon
@@ -499,28 +498,45 @@ handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ];
 
 begin prerequisites
 require_app_inputs implement review
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+# The Claude Code pane's own key file. Under the key-file route the Oh My Pi agents read a key
+# file too, so one file can serve both halves: whichever of the two variables is set serves both,
+# and naming both puts the Claude pane on LEGION_E2E_CLAUDE_KEY_FILE and the agents on
+# LEGION_E2E_ANTHROPIC_KEY_FILE. Both paths are in the notes, so a split is visible.
+key_file_var=LEGION_E2E_CLAUDE_KEY_FILE
 key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
+if [ -z "$key_file" ] && [ "$model_route" = key-file ]; then
+  key_file_var=LEGION_E2E_ANTHROPIC_KEY_FILE
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] ||
+    fail "LEGION_E2E_CLAUDE_KEY_FILE and LEGION_E2E_ANTHROPIC_KEY_FILE are both unset: under LEGION_E2E_MODEL_ROUTE=key-file one file holding the Anthropic API key serves the Claude Code implementer and the Oh My Pi agents"
+fi
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
-[ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
+[ -f "$key_file" ] && [ -r "$key_file" ] || fail "$key_file_var names $key_file, which is not a readable file"
+agent_key_file=$key_file
+if [ "$model_route" = key-file ]; then
+  agent_key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-$key_file}
+  [ -f "$agent_key_file" ] && [ -r "$agent_key_file" ] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $agent_key_file, which is not a readable file"
+fi
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl ss tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise agent-secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
-[ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
+[ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
 # The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
 # key is in no argv.
 (umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
 code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
   https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
 rm -f "$work/claude-key-header"
-[ "$code" = 200 ] || fail "Anthropic refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($key_file): GET /v1/models answered $code"
+[ "$code" = 200 ] || fail "Anthropic refuses the key in $key_file_var ($key_file): GET /v1/models answered $code"
 note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
-for key in "$implement_app_key_name" "$review_app_key_name"; do
-  status=$(secrets get "$key" --no-request 2>&1) || fail "secrets get $key does not resolve: $status"
-  jq -e --arg key "$key" '.key == $key and .tier == "agent"' <<<"$status" >/dev/null 2>&1 ||
-    fail "secrets get $key reports $status, want the agent tier"
-  note "secrets get $key: $status"
-done
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
 # legion.yaml's github_apps is the block proved.
 write_github_apps implement review
@@ -539,9 +555,17 @@ gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh ca
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-note "the Oh My Pi agents' model route: keyed by $key_command"
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file") ||
+    fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
+note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s' "$agent_key_file")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -559,14 +583,14 @@ chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch
 docker exec "$pg_container" createdb -U legion legion
-docker run -d --name "$nats_container" -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
 port_nats=$(docker port "$nats_container" 4222/tcp | sed -n '1s/.*://p')
 [ -n "$port_nats" ] || fail "docker assigned NATS no host port"
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
@@ -575,6 +599,9 @@ start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "Claude backend proof $project" '{key:$key,name:$name}')" >/dev/null
 dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
+# The claude-envoy plugin the panes load, built from this checkout outside it: a pull request's tree
+# carries no fresh dist/ or legion/ (packages/claude-envoy/scripts/build.ts --out).
+bun "$root/packages/claude-envoy/scripts/build.ts" --out "$work/claude-envoy" >/dev/null
 envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
 pin=$(<"$root/.omp-pin")

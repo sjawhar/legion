@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -33,6 +34,16 @@ const (
 	// the store accepts and serves back.
 	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+	// maxNewArtifactKeyBytes bounds, in bytes, a new artifact's name and the reference key
+	// `<owner>/<slug>` that name gives it (newArtifactNameRefusal, newArtifactKeyRefusal).
+	// artifacts_ref_key_key is a B-tree index on ref_key, and a Postgres B-tree entry holds at
+	// most 2704 bytes: an 8-byte tuple header, then the value's 4-byte length word and its bytes,
+	// so incompressible text of 2692 bytes fits and one byte more fails the insert (SQLSTATE
+	// 54000). No index holds the name, but it is held to the same bytes: its slug is the part of
+	// the key a caller writes, so one number names what a new artifact may be called. An artifact
+	// already stored past it, under a key Postgres compressed into the index, keeps its name and
+	// key: an upload naming it stores a version as before.
+	maxNewArtifactKeyBytes = 2692
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads.
@@ -226,6 +237,17 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		}
 		return artifactUploadInput{}, false
 	}
+	// The parser spools a file part past a megabyte to a temporary file. net/http removes the
+	// files of the request it handed its handler, but this is a copy (the access log and the
+	// transaction tracking each wrap it with WithContext), so the server never sees them; left
+	// alone, every such upload kept its file on the pod's disk until the pod's ephemeral storage
+	// ran out. The content is read into memory below, so the files go when this returns, stored
+	// or refused.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("dispatch: remove a multipart upload's spooled files", "error", err)
+		}
+	}()
 	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
 		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
@@ -359,9 +381,17 @@ func (s *server) storeArtifact(
 	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
+		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
 		slug, err := s.nextArtifactSlug(r.Context(), tx, target, input.name)
 		if err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+		if refusal := newArtifactKeyRefusal(target, slug); refusal != nil {
+			s.writeHandlerError(w, refusal)
 			return
 		}
 		actorJSON, err := encodeJSON(actor)
@@ -1060,13 +1090,33 @@ const documentHintLimit = 8
 // loadArtifactByDocumentReference reads an issue's or a project's artifact at slug reference, or
 // the one document whose filename it is.
 func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
-	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
+	return resolveDocumentReference(ctx, s, q, target, reference,
+		func(refKey string) (model.Artifact, error) { return s.loadArtifactByRefKey(ctx, q, refKey) },
+		func(id string) (model.Artifact, error) { return s.loadArtifact(ctx, q, id) },
+	)
+}
+
+// resolveDocumentReference is the one resolution of an issue's or a project's document reference,
+// shared by the full read and the summary: the artifact at slug reference (byRefKey, given the
+// ref_key), else the one document whose filename it is (byID, given its id). Each reader answers
+// ARTIFACT_NOT_FOUND for no row, and reads only the shape its route serves.
+func resolveDocumentReference[T any](
+	ctx context.Context,
+	s *server,
+	q queryer,
+	target artifactTarget,
+	reference string,
+	byRefKey func(refKey string) (T, error),
+	byID func(id string) (T, error),
+) (T, error) {
+	found, err := byRefKey(target.refPrefix() + "/" + reference)
 	if err == nil || !isArtifactNotFound(err) {
-		return artifact, err
+		return found, err
 	}
+	var none T
 	documents, listErr := s.loadDocumentReferences(ctx, q, target)
 	if listErr != nil {
-		return model.Artifact{}, listErr
+		return none, listErr
 	}
 	matches := make([]model.Artifact, 0, 1)
 	for index := range documents {
@@ -1076,11 +1126,11 @@ func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer,
 	}
 	switch len(matches) {
 	case 0:
-		return model.Artifact{}, documentReferenceError(target, reference, documents)
+		return none, documentReferenceError(target, reference, documents)
 	case 1:
-		return s.loadArtifact(ctx, q, matches[0].ID)
+		return byID(matches[0].ID)
 	default:
-		return model.Artifact{}, ambiguousDocumentReferenceError(target, reference, matches)
+		return none, ambiguousDocumentReferenceError(target, reference, matches)
 	}
 }
 
@@ -1335,6 +1385,30 @@ func artifactSlug(name string) string {
 		return "artifact"
 	}
 	return result
+}
+
+// newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
+// or nil. An upload naming an artifact that already exists is never held to it.
+func newArtifactNameRefusal(name string) error {
+	if len(name) <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"artifact name is %d bytes, past the %d bytes a new artifact's name may hold; give it a shorter name",
+		len(name), maxNewArtifactKeyBytes)
+}
+
+// newArtifactKeyRefusal is the 400 refusing a new artifact whose reference key, the target's
+// owner, `/` and slug (the one nextArtifactSlug took, suffix and all), is past
+// maxNewArtifactKeyBytes, or nil.
+func newArtifactKeyRefusal(target artifactTarget, slug string) error {
+	key := len(target.refPrefix()) + 1 + len(slug)
+	if key <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
+		target.refPrefix(), key, maxNewArtifactKeyBytes)
 }
 
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {

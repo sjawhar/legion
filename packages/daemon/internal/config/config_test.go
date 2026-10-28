@@ -1048,12 +1048,12 @@ func TestLoadRefuses(t *testing.T) {
 			// the provider's own variable (GEMINI_API_KEY), so the one shape says both.
 			name: "provider_keys as a list",
 			body: minimalFile + "provider_keys: [GEMINI_API_KEY_TESTS]\n",
-			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key, or file:/abs/path under runtime tmux; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
 		},
 		{
 			name: "provider_keys a scalar",
 			body: minimalFile + "provider_keys: GEMINI_API_KEY_TESTS\n",
-			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key, or file:/abs/path under runtime tmux; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
 		},
 		{
 			name: "provider_keys with a variable that is not a variable name",
@@ -1063,7 +1063,12 @@ func TestLoadRefuses(t *testing.T) {
 		{
 			name: "provider_keys with a command where the secretsd key goes",
 			body: minimalFile + "provider_keys: {GEMINI_API_KEY: \"secrets get GEMINI_API_KEY_TESTS\"}\n",
-			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the key that holds it) must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the key that holds it) must be an environment variable name (letters, digits, and underscores, not starting with a digit), or file: and an absolute path`,
+		},
+		{
+			name: "provider_keys naming a file by a relative path",
+			body: minimalFile + "provider_keys: {GEMINI_API_KEY: \"file:keys/gemini\"}\n",
+			want: `provider_keys value "file:keys/gemini" for GEMINI_API_KEY names a file by a path that is not absolute; write file:/abs/path`,
 		},
 		{
 			name: "provider_keys with a secretsd key that is not a string",
@@ -1159,12 +1164,66 @@ func TestLoadRefuses(t *testing.T) {
 		{
 			name: "a runtime mapping with two keys",
 			body: minimalFile + "runtime: {kubernetes: {namespace: legion}, tmux: {}}\n",
-			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes or tmux",
 		},
 		{
 			name: "a runtime mapping with another single key",
 			body: minimalFile + "runtime: {podman: {}}\n",
-			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes or tmux",
+		},
+		{
+			name: "a runtime.tmux block that is not a mapping",
+			body: minimalFile + "runtime: {tmux: [pane_env]}\n",
+			want: "runtime.tmux must be a mapping",
+		},
+		{
+			name: "an unknown member of runtime.tmux",
+			body: minimalFile + "runtime: {tmux: {session_store: pvc}}\n",
+			want: "unknown key runtime.tmux.session_store",
+		},
+		{
+			name: "runtime.tmux.pane_env a list",
+			body: minimalFile + "runtime: {tmux: {pane_env: [ELAN_HOME]}}\n",
+			want: "runtime.tmux.pane_env must be a mapping of variable name to value",
+		},
+		{
+			name: "runtime.tmux.pane_env naming something that is not a variable",
+			body: minimalFile + "runtime: {tmux: {pane_env: {1ELAN: /opt/elan}}}\n",
+			want: `runtime.tmux.pane_env key "1ELAN" must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+		},
+		{
+			// The runtime composes every pane's PATH: the daemon's own behind its launcher directory.
+			name: "runtime.tmux.pane_env naming PATH",
+			body: minimalFile + "runtime: {tmux: {pane_env: {PATH: /usr/bin}}}\n",
+			want: "runtime.tmux.pane_env names PATH, which the runtime composes for every pane (the daemon's own PATH behind its launcher directory)",
+		},
+		{
+			// A value on tmux's command line is visible to every process on the host; a secret
+			// reaches a pane as a file.
+			name: "runtime.tmux.pane_env naming a credential",
+			body: minimalFile + "runtime: {tmux: {pane_env: {LEDGER_TOKEN: hunter2}}}\n",
+			want: "runtime.tmux.pane_env names LEDGER_TOKEN, a credential-shaped name: a secret reaches a pane as a file (provider_keys), never as a value on tmux's command line",
+		},
+		{
+			name: "runtime.tmux.pane_env naming one variable twice",
+			body: minimalFile + "runtime: {tmux: {pane_env: {ELAN_HOME: /opt/elan, ELAN_HOME: /srv/elan}}}\n",
+			want: "runtime.tmux.pane_env names ELAN_HOME twice",
+		},
+		{
+			name: "runtime.tmux.pane_env with a value that is not a string",
+			body: minimalFile + "runtime: {tmux: {pane_env: {ELAN_HOME: [/opt/elan]}}}\n",
+			want: "runtime.tmux.pane_env.ELAN_HOME must be a string",
+		},
+		{
+			name: "runtime.tmux.pane_env with a null value",
+			body: minimalFile + "runtime: {tmux: {pane_env: {ELAN_HOME: null}}}\n",
+			want: "runtime.tmux.pane_env.ELAN_HOME must be a string",
+		},
+		{
+			// PI_CONFIG_FILES separates its overlays with `:`, so it could not name this path.
+			name: "runtime.tmux.pi_config_files naming a path holding the separator",
+			body: minimalFile + "runtime: {tmux: {pi_config_files: [/etc/legion:operator/overlay.yml]}}\n",
+			want: "runtime.tmux.pi_config_files entry \"/etc/legion:operator/overlay.yml\" holds `:`, which separates the overlays PI_CONFIG_FILES names",
 		},
 		{
 			name: "a root that is not a mapping",

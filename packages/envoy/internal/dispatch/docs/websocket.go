@@ -18,7 +18,9 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -207,13 +209,20 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 }
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A caller that does not
+// resolve is refused 401, except a person whose lapsed confirmation the sign-in issuer could not
+// renew (identity.ErrSignInUnavailable), who is still signed in and is refused 503
+// SIGNIN_UNAVAILABLE as every other route refuses them (identity.WriteError).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
 	if _, err := s.requestActor(r); err != nil {
+		if errors.Is(err, identity.ErrSignInUnavailable) {
+			identity.WriteError(w, err)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -333,6 +342,8 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 		// set. Service means "the server verified this Kubernetes subject", so a
 		// shared-token holder copying one into the header would forge a verified
 		// identity onto every document version it writes.
+		accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
+		accesslog.Note(r.Context(), accesslog.KindSession, supplied.ID)
 		return model.Actor{Kind: "session", ID: supplied.ID, Origin: supplied.Origin}, nil
 	}
 	if s.identity == nil {
@@ -342,6 +353,7 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if err != nil {
 		return model.Actor{}, err
 	}
+	accesslog.Note(r.Context(), accesslog.KindUser, login)
 	return model.Actor{Kind: "user", ID: login}, nil
 }
 

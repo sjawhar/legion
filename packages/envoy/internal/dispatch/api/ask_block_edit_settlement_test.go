@@ -163,6 +163,7 @@ type askEvent struct {
 		Question   string               `json:"question"`
 		State      string               `json:"state"`
 		Resolution *model.AskResolution `json:"resolution"`
+		Restored   bool                 `json:"restored"`
 	} `json:"payload"`
 }
 
@@ -611,6 +612,15 @@ func TestBlockRemovedFromTheDocumentRetractsAsTheSystemActorAndUndoRestores(t *t
 
 	if back := readBlockAsk(t, handler, askID); back.State != "open" {
 		t.Fatalf("undoing the deletion did not bring the ask back: state=%q", back.State)
+	}
+	var opened []bool
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "ask.opened" && event.Payload.ID == askID {
+			opened = append(opened, event.Payload.Restored)
+		}
+	}
+	if len(opened) != 2 || opened[0] || !opened[1] {
+		t.Fatalf("ask.opened restored flags = %v, want the opening unmarked and the restoration marked", opened)
 	}
 }
 

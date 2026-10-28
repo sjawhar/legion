@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -58,6 +59,13 @@ func projectKeyProblem(field, value string) string {
 // visible and filterable once it's no longer named by the project key.
 const repoLabelPrefix = "repo:"
 
+// ServiceTokenVerifier verifies a Kubernetes pod's projected service-account token.
+// *oidc.LazyVerifier is the one Dispatch serves with: until its issuer is discovered every Verify
+// fails with an error matching oidc.ErrIssuerUnavailable.
+type ServiceTokenVerifier interface {
+	Verify(ctx context.Context, raw string) (oidc.Claims, error)
+}
+
 // Deps are the API's application dependencies.
 type Deps struct {
 	Store          *store.Store
@@ -82,8 +90,10 @@ type Deps struct {
 	Architecture *architecture.Importer
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a
-	// JWT-shaped bearer is only ever an unknown personal token.
-	OIDC *oidc.Verifier
+	// JWT-shaped bearer is only ever an unknown personal token. A configured
+	// verifier stays non-nil while its issuer is undiscovered, so such a bearer
+	// is answered 503 then, never taken for a personal token.
+	OIDC ServiceTokenVerifier
 	// AgentStream relays a live session's own conversation to a human watching it; nil is a
 	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
 	AgentStream agentstream.Source
@@ -109,6 +119,11 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
 	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only: every read of the listener's
+	// session list (route_status on an issue read, GET /api/v1/agents) asks the listener rather
+	// than sharing the process's five-second copy, so a test that changes the listener's sessions
+	// sees the change at its next read. A deployment leaves it false.
+	ListenerRosterUncached bool
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -138,7 +153,7 @@ type DepsInput struct {
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App           *auth.AppConfig
 	GitHubAPIBase string
-	OIDC          *oidc.Verifier
+	OIDC          ServiceTokenVerifier
 	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
 	AgentStream agentstream.Source
 	// AgentSecretsURL is the secrets broker's API base URL (DISPATCH_AGENT_SECRETS_URL); empty
@@ -153,6 +168,9 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only; see
+	// Deps.ListenerRosterUncached.
+	ListenerRosterUncached bool
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -194,24 +212,25 @@ func NewDeps(input DepsInput) (Deps, error) {
 		heartbeat = defaultStreamHeartbeat
 	}
 	return Deps{
-		Store:            input.Store,
-		Identity:         input.Identity,
-		AgentTokens:      input.AgentTokens,
-		DefaultProject:   defaultProject,
-		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:             input.Docs,
-		Embedder:         input.Embedder,
-		Envoy:            envoyClient,
-		Events:           input.Events,
-		GitHub:           github,
-		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
-		OIDC:             input.OIDC,
-		AgentStream:      input.AgentStream,
-		AgentSecrets:     agentSecretsClient,
-		Files:            input.Files,
-		Lifetime:         input.Lifetime,
-		TestHooksEnabled: input.TestHooksEnabled,
-		StreamHeartbeat:  heartbeat,
+		Store:                  input.Store,
+		Identity:               input.Identity,
+		AgentTokens:            input.AgentTokens,
+		DefaultProject:         defaultProject,
+		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:                   input.Docs,
+		Embedder:               input.Embedder,
+		Envoy:                  envoyClient,
+		Events:                 input.Events,
+		GitHub:                 github,
+		Architecture:           architecture.NewImporter(input.Store, github, input.Events),
+		OIDC:                   input.OIDC,
+		AgentStream:            input.AgentStream,
+		AgentSecrets:           agentSecretsClient,
+		Files:                  input.Files,
+		Lifetime:               input.Lifetime,
+		TestHooksEnabled:       input.TestHooksEnabled,
+		StreamHeartbeat:        heartbeat,
+		ListenerRosterUncached: input.ListenerRosterUncached,
 	}, nil
 }
 
@@ -254,6 +273,10 @@ type server struct {
 	// Only a test sets it, so a budget that ends before every selected session is read is the
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
+	// rosters is the process's copy of the listener's live-session list that issue reads judge
+	// routes against and the agents list lists (issue_route_status.go). Only register gives it
+	// non-zero TTLs.
+	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
 	deliveryHub *deliveryHub
@@ -332,7 +355,7 @@ func (s *server) waitBackground() {
 // must not dial or read the nil Store: whatever reaches the database or the network starts
 // later, from a handler or the relay's first subscriber.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps}
+	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
@@ -340,17 +363,17 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler))))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
 		const pattern = "/ws/doc/{room}"
-		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
+		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))))
 	}
 	if s.deliveryHub != nil {
 		const pattern = "/ws/delivery"
-		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket))))
+		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket)))))
 	}
 	return s
 }
@@ -367,12 +390,13 @@ func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 // confirms, a revoked token) it cancels the connection's context, on which the document server and
 // the delivery socket close the socket. The check runs beside the handler, which holds pooled
 // connections of its own while it admits the socket, so it marks a context of its own for the pool
-// (store.ErrNestedAcquire).
+// (store.ErrNestedAcquire), and it resolves on a context detached from the access-log line, which
+// names the caller the socket was admitted as (accesslog.Detached).
 func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, closeConnection := context.WithCancel(r.Context())
 		defer closeConnection()
-		check := r.WithContext(store.WithTransactionTracking(ctx))
+		check := r.WithContext(store.WithTransactionTracking(accesslog.Detached(ctx)))
 		go func() {
 			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 			defer heartbeat.Stop()
@@ -390,6 +414,13 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 		}()
 		handler(w, r.WithContext(ctx))
 	}
+}
+
+// heartbeatRequest is r for resolving a stream's caller again on a heartbeat: detached from the
+// access-log line, which names the caller the stream was admitted as, since a re-resolution that
+// reads only the bearer's credential would otherwise replace the session the request named.
+func heartbeatRequest(r *http.Request) *http.Request {
+	return r.WithContext(accesslog.Detached(r.Context()))
 }
 
 type apiError struct {
@@ -617,12 +648,16 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 	})
 }
 
+// optionalActor resolves the request's caller. Each branch names that caller on the request's
+// access-log line (accesslog.Note), which costs the line what the authentication already
+// resolved and never a lookup of its own.
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	if token, present := auth.BearerToken(r); present {
 		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
 		if auth.MatchesSharedAgentToken(r, token, s.deps.AgentTokens) {
+			accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
 			return model.Actor{}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
@@ -635,6 +670,7 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		if actor.Owner == nil {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
+		accesslog.Note(r.Context(), accesslog.KindToken, *actor.Owner)
 		return actor, false, nil
 	}
 	if s.deps.Identity == nil {
@@ -644,15 +680,23 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	if err != nil {
 		return model.Actor{}, false, err
 	}
+	accesslog.Note(r.Context(), accesslog.KindUser, login)
 	return model.Actor{Kind: "user", ID: login}, true, nil
 }
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
 // projected service-account token. A rejected token is a 401 of its own: it
 // never falls through to the personal-token lookup, so OIDC_TOKEN_INVALID tells
-// an operator the token was verified and refused rather than simply unknown.
+// an operator the token was verified and refused rather than simply unknown. A
+// token the verifier could not judge because its issuer has not been discovered
+// is a 503 OIDC_ISSUER_UNAVAILABLE, never a 401: the caller retries rather than
+// reads its token as refused.
 func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, bool, error) {
 	claims, err := s.deps.OIDC.Verify(r.Context(), token)
+	if errors.Is(err, oidc.ErrIssuerUnavailable) {
+		return model.Actor{}, false, errorf(http.StatusServiceUnavailable, "OIDC_ISSUER_UNAVAILABLE",
+			"the service-account token issuer cannot be reached; try again in a minute")
+	}
 	if err != nil {
 		reason := oidc.Reason(err)
 		// The class only. The error carries the token's own unverified iss and
@@ -663,6 +707,7 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 		return model.Actor{}, false, errorf(http.StatusUnauthorized, "OIDC_TOKEN_INVALID",
 			"service-account token rejected (%s)", reason)
 	}
+	accesslog.Note(r.Context(), accesslog.KindService, claims.Subject)
 	return model.Actor{Service: &claims.Subject}, false, nil
 }
 
@@ -674,17 +719,19 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 	if present {
 		return actor, nil
 	}
-	return bearerSessionActor(actor, supplied)
+	return bearerSessionActor(r, actor, supplied)
 }
 
 // bearerSessionActor resolves the acting session for a bearer caller: the caller names its own
 // session in the request body, and what the token itself proved — a personal token's owner, a
 // service token's verified subject — stays attached for attribution. Neither is ever taken from
-// the body, which a caller controls.
-func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
+// the body, which a caller controls. The session is the caller the access-log line names, since
+// it is the one a reader of the log is looking for; the token's own proof is already noted.
+func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
 	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
 	}
+	accesslog.Note(r.Context(), accesslog.KindSession, supplied.ID)
 	return model.Actor{
 		Kind:    "session",
 		ID:      supplied.ID,
@@ -694,8 +741,13 @@ func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model
 	}, nil
 }
 
+// writeAuthenticationError answers a caller that did not resolve: 401 NO_IDENTITY, or 503
+// SIGNIN_UNAVAILABLE for a person whose lapsed confirmation the sign-in issuer could not renew,
+// as identity.WriteError renders both; anything else as writeHandlerError does. Only identity's
+// own sentinels reach identity.WriteError, so a service-account token's issuer outage
+// (serviceTokenActor's OIDC_ISSUER_UNAVAILABLE) never reads as the sign-in issuer's.
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) {
+	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrSignInUnavailable) {
 		identity.WriteError(w, err)
 		return
 	}

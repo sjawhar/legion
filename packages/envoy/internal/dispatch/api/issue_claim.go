@@ -588,7 +588,7 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		actor, err = bearerSessionActor(actor, input.Actor)
+		actor, err = bearerSessionActor(r, actor, input.Actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

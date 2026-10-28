@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  (INFRA-569).
 
 - The packaged skills gain `asd-ste100`, which OpenCode finds on the skills path the config hook
   adds: the ASD-STE100 rules (Simplified Technical English) for text a reader must not misread.
@@ -10,6 +16,9 @@
   licence and without its linter.
 
 ### Fixed
+
+- `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
+  record every request you accept in Dispatch and read that record back before a turn ends.
 
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
   client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
@@ -22,6 +31,18 @@
 
 ### Changed
 
+- The packaged `dispatch` command carries AskGate's marker check, which reads the session's
+  AskGate record (`askgate/`) before a gated write posts. An OpenCode session's id is no Oh My Pi
+  process's record, so the check is inert under OpenCode.
+- The logged start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as not
+  read, and names the session's file to set it in.
+- The packaged skills ship `dispatch-writing-specs` in place of `dispatch-brainstorming`,
+  with no code change: the prepack copies all of `skills/`. The three Dispatch skills
+  are under 2,000 words together; `packages/pi-envoy/CHANGELOG.md` lists what each holds. The
+  `dispatch-first` instruction file says which of the three to read before which step. The
+  `dispatch` command prints the new notice after a primary spec with no ask block. After approval,
+  `dispatch-writing-specs` makes a new version only for a change to scope, acceptance, cost, risk or
+  a person's decision, all in one version.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions an
   Oh My Pi session keeps; OpenCode holds none, so the tools behave as before.
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):

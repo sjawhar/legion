@@ -1,14 +1,81 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
+
+- The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
+  `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
+  `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
+  seconds after a person's last browser edit.
+- Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
+  carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
+  read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:
+  `version`, `ref`, `text`, `state` `unchanged` | `changed` | `removed`, `removed_version?`).
+  `GraphEdge.block` names, on a document's read, the document's block at the queried end, and
+  `BlockLink` / `BlockLinks` are `GET /api/v1/block-links`. `encodeBlockId` writes a block id as a
+  `#b-` fragment carries it (every byte but ASCII letters, digits and `-` percent-encoded, so `@` is
+  `%40` and a raw `@` is only the pin), tested with Go's `text.EncodeBlockID` against
+  `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
+  pin back, for the dashboard and the client alike, an id of any length, as Go's `text.ParseRef`
+  reads a request's reference; a pin holds at most 9223372036854775807, and a larger one names no
+  block. Two bounds decide only what text cites, which is what the server's graph indexes: a block
+  id of at most `MAX_BLOCK_ID_BYTES` (256 UTF-8 bytes, decoded; Go's `text.MaxBlockIDBytes`), and
+  a target id, the id the server stores its edge under (Go's `text.TargetID`: an issue's key, a
+  document's `<KEY or PROJECT>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<block id>`, an ask's,
+  a comment's or a message's id), of at most `MAX_REFERENCE_TARGET_BYTES` (2048 UTF-8 bytes; Go's
+  `text.MaxTargetBytes`), as `referenceTargetFits` tests it. `utf8Bytes` counts a string's UTF-8
+  bytes as Go's `len` does, by code point, for every bound the server shares. A reader of text
+  holds a reference to both: past either it names nothing, a live document page whose block is
+  past them is its document, and one whose document or item is past them names nothing.
+  `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
+  `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. `GraphNode` gains them,
+  optional because a server older than them omits them (`changed_at` was a block's alone and may
+  now be `null`), and `GraphNodeParent` (`kind`, `id`, `ref?`) is `parent`'s type: `id` is the
+  parent node's own id and `ref` is absent when the parent has no reference. An actor list the
+  server never recorded is `[]`, any other fact `null`.
+- Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
+  root that gave its admission slot up while its architect waits on a person's answer, and the
+  state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
+  `ask`, or `kind: "gate"` with `gateVersion` and `artifactId` for a root waiting on its spec's
+  approval, `since`, when the
+  wait began, and `answeredAt` with `answeredBy` (`LEGION_WAIT_ANSWERS`, the act that answered it,
+  not always a person's) once the wait was answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
+  no backward move reaches the new phase. A contract-39 reader refuses a state carrying either
+  addition.
+- `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
+
+- `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
+  session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
+  token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
+  followed by it, with the same output as before, so a reader that draws the name and the
+  attribution apart (the Dashboard's `AgentName`) takes the attribution from the one rule
+  instead of cutting it out of the label (INFRA-440).
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
   `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
   and model, and per kind and in total how many searchable items have a current vector, lack one or
   failed, with the oldest lacking item's wait (INFRA-393). `SearchResponse.degraded`'s doc names the
   model service rather than Bedrock.
+- `AskEventPayload.restored`: `true` on the `ask.opened` or `ask.answered` Dispatch's settlement
+  appends when an edit restores a decision block it retracted, which records no new answer. A
+  restore the release before it writes (every one already in the event log, and one written during
+  a rollout or an image rollback) carries no mark, so a missing field proves nothing.
+- `ArtifactApproval.seq`, the latest review's event sequence on the document's owner, beside its
+  `at`: the owner's row lock orders its events as they commit, so `seq` places the review among them
+  where `at`, its transaction's start, cannot. Absent for a review recorded before Dispatch kept
+  it, and on every read the release before it serves during a rollout or a rollback, so a missing
+  `seq` does not prove an older review.
 - The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
   and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
   frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
@@ -148,6 +215,34 @@
   (INFRA-44).
 
 ### Changed
+
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
+- `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
+  place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
+  dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
+  (which kind to use, and that resolving records no decision), `dispatch_comment` (a reply under an
+  open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
+  insert, then a read back), `dispatch_artifact` (never upload a document's own name to change
+  it) and `dispatch_architecture_sync` (what a failed source's line still shows, and that a
+  credential or branch problem with `repo` is `409 SOURCE_ACCESS`).
+- `dispatch ask --help` says never to create an issue to park a question, and `dispatch issue
+  --help` says to create a project only when a person asks for one, and that work across projects
+  goes in the project that owns most of it.
+- `DISPATCH_HREF_REFERENCES`: a live document page's `#b-<id>` href names that block,
+  `dispatch://…#b-<id>`, where it named the document; any other fragment still names the document,
+  and a version page names that version whatever its fragment (`/issues/KEY/spec?v=N` is
+  `dispatch://KEY/artifact/spec@vN`), rows the table now carries.
+- `dispatch_read`'s `ref` lists the three block forms (`#b-<block id>[@vN]` on a spec, an issue's
+  document or a project document) and the id's percent-encoding, and its description says what a
+  block read prints; `dispatch_ask`'s `ref` names a block among what it takes; and
+  `dispatch_doc_edit` says a `{#id}` over 256 bytes is stored but its block is no graph node.
 
 - The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
   `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation

@@ -35,14 +35,23 @@ import (
 // for a token login: it names the credential after the token's ServiceAccount instead.
 const launcherService = "legion-daemon"
 
-// loginRetryInitial and loginRetryMax bound the wait after a token login that failed (the broker
-// refused it or did not answer, or the token file could not be read): the first wait is
-// loginRetryInitial, each one after it doubles, up to loginRetryMax, and a login that succeeds
-// resets it. No person sees a failed login, so nothing is asked of anyone while it retries.
+// loginRetryInitial and loginRetryMax bound the wait after a token login that failed because the
+// broker refused it (any answer but a 5xx or a 200 with a body of the contract's shape, so every
+// 4xx, 429 included) or the token file could not be read or was empty: the first wait is
+// loginRetryInitial, each one after it doubles, up to loginRetryMax.
+// unavailableRetryInitial and unavailableRetryMax bound the wait after a login the broker was not
+// there to decide: one given no HTTP answer at all, or a 5xx answer from the broker or its front
+// door. They bound it the same way and on the pod renewer's schedule: the broker is down, out of
+// reach or cannot reach its database, nothing it decided needs a slower retry, and every pod
+// enrollment waits on the login, so the daemon logs in again within seconds of the broker serving
+// again. A login that succeeds resets both. No person sees a failed login, so nothing is asked of
+// anyone while it retries.
 // Package-level so tests can shrink them.
 var (
-	loginRetryInitial = 30 * time.Second
-	loginRetryMax     = 5 * time.Minute
+	loginRetryInitial       = 30 * time.Second
+	loginRetryMax           = 5 * time.Minute
+	unavailableRetryInitial = 2 * time.Second
+	unavailableRetryMax     = 10 * time.Second
 )
 
 // Client speaks the broker's token-login and enrollment routes. URL is the broker's base URL with
@@ -142,16 +151,18 @@ func IsPermanent(err error) bool {
 }
 
 // Start logs the daemon in with its token now and keeps it logged in until ctx ends
-// (keepLoggedIn), under the retry bounds loginRetryInitial and loginRetryMax hold at the call. It
-// returns after the first login, with that login's error. No step of it asks a person anything.
-// Call it once.
+// (keepLoggedIn), under the retry bounds the four retry variables hold at the call. A first login
+// that fails starts the loop's wait on the schedule its failure calls for (loginRetry): the short
+// one when the broker gave no HTTP answer or a 5xx, the long one otherwise. It returns after the
+// first login, with that login's error. No step of it asks a person anything. Call it once.
 func (c *Client) Start(ctx context.Context) error {
-	retry := backoff{initial: loginRetryInitial, most: loginRetryMax}
+	retry := newLoginRetry()
+	var retryAt time.Time
 	_, err := c.Login(ctx)
 	if err != nil {
-		retry.failed = 1
+		retryAt = time.Now().Add(retry.failed(err))
 	}
-	go c.keepLoggedIn(ctx, retry)
+	go c.keepLoggedIn(ctx, retry, retryAt)
 	return err
 }
 
@@ -179,7 +190,8 @@ func (c *Client) Login(ctx context.Context) (time.Time, error) {
 }
 
 // tokenLogin is one POST /v1/launcher-credentials/token, answering the credential the broker
-// issued.
+// issued. A POST the broker gave no HTTP answer to, while ctx has not ended, or one answered with a
+// 5xx, fails with a *brokerUnavailableError; the 5xx one wraps the answer's *APIError.
 func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 	raw, err := os.ReadFile(c.TokenFile)
 	if err != nil {
@@ -202,7 +214,13 @@ func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 	}
 	status, body, err := c.do(ctx, http.MethodPost, "/v1/launcher-credentials/token", map[string]string{"token": token, "request": request}, nil)
 	if err != nil {
+		if ctx.Err() == nil {
+			return nil, &brokerUnavailableError{err: err}
+		}
 		return nil, err
+	}
+	if status >= 500 && status <= 599 {
+		return nil, &brokerUnavailableError{err: refusal(status, body)}
 	}
 	if status != http.StatusOK {
 		return nil, refusal(status, body)
@@ -235,16 +253,13 @@ func (c *Client) LoginStatus() LoginState {
 	return LoginState{State: "none"}
 }
 
-// keepLoggedIn is Start's loop, retry counting how many logins in a row have failed so far: it
-// logs in again when nextDue says, and recomputes that whenever a call wakes it. After a failed
-// login it waits retry.wait before the next, so a refresh the broker keeps refusing, or a token file
-// it cannot read, is retried at 30 s doubling to 5 min and never in a tight loop, whether or not a
-// credential is still held.
-func (c *Client) keepLoggedIn(ctx context.Context, retry backoff) {
-	var retryAt time.Time
-	if retry.failed > 0 {
-		retryAt = time.Now().Add(retry.wait())
-	}
+// keepLoggedIn is Start's loop, retry counting the logins in a row that have failed so far and
+// retryAt when the next is due after the latest failure: it logs in again when nextDue says, and
+// recomputes that whenever a call wakes it. After a failed login it waits as retry says before the
+// next, so a login the broker keeps refusing, or a token file it cannot read, is retried at 30 s
+// doubling to 5 min, and one the broker gives no HTTP answer or a 5xx to at 2 s doubling to 10 s,
+// never in a tight loop, whether or not a credential is still held.
+func (c *Client) keepLoggedIn(ctx context.Context, retry loginRetry, retryAt time.Time) {
 	for {
 		timer := time.NewTimer(time.Until(c.nextDue(time.Now(), retryAt)))
 		select {
@@ -260,11 +275,11 @@ func (c *Client) keepLoggedIn(ctx context.Context, retry backoff) {
 			if ctx.Err() != nil {
 				return
 			}
-			retry.failed++
-			retryAt = time.Now().Add(retry.wait())
+			retryAt = time.Now().Add(retry.failed(err))
 			continue
 		}
-		retry.failed, retryAt = 0, time.Time{}
+		retry.won()
+		retryAt = time.Time{}
 	}
 }
 
@@ -398,8 +413,8 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 	return status, raw, nil
 }
 
-// backoff is the login loop's wait after failed consecutive logins: initial after the first,
-// doubled for each one after it, never more than most.
+// backoff is a wait after failed consecutive logins: initial after the first, doubled for each one
+// after it, never more than most.
 type backoff struct {
 	initial, most time.Duration
 	failed        int
@@ -412,6 +427,49 @@ func (b backoff) wait() time.Duration {
 	}
 	return min(wait, b.most)
 }
+
+// loginRetry is the login loop's wait after failed logins, on two schedules: unavailable counts the
+// run of logins the broker gave no HTTP answer or a 5xx to (unavailableRetryInitial doubling to
+// unavailableRetryMax), refused the run of every other failed login (loginRetryInitial doubling to
+// loginRetryMax). A failure of one kind ends the other kind's run, so when the kind changes, that
+// kind's schedule starts fresh; a login that wins ends both.
+type loginRetry struct {
+	unavailable, refused backoff
+}
+
+// newLoginRetry is a loginRetry under the bounds the retry variables hold now.
+func newLoginRetry() loginRetry {
+	return loginRetry{
+		unavailable: backoff{initial: unavailableRetryInitial, most: unavailableRetryMax},
+		refused:     backoff{initial: loginRetryInitial, most: loginRetryMax},
+	}
+}
+
+// failed records a login that failed with err and answers the wait before the next one.
+func (r *loginRetry) failed(err error) time.Duration {
+	var unavailable *brokerUnavailableError
+	if errors.As(err, &unavailable) {
+		r.refused.failed = 0
+		r.unavailable.failed++
+		return r.unavailable.wait()
+	}
+	r.unavailable.failed = 0
+	r.refused.failed++
+	return r.refused.wait()
+}
+
+// won records a login that won a credential.
+func (r *loginRetry) won() { r.unavailable.failed, r.refused.failed = 0, 0 }
+
+// brokerUnavailableError is a token login the broker was not there to decide: the POST failed
+// before a response came back, or while it was read, or it was answered with a 5xx, by the broker
+// or by a front door with no broker behind it. err is the transport's error, which names the route
+// and never the token or the request object, or the 5xx answer's *APIError; its message is err's.
+type brokerUnavailableError struct{ err error }
+
+func (e *brokerUnavailableError) Error() string { return e.err.Error() }
+
+func (e *brokerUnavailableError) Unwrap() error { return e.err }
 
 // noCredentialError is the fail-closed refusal Enroll/Revoke return with no live launcher
 // credential: non-permanent, naming why — the latest login's failure, the broker's refusal of the

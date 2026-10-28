@@ -75,6 +75,12 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 	}, nil
 }
 
+// eventReplayHeader is the response header GET /api/v1/events answers "complete" on a resuming
+// connection (since=, or Last-Event-ID) whose since is at or below the event log's head when it
+// subscribed: the stream replays every event after since before it goes live, so the client has
+// missed nothing. The browser reads it same-origin, so no CORS exposure is needed.
+const eventReplayHeader = "X-Dispatch-Event-Replay"
+
 func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -131,14 +137,22 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A cold client asked for no backlog, and a since above the head can only be an id of a log
-	// this one replaced; both start at the head this connection just read.
-	if !sinceProvided || since > head {
+	// A resuming connection whose since is at or below the head is replayed every event after it
+	// below, so it missed nothing while it was away, and says so in eventReplayHeader: a client
+	// may then skip the whole refresh it owes a gap. A cold connect asked for no backlog and a
+	// since above the head can only be an id of a log this one replaced; neither was replayed what
+	// it missed, so neither carries the header, and both start at the head this connection just
+	// read.
+	replayComplete := sinceProvided && since <= head
+	if !replayComplete {
 		since = head
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	if replayComplete {
+		w.Header().Set(eventReplayHeader, "complete")
+	}
 	w.WriteHeader(http.StatusOK)
 	// One comment line with the headers, so the stream opens in every browser now. Firefox (the
 	// browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this stream only
@@ -228,7 +242,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case <-heartbeat.C:
 			// The caller is resolved again on every heartbeat, so a stream outlives its session
 			// (a logout, a membership the sign-in issuer no longer confirms) by one beat at most.
-			if _, _, err := s.optionalActor(r); err != nil {
+			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
 				return
 			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
@@ -351,8 +365,9 @@ type decodedAskEventPayload struct {
 
 // attachAskEventFields fills the ask fields an event payload cannot carry from the write that
 // appended it: the id of the event that opened the ask, its inbound backlink count, and its anchor
-// document. Ask payloads are decoded because those fields are added; every other payload passes
-// through as the database returned it.
+// document. Ask payloads are decoded because those fields are added, and an ask.answered payload's
+// selected lists are read as model.AskAnswer reads them (normalizeAnsweredSelected); every other
+// payload passes through as the database returned it.
 func (s *server) attachAskEventFields(ctx context.Context, events []model.Event) error {
 	asks := []model.Ask{}
 	payloads := []decodedAskEventPayload{}
@@ -369,6 +384,11 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		payload := map[string]any{}
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			return fmt.Errorf("decode %s payload: %w", events[index].Type, err)
+		}
+		if events[index].Type == "ask.answered" {
+			if err := normalizeAnsweredSelected(raw, payload); err != nil {
+				return err
+			}
 		}
 		askID, ok := payload["id"].(string)
 		if !ok || askID == "" {
@@ -401,6 +421,28 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		}
 		payload.event.Payload = json.RawMessage(encoded)
 	}
+	return nil
+}
+
+// normalizeAnsweredSelected writes model.AskAnswer's reading of selected into an ask.answered
+// payload's answer and previous_answer: an ask.answered event written before answers stored an
+// empty list holds null there, and a client reads the list's length. Every other field of either
+// answer stays as the payload holds it, and an answer the payload does not carry stays absent.
+func normalizeAnsweredSelected(raw json.RawMessage, payload map[string]any) error {
+	var answers struct {
+		Answer         *model.AskAnswer `json:"answer"`
+		PreviousAnswer *model.AskAnswer `json:"previous_answer"`
+	}
+	if err := json.Unmarshal(raw, &answers); err != nil {
+		return fmt.Errorf("decode ask.answered answers: %w", err)
+	}
+	setSelected := func(key string, answer *model.AskAnswer) {
+		if fields, ok := payload[key].(map[string]any); ok && answer != nil {
+			fields["selected"] = answer.Selected
+		}
+	}
+	setSelected("answer", answers.Answer)
+	setSelected("previous_answer", answers.PreviousAnswer)
 	return nil
 }
 

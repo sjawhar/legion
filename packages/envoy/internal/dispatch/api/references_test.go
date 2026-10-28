@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -168,6 +170,168 @@ func TestIssueReferencesTruncateBeyondDepthEight(t *testing.T) {
 	}
 }
 
+// referenceAuthorLists is the cycle of stored author lists the members' versions carry: JSON null
+// and an empty list kept apart, several actors in one list, and actors with an origin, an owner
+// and a service.
+var referenceAuthorLists = []string{
+	`null`,
+	`[]`,
+	`[{"kind":"human","id":"alice"}]`,
+	`[{"kind":"human","id":"alice"},{"kind":"session","id":"session-a"}]`,
+	`[{"kind":"session","id":"session-b","origin":{"host":"example-host-a","machine":"example-machine-a","cwd":"/work/example","session_title":"Example session"}}]`,
+	`[{"kind":"human","id":"bob"}]`,
+	`[{"kind":"human","id":"carol","owner":"alice"}]`,
+	`[{"kind":"service","id":"service-a","service":"example-service"}]`,
+	`[{"kind":"session","id":"session-c"}]`,
+	`[{"kind":"human","id":"bob"},{"kind":"human","id":"alice"}]`,
+	`[{"kind":"session","id":"session-a"}]`,
+	`[{"kind":"human","id":"dave"}]`,
+}
+
+// seedReferenceDocumentHistory gives a document versions 2 through versions, rewrites version 1's
+// authors, and sets its creator. Version n stores referenceAuthorLists[((n-1)/2+offset) mod len],
+// so consecutive versions repeat a list. Every version keeps version 1's markdown, so the live
+// document still matches its latest version and a settlement writes no version of its own.
+func seedReferenceDocumentHistory(t *testing.T, database *store.Store, artifactID string, versions, offset int, createdBy string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `update artifacts set created_by = $2::jsonb where id = $1`, artifactID, createdBy); err != nil {
+		t.Fatalf("set document creator: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update artifact_versions set authors = (($2::text[])[($3::int % cardinality($2::text[])) + 1])::jsonb
+		where artifact_id = $1 and number = 1
+	`, artifactID, referenceAuthorLists, offset); err != nil {
+		t.Fatalf("set first version authors: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, created_at, doc_update_version)
+		select first.artifact_id, n, first.markdown,
+		       (($2::text[])[(((n - 1) / 2 + $3::int) % cardinality($2::text[])) + 1])::jsonb,
+		       n % 7 = 0, case when n % 3 = 0 then 'Summary ' || n end,
+		       first.created_at + n * interval '1 millisecond', first.doc_update_version
+		from artifact_versions first, generate_series(2, $4::int) n
+		where first.artifact_id = $1 and first.number = 1
+	`, artifactID, referenceAuthorLists, offset, versions); err != nil {
+		t.Fatalf("insert document versions: %v", err)
+	}
+}
+
+func TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	ctx := context.Background()
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	documents := []struct {
+		name      string
+		versions  int
+		offset    int
+		createdBy string
+	}{
+		{"Single version", 1, 3, `{"kind":"human","id":"creator-human"}`},
+		{"Forty versions", 40, 0, `{"kind":"session","id":"creator-session","origin":{"host":"example-host-b","machine":"example-machine-b","cwd":"/work/example-b","session_title":"Creator session"}}`},
+		{"Long history", 3217, 5, `{"kind":"service","id":"creator-service","service":"example-service-b"}`},
+	}
+	wantVersions := map[string]int{}
+	var forty model.Artifact
+	var citations []string
+	for _, document := range documents {
+		artifact := createProjectDocument(t, handler, "OPS", document.name, "# "+document.name+"\n")
+		seedReferenceDocumentHistory(t, database, artifact.ID, document.versions, document.offset, document.createdBy)
+		wantVersions[artifact.ID] = document.versions
+		if document.versions == 40 {
+			forty = artifact
+		}
+		citations = append(citations, "dispatch://OPS/artifact/"+artifact.Slug)
+	}
+	createReferenceAPIComment(t, handler, issue.Key, strings.Join(citations, "\n"))
+
+	response := issueReferencesRequest(t, handler, issue.Key, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("get issue references: status=%d body=%s", response.Code, response.Body.String())
+	}
+	value := decodeBody[struct {
+		Members []struct {
+			Artifact struct {
+				ID        string          `json:"id"`
+				CreatedBy json.RawMessage `json:"created_by"`
+				Versions  json.RawMessage `json:"versions"`
+			} `json:"artifact"`
+		} `json:"members"`
+	}](t, response)
+	if len(value.Members) != len(documents) {
+		t.Fatalf("issue references members = %d; want %d", len(value.Members), len(documents))
+	}
+	for _, member := range value.Members {
+		artifact := member.Artifact
+		want, found := wantVersions[artifact.ID]
+		if !found {
+			t.Fatalf("unexpected reference member %q", artifact.ID)
+		}
+		delete(wantVersions, artifact.ID)
+
+		versions, err := served.loadVersions(ctx, database.Pool, artifact.ID)
+		if err != nil {
+			t.Fatalf("load versions of %q: %v", artifact.ID, err)
+		}
+		if len(versions) != want {
+			t.Fatalf("stored versions of %q = %d; want %d", artifact.ID, len(versions), want)
+		}
+		wantVersionsJSON, err := json.Marshal(versions)
+		if err != nil {
+			t.Fatalf("encode versions: %v", err)
+		}
+		gotVersionsJSON, err := json.Marshal(artifact.Versions)
+		if err != nil {
+			t.Fatalf("encode member versions: %v", err)
+		}
+		if !bytes.Equal(gotVersionsJSON, wantVersionsJSON) {
+			t.Fatalf("member %q versions differ from the per-version load:\n got %.600s\nwant %.600s", artifact.ID, gotVersionsJSON, wantVersionsJSON)
+		}
+
+		var storedCreator []byte
+		if err := database.Pool.QueryRow(ctx, `select created_by from artifacts where id = $1`, artifact.ID).Scan(&storedCreator); err != nil {
+			t.Fatalf("read creator of %q: %v", artifact.ID, err)
+		}
+		var creator model.Actor
+		if err := json.Unmarshal(storedCreator, &creator); err != nil {
+			t.Fatalf("decode creator of %q: %v", artifact.ID, err)
+		}
+		wantCreatorJSON, err := json.Marshal(creator)
+		if err != nil {
+			t.Fatalf("encode creator: %v", err)
+		}
+		gotCreatorJSON, err := json.Marshal(artifact.CreatedBy)
+		if err != nil {
+			t.Fatalf("encode member creator: %v", err)
+		}
+		if !bytes.Equal(gotCreatorJSON, wantCreatorJSON) {
+			t.Fatalf("member %q created_by = %s; want %s", artifact.ID, gotCreatorJSON, wantCreatorJSON)
+		}
+
+		if artifact.ID != forty.ID {
+			continue
+		}
+		var fortyVersions []struct {
+			Number  int             `json:"number"`
+			Authors json.RawMessage `json:"authors"`
+		}
+		if err := json.Unmarshal(artifact.Versions, &fortyVersions); err != nil {
+			t.Fatalf("decode member versions: %v", err)
+		}
+		// Offset 0: versions 1-2 store JSON null and versions 3-4 an empty list.
+		for _, check := range []struct {
+			number  int
+			authors string
+		}{{1, `null`}, {2, `null`}, {3, `[]`}, {4, `[]`}} {
+			if got := string(fortyVersions[check.number-1].Authors); fortyVersions[check.number-1].Number != check.number || got != check.authors {
+				t.Fatalf("version %d authors in the response = %s (number %d); want %s", check.number, got, fortyVersions[check.number-1].Number, check.authors)
+			}
+		}
+	}
+}
+
 func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -247,7 +411,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 
 	incoming := graphEdges(t, handler, url.Values{"to": {askRef}})
 	legionKey := legion.Key
-	if want := (model.GraphNode{Kind: "ask", ID: ask.ID, IssueKey: &legionKey, Project: "LEGION", Ref: askRef}); !reflect.DeepEqual(incoming.Node, want) {
+	if want := (model.GraphNode{
+		Kind: "ask", ID: ask.ID, IssueKey: &legionKey, Project: "LEGION", Ref: askRef,
+		MadeBy: []model.Actor{ask.Author}, MadeAt: &ask.CreatedAt, ChangedBy: []model.Actor{ask.Author}, ChangedAt: &ask.CreatedAt,
+		Parent: &model.NodeParent{Kind: "issue", ID: legion.Key, Ref: "dispatch://" + legion.Key},
+	}); !reflect.DeepEqual(incoming.Node, want) {
 		t.Fatalf("queried node = %#v; want %#v", incoming.Node, want)
 	}
 	if len(incoming.Edges) != 1 {
@@ -255,7 +423,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	edge := incoming.Edges[0]
 	acmeKey := acme.Key
-	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID}
+	wantNode := model.GraphNode{
+		Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID,
+		MadeBy: []model.Actor{message.Author}, MadeAt: &message.CreatedAt, ChangedBy: []model.Actor{message.Author}, ChangedAt: &message.CreatedAt,
+		Parent: &model.NodeParent{Kind: "issue", ID: acme.Key, Ref: "dispatch://" + acme.Key},
+	}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}
@@ -305,9 +477,10 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 }
 
 // An issue's backlinks are its mentions and its structure in one list: the child issue
-// (child_of), its own documents (attached_to), and a document elsewhere that cites it, whose
-// excerpt is the block containing the mention. Read from the citing document the same mention
-// points out at the issue; read from the issue's spec the structural edge points out at it.
+// (child_of), its own documents (attached_to), and a document elsewhere that cites it, listed
+// from the block holding the mention, whose excerpt is that block. Read from the citing document
+// the same mention points out at the issue; read from the issue's spec the structural edge points
+// out at it.
 func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -336,8 +509,8 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 		}
 	}
 	mention := byKind["mentions"]
-	if mention.Node.Kind != "artifact" || mention.Node.ID != design.ID || mention.Node.Project != "OPS" || mention.Node.Ref != "dispatch://OPS/artifact/design-notes" {
-		t.Fatalf("mention node = %#v; want the OPS design document", mention.Node)
+	if mention.Node.Kind != "block" || mention.Node.Document != "dispatch://OPS/artifact/design-notes" || mention.Node.Project != "OPS" {
+		t.Fatalf("mention node = %#v; want a block of the OPS design document", mention.Node)
 	}
 	if mention.Excerpt == nil || mention.Excerpt.BlockID == "" || mention.Excerpt.Text != "The plan lives in dispatch://"+parent.Key+" and nowhere else." {
 		t.Fatalf("mention excerpt = %#v; want the containing paragraph block with its id", mention.Excerpt)
@@ -472,7 +645,8 @@ func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 // A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
 // span and a third project's issue as an autolink, which the spec stores as a link whose text is
 // its target, mentions all three. The source of each mention is the spec document, not the issue
-// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+// that owns it: the issue node writes no mention, and each target's backlink names the spec's
+// block holding it.
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -509,8 +683,8 @@ func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T
 	}
 	for _, target := range targets {
 		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
-		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
-			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "block" || backlinks[0].Node.Document != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from a block of %s", target.Key, backlinks, specRef)
 		}
 	}
 }
@@ -629,9 +803,20 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		t.Fatalf("rebuild refs: %v", err)
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
-	// that does not exist is the one orphan.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6}) {
+	// that does not exist is the one orphan. Each of the three is marked owed a block index.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3}) {
 		t.Fatalf("rebuild report = %#v", report)
+	}
+	var documents, owed int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), count(*) filter (where b.artifact_id is not null and b.version is null)
+		from artifacts a left join document_block_versions b on b.artifact_id = a.id
+		where a.kind = 'doc'
+	`).Scan(&documents, &owed); err != nil {
+		t.Fatalf("read the block index of every document: %v", err)
+	}
+	if documents != 3 || owed != documents {
+		t.Fatalf("after rebuild-refs %d of %d documents are owed a block index, want every one", owed, documents)
 	}
 	rebuilt := readRefRows(t, database)
 	if len(rebuilt) != len(live) {

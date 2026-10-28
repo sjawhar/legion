@@ -327,9 +327,10 @@ export interface Issue {
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
- * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
- * per request. It is stored nowhere and is never on an event payload, which is why it is not a
- * field of `Issue`. Both are null when the issue has no route.
+ * Every issue read (the detail, the list, the pinned list) and every ask read (`AskReach`, for
+ * the ask's issue's route) resolves this from the server's copy of the listener's session list,
+ * at most 5 s old. It is stored in no table and is never on an event payload, which is why it is
+ * not a field of `Issue`. Both are null when there is no route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
@@ -427,6 +428,44 @@ export interface IssueSummaryPage {
   readonly total: number;
   readonly limit: number;
   readonly offset: number;
+}
+
+/**
+ * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
+ * `latest_version` is its greatest version number, null only for an artifact with no version,
+ * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
+ * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
+ */
+export interface IssueReferenceSummaryDocument {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly kind: Artifact["kind"];
+  readonly latest_version: number | null;
+  readonly primary: boolean;
+}
+
+/**
+ * `GET /api/v1/issues/{key}/summary`: what a reference to an issue shows, read without the full
+ * issue (`IssueDetails`). `documents` is every artifact of the issue, in the order the full read
+ * lists its `artifacts`, so an issue reference and its documents' references share one read.
+ * 404 `NOT_FOUND` for no such issue.
+ */
+export interface IssueReferenceSummary {
+  readonly key: string;
+  readonly project: string;
+  readonly title: string;
+  readonly status: string;
+  readonly documents: IssueReferenceSummaryDocument[];
+}
+
+/**
+ * `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to a project document
+ * shows, read without its versions. The slug or unambiguous filename resolves as the project
+ * document read resolves it (404 `ARTIFACT_NOT_FOUND`, 400 `ARTIFACT_REFERENCE_AMBIGUOUS`).
+ */
+export interface DocumentReferenceSummary extends Omit<IssueReferenceSummaryDocument, "primary"> {
+  readonly project: string;
 }
 
 export interface IssueChild {
@@ -580,7 +619,15 @@ export interface ArtifactApproval {
   readonly latest_version: number;
   readonly version?: number;
   readonly by?: Actor;
+  /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
+  /** The latest review's event sequence on the document's owner, which orders the review among
+   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
+   *  on every read the release before that serves (during a rollout or a rollback), so a missing
+   *  `seq` does not prove an older review. It orders; it does not say which versions the review
+   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
+   *  `artifact.version`. */
+  readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
@@ -807,9 +854,30 @@ export interface Ask extends AnchorPosition {
 export const ASK_TURNS = ["human", "agent"] as const;
 export type AskTurn = (typeof ASK_TURNS)[number];
 
+/** Whom besides the followers a person's answer and replies on an ask reach, as every ask read
+ *  carries it: the single-ask read (`AskRead`) and each list row's thread (`AskThread`).
+ *
+ *  The inherited `route_status` and `route_holder` are the issue reads' `IssueRouteReach` for
+ *  `route`, resolved per read from one listener read and stored nowhere: `route_holder` is the
+ *  live session `route` reaches right now (the routed session while the Envoy listener lists it,
+ *  or the session holding the role), so a reader can count each session once (the claimant may be
+ *  the same session). `route_status` tells a route nobody holds (`no_holder`) from one Dispatch
+ *  cannot judge because the listener is unconfigured or did not answer (`unknown`); both leave
+ *  `route_holder` null. Both are null when there is no route, and on a project document's ask. */
+export interface AskReach extends IssueRouteReach {
+  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
+   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
+   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
+  readonly claimant: string | null;
+  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
+   *  the ask reach that session or role holder as well as the claimant and the followers. Null
+   *  when the issue has no route, and on a project document's ask. */
+  readonly route: string | null;
+}
+
 /** An ask's thread as a list row carries it: everything a card needs before its first targeted
  *  thread refresh. */
-export interface AskThread {
+export interface AskThread extends AskReach {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
@@ -987,7 +1055,9 @@ export interface AskAnswer {
 }
 
 export interface AskResolution {
-  readonly kind: "retracted" | "resolved";
+  /** `withdrawn` is written by the server alone, when the ask's issue is closed; no caller can
+   *  resolve an ask with it, and reopening the issue opens the ask again. */
+  readonly kind: "retracted" | "resolved" | "withdrawn";
   readonly reason: string;
   readonly actor: Actor;
   readonly at: string;
@@ -1008,18 +1078,56 @@ export interface ReferenceChangesPayload {
    *  their batched backlink counts refreshes exactly those rows. Absent when the write moved
    *  no counted node, and on every event recorded before the field existed. */
   readonly references_changed?: ChangedReference[];
-  /** The write moved more counted nodes than an event carries: `references_changed` is absent
-   *  and the reader refreshes every list that holds a count. */
+  /** The write moved more counted nodes of some kind than an event carries (`refs.CountedChangeLimit`
+   *  of each kind): a reader that does not read `references_changed_truncated_kinds` refreshes
+   *  every list that holds a count. */
   readonly references_changed_truncated?: boolean;
+  /** The kinds whose targets the write cut from `references_changed`, set with
+   *  `references_changed_truncated`; the targets of every other kind are still named. A reader
+   *  refreshes every read of each kind listed, and only those. Absent from an event written
+   *  before the field existed, whose truncation said nothing of its kinds. */
+  readonly references_changed_truncated_kinds?: ChangedReference["kind"][];
+}
+
+/** Whose Replies count a write can have moved, mirroring the server's `ThreadLogins` payload
+ *  field: every login with a Replies row (the server's `user_threads`) on the write's thread once
+ *  the write is in, sorted, `[]` when nobody has one. Each payload family names the event types
+ *  that carry it; it is absent from every other type and from every event written before the
+ *  field existed, which a reader takes as "anyone's count may have moved". */
+export interface ThreadLoginsPayload {
+  readonly thread_logins?: string[];
+}
+
+/** What an `issue.created`, `issue.updated` or `issue.closed` write changed, read in its own
+ *  transaction. Each field is absent from every other `issue.*` type and from an event written
+ *  before the fields existed, which a reader takes as "anything may have changed". */
+export interface IssueEventChanges {
+  /** Each field whose value the write moved, of `title`, `status`, `closed_at` (for a close or a
+   *  reopen), `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo`, `components`,
+   *  `blocked_by` and `external_links`; for `issue.created`, every field the new issue holds a
+   *  value in. */
+  readonly changed?: string[];
+  /** The issue's parent chain after the write, parent first up to the root; `[]` for a root. */
+  readonly ancestors?: string[];
+  /** Present only when the status moved: for a close or a reopen every login with a Replies row
+   *  on one of the issue's open asks, for any other status move `[]`. */
+  readonly thread_logins?: string[];
 }
 
 /** Every `issue.*` event payload is the issue row, flat, plus what the write moved in the
  *  reference graph: a new issue's spec text is indexed in the creating transaction. */
-export type IssueEventPayload = Issue & ReferenceChangesPayload;
+export type IssueEventPayload = Issue & ReferenceChangesPayload & IssueEventChanges;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
- *  graph. */
-export type AskEventPayload = Ask & ReferenceChangesPayload;
+ *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
+ *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
+ *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
+ *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
+ *  missing `restored` does not prove an event is a new answer. `thread_logins` (the ask's own
+ *  thread) is carried by `ask.opened`, `ask.answered` and `ask.resolved`. */
+export type AskEventPayload = Ask &
+  ReferenceChangesPayload &
+  ThreadLoginsPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -1150,11 +1258,13 @@ export interface AcceptSuggestionResponse extends Comment {
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
  * written, and events are retained verbatim, so the row's later additions are optional here:
  * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
- * before that day carries neither. A read row (`Comment`) always has both.
+ * before that day carries neither. A read row (`Comment`) always has both. `thread_logins` (the
+ * comment's ask, else its root) is carried by `comment.created` and `comment.answered`.
  */
 export interface CommentEventPayload
   extends Omit<Comment, "mentions" | "deliveries">,
-    ReferenceChangesPayload {
+    ReferenceChangesPayload,
+    ThreadLoginsPayload {
   readonly mentions?: CommentMention[];
   readonly deliveries?: CommentDelivery[];
   readonly artifact_name: string;
@@ -1216,16 +1326,22 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
  *   key and a same-mode re-send of it reaches the agent.
  *
- * It fails in three places. A host holds its keys in memory, so one that restarts after the first
- * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
- * not rare: `claude --resume` starts a new channel process on the same conversation, and a
- * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
- * session answered with an error no more than any other repeat, so a session the listener pushes
- * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
- * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
- * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
- * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
- * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * It fails in three places. A host's `createDeliveryDedupe` holds its keys in memory, so a host
+ * that keeps nothing else and restarts after the first frame landed has forgotten it, and a Retry
+ * reaches that agent a second time; that is ordinary, not rare: `claude --resume` starts a new
+ * channel process on the same conversation, and a Sandbox pod resumes its session in a new
+ * process. pi-envoy and claude-envoy, from the releases that carry `@legion/envoy-client/replay`,
+ * also keep a ledger of the frames their session was handed (pi-envoy in the session's
+ * transcript, claude-envoy in a file per session id) and drop a repeat it holds after a restart,
+ * for 72 hours and up to 20,000 frames; only a crash between the hand-over and the ledger write
+ * still lets that Retry through. Older plugins still forget, and the dashboard cannot tell which
+ * one a session runs. The stream stores a re-send of an attempt the session answered with an
+ * error no more than any other repeat, so a session the listener pushes to never receives it, and
+ * its attempt reads as a duplicate. The dashboard therefore offers no same-mode Retry for such an
+ * attempt and points at a mode change, which is a new key; sending that Retry under a new key is
+ * LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT` keys, forgetting the oldest
+ * past it, so a re-send of a key it was handed before that many later ones reaches the agent
+ * again. The limit is two and a half times what the whole stream stored in
  * one window when it was set, so a host reaches it only once traffic grows past that or a
  * producer floods a topic it follows.
  *
@@ -1328,19 +1444,31 @@ export interface Message {
 }
 
 /**
- * A node whose inbound reference edges one write moved, addressed the way the lists carrying
- * its backlink count are keyed: an issue by key, an ask by id together with the issue or
- * document whose ask list holds its row. Only the kinds a reader counts are named; a citation
- * of a comment, message or document changes no counted row and the graph query covers it.
+ * A node whose inbound reference edges one write moved, addressed the way the reads that show
+ * it are keyed: an issue by key, an ask by id together with the issue or document whose ask list
+ * holds its row, and a document or file (`artifact`) by its uuid (`id`, the node id its
+ * `GET /api/v1/references` read reports) and its `ref`, the dispatch:// address its Referenced by
+ * panel is opened on (`dispatch://CORE/artifact/runbook`, `dispatch://CORE-1/spec`,
+ * `dispatch://CORE-1/artifact/notes-md`). An `artifact` entry carries neither `issue_key` nor
+ * `artifact_id`; `ref` is absent for one whose owner names no address. A block of a document
+ * (`block`) is named by its node id (`<document ref_key>#<block id>`, as its read reports it), its
+ * `ref` (`dispatch://CORE-1/spec#b-intro`) and its document's uuid as `artifact_id`, whose panel
+ * lists the edges at its blocks; a write names one whose inbound edges or whose text it moved. A
+ * citation of a comment or message changes no row read by name and the graph query covers it. An
+ * event written before `artifact` or `block` entries existed names none.
  */
 export interface ChangedReference {
-  readonly kind: "issue" | "ask";
+  readonly kind: "issue" | "ask" | "artifact" | "block";
   readonly id: string;
   readonly issue_key?: string | null;
   readonly artifact_id?: string | null;
+  readonly ref?: string;
 }
 
-export interface MessageEventPayload extends Message, ReferenceChangesPayload {
+/** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
+ *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
+ *  thread, so its messages carry none. */
+export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
   /** First 160 characters of the reply target's body; empty otherwise. */
   readonly reply_body?: string;
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
@@ -1400,6 +1528,13 @@ export type SearchOwner =
       readonly name: string;
     };
 
+/** Where an ask hit stands, read when the search ran. `answer` on a resolved ask is the last
+ *  answer a person gave before it was closed (rows document settlement retracted while answered). */
+export type SearchAsk =
+  | { readonly state: "open" }
+  | { readonly state: "answered"; readonly answer: AskAnswer }
+  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
+
 export interface SearchResult {
   readonly kind: SearchResultKind;
   /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
@@ -1421,6 +1556,9 @@ export interface SearchResult {
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
+  /** Where the ask stands: present on every `ask` hit from a Dispatch of this release, absent on
+   *  every other kind and on any hit from an older Dispatch. */
+  readonly ask?: SearchAsk;
 }
 
 /** The four paging fields a Dispatch that supports search paging always answers together. */
@@ -1608,6 +1746,10 @@ export interface IssueReferences {
   readonly truncated: boolean;
 }
 
+// OutgoingReference is one Dispatch mention a document writes, by its target's kind and id.
+// `artifact` is the target document when it resolves; a block target (`kind: "block"`, `to_id`
+// `<document ref_key>#<block id>`) carries its document, and is listed only while a current
+// version of that document holds the block.
 export interface OutgoingReference {
   readonly kind: string;
   readonly to_id: string;
@@ -1634,12 +1776,65 @@ export type GraphEdgeKind =
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
+//
+// Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
+// and `changed_at` (who last changed its own text or fields and when; the maker when nothing
+// changed it since), `parent` (the node it belongs to) and `parent_version` (the version of the
+// parent it belongs to). An actor list Dispatch never recorded is `[]`, any other fact `null`.
+// They are optional because a server older than them omits them.
+//
+// A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
+// its document's reference as `document`, and `changed_version`, the document version in which
+// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
+// on the node a reference read names: `text` is the block's whole current text, and `pin`
+// answers a reference pinned to a version.
 export interface GraphNode {
-  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session" | "component";
+  readonly kind:
+    | "issue"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message"
+    | "session"
+    | "component";
   readonly id: string;
+  readonly block_id?: string;
   readonly issue_key?: string;
   readonly project?: string;
   readonly ref?: string;
+  readonly document?: string;
+  readonly changed_version?: number;
+  readonly made_by?: Actor[];
+  readonly made_at?: string | null;
+  readonly changed_by?: Actor[];
+  readonly changed_at?: string | null;
+  readonly parent?: GraphNodeParent | null;
+  readonly parent_version?: number | null;
+  readonly text?: string;
+  readonly pin?: BlockPin;
+}
+
+// GraphNodeParent is the node a graph node belongs to: `id` is the parent node's own `id` (an
+// artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref` its dispatch://
+// reference, absent when it has none (a session).
+export interface GraphNodeParent {
+  readonly kind: GraphNode["kind"];
+  readonly id: string;
+  readonly ref?: string;
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now.
+// `state` is "unchanged" when its current text equals `text`, "changed" when it differs, and
+// "removed" when no current version holds the block; `removed_version` is then the version that
+// deleted it.
+export interface BlockPin {
+  readonly version: number;
+  readonly ref: string;
+  readonly text: string;
+  readonly state: "unchanged" | "changed" | "removed";
+  readonly removed_version?: number;
 }
 
 // GraphExcerpt is the text shown beside an edge: the block containing a document mention
@@ -1652,10 +1847,13 @@ export interface GraphExcerpt {
 // GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
 // end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
 // writes, and `source_seq` is the events.id that introduced a mention (null for structure).
+// `block`, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 export interface GraphEdge {
   readonly kind: GraphEdgeKind;
   readonly direction: "in" | "out";
   readonly node: GraphNode;
+  readonly block?: GraphNode;
   readonly excerpt?: GraphExcerpt;
   readonly created_at: string;
   readonly source_seq: number | null;
@@ -1667,6 +1865,26 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+export interface BlockLink {
+  readonly kind: GraphEdgeKind;
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly created_at: string;
+  readonly created_version: number;
+}
+
+// BlockLinks is GET /api/v1/block-links?from=<document ref>&to=<document ref>: the two documents
+// and the links from blocks of `from` to blocks of `to`, newest first, then by `from.id`, then by
+// `to.id`. A link is listed only while both of its blocks are current blocks of their documents.
+export interface BlockLinks {
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly links: BlockLink[];
+}
+
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }
@@ -1676,6 +1894,23 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
   readonly name: string;
   readonly version: Version;
   readonly diff?: string;
+}
+
+/** `artifact.human_edited`: a person's browser edits of a document, sent once the document has
+ *  been quiet for 30 seconds after the last of them. `from_version` is the version before the
+ *  quiet window's first version by a person, `to_version` the window's last one; `editors` names
+ *  each person who wrote one, and the event's actor is the one who edited last. `diff` is the
+ *  unified diff of the two versions' stored markdown, cut at its last line end within 4,096 bytes,
+ *  `diff_truncated` then true; it is empty when a version is no longer stored. The event reaches
+ *  each session the document credits and the issue's route, never a person. */
+export interface ArtifactHumanEditedEventPayload {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly from_version: number;
+  readonly to_version: number;
+  readonly editors: readonly string[];
+  readonly diff: string;
+  readonly diff_truncated: boolean;
 }
 
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
@@ -1788,7 +2023,16 @@ export interface ArchitectureSyncFailedEventPayload {
 
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
-  readonly state: UserIssueState;
+  /** The viewer's row for one issue as the write left it. Absent from a snooze's event, which
+   *  every signed-in stream carries and so names no issue of the writer's. */
+  readonly state?: UserIssueState;
+  /** Which of `pinned`, `last_read_seq`, `dismissed` and `snoozed` the write moved (`[]` when it
+   *  moved none), so another tab refreshes its pinned list for a pin, its whole Inbox for a snooze
+   *  or an un-snooze (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`, whose event carries only `login`
+   *  and `["snoozed"]`), and neither for a read mark. Absent from an event written before the
+   *  field existed, which a reader takes as "any of pinned, last_read_seq and dismissed may have
+   *  moved". */
+  readonly changed?: string[];
 }
 
 /** `user_agent_state.updated`: one viewer's Clear or read mark on one session's conversation
@@ -1851,18 +2095,25 @@ export const IssueDeployedEventPayloadSchema = z.strictObject({
 export type IssueDeployedEventPayload = z.infer<typeof IssueDeployedEventPayloadSchema>;
 
 /**
- * The subject Dispatch publishes its own start on, directly on the bus rather than through the
- * outbox (it is no issue's, document's or project's event), as an Envoy envelope with `source`
- * `dispatch` whose payload is `DispatchServerStartedPayload`. Mirrored by `startup.Subject` in
- * `packages/envoy/internal/dispatch/startup`, and matched whole by the Legion daemon's intake.
+ * The subject Dispatch announces its server fleet's build on, directly on the bus rather than
+ * through the outbox (it is no issue's, document's or project's event), as an Envoy envelope with
+ * `source` `dispatch` whose payload is `DispatchServerStartedPayload`. One envelope each time the
+ * commit every live Dispatch server process serves changes: a rolling update is announced once its
+ * last process of the build before has gone, a restart on the announced build is not announced, and
+ * a rollback to an earlier build is announced again. Its event id, source event id and dedupe key
+ * are `dispatch-server-started-<commit>-<seq>`, `seq` being the announcement's own number. Mirrored
+ * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`, and matched whole by the
+ * Legion daemon's intake.
  */
 export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.started";
 
 /**
- * The payload of a `server.started` envelope: the build commit Dispatch was stamped with (a
- * Dispatch built without one publishes no start) and when the process started, in UTC. The Legion
- * daemon compares the commit with the merges of its open production checks. Strict: the Go writer
- * emits exactly these two fields.
+ * The payload of a `server.started` envelope: the build commit every live Dispatch server process
+ * serves (a fleet any of whose processes carries no stamped commit is never announced) and when
+ * the fleet was found serving it, by the database's clock, in UTC. The field is named `started_at`
+ * because the Go writer and the Legion daemon carry that name. The Legion daemon compares the
+ * commit with the merges of its open production checks. Strict: the Go writer emits exactly these
+ * two fields.
  */
 export const DispatchServerStartedPayloadSchema = z.strictObject({
   commit: z.string().min(1),
@@ -1939,6 +2190,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.version";
       readonly payload: ArtifactVersionEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.human_edited";
+      readonly payload: ArtifactHumanEditedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.approved";
@@ -2324,7 +2579,7 @@ export interface CommentRead {
   readonly replies: Comment[];
 }
 
-export interface AskRead {
+export interface AskRead extends AskReach {
   readonly ask: Ask;
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
@@ -2538,6 +2793,9 @@ export const IssueEventPayloadSchema = z.object({
   priority: z.number().int().min(0).max(3).nullable().optional(),
   rank: z.string().optional(),
   route: z.string().nullish(),
+  changed: z.array(z.string()).optional(),
+  ancestors: z.array(z.string()).optional(),
+  thread_logins: z.array(z.string()).optional(),
 });
 
 export const ArtifactCreatedEventPayloadSchema = z.object({
@@ -2551,6 +2809,16 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   name: z.string().optional(),
   version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
   diff: z.string().optional(),
+});
+
+export const ArtifactHumanEditedEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  name: z.string().optional(),
+  from_version: z.number().int().optional(),
+  to_version: z.number().int().optional(),
+  editors: z.array(z.string()).optional(),
+  diff: z.string().optional(),
+  diff_truncated: z.boolean().optional(),
 });
 
 export const ArtifactReviewEventPayloadSchema = z.object({
@@ -2581,6 +2849,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  restored: z.boolean().optional(),
   anchor: z
     .object({
       quote: z.string().optional(),
@@ -2599,7 +2868,7 @@ const askEventPayloadFields = {
     .optional(),
   resolution: z
     .object({
-      kind: z.enum(["retracted", "resolved"]).optional(),
+      kind: z.enum(["retracted", "resolved", "withdrawn"]).optional(),
       reason: z.string().optional(),
       actor: z
         .object({ kind: z.string().optional(), id: z.string().optional() })
@@ -2608,6 +2877,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  thread_logins: z.array(z.string()).optional(),
 };
 
 export const AskEventPayloadSchema = z.intersection(
@@ -2683,6 +2953,7 @@ export const CommentEventPayloadSchema = z
     created_at: z.string().optional(),
     mentions: z.array(CommentMentionSchema).optional(),
     deliveries: z.array(CommentDeliverySchema).optional(),
+    thread_logins: z.array(z.string()).optional(),
   })
   // Bus frames are untrusted and this schema declares only the fields Dispatch
   // clients are known to read today, but the wire payload always carries every
@@ -2700,6 +2971,7 @@ export const MessageEventPayloadSchema = z.object({
   reply_body: z.string().optional(),
   thread_target: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
+  thread_logins: z.array(z.string()).optional(),
 });
 
 export const DispatchTargetedResourceIDSchema = z.uuid();

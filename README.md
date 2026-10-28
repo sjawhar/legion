@@ -125,7 +125,8 @@ bun run docs:dev
 | `skills/` | The skills Legion's agents load: the architect, the controller, the phase workers, Dispatch, Envoy and the review rubrics. |
 | `deploy/kubernetes/` | Example files for running Legion on Kubernetes: `legion.yaml`, the controller's file, and a model route. |
 | `docs/site/` | The documentation site, in Astro Starlight. |
-| `docs/` | Beside the site: the Kubernetes runtime's reference (`kubernetes.md`), design principles, plans and learnings. |
+| `STRATEGY.md` | What Legion and Dispatch are for, their key metrics, tracks, principles, and the boundaries that need the owner's decision. |
+| `docs/` | Beside the site: the Kubernetes runtime's reference (`kubernetes.md`), plans and learnings. |
 | `scripts/` | The live end-to-end proofs (`scripts/e2e/`) and repository tooling. |
 | `patches/` | Patches Bun applies to three editor dependencies at install. |
 | `.github/` | CI and release workflows, and the checks they run. |

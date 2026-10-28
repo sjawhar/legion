@@ -30,7 +30,7 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !human {
-		if actor, err = bearerSessionActor(actor, input.Actor); err != nil {
+		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -865,7 +865,12 @@ func (s *server) insertSessionReply(
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}
-	event, err := s.appendEvent(ctx, tx, messageEvent(reply, "message.answered", actor, thread.payload(reply, referenceChanges)))
+	payload := thread.payload(reply, referenceChanges)
+	payload.ThreadLogins, err = messageThreadLogins(ctx, tx, reply)
+	if err != nil {
+		return model.Message{}, model.Event{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, messageEvent(reply, "message.answered", actor, payload))
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 func env(m map[string]string) func(string) string {
@@ -51,6 +52,32 @@ func TestLoadRequiresMachineLoginURL(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
 		t.Fatalf("Load = (%q, %v), want the machine login URL", cfg.MachineLoginURL, err)
+	}
+}
+
+// TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
+// that carries a credential and is refused names the variable and the value as
+// redact.NotPrinted, never the user name, password or query; a clean refused value is named as
+// written.
+func TestLoadRefusesAURLWithoutPrintingItsCredential(t *testing.T) {
+	for _, row := range []struct{ name, value, want string }{
+		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw@secrets.example/v1?token=qtok77", redact.NotPrinted},
+		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw%zz@secrets.example", redact.NotPrinted},
+		{"BROKER_PUBLIC_URL", "https://secrets.example/v1", `"https://secrets.example/v1"`},
+		{"BROKER_MACHINE_LOGIN_URL", "ftp://tokuser9f3:hunter2pw@dispatch.example/x", redact.NotPrinted},
+	} {
+		e := validEnv()
+		e[row.name] = row.value
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), row.name) || !strings.Contains(err.Error(), row.want) {
+			t.Errorf("Load(%s=%q) = %v, want a refusal naming it and %s", row.name, row.value, err, row.want)
+			continue
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("Load(%s=%q) = %v, names %q", row.name, row.value, err, secret)
+			}
+		}
 	}
 }
 
@@ -140,6 +167,39 @@ func TestLoadReadsTheDrainSeconds(t *testing.T) {
 		_, err := Load(env(e))
 		if err == nil || !strings.HasPrefix(err.Error(), "BROKER_DRAIN_SECONDS must be a whole number between 0 and 120") {
 			t.Fatalf("Load(BROKER_DRAIN_SECONDS=%q) = %v, want a refusal naming BROKER_DRAIN_SECONDS and its range", bad, err)
+		}
+	}
+}
+
+// TestLoadRefusesALeaseThreeSweepsCanRunOut pins that a lease must be more than four and a half
+// sweeps: the broker tolerates a gap of three sweeps before it gives back the time no broker was
+// serving, so three sweeps must fall short of the two thirds of a lease a live session holds. The
+// defaults pass; a lease of 22 seconds with a 5-second sweep is refused naming both settings and
+// their values, and 23 passes.
+func TestLoadRefusesALeaseThreeSweepsCanRunOut(t *testing.T) {
+	if _, err := Load(env(validEnv())); err != nil {
+		t.Fatalf("Load(defaults) = %v, want the default lease and sweep accepted", err)
+	}
+	for _, c := range []struct {
+		lease, sweep string
+		refused      bool
+	}{{"22", "5", true}, {"23", "5", false}, {"900", "60", false}, {"270", "60", true}, {"271", "60", false}} {
+		e := validEnv()
+		e["BROKER_LEASE_SECONDS"], e["BROKER_SWEEP_SECONDS"] = c.lease, c.sweep
+		cfg, err := Load(env(e))
+		if !c.refused {
+			if err != nil || strconv.Itoa(cfg.LeaseSeconds) != c.lease || strconv.Itoa(cfg.SweepSeconds) != c.sweep {
+				t.Fatalf("Load(lease %s, sweep %s) = lease %d sweep %d, %v; want both accepted", c.lease, c.sweep, cfg.LeaseSeconds, cfg.SweepSeconds, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("Load(lease %s, sweep %s) accepted a lease three sweeps can run out", c.lease, c.sweep)
+		}
+		for _, want := range []string{"BROKER_LEASE_SECONDS (" + c.lease + ")", "BROKER_SWEEP_SECONDS (" + c.sweep + ")", "two thirds of its lease", "three sweeps"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Load(lease %s, sweep %s) = %q, want it to name %q", c.lease, c.sweep, err, want)
+			}
 		}
 	}
 }

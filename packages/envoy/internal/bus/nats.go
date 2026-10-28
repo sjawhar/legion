@@ -18,8 +18,22 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// ConnectOption configures the bus client.
-type ConnectOption func(*connectOpts)
+// ConnectOption configures a client: Connect and ConnectOwningStream take every one. Dial takes
+// only the DialOptions among them.
+type ConnectOption interface{ apply(*connectOpts) }
+
+// DialOption is a ConnectOption Dial honours too: WithConnectInBackground, WithSilentCutDetection
+// and WithReconnectErrClock. Dial's name and environment are its parameters, so WithName and
+// WithEnvironment are not DialOptions, and neither are the options of a client's JetStream
+// (WithReplicas, WithPublishAcknowledgementClock).
+type DialOption func(*connectOpts)
+
+func (o DialOption) apply(opts *connectOpts) { o(opts) }
+
+// clientOption is a ConnectOption only Connect and ConnectOwningStream honour.
+type clientOption func(*connectOpts)
+
+func (o clientOption) apply(opts *connectOpts) { o(opts) }
 
 type connectOpts struct {
 	name                        string
@@ -27,13 +41,26 @@ type connectOpts struct {
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
+	reconnectWaitTick           func()
+	background                  bool
+	silentCutDetection          bool
+}
+
+// connectionSettings is what every connection of a client applies after envoy's own options
+// (connectWithContext): the NATS user credential names (nkeyCredential, nil for none), and the
+// pings of WithSilentCutDetection when the client asked for them.
+func (o connectOpts) connectionSettings(credential nats.Option) nats.Option {
+	if !o.silentCutDetection {
+		return credential
+	}
+	return allOf(credential, detectSilentCuts)
 }
 
 // parseConnectOptions applies options over the defaults every connect starts from.
-func parseConnectOptions(options []ConnectOption) connectOpts {
+func parseConnectOptions[O ConnectOption](options []O) connectOpts {
 	opts := connectOpts{name: "envoy", replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
 	for _, o := range options {
-		o(&opts)
+		o.apply(&opts)
 	}
 	return opts
 }
@@ -51,35 +78,68 @@ func (wallClock) WithTimeout(parent context.Context, timeout time.Duration) (con
 
 // WithPublishAcknowledgementClock overrides the clock that bounds JetStream publish acknowledgements.
 func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
-	return func(o *connectOpts) { o.publishAcknowledgementClock = clock }
+	return clientOption(func(o *connectOpts) { o.publishAcknowledgementClock = clock })
 }
 
 // WithReconnectErrClock overrides the clock that throttles the warning a failed reconnect attempt
 // logs (reconnectErrThrottle), so a test can see a minute pass without waiting one. nil, the
 // default, is time.Now.
-func WithReconnectErrClock(now func() time.Time) ConnectOption {
+func WithReconnectErrClock(now func() time.Time) DialOption {
 	return func(o *connectOpts) { o.reconnectErrClock = now }
 }
 
 // WithReplicas overrides the replica count of the stream ConnectOwningStream ensures (default 1).
 func WithReplicas(n int) ConnectOption {
-	return func(o *connectOpts) { o.replicas = n }
+	return clientOption(func(o *connectOpts) { o.replicas = n })
 }
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
 // ENVOY_NATS_SOCKS5_PROXY (SOCKS5ProxyEnvVar), NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of
 // the process environment (os.LookupEnv): envoy-dispatch hands it the lookup over its settings
-// table, which lists all four. Dial takes the same lookup as its environment parameter.
+// table, which lists all four. Dial takes the same lookup as its environment parameter, and not
+// this option.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
-	return func(o *connectOpts) { o.environment = lookup }
+	return clientOption(func(o *connectOpts) { o.environment = lookup })
 }
 
 // WithName names the client, in place of "envoy": the name the NATS server's connection listings
 // (its /connz endpoint, `nats server report connections`) show for the connection the client dials
 // first and for each one it dials to replace a closed one, and the name field of the client's
-// lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest).
+// lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest). Dial
+// takes its name as a parameter, and not this option.
 func WithName(name string) ConnectOption {
-	return func(o *connectOpts) { o.name = name }
+	return clientOption(func(o *connectOpts) { o.name = name })
+}
+
+// WithConnectInBackground has the constructor (Connect, ConnectOwningStream, Dial) return without
+// waiting for NATS. A configuration error is still returned before any dial: an unusable nkey seed,
+// a server ENVOY_ALLOW_REMOTE_NATS does not allow, an unusable SOCKS5 setting. A server that does
+// not answer, or refuses the credential, is not an error: the client is returned with a connection
+// nats.go has yet to connect, which nats.go then connects in place, retrying forever as it does a
+// reconnect (connectInBackground). A refusal of the credential is logged at ERROR at most once a
+// minute and retried, never given up on. Until that first connection Connected reports false, a
+// publish waits for it within its own deadline and then fails as one does while reconnecting, a
+// core subscription is sent once it connects, and a JetStream subscription's bind fails while its
+// registration stays, so the first connection binds it. Only nats.go dials before then: the
+// constructor's connection is never closed, so nothing replaces it (ensureConnWithContext). The
+// first connection is a connection event, as a reconnect is (onConnect): the JetStream
+// subscription is bound and the reconnect hooks run, and an owning client (ConnectOwningStream)
+// reconciles the stream then, as its first hook, rather than in the constructor.
+//
+// envoy-dispatch's server takes it for each of its clients, so a bus that is down when it boots
+// leaves it serving everything that does not need the bus, and connected once the bus answers.
+func WithConnectInBackground() DialOption {
+	return func(o *connectOpts) { o.background = true }
+}
+
+// WithSilentCutDetection has every connection the client makes declare itself lost two to three
+// seconds after the server stops answering it (detectSilentCuts), where nats.go's defaults take
+// four to six minutes. A server that goes away cleanly closes the socket, which the client sees at
+// once; one whose packets are dropped (a partition, a node that vanished) closes nothing, and only
+// the client's own pings notice. envoy-dispatch's server takes it for each of its clients, so its
+// /healthz reports a cut bus within seconds of the cut.
+func WithSilentCutDetection() DialOption {
+	return func(o *connectOpts) { o.silentCutDetection = true }
 }
 
 type subscriptionTransport uint8
@@ -136,11 +196,16 @@ type Client struct {
 	js                          nats.JetStreamContext
 	urls                        []string
 	name                        string
-	credential                  nats.Option
+	connectionSettings          nats.Option
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
-	mu                          sync.Mutex
+	// reconnectWaitTick, when not nil, runs after each tick of ensureConnWithContext's wait for a
+	// reconnect, before the connection is read again. It is nil outside tests: a test sets it
+	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
+	// the moment the wait ends.
+	reconnectWaitTick func()
+	mu                sync.Mutex
 
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
 	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
@@ -167,6 +232,10 @@ type Client struct {
 	// before the drain from one during it (closeStopped). Once the client is stopped c.Conn never
 	// changes (ensureConnWithContext), so the count needs no connection beside it.
 	drainedReconnects uint64
+	// awaitingConnection is true, under mu, from the constructor of a client that connects in the
+	// background (WithConnectInBackground) until nats.go has connected its connection for the
+	// first time (onConnect), and false for every other client.
+	awaitingConnection bool
 
 	// recovery state
 	recovering int32
@@ -183,9 +252,14 @@ type Client struct {
 // reading ENVOY_ALLOW_REMOTE_NATS from environment too, which answers as os.LookupEnv does
 // (WithEnvironment).
 //
+// It takes the DialOptions: WithConnectInBackground, which returns the connection before it has
+// connected (a core subscription made on it before then is sent once it connects),
+// WithSilentCutDetection and WithReconnectErrClock.
+//
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
-func Dial(name string, urls []string, environment func(string) (string, bool)) (*nats.Conn, error) {
+func Dial(name string, urls []string, environment func(string) (string, bool), options ...DialOption) (*nats.Conn, error) {
+	opts := parseConnectOptions(options)
 	if err := refuseRemoteNATS(urls, environment); err != nil {
 		return nil, err
 	}
@@ -197,7 +271,14 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
-	return connect(name, urls, credential, dialer, nil, nil, nil, nil)
+	settings := opts.connectionSettings(credential)
+	dial := func(first nats.Option) (*nats.Conn, error) {
+		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, opts.reconnectErrClock)
+	}
+	if opts.background {
+		return connectFirstInBackground(name, urls, opts.reconnectErrClock, dial, nil, nil)
+	}
+	return dial(nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -242,32 +323,89 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	c := &Client{
 		urls:                        urls,
 		name:                        opts.name,
-		credential:                  credential,
+		connectionSettings:          opts.connectionSettings(credential),
 		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
+		reconnectWaitTick:           opts.reconnectWaitTick,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+	stream := *streamCfg
+	stream.Replicas = opts.replicas
+	dial := func(first nats.Option) (*nats.Conn, error) {
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+	}
+	if opts.background {
+		c.awaitingConnection = true
+		if ownsStream {
+			c.AddReconnectHook(c.ensureStreamOnce(&stream))
+		}
+		// onConnect counts the first connection only once it is c.Conn, which install makes it.
+		install := func(nc *nats.Conn) error { return c.install(nc, nil) }
+		if _, err := connectFirstInBackground(c.name, urls, c.reconnectErrClock, dial, c.onConnect, install); err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+	nc, err := dial(nil)
 	if err != nil {
 		return nil, err
 	}
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
+	var owned *nats.StreamConfig
+	if ownsStream {
+		owned = &stream
+	}
+	if err := c.install(nc, owned); err != nil {
 		nc.Close()
 		return nil, err
 	}
-	if ownsStream {
-		cfg := *streamCfg
-		cfg.Replicas = opts.replicas
-		if err := ensureStreamWithConfig(js, &cfg); err != nil {
-			nc.Close()
-			return nil, err
+	return c, nil
+}
+
+// install makes nc the client's connection, with the JetStream context taken from it, once it has
+// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil.
+func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
+	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
+	if err != nil {
+		return err
+	}
+	if stream != nil {
+		if err := ensureStreamWithConfig(js, stream); err != nil {
+			return err
 		}
 	}
-	c.Conn = nc
-	c.js = js
-	return c, nil
+	c.mu.Lock()
+	c.Conn, c.js = nc, js
+	c.mu.Unlock()
+	return nil
+}
+
+// ensureStreamOnce is the reconnect hook an owning client that connects in the background
+// reconciles the stream with (ensureStreamWithConfig) on its first connection, where every other
+// owning client's constructor does. It is the client's first hook, and the hooks run one at a time
+// (rewatch), so ensured needs no lock of its own. A run that fails leaves the hooks due, so a
+// recovery runs it again; once one has succeeded it does nothing, as no owning client reconciles
+// the stream again on a later connection.
+func (c *Client) ensureStreamOnce(stream *nats.StreamConfig) func(*nats.Conn) error {
+	ensured := false
+	return func(*nats.Conn) error {
+		if ensured {
+			return nil
+		}
+		if err := ensureStreamWithConfig(c.JS(), stream); err != nil {
+			return fmt.Errorf("reconcile the %s stream: %w", Stream, err)
+		}
+		ensured = true
+		return nil
+	}
+}
+
+// awaitingFirstConnection reports whether the client connects in the background and nats.go has
+// yet to connect it for the first time.
+func (c *Client) awaitingFirstConnection() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.awaitingConnection
 }
 
 func (c *Client) JS() nats.JetStreamContext {
@@ -285,7 +423,9 @@ func (c *Client) Connected() bool {
 
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
-// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld.
+// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld. On a
+// client that connects in the background and has not connected yet, the bind fails (nothing
+// reaches the server before then) and the registration stays, so the first connection binds it.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -302,10 +442,14 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 // identifies the stable queue group that shares role-lane delivery between
 // overlapping listeners. The client keeps one core subscription: a later call on the same
 // subject and queue replaces it, unsubscribing the handle an earlier one returned, and any other
-// call is refused with ErrSubscriptionHeld.
+// call is refused with ErrSubscriptionHeld. A client that connects in the background and has not
+// connected yet binds it on the connection it has, which nats.go sends once it connects: waiting
+// for that connection here would wait out the outage.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
-	if err := c.ensureConn(); err != nil {
-		return nil, err
+	if !c.awaitingFirstConnection() {
+		if err := c.ensureConn(); err != nil {
+			return nil, err
+		}
 	}
 	queue := ""
 	if len(queues) > 0 {
@@ -708,7 +852,11 @@ func (c *Client) ensureConn() error {
 // finish replaces it: the others close theirs and serve with that one. So every connection the
 // client dials is either c.Conn, which Close and Drain close, or closed already; one left open
 // beside it would outlive Close, and, with MaxReconnect -1, reconnect forever once its server is
-// gone.
+// gone. A client that connects in the background (WithConnectInBackground) holds, from its
+// constructor on, a connection nats.go has yet to connect for the first time and does not close
+// before then, so a caller waits for that first connection as for a reconnect, and nothing here
+// dials beside nats.go before it; a connection dialled later to replace a closed one is an
+// ordinary one, connected before it is installed.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
 		c.mu.Lock()
@@ -730,14 +878,17 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 				return errStopped
 			case <-time.After(10 * time.Millisecond):
 			}
+			if c.reconnectWaitTick != nil {
+				c.reconnectWaitTick()
+			}
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
-		js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+		js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 		if err != nil {
 			nc.Close()
 			return err
@@ -864,12 +1015,30 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
+// publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
+// and publishCoreTo of a caller that passed no deadline of its own: their wait for a reconnect and
+// their flush or JetStream acknowledgement together. A publish window's sends take
+// publishAcknowledgementTimeout instead. It is also the HTTP client's per-attempt deadline
+// (packages/envoy-client/src/transport.ts), which a publish that spends the whole bound can never
+// be answered inside, and that is what the Within forms below exist for.
+const publishBound = 5 * time.Second
+
 // Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
 // capture through core NATS (usesCoreTransport); every notification the stream captures retains
 // JetStream durability. Its signature is an interface method in cistore, outbox and webhook, so a
-// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead.
+// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead, and one
+// that has a deadline of its own calls PublishWithin.
 func (c *Client) Publish(item contracts.Envelope) error {
 	_, err := c.PublishReportingDuplicate(item)
+	return err
+}
+
+// PublishWithin publishes as Publish does, with ctx as the whole publish's bound - the wait for a
+// reconnect, the flush and the JetStream acknowledgement all end with it - instead of publishBound.
+// The listener's HTTP handlers publish this way, so a bus they cannot reach is answered inside the
+// deadline their own caller gave them.
+func (c *Client) PublishWithin(ctx context.Context, item contracts.Envelope) error {
+	_, err := c.PublishReportingDuplicateWithin(ctx, item)
 	return err
 }
 
@@ -885,17 +1054,44 @@ func (c *Client) Publish(item contracts.Envelope) error {
 // have landed, so the very publish that put the message on the subject can come
 // back a duplicate.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
-	if usesCoreTransport(item.Topic) {
-		return false, c.PublishCore(item)
-	}
-	return c.publishJetStream(item)
+	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
+	defer cancel()
+	return c.PublishReportingDuplicateWithin(ctx, item)
 }
 
-// publishJetStream publishes item to the notification stream. The MsgId, where the envelope earns
-// one, is the dedupe key and the topic together, because one upstream event can be published on
-// several topics under one key - a GitHub comment that mentions the trigger is published on its
-// mention topic beside its comment topic - and each of those must be retained.
-func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
+// PublishReportingDuplicateWithin publishes as PublishReportingDuplicate does, reporting the same
+// duplicate verdict over the same two transports, with ctx as the whole publish's bound instead of
+// publishBound.
+func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contracts.Envelope) (bool, error) {
+	if usesCoreTransport(item.Topic) {
+		return false, c.publishCoreTo(ctx, item.Topic, item)
+	}
+	return c.publishJetStream(ctx, item)
+}
+
+// publishJetStream publishes item to the notification stream within ctx's bound. The MsgId, where
+// the envelope earns one, is the dedupe key and the topic together, because one upstream event can
+// be published on several topics under one key - a GitHub comment that mentions the trigger is
+// published on its mention topic beside its comment topic - and each of those must be retained.
+// The bound below is the earlier of the caller's own deadline and publishBound, since WithTimeout
+// keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
+// that passed none. The acknowledgement wait is still taken from publishAcknowledgementClock, the
+// seam a test uses to expire that bound without spending it.
+//
+// A ctx that has already ended never puts the message on the wire here, and that protection is
+// the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
+// nats.go's requestWithContext returns ctx.Err() before it sends anything (nats.go v1.50.0,
+// context.go), on the first attempt, on each of its no-responders retries and on the reconnect
+// retry below alike. That read comes after ensureConnWithContext has returned, so it also refuses
+// a ctx cancelled as a reconnect wait ends. So the core path's own check (publishConfirmed's read
+// of ctx) has no counterpart here, and it is not redundant with this one: a change that stopped
+// passing nats.Context(ctx), or a nats.go that stopped checking first, would reopen the case on
+// this path silently.
+// TestAPublishWithAnEndedContextSendsNothing pins it, so either change fails that test instead of
+// reaching the wire. What a context that ends during the acknowledgement wait leaves is a message
+// the stream may hold while the caller is answered failure; that is the acknowledgement's own
+// ambiguity, which the MsgId's duplicate window absorbs for an envelope that earns one.
+func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) (bool, error) {
 	if err := checkSubject(item.Topic); err != nil {
 		return false, err
 	}
@@ -903,7 +1099,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(ctx, publishBound)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
@@ -936,8 +1132,27 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
 // of a per-client grant), a flush that fails and a publish the server cannot be shown to have
 // accepted all return an error. The subject can differ from item.Topic when an authoritative
-// router forwards an envelope while retaining its original topic for the recipient.
+// router forwards an envelope while retaining its original topic for the recipient. It bounds
+// itself at publishBound; a caller with a deadline of its own reaches the same publish through
+// PublishWithin.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
+	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
+	defer cancel()
+	return c.publishCoreTo(ctx, subject, item)
+}
+
+// publishCoreTo is PublishCoreTo under ctx: ctx is the whole publish's bound, so it is both what
+// the wait for a reconnect ends with and the window publishConfirmed flushes and confirms within.
+// The bound taken below is the earlier of ctx's own deadline and publishBound, since WithTimeout
+// keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
+// that passed none.
+//
+// A ctx that has ended puts nothing on the wire: ensureConnWithContext returns its error rather
+// than wait for a reconnect or dial one, and publishConfirmed refuses it immediately before the
+// publish, which also catches a cancel that lands as a reconnect completes. A deadline arrives
+// spent through publishHandler (cmd/listener/api.go), whose role-holder resolution shares the
+// route's context with the publish.
+func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -945,14 +1160,13 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, publishBound)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	deadline, _ := ctx.Deadline()
 	conn := c.Conn
-	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)
+	return c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Data: data}, conn.PublishMsg)
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -996,7 +1210,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	defer receipt.Unsubscribe()
-	err = c.publishConfirmed(conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, deadline, conn.PublishMsg)
+	err = c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err
 	}

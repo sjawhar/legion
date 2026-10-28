@@ -16,7 +16,11 @@ import (
 // without it. It runs before them, inside their transaction, because they read the row it writes.
 // The periodic turn's own re-read of Dispatch rides on the controller tick
 // (intake.ControllerTick.Observed), and is written here through the very same fenced write, so a
-// blocker whose closing event never arrived is repaired before those handlers judge.
+// blocker whose closing event never arrived is repaired before those handlers judge. Each issue's
+// Dispatch claim is mirrored beside its row, behind a fence of its own (record.PutDispatchClaim):
+// from an issue event or a view that shows it, and from Dispatch's issue.claimed and
+// issue.released events (intake.DispatchClaim), which say nothing else of the issue and are kept
+// even when they arrive before the issue's first row.
 //
 // One path it never sees: an intake.ObservedIssue of an issue already recorded whose event was
 // prepared in place of none applies no handler at all (intake.settleObserved sets handlers to
@@ -37,13 +41,18 @@ func NewMirror(store record.Store, project string) *Mirror {
 }
 
 // Apply writes the row of a Dispatch issue fact and every row the periodic turn's re-read
-// observed, and does nothing for every other kind of fact — a tick that observed nothing, which
-// is almost every turn, included.
+// observed, the claim of a claim event, and does nothing for every other kind of fact — a tick
+// that observed nothing, which is almost every turn, included.
 func (m *Mirror) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	switch fact := fact.(type) {
 	case intake.DispatchIssue:
-		observed := intake.IssueStatus{Key: fact.Key, Status: fact.Status, Blockers: fact.Blockers, Seq: fact.Seq}
+		observed := intake.IssueStatus{Key: fact.Key, Status: fact.Status, Blockers: fact.Blockers, Seq: fact.Seq,
+			ClaimedBy: fact.ClaimedBy, ClaimKnown: fact.ClaimKnown}
 		if err := m.put(ctx, tx, observed); err != nil {
+			return intake.Result{}, err
+		}
+	case intake.DispatchClaim:
+		if err := m.store.PutDispatchClaim(ctx, tx, fact.Key, fact.ClaimedBy, fact.Seq); err != nil {
 			return intake.Result{}, err
 		}
 	case intake.ControllerTick:
@@ -56,20 +65,25 @@ func (m *Mirror) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 	return intake.Result{}, nil
 }
 
-// put is one observation's row, under the daemon's project and behind the sequence fence
+// put is one observation's row, under the daemon's project and behind the sequence fences
 // PutDispatchIssue applies: an observation older than the row's own leaves it exactly as it
-// stands.
+// stands, and one that does not show the claim leaves the claim as it stands.
 func (m *Mirror) put(ctx context.Context, tx pgx.Tx, observed intake.IssueStatus) error {
-	return m.store.PutDispatchIssue(ctx, tx, record.DispatchIssueRow{
+	row := record.DispatchIssueRow{
 		Key: observed.Key, Project: m.project, Status: observed.Status, Blockers: observed.Blockers, Seq: observed.Seq,
-	})
+	}
+	if observed.ClaimKnown {
+		row.ClaimedBy, row.ClaimSeq = observed.ClaimedBy, observed.Seq
+	}
+	return m.store.PutDispatchIssue(ctx, tx, row)
 }
 
-// Observed is one summary of a Dispatch listing as an observation of that issue, the four facts
-// a mirror row is written from: the boot's reconcile and the periodic turn's listing both read
-// the project this way, and both write what it returns.
+// Observed is one summary of a Dispatch listing as an observation of that issue, the facts a
+// mirror row is written from: the boot's reconcile and the periodic turn's listing both read the
+// project this way, and both write what it returns. A listing always shows the claim.
 func Observed(summary dispatch.IssueSummary) intake.IssueStatus {
-	return intake.IssueStatus{Key: summary.Key, Status: summary.Status, Blockers: summary.BlockedBy, Seq: summary.LastSeq}
+	return intake.IssueStatus{Key: summary.Key, Status: summary.Status, Blockers: summary.BlockedBy, Seq: summary.LastSeq,
+		ClaimedBy: summary.ClaimedBy, ClaimKnown: !summary.ClaimUnread}
 }
 
 // Reconcile mirrors the boot listing: every summary Dispatch returned for project, through the

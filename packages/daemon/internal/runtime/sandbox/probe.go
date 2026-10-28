@@ -1049,10 +1049,12 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
 // roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
 // into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
-// twice. It must carry the capabilities mark too
-// (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
-// checked no capability, and a current one that found a capability missing exits 1 before the OK
-// line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the
+// twice. It must carry the capabilities mark too, at bootprobe.CapabilitiesAll
+// (bootprobe.Capabilities): a CLI that predates the capability check prints none, having checked
+// no capability, and a current one that found a capability missing exits 1 before the OK line, so
+// the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild; a line that left
+// the browser row unchecked (bootprobe.CapabilitiesBrowserSkipped, `probe-image --skip-browser`,
+// which this probe's command never passes) is refused naming that mark. When the
 // daemon has a pane NATS nkey seed (Options.NATSUser),
 // the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
 // refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
@@ -1080,6 +1082,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
 				name, ended, flag[1], logTail)
 		}
+		if role, why, ok := bootprobe.RoleOverlaysRefused(logTail); ok {
+			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s refused role %s's Oh My Pi overlays: %s; the probe pod mounts runtime.kubernetes.pod's volumes as every pod does, so the %s's Oh My Pi would not start: add the file to the ConfigMap its mount serves, or correct role_config_files.%s — log tail: %s",
+				name, role, why, role, role, logTail)}
+		}
 		if refused := r.unreadableShares(name, pod); refused != nil {
 			return *refused
 		}
@@ -1106,8 +1112,13 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
 			name, logTail)
 	}
-	if !bootprobe.CapabilitiesChecked(logTail) {
+	switch mark := bootprobe.Capabilities(logTail); mark {
+	case bootprobe.CapabilitiesAll:
+	case "":
 		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail)
+	default:
+		return imageRefusal(digest, "pod %s Succeeded without checking the whole capability list (its OK line's capabilities mark: %s, where the daemon's probe requires %s) — log tail: %s",
+			name, mark, bootprobe.CapabilitiesAll, logTail)
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {
@@ -1194,6 +1205,9 @@ type probeSpec struct {
 // of its own whenever possible, so each boot's probe would ask for a node, and a probe minutes long
 // and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day
 // eviction window.
+// For each role role_config_files names (Options.RoleConfigFiles), in the workflow's order, it
+// passes that role's overlays (--role-config-files), which the probe reads as that role's Oh My Pi
+// will: none are passed for a deployment that names none.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -1208,6 +1222,15 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
 	command = append(command, "--role-references", p.RoleReferences.Encode(), "--role-namespaces", RoleProbeDir)
+	// Each role that names overlays of its own is read as it will start: the probe pod mounts the
+	// operator's volumes as every pod does, so a file a role's PI_CONFIG_FILES names and the mounts
+	// lack refuses the boot here, naming the role and the file, rather than that role's Oh My Pi at
+	// its first launch.
+	for _, role := range roleConfigRoles {
+		if files := r.roleConfigFiles[role]; len(files) > 0 {
+			command = append(command, bootprobe.RoleConfigFilesFlag, bootprobe.RoleConfigFilesValue(string(role), files))
+		}
+	}
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,

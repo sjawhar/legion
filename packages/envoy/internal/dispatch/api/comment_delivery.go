@@ -502,7 +502,7 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !human {
-		if actor, err = bearerSessionActor(actor, input.Actor); err != nil {
+		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -781,6 +781,11 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.commentEventPayload(
 		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	payload.ThreadLogins, err = commentThreadLogins(r.Context(), tx, reply)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

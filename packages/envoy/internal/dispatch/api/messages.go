@@ -49,7 +49,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !human {
-		if actor, err = bearerSessionActor(actor, input.Actor); err != nil {
+		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -171,7 +171,12 @@ func (s *server) createStoredMessage(
 	if message.InReplyTo != nil {
 		eventType = "message.answered"
 	}
-	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)))
+	payload := thread.payload(message, referenceChanges)
+	payload.ThreadLogins, err = messageThreadLogins(ctx, tx, message)
+	if err != nil {
+		return model.Message{}, nil, err
+	}
+	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, payload))
 	if err != nil {
 		return model.Message{}, nil, err
 	}

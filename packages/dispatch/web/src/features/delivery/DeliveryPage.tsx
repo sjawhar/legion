@@ -548,6 +548,7 @@ export function DeliveryPage(): ReactNode {
                   runs={data.runs}
                   selection={drillDownSelection}
                   sessionGroups={data.session_groups}
+                  sessionTitles={data.session_titles}
                 />
               </div>
             </>

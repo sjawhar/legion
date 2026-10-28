@@ -2,7 +2,8 @@ import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contrac
 
 import type { Agent, CreateBroadcastInput, MessageDeliveryMode } from "../../api/types";
 import { MODE_LABELS } from "../conversation/delivery";
-import { sessionLabel } from "../refs/actor";
+import type { AgentPart } from "../refs/AgentName";
+
 /** A session a broadcast would leave out, with its composer-facing reason named through
  *  `MODE_LABELS`. The server's stored diagnostic keeps the wire name
  *  (`packages/dispatch/AGENTS.md`). */
@@ -22,14 +23,15 @@ export interface BroadcastPlan {
 }
 
 /** What the composer shows about the send it would make: Send's label, the one notice line, and
- *  why Send refuses, if it does. */
+ *  why Send refuses, if it does. Both lines are `AgentPart`s, so an excluded session keeps its
+ *  identity until the composer draws it through `AgentName`. */
 export interface BroadcastSendState {
   readonly label: string;
   /** The composer's one notice line, highest first: the limit, nobody reached, or the Excluded
    *  line; null when none applies. */
-  readonly notice: string | null;
+  readonly notice: readonly AgentPart[] | null;
   /** Why Send refuses, or null while it can be pressed. */
-  readonly refusal: string | null;
+  readonly refusal: readonly AgentPart[] | null;
   /** Whether `notice` is the refusal, rather than a line beside a Send that can be pressed or
    *  refuses for an empty message. */
   readonly refusalOnNotice: boolean;
@@ -144,16 +146,38 @@ export function composedBroadcast(
   };
 }
 
+/** `Excluded: <session> (<reason>), …`: each session a send leaves out, with its reason, as an
+ *  agent part for `AgentParts` to draw. The composer's Excluded line and the sent broadcast's
+ *  page both start from it. */
+export function excludedParts(
+  excluded: readonly { sessionId: string; storedTitle: string | undefined; reason: string }[]
+): AgentPart[] {
+  const parts: AgentPart[] = ["Excluded: "];
+  excluded.forEach(({ reason, sessionId, storedTitle }, index) => {
+    if (index > 0) parts.push(", ");
+    parts.push({ sessionId, storedTitle }, ` (${reason})`);
+  });
+  return parts;
+}
+
 /**
  * The Excluded line: every selected session the send leaves out, with its reason, and, when the
  * mode is why nobody is reached, the mode that would reach the most of them (`hint`).
  */
-function exclusionLine(excluded: readonly BroadcastExclusionPlan[], hint: string | null): string {
-  const named = excluded
-    .map((item) => `${sessionLabel(item.sessionID, item.agent?.title)} (${item.reason})`)
-    .join(", ");
-  const line = `Excluded: ${named}. Nothing is sent to them, and no other mode is substituted.`;
-  return hint === null ? line : `${line} ${hint}`;
+function exclusionLine(
+  excluded: readonly BroadcastExclusionPlan[],
+  hint: string | null
+): AgentPart[] {
+  const parts = excludedParts(
+    excluded.map((item) => ({
+      reason: item.reason,
+      sessionId: item.sessionID,
+      storedTitle: item.agent?.title,
+    }))
+  );
+  const tail = ". Nothing is sent to them, and no other mode is substituted.";
+  parts.push(hint === null ? tail : `${tail} ${hint}`);
+  return parts;
 }
 
 /**
@@ -177,13 +201,13 @@ export function broadcastSendState(
   const label = `Send to ${recipients.length}`;
   if (recipients.length > MAX_BROADCAST_RECIPIENTS) {
     const limit = `At most ${MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach ${recipients.length}.`;
-    return { label, notice: limit, refusal: limit, refusalOnNotice: true };
+    return { label, notice: [limit], refusal: [limit], refusalOnNotice: true };
   }
   if (recipients.length > 0) {
     return {
       label,
       notice: excluded.length === 0 ? null : exclusionLine(excluded, null),
-      refusal: body.trim() === "" ? "Type a message first." : null,
+      refusal: body.trim() === "" ? ["Type a message first."] : null,
       refusalOnNotice: false,
     };
   }

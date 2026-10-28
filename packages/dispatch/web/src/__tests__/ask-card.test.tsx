@@ -84,14 +84,29 @@ function reply(
 // never falls through to the default getAskThread, which would issue a real
 // fetch in this test environment.
 function emptyThread(input: Ask): () => Promise<AskRead> {
-  return async () => ({ ask: input, answers: [], edits: [], followers: [], replies: [] });
+  return async () => ({
+    ask: input,
+    answers: [],
+    claimant: null,
+    edits: [],
+    followers: [],
+    replies: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
+  });
 }
 
 function renderCard(node: ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
-  const view = render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>);
+  // The asker is an `AgentName`, whose live link needs a router.
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>{node}</QueryClientProvider>
+    </MemoryRouter>
+  );
   return { queryClient, view };
 }
 
@@ -194,7 +209,10 @@ test("AskCard keeps a deleted anchor document's quote", () => {
 
   try {
     expect(view.getByText("The surviving passage.", { exact: true })).toBeTruthy();
-    expect(view.queryByRole("link")).toBeNull();
+    // The deleted document's quote links nowhere; the only link left is the asker's live link.
+    expect(view.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "/agents/session-1/live",
+    ]);
   } finally {
     view.unmount();
   }
@@ -327,6 +345,19 @@ test("AskCard renders a blocking urgency notch", () => {
   try {
     const card = view.getByRole("article", { name: "Urgency: Blocking" });
     expect(within(card).getByText("BLOCKING", { exact: true })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+// An untitled session is named by its short form, which sessions started in the same minute
+// share; the asker's tooltip, the innermost title a browser shows, carries its full id.
+test("an untitled session asker's tooltip carries its full id", () => {
+  const input = ask({ author: { id: "0123456789abcdef-untitled", kind: "session" } });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    expect(view.getByTitle("session:01234567… · 0123456789abcdef-untitled")).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -480,7 +511,17 @@ test("AskCard shows every previous version of an edited question, oldest first",
   const { view } = renderCard(
     <AskCard
       ask={input}
-      getAskThread={async () => ({ ask: input, answers: [], edits, followers: [], replies: [] })}
+      getAskThread={async () => ({
+        ask: input,
+        answers: [],
+        claimant: null,
+        edits,
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      })}
     />
   );
 
@@ -1283,7 +1324,16 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
     ...input,
     priority: null,
     snoozed_until: null,
-    thread: { answers: [], edits: [], followers: [], replies: [] },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
+    },
   };
   queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
 
@@ -1323,7 +1373,11 @@ test("AskCard reloads a changed question, requires the human to reconfirm, and a
         ask: current,
         answers: [],
         edits: [],
+        claimant: null,
         followers: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
         replies: [],
       })}
     />
@@ -1491,7 +1545,11 @@ test("AskCard renders replies under the question without an open-ask thread comp
         ask: input,
         answers: [],
         edits: [],
+        claimant: null,
         followers: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
         replies: [reply({ id: "comment-1", body: "Any update?" })],
       })}
     />
@@ -1636,6 +1694,8 @@ test("a resolved ask keeps its question and options and carries a resolution bad
     },
     state: "resolved",
   } as unknown as Ask;
+  // The resolution names its actor with a link to that agent's live conversation; `renderCard`
+  // renders inside a router, as the app always does.
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
@@ -1662,7 +1722,17 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     reply({ body: "Newer reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
     reply({ body: "Newest reply", created_at: "2026-09-09T00:05:00Z", id: "comment-5" }),
   ];
-  const thread = async () => ({ ask: input, answers: [], edits: [], followers: [], replies });
+  const thread = async () => ({
+    ask: input,
+    answers: [],
+    claimant: null,
+    edits: [],
+    followers: [],
+    replies,
+    route: null,
+    route_status: null,
+    route_holder: null,
+  });
   const { view } = renderCard(
     <AskCard
       ask={input}
@@ -1731,7 +1801,11 @@ test("a compact answered ask's Write a reply reveals its composer as the next ke
         ask: input,
         answers: [],
         edits: [],
+        claimant: null,
         followers: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
         replies: [reply({ body: "Earlier reply" })],
       })}
       thread="collapsed"
@@ -1768,7 +1842,17 @@ test("a reply arriving while the older replies are shown lands first and keeps t
   const { queryClient, view } = renderCard(
     <AskCard
       ask={input}
-      getAskThread={async () => ({ ask: input, answers: [], edits: [], followers: [], replies })}
+      getAskThread={async () => ({
+        ask: input,
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies,
+        route: null,
+        route_status: null,
+        route_holder: null,
+      })}
       thread="collapsed"
     />
   );
@@ -1819,7 +1903,17 @@ test("a link to a folded reply opens the fold and still lets the reader collapse
     <AskCard
       ask={input}
       currentReplyId="comment-1"
-      getAskThread={async () => ({ ask: input, answers: [], edits: [], followers: [], replies })}
+      getAskThread={async () => ({
+        ask: input,
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies,
+        route: null,
+        route_status: null,
+        route_holder: null,
+      })}
       thread="collapsed"
     />
   );
@@ -1873,7 +1967,17 @@ test("AskCard with no replies offers Write a reply only after an answer, and ret
       getAskThread={async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("boom");
-        return { ask: failedInput, answers: [], edits: [], followers: [], replies: [] };
+        return {
+          ask: failedInput,
+          answers: [],
+          claimant: null,
+          edits: [],
+          followers: [],
+          replies: [],
+          route: null,
+          route_status: null,
+          route_holder: null,
+        };
       }}
       thread="collapsed"
     />
@@ -2035,7 +2139,16 @@ test("a document ask links its project and document page", async () => {
       ...input,
       priority: null,
       snoozed_until: null,
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
     },
   ]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });

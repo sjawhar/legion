@@ -160,7 +160,7 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
 // recipient's copy on the Agents page, and the list's one-line preview. A numbered list is a
 // list, not one run-on line, on the desktop and on a phone; and the preview, which runs the list
 // onto one line, shows exactly one line of it.
-test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list", async ({
+test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list @phone", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner, tester]);
@@ -247,6 +247,23 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
       overflows: element.scrollHeight > element.clientHeight,
     }));
     expect(box).toEqual({ lines: 1, overflows: true });
+    // The sender is drawn above the row's link, never inside it (`AgentName` links a session to
+    // its live conversation, and one link never holds another): the row link keeps its broadcast
+    // destination, the two do not overlap, and on a phone nothing widens the page.
+    const row = list.getByRole("listitem");
+    const rowLink = row.getByRole("link", { name: /answered/ });
+    await expect(rowLink).toHaveAttribute("href", /^\/agents\/broadcasts\/[0-9a-f-]+$/);
+    await expect(row.locator("a a")).toHaveCount(0);
+    const sender = row.getByText("alice", { exact: true });
+    await expect(sender).toBeVisible();
+    await expect(rowLink.getByText("alice", { exact: true })).toHaveCount(0);
+    const senderBox = await sender.boundingBox();
+    const rowLinkBox = await rowLink.boundingBox();
+    if (senderBox === null || rowLinkBox === null) throw new Error("the broadcast row is hidden");
+    expect(senderBox.y + senderBox.height).toBeLessThanOrEqual(rowLinkBox.y + 0.5);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
     await page.screenshot({
       path: testInfo.outputPath("broadcast-markdown-list.png"),
       fullPage: true,

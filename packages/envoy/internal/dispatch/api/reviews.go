@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -51,8 +52,10 @@ func settledVersionNumber(ctx context.Context, q queryer, artifactID string) (in
 	return *latest, nil
 }
 
+// loadReviews is every review of the document, newest first in the order its events committed
+// (docs.ReviewOrder).
 func (s *server) loadReviews(ctx context.Context, q queryer, artifactID string) ([]model.ArtifactReview, error) {
-	rows, err := q.Query(ctx, `select `+docs.ReviewColumns+` from artifact_reviews where artifact_id = $1 order by created_at desc, id desc`, artifactID)
+	rows, err := q.Query(ctx, `select `+docs.ReviewColumns+` from artifact_reviews where artifact_id = $1 order by `+docs.ReviewOrder, artifactID)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +88,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 	rows, err := q.Query(ctx, `
 		select distinct on (artifact_id) `+docs.ReviewColumns+`
 		from artifact_reviews where artifact_id = any($1::uuid[])
-		order by artifact_id, created_at desc, id desc
+		order by artifact_id, `+docs.ReviewOrder+`
 	`, ids)
 	if err != nil {
 		return fmt.Errorf("load latest reviews: %w", err)
@@ -150,6 +153,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 			approval.Version = &version
 			approval.By = &actor
 			approval.At = &at
+			approval.Seq = review.EventSeq
 			approval.Reason = review.Reason
 			approval.AskID = review.AskID
 			switch {
@@ -489,9 +493,11 @@ func (s *server) openApprovalAsk(
 	if err != nil {
 		return nil, model.Event{}, err
 	}
-	event, err := s.appendEvent(ctx, tx, owner.event(
-		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	payload, err := events.AskEventPayload(ctx, tx, ask, askChanges)
+	if err != nil {
+		return nil, model.Event{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, owner.event("ask.opened", actor, payload))
 	if err != nil {
 		return nil, model.Event{}, err
 	}
