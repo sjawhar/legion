@@ -104,11 +104,9 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 	if err != nil {
 		return Anchored{}, err
 	}
-	// The anchor is read off the tree applyLive read from the fork after this callback wrote the
-	// mark and kept as the operation's tree: nothing changes the fork between the callback's end
-	// and that read, so reading the fork again in the callback would walk the whole document a
-	// second time for the same tree.
-	anchored, err := readAnchored(joinedLiveWrite(ctx, artifactID).tree, mark.Kind, mark.ID)
+	// applyLive keeps the tree it read from the fork after this callback as the write's rendering,
+	// so the anchor is read off it rather than off a second read of the fork.
+	anchored, err := readAnchored(ledgerFrom(ctx).writtenRendering(artifactID).tree, mark.Kind, mark.ID)
 	if errors.Is(err, ErrAnchorMissing) {
 		return Anchored{}, fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
 	}
@@ -119,17 +117,19 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 }
 
 // readAnchored reads a persisted mark's covered text and containing block from tree;
-// ErrAnchorMissing when the mark is not there.
+// ErrAnchorMissing when the mark is not there. FindMarks reads what FindMark does and stops once
+// the mark's first span has ended.
 func readAnchored(tree *pmdoc.Node, kind MarkKind, id string) (Anchored, error) {
-	r, quote, found := pmdoc.FindMark(tree, string(kind), id)
-	if !found {
+	key := pmdoc.MarkRef{Type: string(kind), ID: id}
+	found, ok := pmdoc.FindMarks(tree, []pmdoc.MarkRef{key})[key]
+	if !ok {
 		return Anchored{}, ErrAnchorMissing
 	}
-	blockID, err := pmdoc.BlockIDForRange(tree, r)
+	blockID, err := pmdoc.BlockIDForRange(tree, found.Range)
 	if err != nil {
 		return Anchored{}, err
 	}
-	return Anchored{Quote: quote, BlockID: blockID}, nil
+	return Anchored{Quote: found.Quote, BlockID: blockID}, nil
 }
 
 // markQuoteInTxn finds quote in doc and writes the supplied mark within txn.
@@ -447,6 +447,11 @@ type anchoredMark struct {
 	anchor   model.Anchor
 }
 
+// markRef is the mark identity the row anchors to.
+func (m anchoredMark) markRef() pmdoc.MarkRef {
+	return pmdoc.MarkRef{Type: m.markType, ID: m.anchor.MarkID}
+}
+
 func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifactID string) ([]anchoredMark, error) {
 	var marks []anchoredMark
 	for _, target := range []struct {
@@ -510,11 +515,8 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 	keys := make([]pmdoc.MarkRef, 0, len(anchors))
 	for _, mark := range anchors {
 		if !skipped(mark) {
-			keys = append(keys, pmdoc.MarkRef{Type: mark.markType, ID: mark.anchor.MarkID})
+			keys = append(keys, mark.markRef())
 		}
-	}
-	if len(keys) == 0 {
-		return nil
 	}
 	found := pmdoc.FindMarks(tree, keys)
 	for _, mark := range anchors {
@@ -522,7 +524,7 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 			continue
 		}
 		refreshed := mark.anchor
-		if hit, ok := found[pmdoc.MarkRef{Type: mark.markType, ID: mark.anchor.MarkID}]; ok {
+		if hit, ok := found[mark.markRef()]; ok {
 			refreshed.Quote = hit.Quote
 			refreshed.Orphaned = false
 		} else {

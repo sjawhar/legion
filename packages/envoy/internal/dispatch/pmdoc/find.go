@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -774,9 +775,8 @@ type MarkFound struct {
 // would make that refresh quadratic in a document carrying many of them; here a run costs only its
 // own marks and the identities open at it.
 func FindMarks(doc *Node, keys []MarkRef) map[MarkRef]MarkFound {
-	found := make(map[MarkRef]MarkFound)
 	if len(keys) == 0 {
-		return found
+		return map[MarkRef]MarkFound{}
 	}
 	wanted := make(map[MarkRef]*markSearch, len(keys))
 	for _, key := range keys {
@@ -800,19 +800,16 @@ func FindMarks(doc *Node, keys []MarkRef) map[MarkRef]MarkFound {
 			}
 			search := wanted[MarkRef{Type: mark.Type, ID: id}]
 			// A run carrying one identity twice counts once, and MarkAttrs reads the first of them.
-			if search == nil || search.run == run {
+			if search == nil || search.run == run || search.state == markClosed {
 				continue
 			}
 			search.run = run
-			switch search.state {
-			case markUnseen:
+			if search.state == markUnseen {
 				search.state = markOpen
 				search.found = MarkFound{Range: Range{From: pos, To: pos}, Attrs: cloneAttrs(mark.Attrs)}
 				open = append(open, search)
-				search.add(node.Text, pos, end)
-			case markOpen:
-				search.add(node.Text, pos, end)
 			}
+			search.add(node.Text, pos, end)
 		}
 		// A text run without an open identity ends its first span, and only the first counts.
 		kept := open[:0]
@@ -831,6 +828,7 @@ func FindMarks(doc *Node, keys []MarkRef) map[MarkRef]MarkFound {
 	for _, search := range open {
 		search.close()
 	}
+	found := make(map[MarkRef]MarkFound, len(wanted))
 	for key, search := range wanted {
 		if search.state != markUnseen {
 			found[key] = search.found
@@ -874,7 +872,7 @@ func (s *markSearch) add(text string, pos, end int) {
 		s.write("", s.pending[flushed], s.pending[flushed])
 		flushed++
 	}
-	s.pending = s.pending[:copy(s.pending, s.pending[flushed:])]
+	s.pending = slices.Delete(s.pending, 0, flushed)
 	if pos == end {
 		s.pending = append(s.pending, pos)
 		return
@@ -1054,10 +1052,10 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 // ranges stay those of the fragment. Nothing but its own marks may change the fragment while the
 // writer is in use.
 type MarkWriter struct {
-	frag  *crdt.YXmlFragment
-	read  bool
-	spans []yTextRange
-	err   error
+	frag     *crdt.YXmlFragment
+	prepared bool
+	spans    []yTextRange
+	err      error
 }
 
 // NewMarkWriter returns a writer over frag. It reads nothing of frag until its first mark.
@@ -1078,8 +1076,8 @@ func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
 		return err
 	}
 
-	if !w.read {
-		w.read = true
+	if !w.prepared {
+		w.prepared = true
 		w.spans, w.err = yTextRanges(w.frag)
 	}
 	if w.err != nil {
@@ -1146,12 +1144,11 @@ type textLocation struct {
 
 // yTextRanges is the ProseMirror range of each non-empty Yjs text in frag, with the textblock
 // holding it, in document order. MarkRange and Unmark call it on every anchored write, so it reads
-// the fragment once and finds each text run's position as it goes: building the fragment's Node
-// shape and walking that shape again was most of its cost.
+// the fragment once and finds each text run's position as it goes.
 func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	var texts []yTextNode
 	var locations []textLocation
-	if _, err := yFragmentLocations(frag, "", 1, 0, true, &texts, &locations); err != nil {
+	if _, err := yFragmentLocations(frag, "", 1, 0, &texts, &locations); err != nil {
 		return nil, err
 	}
 
@@ -1191,16 +1188,17 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 }
 
 // yFragmentLocations appends each Yjs text among frag's children, which stand depth levels below
-// the document, to texts with the textblock holding it. When located, it also appends the range of
-// each text node walk would visit among them in the Node shape the fragment reads as, with each
-// text's delta operations as text nodes and each element as a node of its name, where the children
-// start at ProseMirror position pos, and returns their size as nodeSize counts it. Walk enters no
-// text or leaf node, so an element named text is a text run of no width and a leaf-named element
-// one position, and no Yjs text inside either is located; an element named doc adds no tokens of
-// its own, as the document does not. It refuses a node past MaxTreeDepth as Read does: an element,
-// or a text holding anything, which Read makes a text node of. Its refusals, met in document order
-// during the one traversal, precede any refusal from aligning texts with locations.
-func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos int, located bool, texts *[]yTextNode, locations *[]textLocation) (int, error) {
+// the document, to texts with the textblock holding it. When locations is not nil, it also appends
+// the range of each text node walk would visit among them in the Node shape the fragment reads as,
+// with each text's delta operations as text nodes and each element as a node of its name, where
+// the children start at ProseMirror position pos, and returns their size as nodeSize counts it.
+// Walk enters no text or leaf node, so an element named text is a text run of no width and a
+// leaf-named element one position, and no Yjs text inside either is located; an element named doc
+// adds no tokens of its own, as the document does not. It refuses a node past MaxTreeDepth as Read
+// does: an element, or a text holding anything, which Read makes a text node of. Its refusals, met
+// in document order during the one traversal, precede any refusal from aligning texts with
+// locations.
+func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos int, texts *[]yTextNode, locations *[]textLocation) (int, error) {
 	start := pos
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
@@ -1221,7 +1219,7 @@ func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos in
 					return 0, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
 				}
 				// Outside located children no position is read, so their widths go uncounted.
-				if located {
+				if locations != nil {
 					width := len16(value)
 					*locations = append(*locations, textLocation{pos: pos, end: pos + width})
 					pos += width
@@ -1232,20 +1230,24 @@ func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos in
 				return 0, err
 			}
 			name := current.NodeName
-			inner := textblock
+			innerBlock := textblock
 			switch name {
 			case "paragraph", "heading", "code_block":
-				inner = name
+				innerBlock = name
 			}
 			opaque := name == "text" || isLeafNodeType(name)
-			if name == "text" && located {
+			if name == "text" && locations != nil {
 				*locations = append(*locations, textLocation{pos: pos, end: pos})
 			}
 			childPos := pos + 1
 			if name == "doc" {
 				childPos = pos
 			}
-			size, err := yFragmentLocations(&current.YXmlFragment, inner, depth+1, childPos, located && !opaque, texts, locations)
+			innerLocations := locations
+			if opaque {
+				innerLocations = nil
+			}
+			size, err := yFragmentLocations(&current.YXmlFragment, innerBlock, depth+1, childPos, texts, innerLocations)
 			if err != nil {
 				return 0, err
 			}

@@ -365,12 +365,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			attrs  pmdoc.Attrs
 		}
 		reanchors := make([]reanchor, 0, len(anchors))
-		if !repairing && len(anchors) > 0 {
+		if !repairing {
 			// One walk reads every row's mark, where one per row would make an upload cost the
 			// document once per open anchor.
 			keys := make([]pmdoc.MarkRef, len(anchors))
 			for index, mark := range anchors {
-				keys[index] = pmdoc.MarkRef{Type: mark.markType, ID: mark.anchor.MarkID}
+				keys[index] = mark.markRef()
 			}
 			marks := pmdoc.FindMarks(current, keys)
 			for index, mark := range anchors {
