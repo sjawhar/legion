@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-27T17:55:00Z",
+  "completed": "2026-10-28T13:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
-  "round": "2: the tester's red test TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites (6ebf4be0) passes unmodified; the standby has a wake channel of its own",
+  "head": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
+  "round": "3: the round-1 review (changes requested at 3d0b23c8). All 10 threads answered and resolved; CI path filters (d47d6243); behaviour fixes with failing-before tests (9e6b8247); docs (790c651a); census follow-ups and Client.Window removed (ab5984da); contract change census in the PR body and in comment 6467221040; the review's fast-follow (one send classification) done; three forward merges of main (cb499793, a9b57a7b, f10d635e: connection count 85, changelog fragment, #2225's claimant routing in the batch model with a 5-statement lookup bound).",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -54,6 +54,22 @@
       "observed": "200 comments written through both processes: 3 takes of duty_holds in the whole run (the processes' first takes), each comment delivered once and in order; the tester's red test passes unmodified: 'the standby sent 0 takes of the hold and 0 reads of its lapse' while 100 events were written. Whole outbox package (and -race), TestHealthz, and the whole tagged multiprocess package (548.9 s) pass at this head",
       "headSha": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
       "negativeControl": "The same multiprocess run on the code before the fix (8fcb26c7, in a scratch archive) logged 308 takes of duty_holds for the same 200 comments; the red test at 8fcb26c7 fails with 'the standby sent 98 takes of the publisher hold and 98 reads of its lapse while the holder wrote 100 events'"
+    },
+    {
+      "criterion": "Round-1 review fixes at the merged head: two processes keep one publisher, take over within 10 s, deliver each event once and in order; shutdown releases the hold; no send past the deadline; the listener's forward keeps a MsgId only for a key that names its event",
+      "surface": "two real envoy-dispatch binaries on one Postgres and one NATS (multiprocess harness), plus the outbox, bus, listener, store and cmd/dispatch packages on real Postgres and NATS",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -timeout 25m -v ./cmd/dispatch; go test -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/ ./internal/roles/ ./cmd/dispatch/ ./internal/bus/ ./cmd/listener/",
+      "observed": "Whole tagged package ok in 411.621 s: take-over 5.064 s after SIGKILL, 3.005 s after a NATS cut, 7.254 s after a silent cut, 5.217 s after SIGSTOP; 200 comments (watcher 200, role holder 80, thread author 60) each once and in order; killed mid-batch and restarted healthy in 3.763 s with the comments in order. Every listed package ok. New tests pass: TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent, TestAHolderConnectedAgainWhenTheGraceEndsKeepsTheHold, TestAPublishWaitingForAReconnectWhoseEventIsDelayedStillReturns, TestShutdownWaitsForTheOutboxToReleaseThePublisherHold, TestAHolderWhoseRecordFindsTheHoldAnothersStopsItsRenewal, TestAWindowSendsNothingPastItsDeadline, TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing",
+      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
+      "negativeControl": "Each new test on the code before its fix (scratch copy) fails: 'the stream holds 1 copies on notifications.agent.ses_forward_chosen after 2 forwards, want 2'; 'the holder stopped serving (NATS lost)'; 'the publish had not returned 3s after the reconnect whose event was held'; 'shutdown returned while the outbox was still inside its batch'; 'the lost hold's Lost is still open: its renewal runs on'; the send answered nil after 1.08 s and was stored past its deadline; sent:1 for an unclaimed role route"
+    },
+    {
+      "criterion": "Main's #2225 claimant delivery holds in the batch model after the forward merge",
+      "surface": "the real envoy-dispatch binary, a NATS of the run's own, the e2e harness's fake Envoy listener, driven over HTTP as three sessions and one person (scripts/e2e/dispatch-claimant-delivery.sh)",
+      "command": "DATABASE_URL='postgres://postgres@127.0.0.1:55490/claimant_e2e?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "summary: 9 ok, 0 FAIL; dispatch claimant delivery e2e: PASS in 41s. A person's answer, thread reply and untargeted message on a claimed issue reach the claimant's agent topic; an unclaimed issue reaches none; a delivered mention suppresses the claimant copy (dispatch-14 on no agent topic); a failed mention gets the copy (dispatch-16 on notifications.agent.claimant-e2e-p, dispatch-20 on the follower's)",
+      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
+      "negativeControl": "The script's own unclaimed-issue case: a person's comment on an issue nobody claims (dispatch-13) reaches no agent topic"
     }
   ],
   "filesChanged": [
