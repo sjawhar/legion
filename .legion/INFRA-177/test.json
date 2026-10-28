@@ -2,52 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T14:09:30Z",
-  "round": 8,
-  "headTested": "366909b630d0ccd88a5d37a817c7df9fa47c79e8 (code head d0a5a0cafa83; 366909b6 adds only .legion/INFRA-177/implement.json)",
-  "fingerprint": "changed by the forward merge d0a5a0ca with main adee0aba (#2436 among it) and the two envoy-client fragments, so a full round",
-  "mergeability": "git merge-tree of main 139c61b3 with 366909b6 -> no conflict (GitHub's mergeable read UNKNOWN while it computed); contract 41, daemon 0062_handoff_records, Dispatch 0135_handoffs free on main (40, 0061, 0134).",
-  "ci": "Read 14:09Z at code head d0a5a0ca: every lane queued (build x2, changes, lint, pr-title, test, typecheck). Read as running, not waited for. The two reds the controller named as main's (recipients-claim.e2e.ts, TestDispatchConnectionsPerPodIsTheServers) were not seen here.",
-  "pr2436": {
-    "what": "fix(daemon): a synchronize's sender names its move's push, and late synchronizes name the moves they skipped (merge c27469629a9b). Kept at the head: Sender on record.ClassifiedPush, intake.Push and intake.PullRequestSynchronized, the synchronize's Before, NameMove and the head run's names, gapPath and the one-second windows, maxCopies and the copy warning, the run closing at its bound.",
-    "survivingTests": "175 tests of #2436's test files exist at the head by name; run by name: classify 61, intake 47, record 38, workflow 29 -> all ok.",
-    "dropped": [
-      "TestAPushReplacesAnApprovalCarrierOfItsTwoHeads: a push replacing an earlier approval-carrying push of the same two heads; a carrier is an unforced handoff-only push, which no role makes after the cutover and the record no longer has.",
-      "TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder: its forced-marker half goes with the forced field the head no longer decodes (a push is judged by its pusher); its review-order half is kept as TestDecodingCarriesTheReviewOrder (intake_test.go:1793, same cases: review_id, submitted_at, unreadable times, body_truncated).",
-      "The remaining dropped names (TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification, TestApplyPushTakesBackACountItsLatePushSpares, TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound, TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay, TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound, TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff, TestTheArrivalOfTheApprovedHeadEndsTheRoundWithoutItsPush) were judged in round 7: each covered a handoff-only push or its approval carry, and the head keeps renamed equivalents where the case still exists (TestPlannedRedIsSetAndClearedAcrossATesterRound, TestTheBoundKeepsPushesOnTheirWay, TestTheArrivalOfTheApprovedHeadEndsTheRound)."
-    ],
-    "protectionsUnderTheNewDaemon": "#2436's headline cases are review App and implementer pushes, which still happen; driven through the engine below, both are judged by the sender of the repeated move in either delivery order, with the run closed. Its approval-carrier fixes covered only handoff-only pushes."
+  "completed": "2026-10-28T15:43:00Z",
+  "round": 9,
+  "headTested": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1 (code head e99901ae5857; 8ab4da93 adds only .legion/INFRA-177/implement.json)",
+  "fingerprint": "changed by the forward merge e99901ae with main (#2423 among it; Dispatch migration renumbered to 0136), so a full round",
+  "mergeability": "git merge-tree of main c44c1469 with 8ab4da93 -> no conflict (GitHub's mergeable read UNKNOWN while it computed); contract 41, daemon 0062_handoff_records and Dispatch 0136_handoffs free on main (40, 0061, 0135_server_processes).",
+  "ci": "Read 15:42Z at code head e99901ae: every lane queued (build x2, changes, lint, pr-title, test, typecheck, the Daemon Go suite on Postgres 16). Read as running, not waited for.",
+  "claudeEnvoyBuild": {
+    "how": "As #2423 builds it: `bun scripts/build.ts --out $TMPDIR/ce-build` in packages/claude-envoy on Bun 1.4.4 (.bun-version), from this head's source. The tracked dist/ and legion/ at the head are main's (git diff main..8ab4da93 over them is empty), as #2423 requires of a pull request.",
+    "built": "dist/envoy-channel.js holds latestHandoff (5), handoffId (2), handoffVersion (2), `dispatch handoff-write` (3), HANDOFF_NOT_FOUND (3), JJ_USER (0), and reports daemonApiVersion 41; dist/dispatch.js carries handoff-write/handoff-read; legion/skills is byte-identical to skills/legion-worker and names handoff-write in SKILL.md and merge-gate.md, with no skip-checks rule (0 files) and no skip-checks-trailer.md.",
+    "trackedOldBuild": "main's tracked bundle: none of the handoff names, JJ_USER (1), daemonApiVersion 40 compiled in, and legion/ with skip-checks in 7 files and skip-checks-trailer.md. A Claude Code worker on it is refused, never served the old text: it registers with plugin contract 40, which a contract-41 daemon refuses, and its strict reader refuses a contract-41 state (observed: 'GET /legion/v1/state answered 200 with a body the daemon API contract does not describe: issues.LEGT-1.workers.planner: Unrecognized key: \"handoffRecord\"'). docs/deployment.md (#2423) says how to bridge the window between a merge and main's rebuild commit: build with --out and point LEGION_CLAUDE_PLUGIN_DIR at it."
   },
-  "fragments": "envoy-client now has pr2354 Added and Changed fragments. All thirteen pr2354 fragments (envoy-client 2, claude-envoy 3, contracts 3, envoy 1, pi-envoy 1, pi-legion 3) carry no Dispatch key (grep '(INFRA|LEGION|LEGSMOKE|SMOKE)-[0-9]+' -> 0 files) and `changie batch v9.9.9 --dry-run` (v1.26.0) folds every package, exit 0. The envoy-client Changed fragment's claims hold on the CLI (proof below). Wording only: the two envoy-client bodies are single long lines, so they fold to one unwrapped bullet each, where the other packages' fragments wrap at 100 in a |- block.",
+  "dispatchMigration0136": "Dispatch built from main c44c1469 migrates a fresh database to 135 and answers the handoff route 404; the head's Dispatch migrates it to 136, keeps the existing issue and records plan v1; 0136's census answers 0; main's Dispatch then serves the 136 database (GET UPG-1 200), the binary rollback the README's expand-only rule gives a new table.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "P1 on a fresh database: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t8?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s. A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t8?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. handoffimport ok. P7 and P4 not re-run (implement App, model route)."
+    "how": "P1 on a fresh database: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t9?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s. A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t9?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. handoffimport ok. P7 and P4 not re-run (implement App, model route)."
   },
   "failures": [],
   "failed": 0,
+  "notes": [
+    "Wording, for the reviewer's Fast-follow judgement: claude-envoy's pr2354 Changed fragment still ends 'since `dist/` and `legion/` were regenerated' and says 'Install it with a `legion` built from the same commit'; after #2423 this pull request regenerates neither, and the merge commit's tracked bundle is the old contract-40 build until main's rebuild commit lands. The behaviour is safe (refused at the gate) and docs/deployment.md covers the window."
+  ],
   "proof": [
     {
-      "criterion": "#2436 under the records' daemon: a move made again is judged by its own sender in every delivery order",
-      "surface": "the workflow engine on a real Postgres with synchronizes carrying before and sender and pushes carrying sender, as the listener now sends them; a throwaway test, deleted afterwards",
-      "command": "cd packages/daemon && go test ./internal/workflow/ -run TestZZTesterR8 -v (red h0 counted at 1; synchronizes a minute apart)",
-      "observed": "the review App's h0..h1, the implementer's forced return h1..h0, the review App's h0..h1 again: head h1, 1 attempt, planned, run closed, whether the last push arrives before or after its synchronize; the implementer's h0..h1, the review App's return, the implementer's h0..h1 again: head h1, 2 attempts, unplanned, run closed, in both orders",
-      "headSha": "366909b630d0ccd88a5d37a817c7df9fa47c79e8",
-      "negativeControl": "the same two histories differ only in who pushed the repeated move, and the plan and the count follow the sender: planned and uncounted for the review App, unplanned and counted for the implementer"
+      "criterion": "A claude-envoy built from this head's source as #2423 builds it carries the handoff record: the legion MCP tool's handoff_complete reports the Dispatch record, and the generated skills teach it",
+      "surface": "the built dist/envoy-channel.js run as a Legion tester pane's MCP server (bun, stdio, as Claude Code runs it) with a daemon stand-in and a scratch Dispatch built from the head holding LEGT-1's test record v1 under the pane's session; a throwaway test, deleted afterwards",
+      "command": "bun scripts/build.ts --out $TMPDIR/ce-build; BUILT_ENTRY=$TMPDIR/ce-build/dist/envoy-channel.js bun test tests/zz-tester-built-handoff.test.ts (legion tool: handoff_complete, verdict pass)",
+      "observed": "the daemon stand-in received POST /legion/v1/handoff/complete {grantId, summary, verdict: pass, ready: false, handoffId: ef076fc6-…, handoffVersion: 1}, the record Dispatch holds; the built dist/dispatch.js reads it back with handoff-read",
+      "headSha": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1",
+      "negativeControl": "the same pane on main's tracked dist/envoy-channel.js (the merge's copy): its contract-40 reader refuses the daemon's state ('Unrecognized key: \"handoffRecord\"'), the claim never serves a tool call, and nothing reaches /legion/v1/handoff/complete"
     },
     {
-      "criterion": "envoy-client's Changed fragment: under Claude Code the dispatch command acts as ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID, and refuses with neither, naming both",
-      "surface": "the real dispatch CLI (packages/envoy-client/bin/dispatch.ts) with DISPATCH_HOST=claude against a scratch Dispatch",
-      "command": "dispatch handoff-write --issue TST-2 --phase plan --body-file h.json with ENVOY_SESSION_ID=ses_envoy CLAUDE_CODE_SESSION_ID=ses_claude; then CLAUDE_CODE_SESSION_ID alone; then neither",
-      "observed": "versions 1 and 2 recorded with authors ses_envoy and ses_claude",
-      "headSha": "366909b630d0ccd88a5d37a817c7df9fa47c79e8",
-      "negativeControl": "neither set: 'dispatch: ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID is not set, so this call has no session to act as.', exit 2, nothing written"
+      "criterion": "Dispatch migration 0136 applies on main's 0135, and the release before runs over it",
+      "surface": "Dispatch built from main c44c1469 and from the head on one database",
+      "command": "./dispatch-main, create UPG/UPG-1, POST …/handoffs/plan; ./dispatch-srv on the same database, POST again; ./dispatch-main again; 0136_handoffs.census.sql",
+      "observed": "main at 135; head at 136 with UPG-1 kept and plan v1 recorded; census 0; main serves the 136 database (200)",
+      "headSha": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1",
+      "negativeControl": "main's Dispatch answers POST /api/v1/issues/UPG-1/handoffs/plan 404"
     },
     {
       "criterion": "A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon; A1 in the dashboard",
       "surface": "scripts/e2e/handoff-records.sh; the Dispatch browser suite",
-      "command": "handoff-records.sh (legion_t8); dispatch-e2e.sh … e2e/handoffs.e2e.ts",
+      "command": "handoff-records.sh (legion_t9); dispatch-e2e.sh … e2e/handoffs.e2e.ts",
       "observed": "9 checks ok; 2 passed",
-      "headSha": "366909b630d0ccd88a5d37a817c7df9fa47c79e8",
+      "headSha": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1",
       "negativeControl": "a 262,145-byte body -> 413 CAP_EXCEEDED (a6-control); another session's record -> 403 HANDOFF_SESSION_MISMATCH (a3)"
     }
   ]
