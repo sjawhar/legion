@@ -2,18 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T15:55:37Z",
-  "round": 7,
-  "headReviewed": "46727fbea446d8b0bb6b25fefaeaa8a449472175 (code head e99901ae5857; 8ab4da93 and 46727fbe add only .legion/INFRA-177/)",
-  "fingerprint": "changed by forward merge e99901ae (main 78d5f6b6), per the comment of 2026-10-28T15:31Z, so a full round",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T17:02:26Z",
+  "round": 8,
+  "headReviewed": "8fab936cb24513a6d5b24771d6c51a6d5070a3c7 (code head abdef8d9d4c2; e6980f49 and 8fab936c add only .legion/INFRA-177/)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "code": "Merge e99901ae is sound: every conflict keeps both sides (client.go, dispatch-api.ts and its test, envoy AGENTS.md and cmd/dispatch/README.md, scripts/e2e/README.md); skills-guard.test.ts keeps this PR's deletion of a trailer test main only reworded. Dispatch migration is 0136_handoffs after main's 0135_server_processes, with every reference renumbered; daemon 0062 and contract 41 unchanged. claude-envoy dist/** and legion/** equal main's, per #2423, and every test or script that reads them builds fresh.",
-  "ci": "Read 15:45Z at CI head e99901ae (compare to 46727fbe: handoffsOnly true, 2 files): required lint, typecheck, test and pr-title queued. A request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: Verdict APPROVE at 46727fbe (the fragment, confirmed, as its one Minor). code-quality: Verdict CHANGES at 46727fbe (the fragment alone).",
-  "keyFindings": [
-    {"severity": "important", "file": "packages/claude-envoy/.changes/unreleased/pr2354-Changed-20261028-103904.yaml", "description": "The release note states two false things: 'since dist/ and legion/ were regenerated' (line 13) and 'Install it with a legion built from the same commit' (line 9). After main's #2423 this PR regenerates neither; main's rebuild builds the plugin from this commit's source after the merge, and until that rebuild lands the committed bundle is the contract-40 build, which a contract-41 daemon refuses at registration. Reword to say that, as the INFRA-138 architect asked."}
-  ]
+  "roundSevenFinding": "Fixed in abdef8d9: claude-envoy's pr2354 Changed fragment now says main's Rebuild Claude Envoy plugin workflow builds dist/ and legion/ from this commit's source after the merge, that a contract-41 daemon refuses the committed contract-40 build at registration until then, and to install from main once the rebuild commit lands. No other pr2354 fragment claims a regeneration.",
+  "delta": "ca076e58..8fab936c changes only that fragment and .legion/ handoffs: docs-only, so no thermonuclear pass this round. The code was last audited at 46727fbe (code e99901ae), which this round's code head adds only the fragment to.",
+  "ci": "Read 17:02Z at CI head abdef8d9 (compare to 8fab936c: handoffsOnly true, 2 files): required lint, typecheck, test (run 40721412670) and pr-title (run 40721605714) completed success. Required set re-read: lint, typecheck, test, pr-title.",
+  "keyFindings": []
 }
