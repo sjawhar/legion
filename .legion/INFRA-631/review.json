@@ -2,39 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T15:48:01Z",
-  "round": 9,
-  "headReviewed": "the handoff commit this file is pushed in (code head 838af5ad, merge of main 690c0136)",
+  "completed": "2026-10-28T16:15:00Z",
+  "round": 10,
+  "headReviewed": "the handoff commit this file is pushed in (code head 4e67dd97, on the merge of main 690c0136)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
+  "important": 2,
   "minor": 0,
-  "roundEightFindings": "fixed: the \\f, \\v, '</source\\f>', list-item and bare-\\r <source inputs refuse with exit 2 and the file unchanged; the two earlier <source cases stay unchanged; GFM_ONLY_HTML_BLOCK_LINE is gone; main 690c0136 merged and restructure.ts --strict on its files is byte-identical to the head guides",
+  "roundNineFindings": "fixed: a CRLF file and an invalid UTF-8 file each refuse with exit 2 and the bytes kept; the refusal tests bite (mutations in a scratch copy: the UTF-8 refusal's continue removed fails 1, the whitespace refusal's continue removed fails 4, CRLF allowed again fails 1, a lenient decoder fails 1)",
   "verified": [
-    "checker exit 0 on both guides; bun test of the two test files: 85 pass, 0 fail",
-    "required checks (lint, typecheck, test, pr-title) at CI head 838af5ad all queued at 15:47Z; PR MERGEABLE",
-    "main's three known reds (recipients-claim.e2e.ts, mermaid.e2e.ts:194, TestDispatchConnectionsPerPodIsTheServers) run in envoy-and-contracts.yaml jobs, outside the required set"
+    "checker exit 0 on both guides; bun test of the two test files: 87 pass, 0 fail",
+    "restructure.ts --strict on main 690c0136's files byte-identical to the head guides; on main 8b4a862b's files exit 0",
+    "GitHub reports the pull request CONFLICTING with main 8b4a862b: git merge-tree conflicts in packages/envoy/AGENTS.md",
+    "required checks at CI head 4e67dd97 queued at 16:05Z; every completed 'Tests' run of this branch's pull_request runs (18) is cancelled, none succeeded: each push cancels the run before a runner takes it"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:1131",
-      "description": "On a CRLF file the first --write leaves a bare CR inside a line ('Some text. More text\\r\\nhere.\\r\\n' becomes 'Some text.\\nMore text\\r here.\\r\\n', exit 0), and ODD_WHITESPACE then refuses that file on every later run. The architect's fix (2026-10-28 15:34Z): --write refuses any file that holds a carriage return, CRLF included, naming the file, with a test."
+      "file": "packages/envoy/AGENTS.md",
+      "description": "The head conflicts with main 8b4a862b. Merge main and regenerate the guides with restructure.ts --strict on main's files (exit 0 there today)."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:1106",
-      "description": "readText decodes with readFile(path, 'utf8'), which turns invalid UTF-8 into U+FFFD, and writeFile saves it: 'Caf\\xe9 words here. More words follow.' is written with exit 0 and the byte e9 becomes ef bf bd, a non-whitespace change. Decode with new TextDecoder('utf-8', { fatal: true }) and refuse the file on error, with a test."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/semantic-line-breaks.test.ts:490",
-      "description": "The refusal tests use inputs relayout leaves alone, so deleting the refusal's 'continue' (semantic-line-breaks.ts:1147) passes all tests while the script prints the refusal, exits 2 and still rewrites the file ('Some words. More words.\\n<source\\fsrc=x> more words.'). Start each input with a line relayout would change; the CR and UTF-8 tests the same way."
+      "file": "scripts/semantic-line-breaks.ts:1115",
+      "description": "With ignoreBOM true a leading U+FEFF stays in the text, so every line-start rule misreads line 1 while micromark and GitHub drop the BOM. '\\xef\\xbb\\xbf<source src=x> Some words.\\n- one. two\\n- three' is written with exit 0, and GitHub's POST /markdown shows the two '-' lines as raw text in the <source> HTML block before and as a <ul> after. Fix: take a leading BOM off before any check or re-layout and put it back only in writeFile, in check mode too; add this input as a test."
     }
   ],
-  "fastFollow": "The usage comment at semantic-line-breaks.ts:1166-1169 does not list the new refusal; plus the cleanups named in rounds 3, 5 and 7.",
+  "fastFollow": "The usage comment at semantic-line-breaks.ts:1183-1186 omits the UTF-8 and whitespace refusals; plus the cleanups named in rounds 3, 5 and 7.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at bbf5c1f1 (no round-9 finding; 231 Unicode-whitespace and NUL inputs rendered on GitHub show no difference; the guides and all 1,249 tracked .md files behave the same under the old and new script; outside the round: invalid UTF-8 is replaced and written)",
-    "codeQuality": "Verdict: CHANGES at bbf5c1f1 (the refusal's continue is untested; usage comment cleanup)"
+    "deepReview": "Verdict: CHANGES at bef3650e (1 High: the BOM shifts line 1 past every anchored rule). Other BOM first lines refuse or render the same",
+    "codeQuality": "Verdict: APPROVE at bef3650e"
   }
 }
