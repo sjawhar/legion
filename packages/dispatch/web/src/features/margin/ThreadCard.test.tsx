@@ -305,7 +305,8 @@ test("the author can edit a comment and an edited comment carries its marker", a
     expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root"));
+    // No blocks route answered here, so the save carries no block ids.
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root", undefined));
 
     view.rerender(
       <QueryClientProvider client={new QueryClient()}>

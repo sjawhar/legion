@@ -61,6 +61,13 @@ import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
+import {
+  type FollowedBlocks,
+  followEdit,
+  spansFromBlocks,
+  type TextEditRange,
+  textareaValue,
+} from "./block-spans";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -75,17 +82,13 @@ import {
   type DeliveryPlan,
   deliveryPlan,
   mentionText,
+  type SaveCommentEdit,
   SEND_DEADLINE_MS,
   type SentRequest,
   survivingMentions,
 } from "./send-request";
 import { useAgents } from "./useAgents";
 import { useComposerSend } from "./useComposerSend";
-
-interface TextEditRange {
-  readonly end: number;
-  readonly start: number;
-}
 
 /** A draft as the composer holds it: the text, the mentions accepted in it, and, when it is a
  *  suggestion, its replacement. Mentions are offsets into that exact text. */
@@ -421,7 +424,7 @@ interface MentionComposerProps {
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
-  readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
+  readonly saveEdit?: SaveCommentEdit;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
    *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
@@ -485,19 +488,25 @@ export function MentionComposer({
   const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focusAddedOption = useRef(false);
   const previousBody = useRef(initial.body);
-  const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
+  const pendingTextEdit = useRef<
+    { before: string; inputType: string; range: TextEditRange } | undefined
+  >(undefined);
   const previousReply = useRef<string | undefined>(undefined);
   // Whether this mount took a held send's draft, which the reply prefill must not replace.
   const mountedHeld = useRef(outgoing.held !== undefined);
   const [body, setBody] = useState(initial.body);
   const [replacement, setReplacement] = useState(initial.replacement);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
+  /** The edited comment's blocks as the field's edits moved them, while the blocks route has
+   *  answered them; Save carries their ids (`carriedBlocks`). */
+  const followedBlocks = useRef<FollowedBlocks | undefined>(undefined);
   /** Puts a whole draft in the field at once - its text, mentions, and replacement in step with
    *  the request that supplied them - where the reader did not type it, so their next edit is
    *  measured from here (`previousBody`). */
   const replaceDraft = useCallback((draft: Draft) => {
     setBody(draft.body);
     previousBody.current = draft.body;
+    followedBlocks.current = followEdit(followedBlocks.current, draft.body, undefined, undefined);
     setMentions([...draft.mentions]);
     setReplacement(draft.replacement ?? "");
   }, []);
@@ -579,6 +588,35 @@ export function MentionComposer({
     editedFrom.current = editBody;
     replaceDraft({ body: editBody, mentions: [] });
   }, [editBody, replaceDraft]);
+  // The edited comment's blocks, read when the edit opens and again whenever the comment changes,
+  // then followed through every edit of the field, so Save carries each block's id. A read that
+  // fails (an older server has no blocks route), or that answers the comment not indexed, leaves
+  // none to follow, and the save carries no ids.
+  const editId = edit?.id;
+  useEffect(() => {
+    followedBlocks.current = undefined;
+    if (editId === undefined || editBody === undefined) return;
+    let current = true;
+    api.commentBlocks(editId).then(
+      (answer) => {
+        if (!current || !answer.indexed || answer.revision === undefined) return;
+        const opened = textareaValue(editBody);
+        const spans = spansFromBlocks(editBody, opened, answer.blocks);
+        if (spans === undefined) return;
+        // What the reader typed while the read was out, measured from the body it answered.
+        followedBlocks.current = followEdit(
+          { revision: answer.revision, spans, value: opened },
+          previousBody.current,
+          undefined,
+          undefined
+        );
+      },
+      () => {}
+    );
+    return () => {
+      current = false;
+    };
+  }, [editBody, editId]);
   const autoFocused = useRef(false);
   useEffect(() => {
     if (!autoFocus || autoFocused.current) return;
@@ -769,6 +807,14 @@ export function MentionComposer({
         pending?.before === before ? pending.range : undefined
       )
     );
+    // `mapSpans` takes the range only where it explains the edit of the value the spans follow,
+    // which is the textarea's own (LF for an edited body's CR LF).
+    followedBlocks.current = followEdit(
+      followedBlocks.current,
+      value,
+      pending?.range,
+      pending?.inputType
+    );
     previousBody.current = value;
     setBody(value);
     if (edit !== undefined || owner.kind === "session") {
@@ -787,7 +833,11 @@ export function MentionComposer({
       start = Math.max(0, start - 1);
     if (start === end && input.inputType === "deleteContentForward")
       end = Math.min(element.value.length, end + 1);
-    pendingTextEdit.current = { before: element.value, range: { end, start } };
+    pendingTextEdit.current = {
+      before: element.value,
+      inputType: input.inputType,
+      range: { end, start },
+    };
   };
   const addAskOption = () => {
     focusAddedOption.current = true;
@@ -815,7 +865,12 @@ export function MentionComposer({
     edit:
       edit === undefined
         ? undefined
-        : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
+        : {
+            blocks: followedBlocks.current,
+            id: edit.id,
+            save:
+              saveEdit ?? ((id, text, carried) => api.editComment(id, { body: text, ...carried })),
+          },
     kind,
     owner,
     plainDelivery: plainMode,

@@ -8,6 +8,7 @@ import type { Actor, Anchor, Artifact, Ask, Comment, Event } from "../../api/typ
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
+import type { CarriedBlockIds } from "../conversation/send-request";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import {
   type ConversationPinKind,
@@ -474,7 +475,15 @@ export function useMarginItems(
     },
   });
   const edit = useMutation({
-    mutationFn: ({ body, id }: { body: string; id: string }) => api.editComment(id, { body }),
+    mutationFn: ({
+      body,
+      carried,
+      id,
+    }: {
+      body: string;
+      carried: CarriedBlockIds | undefined;
+      id: string;
+    }) => api.editComment(id, { body, ...carried }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
     },
@@ -491,7 +500,8 @@ export function useMarginItems(
     commentsError: comments.isError,
     commentsPending: comments.isPending,
     commentRecords: comments.data ?? [],
-    editComment: (id: string, body: string) => edit.mutateAsync({ body, id }),
+    editComment: (id: string, body: string, carried: CarriedBlockIds | undefined) =>
+      edit.mutateAsync({ body, carried, id }),
     items,
     marginItems,
     needsYou,

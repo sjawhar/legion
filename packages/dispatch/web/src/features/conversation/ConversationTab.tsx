@@ -78,6 +78,7 @@ import {
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
+import type { CarriedBlockIds } from "./send-request";
 import { capabilitiesForTarget, TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useAgents } from "./useAgents";
@@ -554,10 +555,10 @@ function CommentTurn({
   const [editingCommentId, setEditingCommentId] = useState<string>();
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const editComment = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, carried: CarriedBlockIds | undefined) => {
       setSavingCommentEditId(id);
       try {
-        const comment = await api.editComment(id, { body });
+        const comment = await api.editComment(id, { body, ...carried });
         await queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
         return comment;
       } finally {

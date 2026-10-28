@@ -9,6 +9,7 @@ import { whoAmIQuery } from "../../api/queries";
 import type { Ask, UserState } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
+import type { CarriedBlockIds } from "../conversation/send-request";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { eventItemId, stateForIssue } from "../issue/pins";
 import {
@@ -225,10 +226,10 @@ export function useMarginSheet(): MarginSheetModel {
     held: heldReplyKeys,
   });
   const onEdit = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, carried: CarriedBlockIds | undefined) => {
       setSavingCommentEditId(id);
       try {
-        return await editComment(id, body);
+        return await editComment(id, body, carried);
       } finally {
         setSavingCommentEditId(undefined);
       }

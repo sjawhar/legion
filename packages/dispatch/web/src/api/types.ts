@@ -154,6 +154,8 @@ export type {
   IssueReferences,
   IssueRouteReach,
   IssueSummary,
+  ItemBlock,
+  ItemBlocks,
   ListUsersResponse,
   Message,
   MessageDelivery,

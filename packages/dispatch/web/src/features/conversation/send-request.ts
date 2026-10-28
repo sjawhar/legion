@@ -4,7 +4,9 @@ import type {
   AskUrgency,
   CreateCommentInput,
   DeliveryCapability,
+  EditCommentInput,
 } from "../../api/types";
+import { carriedBlocks, type FollowedBlocks } from "./block-spans";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -20,6 +22,18 @@ export interface SentDraft {
   readonly mentions: readonly AcceptedMention[];
   readonly replacement: string;
 }
+
+/** The block ids an edit's save carries (`PATCH /api/v1/comments/{id}`): the revision the blocks
+ *  route answered, and each carried id with where its block starts in the body sent. */
+export type CarriedBlockIds = Required<Pick<EditCommentInput, "base_revision" | "blocks">>;
+
+/** Saves an edit of comment `id`: its new body, and the block ids the editor carried through the
+ *  edit, or undefined to carry none. */
+export type SaveCommentEdit = (
+  id: string,
+  body: string,
+  carried: CarriedBlockIds | undefined
+) => Promise<unknown>;
 
 /**
  * A send, whole, as it stood when Send started it: where it goes (the owner, the reply it answers,
@@ -40,8 +54,12 @@ export interface SentRequest {
   readonly draft: SentDraft;
   readonly edit:
     | {
+        /** The comment's blocks as the editor followed them through the edit, or undefined
+         *  when the blocks route did not answer them (it failed, or the comment is not indexed
+         *  yet): the save then carries no ids, and the server matches blocks by their text. */
+        readonly blocks: FollowedBlocks | undefined;
         readonly id: string;
-        readonly save: (id: string, body: string) => Promise<unknown>;
+        readonly save: SaveCommentEdit;
       }
     | undefined;
   readonly kind: ComposerKind;
@@ -154,7 +172,20 @@ export async function sendRequest({
   replyTo,
 }: SentRequest): Promise<unknown> {
   const { body, mentions, replacement } = draft;
-  if (edit !== undefined) return edit.save(edit.id, body.trim());
+  if (edit !== undefined) {
+    const trimmed = body.trim();
+    const carried =
+      edit.blocks === undefined
+        ? undefined
+        : carriedBlocks(edit.blocks.spans, edit.blocks.value, trimmed);
+    return edit.save(
+      edit.id,
+      trimmed,
+      edit.blocks === undefined || carried === undefined
+        ? undefined
+        : { base_revision: edit.blocks.revision, blocks: carried }
+    );
+  }
   const selection =
     anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
   if (kind === "ask") {

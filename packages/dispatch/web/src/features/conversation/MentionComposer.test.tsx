@@ -5,7 +5,7 @@ import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { Agent, Comment, Message } from "../../api/types";
+import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import type { ComposerOwner, ReplyTarget } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
@@ -750,6 +750,94 @@ test("editing a comment patches only its body and never creates a delivery", asy
     view.unmount();
     editComment.mockRestore();
     createComment.mockRestore();
+  }
+});
+
+/** The blocks route's answer for a two-paragraph comment, `Alpha` and `Beta`. */
+function alphaBetaBlocks(indexed: boolean): ItemBlocks {
+  const blocks: ItemBlock[] = [
+    { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+    { from: 7, id: "b2", text: "Beta", to: 11, type: "paragraph" },
+  ];
+  return {
+    blocks: indexed ? blocks : [],
+    indexed,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    revision: 3,
+  };
+}
+
+/** Opens the edit of `Alpha\n\nBeta` once the blocks route answers `blocks`, types a word at
+ *  the end of `Beta`, saves, and hands back what the save sent: the comment id and the input. */
+async function saveEditOfAlphaBeta(blocks: Promise<ItemBlocks>): Promise<unknown[]> {
+  const commentBlocks = spyOn(api, "commentBlocks").mockReturnValue(blocks);
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {
+      await blocks.catch(() => {});
+    });
+    fireEvent.change(screen.getByLabelText("Edit comment"), {
+      target: { value: "Alpha\n\nBeta gamma  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    return [...(editComment.mock.calls[0] ?? [])];
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+}
+
+test("an edit's save carries each block's id and the revision the blocks route answered", async () => {
+  expect(await saveEditOfAlphaBeta(Promise.resolve(alphaBetaBlocks(true)))).toEqual([
+    "comment-1",
+    {
+      base_revision: 3,
+      blocks: [
+        { from: 0, id: "b1" },
+        { from: 7, id: "b2" },
+      ],
+      body: "Alpha\n\nBeta gamma",
+    },
+  ]);
+});
+
+test("an edit's save carries no block ids while the comment is not indexed or the route fails", async () => {
+  expect(await saveEditOfAlphaBeta(Promise.resolve(alphaBetaBlocks(false)))).toEqual([
+    "comment-1",
+    { body: "Alpha\n\nBeta gamma" },
+  ]);
+  // An older server has no blocks route.
+  expect(
+    await saveEditOfAlphaBeta(
+      Promise.reject(new ApiError(404, { code: "NOT_FOUND", error: "not found" }))
+    )
+  ).toEqual(["comment-1", { body: "Alpha\n\nBeta gamma" }]);
+});
+
+test("an edit's save an older server refuses keeps the draft", async () => {
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
+  const editComment = spyOn(api, "editComment").mockRejectedValueOnce(
+    new ApiError(400, { code: "INVALID_JSON", error: 'json: unknown field "blocks"' })
+  );
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    fireEvent.change(field, { target: { value: "Alpha\n\nBeta gamma" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toContain('unknown field "blocks"');
+    expect(field.value).toBe("Alpha\n\nBeta gamma");
+    expect(editComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
   }
 });
 
