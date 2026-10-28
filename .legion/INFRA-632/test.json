@@ -2,44 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T19:15:00Z",
-  "round": 3,
-  "testedHead": "362ba0e923e969ca2294835e54b405baed217e4e",
+  "completed": "2026-10-28T19:42:00Z",
+  "round": 4,
+  "testedHead": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands at 362ba0e9: the checker on the three guides (exit 0, nothing printed) and on #2422's two guides (exit 0); restructure.ts --strict --report on main a409c128's three files (exit 0, all three outputs cmp-identical to head); replay/run.sh (36 PASS); the guides test (3 pass); the reviewer's repro (a 50-row nested item followed by a sibling) passes at head and gives 'R3: 51 screen rows' on the checker of c3539293, as its negative control says."
+    "how": "Re-ran its commands at 7cf8f4e4: the checker on the three guides and #2422's two guides (exit 0, nothing printed); restructure.ts --strict --report on main a409c128's three files (exit 0, all three outputs cmp-identical to head); replay/run.sh (36 PASS); the guides test (3 pass). The reviewer's round-2 repro (a one-line parent with 50 one-line children) passes at head and gives 'R3: 51 screen rows: - Parent item.' on the checker of 362ba0e9, as its negative control says."
   },
   "failed": 0,
   "failures": [],
-  "scope": "Since round 2 (c3539293) the only code change is 362ba0e9: R3's line ownership in scripts/semantic-line-breaks.ts and its tests. The three guides, restructure.ts and the replay are byte-identical to c3539293 (git diff --quiet), so round 2's guide, difference and replay evidence holds; I re-ran the regeneration, scan, replay and guides test because the regeneration and replay run the checker.",
+  "scope": "Since round 3 (362ba0e9) the only code change is 7cf8f4e4: R3 counts the blank lines right before a list item toward no item, the file-head comment, and three tidy-ups (one GUIDES constant in the guides test, VERBATIM_OPEN captures the tag name, relayout takes blocks as required). The three guides, restructure.ts and the replay are byte-identical to 362ba0e9.",
   "proof": [
     {
-      "criterion": "Review round 1's finding: R3 gives a nested item the same count whatever follows it, and still checks a parent's own lines",
+      "criterion": "Review round 2's finding: the blank lines R2 requires between nested items never add up in the parent, and R3 still holds every item to one screen",
       "surface": "bun scripts/semantic-line-breaks.ts on scratch files, as a contributor runs it",
-      "command": "11 scratch files: a nested item of 50 and 51 rows followed by a sibling, a nested item of 50 rows as the last child, a top-level item of 50 and 51 rows followed by a sibling, a third-level item of 50 and 51 rows between siblings, an ordered item holding a fence of 50 and 51 rows, a parent whose own lines after a nested list total 50 and 51",
-      "observed": "every 50-row case exits 0 and every 51-row case exits 1 with 'R3: 51 screen rows' at that item's first line (line 3 for the nested item, line 5 for the third-level one, line 1 for the parent and the ordered step), whatever follows it",
-      "headSha": "362ba0e923e969ca2294835e54b405baed217e4e",
-      "negativeControl": "the reviewer's repro (a 50-row nested item followed by a sibling) on scripts/semantic-line-breaks.ts as of c3539293: 'R3: 51 screen rows: - First nested.', exit 1; at head exit 0"
+      "command": "15 scratch files: a one-line parent with 50 and with 200 one-line children (then a sibling); a parent with 50 and 51 own lines then children; a parent with two paragraphs totalling 50 and 51; a parent paragraph after a nested list at 49 and 51; a nested item of 50 and 51 rows followed by a sibling; a top-level item of 50 rows then three blank lines; `- - x` with 50 and 51 rows; an ordered step holding a fence of 50 rows, and one whose fence holds a blank line before a `- not an item` line (51)",
+      "observed": "every case at or below 50 exits 0, every 51-row case exits 1 with 'R3: 51 screen rows' at the item's first line; the 50- and 200-child parents pass; a blank line inside a fence is still counted (the fence case fails at 51)",
+      "headSha": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
+      "negativeControl": "the reviewer's repro on scripts/semantic-line-breaks.ts as of 362ba0e9: 'R3: 51 screen rows: - Parent item.', exit 1; at head exit 0"
     },
     {
-      "criterion": "Acceptance 1 and 2 still hold under the changed checker: the guides keep the layout and regenerate byte for byte",
-      "surface": "the checker, the independent sentence scan, restructure.ts --strict and the guides test",
-      "command": "bun scripts/semantic-line-breaks.ts <three guides> packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun $TMPDIR/infra632/scan.ts <three guides>; bun .legion/INFRA-632/restructure.ts --strict --report r.json <main a409c128 files> <outs>; cmp outs head; bun test scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0 on all five guides; scan hits=0; restructure exit 0 and all three outputs identical to head; guides test 3 pass, 0 fail",
-      "headSha": "362ba0e923e969ca2294835e54b405baed217e4e",
-      "negativeControl": "the checker on main a409c128's three guides exits 1 (2,411 R1, 295 R2, 7 R3; round 2)"
+      "criterion": "The tidy-ups change no output",
+      "surface": "the checker of 362ba0e9 and of head run on the same inputs",
+      "command": "both checkers on 15 scratch files of the verbatim warning (round 1's), main a409c128's three old-layout guides and the five guides, comparing exit codes and stderr; and stdout in full on main a409c128's three guides",
+      "observed": "exit codes and stderr (the warning text included) identical on all 23 files; stdout identical on main's guides (186 / 1,032 / 1,495 lines, the same seven R3 findings)",
+      "headSha": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
+      "negativeControl": "the reviewer's repro is the one input where the two differ (exit 1 at 362ba0e9, 0 at head)"
     },
     {
-      "criterion": "Acceptance 3 still holds: different sentences and different items merge clean",
-      "surface": "git merge-tree --write-tree in throwaway repositories",
-      "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE (guides unchanged since round 2)",
-      "observed": "run.sh 36 PASS; my 8 pairs pass at round 2 on byte-identical guides",
-      "headSha": "362ba0e923e969ca2294835e54b405baed217e4e",
-      "negativeControl": "my first pair conflicts on main a409c128's guides (round 2)"
+      "criterion": "Acceptance 1 to 3 still hold under the changed checker",
+      "surface": "the checker, the independent sentence scan, restructure.ts --strict, the guides test and the replay",
+      "command": "bun scripts/semantic-line-breaks.ts <five guides>; bun $TMPDIR/infra632/scan.ts <three guides>; bun .legion/INFRA-632/restructure.ts --strict --report r.json <main a409c128 files> <outs>; cmp outs head; bun test scripts/semantic-line-breaks.guides.test.ts; TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; git merge-tree --write-tree origin/main 7cf8f4e4",
+      "observed": "checker exit 0; scan hits=0; restructure exit 0 and all three outputs identical to head; guides test 3 pass, 0 fail; replay 36 PASS; the branch still merges clean with main d743376f",
+      "headSha": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
+      "negativeControl": "the checker on main a409c128's three guides exits 1 (2,411 R1, 295 R2, 7 R3)"
     }
   ],
   "notes": [
-    "CI at 362ba0e9 was queued at 19:13Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at c3539293 was cancelled by the new push, never completed.",
-    "The reviewer's minor finding (the file-head comment of scripts/semantic-line-breaks.ts at :5-6 still names only the two Envoy guides as keeping the layout) is unchanged at head and not on the Fast-follow line, which names the three other tidy-ups. It is a comment and changes no behaviour; the reviewer decides."
+    "CI at 7cf8f4e4 was queued at 19:40Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at 362ba0e9 was cancelled by the push (29 cancelled), never completed.",
+    "Once, one diff of the two checkers' R3 lines through process substitution showed 5 lines on the old side instead of 7; six reruns of the same command and every comparison through files gave identical output, so it is recorded as not reproduced."
   ]
 }
