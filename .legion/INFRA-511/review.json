@@ -2,29 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T16:17:29Z",
-  "decision": "changes_requested",
-  "round": 5,
-  "scope": "Narrowed by the INFRA-497 architect to the widget fix at controller-session.ts:461-467 and its test, plus (architect, 16:15Z, per the operator's rule of 2026-10-27 15:49Z that skill changes merge only after his review, in their own pull request) the split of the skill and role-prompt edits out of #2300.",
-  "reviewedHead": "719564d253a0795f4aa06ab9eada031df3025177",
-  "codeHead": "bbc7410b5bb131d64f9e0c2d75b49186e299296c",
+  "completed": "2026-10-28T15:45:44Z",
+  "decision": "approved",
+  "round": 6,
+  "scope": "Narrowed by the INFRA-497 architect: the skill split (round 5's one request), then, after the conflict-forced forward merge, that the merge changed nothing but the merge, the three skill and role-prompt files still match main, and the required checks pass.",
+  "reviewedCodeHead": "3d60177d5453dd9d307d686d25ceb3bd0d70f510",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
-  "widgetFix": "fixed: controller-session.ts:466-471 takes down a widget shown for another session on the early return for the registered session; the new test (legion.test.ts:3197-3229) fails without the fix and passes at the head (129 pass, tsc clean), checked by both thermonuclear agents in scratch copies; no regression found",
+  "important": 0,
+  "minor": 1,
+  "skillSplit": "done: skills/legion-controller/references/session.md, its claude-envoy copy and packages/daemon/internal/prompts/roles/controller-root.md equal main at the head; none is in #2300's file list; #2420 carries the three edits",
+  "merge": "fingerprint f013c87e (7a720a5d) -> 9fc5f559 (2d22b6df), changed; every hunk of the merge's delta (jj diff -r 3d60177d, 9 files) read: the three CHANGELOG entries moved into main's changie fragments (.changes/unreleased/pr2300-*.yaml, same text without the Dispatch key; CHANGELOG.md files equal main's), the key removed from version.go's contract-41 comment and pi-legion AGENTS.md, and controller-session.ts:318 `context.isIdle?.() === false` (main made SessionContext.isIdle optional; same decision for every context). Both thermonuclear agents approved the delta; pi-legion legion.test.ts 129 pass, tsc clean.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "skills/legion-controller/references/session.md; packages/claude-envoy/legion/skills/legion-controller/references/session.md; packages/daemon/internal/prompts/roles/controller-root.md",
-      "description": "The operator's rule (2026-10-27 15:49Z, relayed by the INFRA-497 architect): skill changes merge to main only after his review, in their own pull request, never mixed with code. #2300 mixes these three skill/role-prompt edits with code. Restore the three files to main's text in #2300 and carry the edits in a separate pull request from its own branch."
+      "severity": "minor",
+      "file": "PR body, Contract change census search 2",
+      "description": "The 'Prose and records, unaffected' bullet still lists packages/{claude-envoy,pi-envoy,pi-legion}/CHANGELOG.md as carrying this change's entries; after the merge the entries are in .changes/unreleased/pr2300-*.yaml. A body edit; the hits remain unaffected."
     }
   ],
-  "notBlocking": [
-    "Docs not naming the new widget take-down trigger: controller-session.ts:91-93 and :446-449, packages/pi-legion/AGENTS.md:402-403, packages/pi-legion/CHANGELOG.md:892-894.",
-    "The test covers only the clearing half of `claimWidget.session !== controllerSessionID`.",
-    "Older timing window, not caused by this fix: a /resume while the new session's re-claim is still in flight lets its later refusal put the widget up on the registered session."
-  ],
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head bbc7410b (only .legion/ above it): lint, typecheck, test and pr-title completed success, read 16:15Z. envoy-go (not required) failed: internal/dispatch/api timed out after 10m (run 40509205933); this pull request changes nothing under packages/envoy.",
-  "thermo": "At 719564d2: thermonuclear-deep-review APPROVE (fix closes the finding in every order traced, test fails without it); thermonuclear-code-quality CHANGES on cleanup only (doc drift, test gap, duplication), no correctness finding.",
-  "fastFollow": "the implementer's command-word item, plus the widget docs naming the switch-back trigger, a test for the kept own-session widget, one clearClaimWidget helper, and the earlier cleanup list."
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 3d60177d (compare to 2d22b6df: .legion/ only, 2 files): lint, typecheck, test, pr-title completed success (read 15:44Z). envoy-infra-go (not required) failed on TestDispatchConnectionsPerPodIsTheServers (expected 84), main's known red fixed by #2464; this PR changes nothing under packages/envoy.",
+  "thermo": "At 2d22b6df (merge delta): thermonuclear-deep-review APPROVE, thermonuclear-code-quality APPROVE.",
+  "fastFollow": "the implementer's command-word item; the widget docs naming the switch-back trigger; a test for the kept own-session widget; one clearClaimWidget helper; drop the never-run no-widget fallback; keep the warning level in widget lines; the census bullet's CHANGELOG paths."
 }
