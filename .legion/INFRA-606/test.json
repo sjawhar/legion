@@ -2,52 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T14:25:00Z",
-  "round": 4,
-  "headTested": "da4434188526",
-  "handoffHead": "28e5a571a94a36f5f9ddb5eef6f9810bb69793b6",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round4-tar-gz (RESULTS.md); earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2-tar-gz, infra606-tester-round3-tar-gz",
-  "ci": "Every check on da443418 was queued when read (pr-title one run cancelled, one queued); none on 28e5a571. Not waited for. The controller names two reds on main as main's: packages/dispatch/e2e/recipients-claim.e2e.ts 'a route change that closes the issue moves the open card's route row without a reload' (since #2233, #2324 fixes it) and packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers (since #2233).",
+  "completed": "2026-10-28T15:35:00Z",
+  "round": 5,
+  "headTested": "95df98158072",
+  "handoffHead": "557651c471da6d8792cf7424900daf0372b77ef7",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round5-tar-gz (RESULTS.md); earlier rounds' artifacts infra606-tester-evidence-tar-gz, infra606-tester-round2/3/4-tar-gz",
+  "ci": "On 95df9815: 8 checks queued, 1 cancelled when read; not waited for. Main's two reds (recipients-claim.e2e.ts route-change test, TestDispatchConnectionsPerPodIsTheServers) are main's, as the controller relayed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Built Dispatch from the workspace (da443418) on the round-3 stack and drove round 4's two fixes. Silent listener (RTT 30 s): a person's comment on an issue routed to the mentioned session, and a reply in that session's thread, each leave 1 copy on its NATS subject (round 3: 0); a live and a 600 ms listener leave 1 copy each, the mention's. Both round-3 red tests pass, unmodified. Stranded pass: the partial index comment_deliveries_pending exists and EXPLAIN (ANALYZE, BUFFERS) over 48,000 settled attempts shows an Index Scan reading no row. Main control build c27469629a9b."
+    "how": "Built Dispatch from the workspace (95df9815) and round 4's head (da443418) on the round-3 stack. Round 5's fix does what its proof says for attempts no sender claimed: after a SIGKILL, the outbox's settle and the stranded pass are exclusive for them (c2..c8 once each on the route session), round 4's red test passes unmodified, and the normal path and a stuck listener's burst commit no extra event or statement. It does not cover the attempt whose send was in flight at the kill (failure 1)."
   },
   "failures": [
     {
-      "criterion": "Each recipient gets one copy of a comment through a Dispatch restart (the architect's ruling, 2026-10-28T14:08Z: the outbox's abandoned-attempt copy and the stranded pass's resend must be exclusive for each comment and session).",
-      "evidence": "AS_PERSON=1 crash.sh r4person 1 130: LGA-10 routed to session:ses-a; a person posts 8 comments, each mentioning ses-a, ses-b and ses-c; listener at 2 s round trip; SIGKILL 0.3 s into stack.sh restart-dispatch's drain. ses-a's NATS subject stores c1..c8 twice each: the route copy (dispatch-13001..13008, published 14:06:25-30, about 60 s after creation, when the outbox counts the unclaimed pending attempts abandoned under model.DeliveryClaimLapse) and the mention copy (14:06:30-59, the stranded pass, which may take an attempt once it is a claim lease old). ses-b and ses-c store each comment once. Round 3's head gave exactly one copy after the same kill. Red test: TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth in packages/envoy/internal/dispatch/api/comment_delivery_silent_listener_test.go (commit 'test(dispatch): an abandoned mention reaches its session once, by the outbox's copy or the stranded pass, not both'): a comment accepted while the sender stops, its attempt aged a lease, the outbox run first, then a stranded pass. `cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<postgres url> go test ./internal/dispatch/api/ -run TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth -count=5` fails 5 of 5: 's1 received 2 copies of the comment (route copy published: true, mention sends: [s1]), want exactly 1'."
+      "criterion": "Each recipient gets one copy of a comment through a Dispatch restart: crash.sh's case (route plus mention, SIGKILL in the drain, listener at 2 s) gives exactly 1 copy per session (the architect's ruling, 2026-10-28T14:08Z).",
+      "evidence": "AS_PERSON=1 crash.sh r5person 1 130 at head 95df9815: LGA-10 routed to session:ses-a; a person posts 8 comments mentioning ses-a, ses-b, ses-c; SIGKILL 0.3 s into the drain. ses-a's NATS subject stores c1 twice (agent.ses-a.<c1>... the mention copy the killed process had handed the listener before it died, and dispatch-13001, the route copy), c2..c8 once each; ses-b and ses-c once each. comment_deliveries for ses-a: 7 failed with 'the outbox published the comment's own copy instead; the send was abandoned', 1 sent. The killed process's in-flight attempt keeps a claim that lapses a lease later; the outbox then counts it abandoned and publishes the route copy, though its send had landed; round 3's head instead resent it under the same dedupe key, which the listener drops. Red test: TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses in packages/envoy/internal/dispatch/api/comment_delivery_silent_listener_test.go (commit 'test(dispatch): a mention in flight at a kill reaches its session once after the claim lapses'); `cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<postgres url> go test ./internal/dispatch/api/ -run TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses -count=3` fails 3 of 3 ('s1 received 2 copies of the comment (route copy published: true, mention sends: [s1 \"In flight when the process was killed.\"]), want exactly 1'); the same test passes at 12aada04."
+    },
+    {
+      "criterion": "Every contract change a person or process meets is in the PR body's contract change census (the architect's check for this round, 2026-10-28T15:05Z).",
+      "evidence": "95df9815 adds a new producer of comment.delivery: the outbox commits a receipt with state failed, error 'the outbox published the comment's own copy instead; the send was abandoned', actor the comment's author, notify false (published to notifications.dispatch.issue.<key>.comment.delivery only). Readers found with rg 'comment\\.delivery' over packages and scripts (non-test): packages/dispatch/web/src/api/sse.ts 65/120/210/240/686 (refreshes the comment's queries), features/activity/activity-model.ts:112 (renders 'delivered a comment mention to <target>' whatever the state), features/issue/event-description.ts:84 ('Comment failed: <mode>'), packages/contracts/src/dispatch-api.ts:2150 (the type); no listener, delivery hub, Stage 3 or audit reader. The PR body's '## Contract change census' (searched at 12aada04 and da443418) lists five changes and none of them is this receipt."
     }
   ],
-  "failed": 1,
+  "failed": 2,
   "proof": [
     {
-      "criterion": "A session both mentioned and reached by the route or an author route gets one copy, also with a silent listener.",
-      "surface": "POST /api/v1/issues/{key}/comments as a person on the load-test stack; Dispatch's ENVOY_URL through 'loadgen proxy -rtt 30s', 600ms, or direct; the session's NATS subject read with $JS.API.STREAM.MSG.GET",
-      "command": "swap.sh head 30s; routecopy.sh r4-head-hung; authorcopy.sh r4-head-hung; the same with swap.sh head (live) and swap.sh head 600ms",
-      "observed": "Silent: routed issue -> suppress_route=true, attempt failed, 1 copy (dispatch-13001, the route copy); reply in ses-x's thread -> suppressed_authors=[ses-x], attempt failed, 1 copy (the author copy). Live and 600 ms: 1 copy each (the mention, agent.ses-x.<comment>:session:ses-x:steer).",
-      "headSha": "da4434188526",
-      "negativeControl": "Round 3's head 12aada04 with the same silent listener: 0 copies in both cases."
+      "criterion": "After a kill, the outbox's abandoned-attempt copy and the stranded pass's resend are exclusive for attempts no sender claimed.",
+      "surface": "The load-test stack, listener at 2 s; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; each session's NATS subject read with $JS.API.STREAM.MSG.GET",
+      "command": "AS_PERSON=1 crash.sh r5person 1 130 (LGA-10 routed to session:ses-a)",
+      "observed": "ses-a: c2..c8 once each (7 route copies from the outbox's settle, c4's mention from the stranded pass); ses-b and ses-c: c1..c8 once each. (c1, in flight at the kill, twice: failure 1.)",
+      "headSha": "95df98158072",
+      "negativeControl": "Round 4's head da443418, same run: ses-a stored all 8 comments twice."
     },
     {
-      "criterion": "The stranded-mention pass costs little when nothing is stranded.",
-      "surface": "The stack's Postgres after Dispatch applied migration 0135",
-      "command": "48,000 settled comment_deliveries rows inserted and analyzed; EXPLAIN (ANALYZE, BUFFERS) of strandedCommentMentions' statement with empty held arrays",
-      "observed": "Index comment_deliveries_pending (created_at) where state = 'pending'; plan: Index Scan using comment_deliveries_pending, actual rows=0, shared hit=2 for the scan, execution 0.39 ms.",
-      "headSha": "da4434188526",
-      "negativeControl": "Round 3's head 12aada04: the same statement's plan was a Seq Scan on comment_deliveries (only the primary key index)."
-    },
-    {
-      "criterion": "Bounded catch-up and the Stage 3 audit are unchanged by the forward merges.",
-      "surface": "GET /api/v1/events; production_dispatch_audit against the stack's Dispatch",
-      "command": "sse_probe.py since=H-256 and H-257; reconnect_flap2.py 60; audit.sh r4-head-rig rig",
-      "observed": "H-256: 256 frames + complete; H-257: none, no header; 60 reconnects: 233 of 233 events, no duplicate, none out of order, all complete. Audit: 1,103 events, rig comment and rig project document (no issue) flagged, exit 1.",
-      "headSha": "da4434188526",
-      "negativeControl": "since=H-257 carries no X-Dispatch-Event-Replay and replays nothing."
+      "criterion": "The settle adds no event or statement on the normal path, and a stuck listener's burst does not double the events committed (the architect's check).",
+      "surface": "POST /api/v1/issues/LGA-6/comments as a person (route session:ses-x, mention session:ses-x); Postgres log_statement=all; listener live, or through 'loadgen proxy -rtt 30s'",
+      "command": "stmts.sh head 10 and stmts.sh r4 10 (statement shapes touching comment_deliveries or inserting events); stuck.sh head 30 and stuck.sh r4 30",
+      "observed": "Live: the same statements per comment on both builds (one attempt insert, claim, resolution and outcome updates, one attempt read, two event inserts, two mention-outcome reads); no settle update; comment.created=10 comment.delivery=10 on both. Stuck, 30 comments: head comment.created=30 comment.delivery=30, one receipt per comment (15 from the outbox's settle), 1 copy per comment, settled in 81 s.",
+      "headSha": "95df98158072",
+      "negativeControl": "Round 4's head, stuck burst: the same 30 + 30 events, every attempt failed by its sender, settled in 157 s; its mention-outcome read is the only statement whose text differs."
     }
   ],
   "observations": [
-    "Round 3's browser run of census entry 1 stands: the forward merges change packages/dispatch/web/src/api/sse.ts only in which events refresh ask threads, not its reconnect path.",
-    "A 40-round reconnect run with reads as short as 50 ms counted one connection without the complete header; its headers had not arrived within the read. With 300 ms reads, 60 of 60 are complete.",
-    "Kill recovery timing as in round 3: leftovers go out a claim lease after the kill."
+    "Round 5 changes only the outbox's mention settle and the sender's comment; the stream, relay, hub, agent stream and audit results of rounds 3 and 4 stand.",
+    "crash.sh's summary line ('stored 2 of 8 missing ...') counts only mention-copy ids; the per-comment count in RESULTS.md counts route copies too."
   ]
 }
