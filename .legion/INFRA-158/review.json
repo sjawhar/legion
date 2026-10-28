@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-158",
+  "completed": "2026-10-28T11:05:45Z",
+  "round": 15,
+  "generation": 4,
+  "head": "1abb49baf88e37d571b4461017dde8d594949aec",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "ci": "Required set: lint, typecheck, test, pr-title. At CI head 1abb49ba: lint, typecheck, test success (run 40670982729); pr-title success (run 40671551839; an earlier run cancelled). Compare 1abb49ba...afba7dd1 changes only .legion/.",
+  "thermonuclear": "At 1abb49ba, scoped to merge ba1c7d68 and commit 1abb49ba: thermonuclear-deep-review APPROVE (43 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality APPROVE (36 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
+  "fingerprint": "8c1843ec -> afba7dd1: 475d2094... -> 4d34068d... changed: the nineteenth merge's UI resolutions and the changelog-fragment commit.",
+  "checks": {
+    "AskResolutionLine": "keeps main's #2363 agent prop (passed to AgentName kind) and this branch's withdrawn frame; RESOLUTION_VERB removed with no reference left; EventBody, AskCompletionCard, SearchPalette and askResolutionParts render all three kinds; a withdrawn ask's search hit reads 'Closed, no answer' then 'Withdrawn when <name> closed the issue'; both EventBody tests kept; 324 web tests pass",
+    "1abb49ba": "no code change (two Go comment lines); nine fragments match the removed entries word for word apart from the dropped key, kinds match their sections, changie batch renders them; the six CHANGELOG.md files equal main's; the 13 renamed learnings' two cross-links resolve; no added line outside .legion/ names the issue key"
+  },
+  "keyFindings": [],
+  "fastFollow": "none"
+}
