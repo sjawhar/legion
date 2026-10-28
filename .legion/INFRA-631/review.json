@@ -2,34 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T15:17:54Z",
-  "round": 8,
-  "headReviewed": "the handoff commit this file is pushed in (code head bbcf3e77, on the merge of main d47dbf05)",
+  "completed": "2026-10-28T15:48:01Z",
+  "round": 9,
+  "headReviewed": "the handoff commit this file is pushed in (code head 838af5ad, merge of main 690c0136)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 3,
   "minor": 0,
-  "roundSevenFindings": "fixed: both <source reproductions leave the file unchanged with exit 0; VERBATIM_OPEN's names and case are pinned (mutations in a scratch copy: dropping /i fails 64 tests, each name dropped fails 2-23, the lookahead removed fails 2, 'source' dropped fails 2)",
+  "roundEightFindings": "fixed: the \\f, \\v, '</source\\f>', list-item and bare-\\r <source inputs refuse with exit 2 and the file unchanged; the two earlier <source cases stay unchanged; GFM_ONLY_HTML_BLOCK_LINE is gone; main 690c0136 merged and restructure.ts --strict on its files is byte-identical to the head guides",
   "verified": [
-    "checker exit 0 on both guides; bun test of the two test files: 81 pass, 0 fail",
-    "GitHub reports the pull request CONFLICTING with main 690c0136: git merge-tree conflicts in packages/envoy/AGENTS.md (main added 18 lines); restructure.ts --strict on 690c0136's two files exits 0",
-    "required checks (lint, typecheck, test, pr-title) at CI head bbcf3e77 queued at 15:17Z"
+    "checker exit 0 on both guides; bun test of the two test files: 85 pass, 0 fail",
+    "required checks (lint, typecheck, test, pr-title) at CI head 838af5ad all queued at 15:47Z; PR MERGEABLE",
+    "main's three known reds (recipients-claim.e2e.ts, mermaid.e2e.ts:194, TestDispatchConnectionsPerPodIsTheServers) run in envoy-and-contracts.yaml jobs, outside the required set"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/AGENTS.md",
-      "description": "The head conflicts with main 690c0136. Merge main and regenerate the guides with restructure.ts --strict on main's files."
+      "file": "scripts/semantic-line-breaks.ts:1131",
+      "description": "On a CRLF file the first --write leaves a bare CR inside a line ('Some text. More text\\r\\nhere.\\r\\n' becomes 'Some text.\\nMore text\\r here.\\r\\n', exit 0), and ODD_WHITESPACE then refuses that file on every later run. The architect's fix (2026-10-28 15:34Z): --write refuses any file that holds a carriage return, CRLF included, naming the file, with a test."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:77",
-      "description": "After the tag name, HTML_BLOCK_TAG (and kind 1 at :66, and GFM_ONLY_HTML_BLOCK_LINE at :1001) accept only space, tab, '>' or '/>', where cmark-gfm's spacechar is [ \\t\\v\\f\\r\\n]. 'Some words here\\n<source\\fsrc=x> more words.' is joined with exit 0; GitHub renders '<p>Some words here</p>\\n<source> more words.' before and '<p>Some words here <source> more words.</p>' after. With a bare \\r ('<source\\rmore words.') the literal '&lt;source' appears on the page. Fix: [ \\t\\v\\f\\r] in each; delete GFM_ONLY_HTML_BLOCK_LINE and its check, which never fires once HTML_BLOCK_TAG has 'source' (deleting it leaves 80/80 tests passing; 40,000 random inputs refused 0), so the rule lives once."
+      "file": "scripts/semantic-line-breaks.ts:1106",
+      "description": "readText decodes with readFile(path, 'utf8'), which turns invalid UTF-8 into U+FFFD, and writeFile saves it: 'Caf\\xe9 words here. More words follow.' is written with exit 0 and the byte e9 becomes ef bf bd, a non-whitespace change. Decode with new TextDecoder('utf-8', { fatal: true }) and refuse the file on error, with a test."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/semantic-line-breaks.test.ts:490",
+      "description": "The refusal tests use inputs relayout leaves alone, so deleting the refusal's 'continue' (semantic-line-breaks.ts:1147) passes all tests while the script prints the refusal, exits 2 and still rewrites the file ('Some words. More words.\\n<source\\fsrc=x> more words.'). Start each input with a line relayout would change; the CR and UTF-8 tests the same way."
     }
   ],
-  "notADefect": "Code quality's '- beta. Gamma\\n- ' case: R2's blank line between list items makes the list loose, which the spec requires and the plan accepts ('loose-list <p> normalised', plan.json acceptanceEvidence 2).",
+  "fastFollow": "The usage comment at semantic-line-breaks.ts:1166-1169 does not list the new refusal; plus the cleanups named in rounds 3, 5 and 7.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 6decae7c (1 Medium: \\f, \\v, bare \\r after the tag name). Case, '</source', '<source/>', indent up to 3, tabs, blockquotes, list items, cuts of long lines and CRLF checked and not defects",
-    "codeQuality": "Verdict: CHANGES at 6decae7c (GFM_ONLY_HTML_BLOCK_LINE never fires and no test catches its removal)"
+    "deepReview": "Verdict: APPROVE at bbf5c1f1 (no round-9 finding; 231 Unicode-whitespace and NUL inputs rendered on GitHub show no difference; the guides and all 1,249 tracked .md files behave the same under the old and new script; outside the round: invalid UTF-8 is replaced and written)",
+    "codeQuality": "Verdict: CHANGES at bbf5c1f1 (the refusal's continue is untested; usage comment cleanup)"
   }
 }
