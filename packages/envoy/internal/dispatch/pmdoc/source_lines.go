@@ -113,10 +113,13 @@ func browserTextColumn(block ast.Node, lines sourceLines) int {
 	return column - lines.textColumn(startOf(definition.FirstChild())) + base + 4
 }
 
-// sourceLines is where each line of a source starts.
+// sourceLines is where each line of a source starts, and which of its lines indented code holds
+// past where goldmark ends the code (held): those are the code's, not blank, wherever a blank line
+// is counted (holdCodeLines).
 type sourceLines struct {
 	source []byte
 	starts []int
+	held   map[int]bool
 }
 
 func newSourceLines(source []byte) sourceLines {
@@ -193,7 +196,7 @@ func (l sourceLines) blankLinesOutsideCode(from, until ast.Node, blank func([]by
 func (l sourceLines) blanks(first, last int, blank func([]byte) bool) []int {
 	var blanks []int
 	for line := first; line < last; line++ {
-		if blank(l.text(line)) {
+		if l.blank(line, blank) {
 			blanks = append(blanks, line)
 		}
 	}
@@ -203,7 +206,7 @@ func (l sourceLines) blanks(first, last int, blank func([]byte) bool) []int {
 // blanksBefore is how many blank lines come right before position's line.
 func (l sourceLines) blanksBefore(position int, blank func([]byte) bool) int {
 	count := 0
-	for line := l.lineOf(position) - 1; line >= 0 && blank(l.text(line)); line-- {
+	for line := l.lineOf(position) - 1; line >= 0 && l.blank(line, blank); line-- {
 		count++
 	}
 	return count
@@ -224,11 +227,11 @@ func (l sourceLines) blanksEnding(next ast.Node, past, blank func([]byte) bool) 
 // blanksEndingBefore is blanksEnding for a container ending before line.
 func (l sourceLines) blanksEndingBefore(line int, past, blank func([]byte) bool) int {
 	line--
-	for line >= 0 && past(l.text(line)) {
+	for line >= 0 && l.blank(line, past) {
 		line--
 	}
 	count := 0
-	for ; line >= 0 && blank(l.text(line)); line-- {
+	for ; line >= 0 && l.blank(line, blank); line-- {
 		count++
 	}
 	return count
@@ -240,17 +243,22 @@ func (l sourceLines) blanksEndingBefore(line int, past, blank func([]byte) bool)
 func (l sourceLines) blanksThroughOuterQuotes(position, depth int) int {
 	line := l.lineOf(position) - 1
 	outer := 0
-	for ; line >= 0 && quoteBlankLine(l.text(line)) && bytes.Count(l.text(line), []byte(">")) < depth; line-- {
+	for ; line >= 0 && l.blank(line, quoteBlankLine) && bytes.Count(l.text(line), []byte(">")) < depth; line-- {
 		outer++
 	}
 	inner := 0
-	for blank := quoteBlankLineAt(depth); line >= 0 && blank(l.text(line)); line-- {
+	for blank := quoteBlankLineAt(depth); line >= 0 && l.blank(line, blank); line-- {
 		inner++
 	}
 	if inner == 0 {
 		return 0
 	}
 	return inner + outer
+}
+
+// blank reports whether line is blank as blank reads it and not a line indented code holds.
+func (l sourceLines) blank(line int, blank func([]byte) bool) bool {
+	return !l.held[line] && blank(l.text(line))
 }
 
 // blankInside reports whether a line between typed block directive's opening and closing fences

@@ -82,10 +82,12 @@ func enclosingFlow(node ast.Node) ast.Node {
 	return nil
 }
 
-// codeBlockText is an indented code block's lines as its text; its trailing blank lines are the
-// blank lines after it.
+// codeBlockText is an indented code block's lines as its text: the last line's own line feed
+// dropped, and then one more final line ending, as mdast-util-from-markdown drops one from
+// indented code (onexitcodeindented). Its trailing blank lines are the blank lines it keeps
+// (codeColumns), so two trailing lines of four columns read `code\n`.
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(segmentsText(lines, source), "\n")
+	value := strings.TrimSuffix(strings.TrimSuffix(segmentsText(lines, source), "\n"), "\n")
 	if value == "" {
 		return nil
 	}
