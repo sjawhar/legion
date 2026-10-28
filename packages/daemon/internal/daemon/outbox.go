@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -1511,13 +1510,10 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 			return err
 		}
 	}
-	var compare struct {
-		Status string `json:"status"`
-	}
 	// Both commits are SHAs by the time they reach here (the merge from GitHub's own answer, the
-	// build held to workflow's buildShape before its row was queued); the escape is defence in depth,
+	// build held to workflow's buildShape before its row was queued); Compare escapes them anyway,
 	// so a value that is not keeps to its path segment rather than ending the request at a `#` or `?`.
-	err = github.Get(ctx, "/compare/"+url.PathEscape(check.MergeSHA)+"..."+url.PathEscape(payload.Build)+"?per_page=1", &compare)
+	compare, err := github.Compare(ctx, check.MergeSHA, payload.Build)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
 		r.log.Info("outbox check compare finished without acting: GitHub does not know the merge or the build", "row", row.ID,

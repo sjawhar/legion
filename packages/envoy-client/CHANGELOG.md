@@ -11,6 +11,13 @@
   unregistering stays registered for up to 5 minutes and is named in that time, and a named
   session is not a failed delivery to the other sessions. A session on a serve port is not
   confirmed (INFRA-547).
+- The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
+  a gated write without a matching marker only when a live owner's store records `block`.
+- `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
+  their `--help` asks for the concrete case first and the choice in its terms
+  (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
+  `--image`, the appended `Ref:` line and picture lines count toward the limit.
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -49,35 +56,30 @@
 
 ### Added
 
-- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
-  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
-  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
-  message:
-  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
-  an empty actor list written `nobody recorded` and a null time, version or parent left out.
-  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
-  `Node:` line.
-- `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
-  person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
-  4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
-  names the same line.
-- `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
-  `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
-  optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
-  `Document:`, `Changed in version:` and `Text:`, then, for a pinned reference, `Pinned to version:`,
-  whether the block is unchanged, changed or removed since, and `Text at version N:`, then
-  `Referenced by:` and `Links:`. An unpinned reference to a block the document no longer holds
-  exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
-  `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
-  arguments for its document, and every read's reference row on a document ends
-  `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
-  gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
-  so a pin past 2^53 is never rounded. As the server reads it, a pin past 9223372036854775807 is
-  no reference. `parseDispatchRef` and `dispatchRefFromUrl` read a reference of any length, as the
-  server reads a request's (`text.ParseRef`): the 256-byte block-id and 2048-byte target-id bounds
-  decide only what text the server indexes, so a document of any name is read by its own
-  reference, and a block whose id is past 256 bytes, no graph node, reads as
-  `No block <id> in <document>.`
+- `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
+  pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
+  `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
+  that uploads a markdown document); the record a live Oh My Pi process keeps in a session's
+  state directory, one owner-only file per process under `askgate/` (`<pid>-<start>.json`), naming
+  its pid, its Linux start time and its marker store, so two processes that bind one session never
+  drop each other (an owner whose process is gone, or whose pid another process holds, is inert);
+  and single-use markers (version 2), minted exclusively and owner-only, keyed by the argv's
+  digest and bound to the dry run's arguments and to the sha256 of each file the argv names
+  (`fileOperands`) for a reviewed write. A marker older than two hours, longer than any tool's
+  time limit, is refused. Before a gated write posts, after `--help`, `--dry-run` and the session
+  and Dispatch settings, the CLI reads the session's record; with a live one it reads each named
+  file once and consumes one matching marker by unlinking it, and an upload by `--path` sends the
+  bytes of that read. In block mode it refuses a write with no matching marker
+  (`dispatch <command> was not called: AskGate is on for this session, …`, logged to the ledger
+  with an `askgate` field), and a file that changed after the review with the advice to send the
+  call again in a later message. In warn mode it writes that ledger line before it posts, refuses
+  the write when the ledger cannot take it, and posts with a `dispatch: warning:` line. A record
+  that cannot be read, or names a store that is gone, is a refusal; a session no live record names
+  needs no marker, so a terminal, CI, Claude Code, OpenCode and a pod without pi-envoy are
+  unchanged. `pruneSessions` keeps a directory whose record is live, and removes the marker store
+  of a process that is gone and that nothing changed for two hours (`sweepStores`).
+- The `dispatch` refusal for a missing `DISPATCH_HOST` says to send the command as a bash call from
+  an agent's session, or to set your own session id to run it by hand.
 - `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
   notification stream stored on a subject it follows while its own NATS subscription was down,
   through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
@@ -127,7 +129,35 @@
   nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
   close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
   warning (`routeReplayNotice`) (INFRA-439).
-
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
+  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
+  message:
+  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
+  an empty actor list written `nobody recorded` and a null time, version or parent left out.
+  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
+  `Node:` line.
+- `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
+  person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
+  4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
+  names the same line.
+- `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
+  `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
+  optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
+  `Document:`, `Changed in version:` and `Text:`, then, for a pinned reference, `Pinned to version:`,
+  whether the block is unchanged, changed or removed since, and `Text at version N:`, then
+  `Referenced by:` and `Links:`. An unpinned reference to a block the document no longer holds
+  exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
+  `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
+  arguments for its document, and every read's reference row on a document ends
+  `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
+  gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
+  so a pin past 2^53 is never rounded. As the server reads it, a pin past 9223372036854775807 is
+  no reference. `parseDispatchRef` and `dispatchRefFromUrl` read a reference of any length, as the
+  server reads a request's (`text.ParseRef`): the 256-byte block-id and 2048-byte target-id bounds
+  decide only what text the server indexes, so a document of any name is read by its own
+  reference, and a block whose id is past 256 bytes, no graph node, reads as
+  `No block <id> in <document>.`
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying
@@ -161,6 +191,12 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
+  envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse
+  leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
+  read. A checkout's `askgate` section is not read: `CheckoutEnvoyConfig.askgateError` names it,
+  and `sessionSettings` says it in its notice.
 
 ### Fixed
 

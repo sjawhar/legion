@@ -4,6 +4,40 @@
 
 ### Added
 
+- The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
+  session after a cursor per subject, so a session that receives on its own NATS subscriptions
+  (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
+  session's own `notifications.agent.<session_id>`, exactly, and the topics registered as its
+  interests that lie inside a shared stream subject (`notifications.dispatch.>`,
+  `notifications.github.>`, `notifications.slack.>`, `notifications.ghostwispr.>`,
+  `notifications.whatsapp.>`), whose publishers never carry one session's private payload. Every
+  other subject is `refused: "not_followed"` even when the interest store holds it: another
+  session's agent subject or a wildcard over them, every exception lane (the session's own
+  included), the Legion controller's `notifications.legion.>` notices, and a wildcard wider than
+  one shared subject such as `notifications.>`. Every subject of the stream is classified shared
+  or private beside the stream's subject list, and a test fails on a new one left unclassified. An
+  answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
+  without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
+  stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
+  stream they create, or on a deployed one without it, whose other metadata every start keeps; a
+  deployed stream that needs no other change gets the id alone, its replicas and every other
+  setting kept as deployed), which a backup and restore, a reconcile and a leader election keep,
+  while a restore changes `created`, and after a clustered restore the servers can report
+  different `created` times, so a later leader election can change it too. One answer holds at
+  most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
+  a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
+  NATS's error; a listener without the route answers 404, which a session reads as "does not
+  replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a
+  control character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject
+  and read every session's inbox (INFRA-439).
+- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
+  read `/v1/replay` makes; it reads one message at a time and can create, change or delete
+  nothing, and `SessionPermissions` does not get it. The rendered users change, so moving a hub
+  with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its
+  VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
+  listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
+  (INFRA-439).
 - A person's browser edit of a document reaches the agent sessions that wrote it. Once the
   document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
   one `artifact.human_edited` event: the person who edited last is its actor, and its payload
@@ -73,40 +107,6 @@
   whatever the length of its target's key; only bare text it links is held to the index's
   bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
   graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
-- The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
-  session after a cursor per subject, so a session that receives on its own NATS subscriptions
-  (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
-  session's own `notifications.agent.<session_id>`, exactly, and the topics registered as its
-  interests that lie inside a shared stream subject (`notifications.dispatch.>`,
-  `notifications.github.>`, `notifications.slack.>`, `notifications.ghostwispr.>`,
-  `notifications.whatsapp.>`), whose publishers never carry one session's private payload. Every
-  other subject is `refused: "not_followed"` even when the interest store holds it: another
-  session's agent subject or a wildcard over them, every exception lane (the session's own
-  included), the Legion controller's `notifications.legion.>` notices, and a wildcard wider than
-  one shared subject such as `notifications.>`. Every subject of the stream is classified shared
-  or private beside the stream's subject list, and a test fails on a new one left unclassified. An
-  answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
-  without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
-  stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
-  stream they create, or on a deployed one without it, whose other metadata every start keeps; a
-  deployed stream that needs no other change gets the id alone, its replicas and every other
-  setting kept as deployed), which a backup and restore, a reconcile and a leader election keep,
-  while a restore changes `created`, and after a clustered restore the servers can report
-  different `created` times, so a later leader election can change it too. One answer holds at
-  most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
-  a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
-  NATS's error; a listener without the route answers 404, which a session reads as "does not
-  replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a
-  control character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject
-  and read every session's inbox (INFRA-439).
-- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
-  `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
-  read `/v1/replay` makes; it reads one message at a time and can create, change or delete
-  nothing, and `SessionPermissions` does not get it. The rendered users change, so moving a hub
-  with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its
-  VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
-  listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
-  (INFRA-439).
 - Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
   and `parent_version`, and `dispatch read` prints them on a `Node:` line. They are on every node
   `GET /api/v1/references` and `GET /api/v1/block-links` answer, whatever its kind, always
@@ -233,18 +233,23 @@
   in total and per kind the searchable items with a current vector, lacking one or failed, and the
   oldest lacking item's wait (INFRA-393).
 - `agent-secrets` names the store it answered from, so no answer of its own is read as another
-  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
-  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
-  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
-  settings cannot be read. The injection form writes one line to standard error before it execs -
-  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
-  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
-  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
-  on standard error naming the store the table is from; `machine list` and `grant list` name
-  their broker the same way; and every refusal names where this CLI looked, from a denied request
-  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
-  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
-  broker's own body verbatim and make no settings call; `secret list --json` and
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, and the kind of that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager`, `GCP Secret
+  Manager`, or the store the broker names when this release does not know it), as `the broker
+  AGENT_SECRETS_URL names (<store kind>)`, with no `(<store kind>)` where the settings cannot be
+  read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker AGENT_SECRETS_URL names (<store kind>)`, the names it
+  injected and nothing of their values; `request`, `status` and `self` print a `source:` line;
+  `machine list` and `grant list` name their broker the same way; and every refusal names where
+  this CLI looked, from a denied or pending request to `UNKNOWN_SECRET` and a grant that released
+  no value. None of these lines names the broker's host or the store's account, region or
+  project, since an agent's output is quoted wherever it goes, a public pull request among them.
+  The secret forms, which a person runs under their own cloud sign-in, name the store's account or
+  project (`AWS Secrets Manager account <id> in <region>`, `GCP Secret Manager project <number>`):
+  `secret show` prints a `store:` line and every row of `secret list` carries `store` in `--json`
+  and a line on standard error naming the store the table is from. `--json` output is unchanged
+  for `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print
+  the broker's own body verbatim and make no settings call; `secret list --json` and
   `secret show --json` gain a `store` field. No line names a secret's version: the broker
   releases a grant's values as names and values alone, and a session holds no sign-in of its own
   to the store to read one with (`agent-secrets secret show`, which reads the store directly
@@ -258,6 +263,44 @@
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
+- No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
+  credential the broker's URL carries. Every message that names the URL names it through
+  `internal/redact`'s allow-list: the URL prints as written only when it is provably a plain
+  http(s) URL - printable ASCII with no `@`, `%`, `?`, `#`, backslash or whitespace, an http or
+  https scheme, a DNS name, IPv4 or bracketed IPv6 host with an optional numeric port, and a path
+  of letters, digits and `._~/-` alone - and as `(not printed: the value carries a credential or is
+  not a plain http(s) URL)` otherwise. No part of a value that fails the check prints, so no
+  separator, escape (single or double) or control byte in it can show a credential or forge a
+  line. For such a URL, the transport's own error prints as its class alone (`name resolution
+  failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`,
+  `not a valid URL`, `the request failed`), since its text can quote the URL; it still unwraps
+  to the original, so every classification reads as before, and a clean URL's errors print as
+  before. This covers a broker that could not be reached, the secret forms' refusal of a
+  plain-http broker, the helper's `listening` log line, and every error the helper's broker
+  calls make (a machine login, an enrollment, a renewal, a refresh or a revoke, which
+  `agent-secrets machine login`, `register --wait` and the helper's log print), the helper's
+  `sign-launcher` refusal of a URL that is not its broker's (which `machine` and `grant` list and
+  revoke print), `agent-secrets-helper install`'s refusal of a URL a unit line would need
+  escaped, Dispatch's two boot errors about `DISPATCH_AGENT_SECRETS_URL`, and the broker's own
+  refusals of `BROKER_PUBLIC_URL` and `BROKER_MACHINE_LOGIN_URL`. With a clean base, an error
+  prints as net/http wrote it only when the URL it names is that base followed by a plain `/v1/`
+  path and the error it wraps is a transport failure (a dial, name resolution, refused, timeout,
+  TLS, net/http's `http: server gave HTTP response to HTTPS client`, EOF, a reset or a broken
+  pipe), an HTTP status answer, or text the allow-list passes: a redirect's target (another host
+  or path, a query, or a malformed `Location` whose text quotes it) prints the class alone.
+  `agent-secrets` refuses an id that would not name one path segment as written - `"req%zz" is
+  not a request id`, with no `asked the broker` ending since nothing was sent - before any call,
+  since the proof signs the path as built and the broker checks it against the path it decoded;
+  before, such an id was blamed on the broker's address. An http server answering an https
+  `AGENT_SECRETS_URL` now reads as `the broker at … answered but the exchange failed`, as the
+  troubleshooting guide says: net/http reports it as its fixed `http.ErrSchemeMismatch`, which
+  the classification did not look for.
+  `agent-secrets-devrelay --broker` no longer takes `AGENT_SECRETS_URL` as its flag default,
+  which its usage text printed whole; it reads the variable after parsing. `agent-secrets-helper
+  install` writes its unit `0600`, not `0644`, since the unit's `Environment=` line holds the
+  URL, and narrows a unit an older install left `0644`. Before, net/http masked a password alone
+  and printed the user name and query, and the message about an unreachable broker printed the
+  whole URL, twice since the entry above.
 - The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
   block it retracted carries `restored: true`: the ask returns to the state it had, and the event
   records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell
@@ -1013,6 +1056,10 @@
   the payload's delivery mode). A role held by a session served on a port, which holds no NATS
   connection to confirm a forward, now answers 504 `receipt_timeout`; an earlier listener answered
   200 and the forward reached nobody.
+- Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
+  `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
+  request's `summary` gets what its question leaves of the same limit.
+
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
   `notifications.agent.<id>`, a failed-delivery lane
@@ -1838,6 +1885,24 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
+  own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
+  written through the API struck `a`; a run directly after an escaped tilde may open or close, so
+  `Plain ~\~~ end.` strikes the tilde where a document showed `~~~`; and `~` runs pair apart from
+  `*` and `_` runs, in the browser editor's order, so `x* ~~a*b~~c*` is emphasis `b~~c` in both.
+  Reading a paragraph of mixed `~` and `*` runs is now linear in its length: a mebibyte of
+  `~~a ` then `a* ` took over a minute. So is a paragraph whose `*` runs the rule of three keeps
+  apart: 437 KiB of `**a ` then `a*a` took 100 seconds and now takes under one. A rendering stored
+  correctly keeps its bytes, an image's alt text included: the writer takes first a spelling that
+  reads back under the browser editor's rules and under both sets of rules Dispatch stored
+  markdown under, so the spelling it wrote before stays wherever the browser reads it back as
+  written. One the browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser
+  strikes, is written anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next
+  rendered, and no stored document is rewritten. An image inside an image's label now adds its own
+  alt text to the outer alt text, as the browser editor reads it. A `*` or `_` run beside a tilde
+  now opens or closes toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around
+  struck `**b`, and `Plain b*~* text.` is emphasis `~` (INFRA-534).
 
 - A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
   API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a

@@ -230,8 +230,7 @@ func replaySessionToken(id string) bool {
 // is, whatever the interest store holds, since /v1/interests/subscribe stores any topic but one
 // reaching a private stream subject (bus.ReachesPrivateStreamSubject), and an interest written
 // before or past that guard may name anything. The store is read only when some requested subject
-// could pass as an interest, within ctx (store.Registry.Get); a session it holds no record of
-// follows only its agent subject.
+// could pass as an interest; a session it holds no record of follows only its agent subject.
 func (d *listenerDeps) replayFollowed(ctx context.Context, sessionID string, subjects []replaySubjectRequest) (func(string) bool, error) {
 	agentSubject := contracts.AgentSubject(sessionID)
 	var topics []string
