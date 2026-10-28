@@ -25,6 +25,17 @@ func TestZZTesterProbe(t *testing.T) {
 	s.Buffer(make([]byte, 1<<20), 1<<24)
 	se.Buffer(make([]byte, 1<<20), 1<<24)
 	onlyBad := os.Getenv("PROBE_ONLY_BAD") != ""
+	var rendersOut *os.File
+	if path := os.Getenv("PROBE_RENDERS_OUT"); path != "" {
+		rendersOut, _ = os.Create(path)
+		defer rendersOut.Close()
+	}
+	var renderEngine *bufio.Scanner
+	if path := os.Getenv("PROBE_RENDERS_ENGINE"); path != "" {
+		re, _ := os.Open(path)
+		renderEngine = bufio.NewScanner(re)
+		renderEngine.Buffer(make([]byte, 1<<20), 1<<24)
+	}
 	for s.Scan() && se.Scan() {
 		var rec struct {
 			ID any    `json:"id"`
@@ -51,6 +62,22 @@ func TestZZTesterProbe(t *testing.T) {
 				}
 			}
 		}
+		if rendersOut != nil {
+			line, _ := json.Marshal(map[string]any{"id": rec.ID, "md": render})
+			rendersOut.Write(append(line, '\n'))
+		}
+		engOfGo := "n/a"
+		if renderEngine != nil && renderEngine.Scan() {
+			var r struct {
+				MD *diffReading `json:"md"`
+			}
+			json.Unmarshal(renderEngine.Bytes(), &r)
+			t := diffTree(r.MD)
+			engOfGo = fmt.Sprint(err == nil && t != nil && t.Equal(StripAnchorMarks(doc)))
+			if engOfGo == "false" {
+				engOfGo += " " + probeSummary(t)
+			}
+		}
 		engRender, eerr := "", error(nil)
 		engBack := false
 		if eng != nil {
@@ -60,11 +87,11 @@ func TestZZTesterProbe(t *testing.T) {
 				engBack = perr == nil && b.Equal(eng)
 			}
 		}
-		if onlyBad && agree && back && stable && (eng == nil || engBack) {
+		if onlyBad && agree && back && stable && (eng == nil || engBack) && engOfGo != "false" && !strings.HasPrefix(engOfGo, "false") {
 			continue
 		}
-		fmt.Printf("%v agree=%v goBack=%v stable=%v engBack=%v %q\n\tgo:  %s\n\teng: %s\n\tgoRender: %q %v\n\tengRender: %q %v\n",
-			rec.ID, agree, back, stable, engBack, rec.MD, probeSummary(doc), probeSummary(eng), render, rerr, engRender, eerr)
+		fmt.Printf("%v agree=%v goBack=%v stable=%v engBack=%v engReadsGo=%s %q\n\tgo:  %s\n\teng: %s\n\tgoRender: %q %v\n\tengRender: %q %v\n",
+			rec.ID, agree, back, stable, engBack, engOfGo, rec.MD, probeSummary(doc), probeSummary(eng), render, rerr, engRender, eerr)
 	}
 }
 
