@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -789,13 +788,60 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 	return href
 }
 
+// escapeImageSource writes an image's address so that the browser editor's parser, which decodes
+// a destination's escapes and character references, reads it back: a backslash before ASCII
+// punctuation or at the address's end, where it would escape the closing parenthesis or angle
+// bracket, is doubled, an ampersand is escaped where it would open a character reference
+// (characterReferenceAt), and in a table a pipe is escaped as well. An address holding a space or
+// a parenthesis is then written in angle brackets, as escapeLinkDestination writes a link's.
+func escapeImageSource(src string, escapePipes bool) string {
+	if strings.ContainsAny(src, "\\&|") {
+		var written strings.Builder
+		written.Grow(len(src))
+		for index := range len(src) {
+			char := src[index]
+			switch {
+			case char == '\\' && (index+1 == len(src) || isASCIIPunctuation(src[index+1])):
+				written.WriteByte('\\')
+			case char == '|' && escapePipes:
+				written.WriteByte('\\')
+			case char == '&':
+				if _, _, ok := characterReferenceAt(src, index); ok {
+					written.WriteByte('\\')
+				}
+			}
+			written.WriteByte(char)
+		}
+		src = written.String()
+	}
+	return escapeLinkDestination(src, false)
+}
+
+// titleSuffix writes a link or image title, quoted, so that the browser editor's parser, which
+// decodes a title's escapes and character references, reads it back: a backslash and a quote are
+// escaped, an ampersand only where it would open a character reference (characterReferenceAt),
+// and in a table a pipe as well.
 func titleSuffix(title string, escapePipes bool) string {
 	if title == "" {
 		return ""
 	}
-	title = strings.ReplaceAll(title, "\\", "\\\\")
-	title = strings.ReplaceAll(title, "\"", "\\\"")
-	return " \"" + escapeTablePipes(title, escapePipes) + "\""
+	var written strings.Builder
+	written.Grow(len(title) + len(` ""`))
+	written.WriteString(` "`)
+	for index := range len(title) {
+		char := title[index]
+		switch {
+		case char == '\\' || char == '"' || char == '|' && escapePipes:
+			written.WriteByte('\\')
+		case char == '&':
+			if _, _, ok := characterReferenceAt(title, index); ok {
+				written.WriteByte('\\')
+			}
+		}
+		written.WriteByte(char)
+	}
+	written.WriteByte('"')
+	return written.String()
 }
 
 func escapeTablePipes(value string, escapePipes bool) string {
@@ -833,8 +879,9 @@ func escapeTableLinkDestination(value string) string {
 
 // escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's
 // escapes and character references, reads it back: a bracket, a pipe, and a backslash before ASCII
-// punctuation or at the label's end are escaped, an ampersand only where it would open a character
-// reference, and white space, which no label holds as written, is a numeric character reference.
+// punctuation or at the label's end are escaped, an ampersand only where it opens a run shaped as a
+// character reference (characterReferenceLength), and white space, which no label holds as written,
+// is a numeric character reference.
 // A label that reads back as written stays as it is.
 func escapeFootnoteLabel(label string) string {
 	var written strings.Builder
@@ -845,7 +892,7 @@ func escapeFootnoteLabel(label string) string {
 			written.WriteByte('\\')
 		case char == '\\' && (index+1 == len(label) || isASCIIPunctuation(label[index+1])):
 			written.WriteByte('\\')
-		case char == '&' && characterReference.MatchString(label[index:]):
+		case char == '&' && characterReferenceLength(label, index) > 0:
 			written.WriteByte('\\')
 		case unicode.IsSpace(char):
 			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
@@ -855,10 +902,6 @@ func escapeFootnoteLabel(label string) string {
 	}
 	return written.String()
 }
-
-// characterReference is a character reference opening text: a named one, or a decimal or
-// hexadecimal numeric one.
-var characterReference = regexp.MustCompile(`^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});`)
 
 func holdsHardBreak(nodes []*Node) bool {
 	for _, n := range nodes {

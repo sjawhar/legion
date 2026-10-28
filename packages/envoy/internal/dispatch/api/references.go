@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -324,6 +325,10 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 		return nil, err
 	}
 	defer rows.Close()
+	// authorsByJSON decodes each distinct author list once, and every version storing those bytes
+	// shares the slice. That is safe because what this loader returns is read-only, encoded once
+	// by getIssueReferences, and the memo lives for this one call only.
+	authorsByJSON := map[string][]model.Actor{}
 	for rows.Next() {
 		var artifact model.Artifact
 		var createdBy, authors []byte
@@ -351,29 +356,27 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 		); err != nil {
 			return nil, err
 		}
-		if err := decodeArtifactReference(&artifact, createdBy, &version, authors); err != nil {
-			return nil, err
+		current, found := artifacts[artifact.RefKey]
+		if !found {
+			if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
+				return nil, fmt.Errorf("decode artifact author: %w", err)
+			}
+			current = artifact
 		}
-		if current, found := artifacts[artifact.RefKey]; found {
-			current.Versions = append(current.Versions, version)
-			artifacts[artifact.RefKey] = current
-			continue
+		decoded, ok := authorsByJSON[string(authors)]
+		if !ok {
+			if err := json.Unmarshal(authors, &decoded); err != nil {
+				return nil, fmt.Errorf("decode artifact version authors: %w", err)
+			}
+			decoded = slices.Clip(decoded)
+			authorsByJSON[string(authors)] = decoded
 		}
-		artifact.Versions = []model.Version{version}
-		artifacts[artifact.RefKey] = artifact
+		version.Authors = decoded
+		current.Versions = append(current.Versions, version)
+		artifacts[artifact.RefKey] = current
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return artifacts, nil
-}
-
-func decodeArtifactReference(artifact *model.Artifact, createdBy []byte, version *model.Version, authors []byte) error {
-	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
-		return fmt.Errorf("decode artifact author: %w", err)
-	}
-	if err := json.Unmarshal(authors, &version.Authors); err != nil {
-		return fmt.Errorf("decode artifact version authors: %w", err)
-	}
-	return nil
 }
