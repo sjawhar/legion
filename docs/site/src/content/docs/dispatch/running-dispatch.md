@@ -286,12 +286,11 @@ one. Three things have to be true first, and Dispatch can check none of them for
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
-- **Concurrent servers claim durable work before they act.** The outbox claims each batch with
-  `FOR UPDATE SKIP LOCKED`, so two healthy servers do not publish one event twice. A page write's
-  `(login, Idempotency-Key)` row and its write transaction's commit mark keep one intent from
-  running twice, and the delivery sweep or a retry atomically claims each lapsed delivery attempt
-  before it sends. Several replicas can therefore serve the same keys and sweep the same backlog
-  without making a write or delivery twice.
+- **Expect an issue's notifications out of order while two servers publish.** Each server's
+  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
+  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
+  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
+  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
 to 64 connections for requests, up to 9 for the periodic work it runs once across the servers, up
@@ -355,7 +354,11 @@ server ignores a write's `Idempotency-Key`, so while both run a write whose answ
 run once by each: the page and the `dispatch` command both retry such a write, and its retry can
 reach the other version. At one replica the Deployment's `Recreate` already stops the old pod
 first; above one replica, scale to zero before the new version starts. Releases after it roll
-again. A tab opened before the deploy needs a reload: its event route is gone and it shows
+again. Rolling it back brings the hazard back the other way: a tab still open, and a `dispatch`
+client that saw this version keep keys in the last five minutes, retry a write whose answer was
+lost against the earlier server, which runs it again. So fix it forward, as above; if you must roll
+back, stop this version first, knowing a write in flight at that moment may land twice. A tab
+opened before the deploy needs a reload: its event route is gone and it shows
 **Live updates unavailable**, and its broadcast body still carries a field the new server refuses.
 
 From that release on, every page write that could otherwise happen twice carries an

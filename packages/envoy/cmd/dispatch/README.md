@@ -473,10 +473,14 @@ server answered it. Stop the earlier release, or scale it to zero, before this o
 Kubernetes Deployment's `strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its
 default one replica; a deployment running more than one replica, which rolls, is scaled to zero
 first, as for `0117` (Database migrations, below). The compose auto-deployer stops the old
-container before it starts the new one. Releases after this one roll again. A tab opened before
-the deploy needs a reload: `GET /api/v1/events` is gone, so it shows `Live updates unavailable`,
-and its broadcast body still carries `idempotency_key`, which this release refuses as an unknown
-field (`400 INVALID_JSON`).
+container before it starts the new one. Releases after this one roll again. A rollback to an
+earlier release brings the same hazard back, the other way: a tab still open, and a `dispatch`
+client that saw this release keep keys within the last five minutes (`KEYED_LAYER_MEMORY_MS`),
+retry a write whose answer was lost against the earlier server, which runs it again. Fix forward
+instead; if you must roll back, stop this release first, knowing a write in flight at that moment
+may land twice. A tab opened before the deploy needs a reload: `GET /api/v1/events` is gone,
+so it shows `Live updates unavailable`, and its broadcast body still carries `idempotency_key`,
+which this release refuses as an unknown field (`400 INVALID_JSON`).
 
 What the two processes share, and what each keeps to itself:
 
