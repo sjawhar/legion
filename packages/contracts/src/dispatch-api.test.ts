@@ -131,14 +131,15 @@ test("models the deployed event exactly as the delivery timeline writes it", () 
   expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, number: 0 }).success).toBe(false);
 });
 
-test("models Dispatch's own start and the subject it is published on", () => {
+test("models Dispatch's announcement of its fleet's build and the subject it is published on", () => {
   expect(DISPATCH_SERVER_STARTED_SUBJECT).toBe("notifications.dispatch.server.started");
   const payload = {
     commit: "0123456789abcdef0123456789abcdef01234567",
     started_at: "2026-10-19T12:00:00Z",
   };
   expect(DispatchServerStartedPayloadSchema.parse(payload)).toEqual(payload);
-  // A start names a commit: an unstamped Dispatch publishes none, so an empty commit is no start.
+  // An announcement names a commit: a fleet with an unstamped build is never announced, so an
+  // empty commit is no announcement.
   expect(DispatchServerStartedPayloadSchema.safeParse({ ...payload, commit: "" }).success).toBe(
     false
   );
@@ -148,6 +149,21 @@ test("models Dispatch's own start and the subject it is published on", () => {
   expect(
     DispatchServerStartedPayloadSchema.safeParse({ ...payload, started_at: "noon" }).success
   ).toBe(false);
+});
+
+test("the envelope Dispatch publishes for an announcement carries a payload this schema reads", async () => {
+  // The fixture is shared with the Go writer (`packages/envoy/internal/dispatch/startup`, whose
+  // test requires the envelope it builds to equal it) and the Legion daemon's intake test.
+  const path = new URL(
+    "../../daemon/internal/intake/testdata/dispatch/server-started.json",
+    import.meta.url
+  );
+  const envelope = JSON.parse(await Bun.file(path).text());
+  expect(envelope.topic).toBe(DISPATCH_SERVER_STARTED_SUBJECT);
+  expect(DispatchServerStartedPayloadSchema.parse(JSON.parse(envelope.payload))).toEqual({
+    commit: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+    started_at: "2026-10-27T12:00:00Z",
+  });
 });
 
 test("models every supported typed-block content rule", () => {

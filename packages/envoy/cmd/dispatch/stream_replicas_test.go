@@ -42,7 +42,7 @@ func startDispatchStream(t *testing.T, urls []string, overrides map[string]strin
 
 // startDispatchNATS is all the Dispatch server's boot writes to NATS for overrides when it holds
 // an App key: the publisher's connect (startDispatchStream) and the webhook sweeper's state bucket
-// (webhookSweeper), opened at the settings' replica count.
+// (webhookSweeper's Open, which the first sweep calls), opened at the settings' replica count.
 func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string) error {
 	t.Helper()
 	client, err := startDispatchStream(t, urls, overrides)
@@ -51,7 +51,11 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 	}
 	_, pemText := githubapptest.Key(t)
 	app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
-	_, err = webhookSweeper(client, app, "", resolveWith(t, overrides).NATSReplicas)
+	sweeper, err := webhookSweeper(client, app, "", resolveWith(t, overrides).NATSReplicas)
+	if err != nil {
+		return err
+	}
+	_, err = sweeper.Open()
 	return err
 }
 

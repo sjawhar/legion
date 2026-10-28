@@ -22,8 +22,9 @@ body: |-
     Lowering or removing a limit is an operator step that needs every program's setting lowered or
     removed first (`--max-bytes=<n>`, or `--max-bytes=-1` for none). 0, a negative number or a
     non-integer is refused at load naming the variable, and a limit above what the server can
-    reserve is refused at create or update, the start then stopping with an error naming
-    `ENVOY_STREAM_MAX_BYTES=<n>`.
+    reserve is refused at create or update: the listener's start then stops with an error naming
+    `ENVOY_STREAM_MAX_BYTES=<n>`, and Dispatch's server, which connects in the background, serves on
+    and logs `envoy nats reconnect hook failed` with that error at each retry.
 time: 2026-10-28T10:11:16.371529334Z
 custom:
     Issue: pr2362

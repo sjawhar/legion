@@ -152,7 +152,7 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 		t.Fatalf("deploy the R1 stream with the old subjects: %v", err)
 	}
 
-	defaults := parseConnectOptions(nil).streamConfig()
+	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	defaultStart := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
 		startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
 		if info, err := js.StreamInfo(Stream); err != nil || !keptAtSettings(id)(info) {
@@ -195,7 +195,7 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	js := streamTestJetStream(t)
 	const added = "notifications.newer.>"
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
-	newer := parseConnectOptions(nil).streamConfig()
+	newer := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	newer.Subjects = append(slices.Clone(streamSubjects), added)
 	if err := ensureStreamWithConfig(js, &limited); err != nil {
 		t.Fatalf("the limited program's start: %v", err)
@@ -250,7 +250,7 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 		t.Fatalf("deploy the stream with the role lanes: %v", err)
 	}
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
-	defaults := parseConnectOptions(nil).streamConfig()
+	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
 	keeper := &interleavedJetStream{JetStreamContext: js, afterRead: func() {
 		if err := ensureStreamWithConfig(js, &defaults); err != nil {
@@ -306,9 +306,9 @@ func TestTheKeepersSubjectsAddOnlyItsOwnThatOverlapNothingDeployed(t *testing.T)
 // keeper sends an update, with both new subjects in the list.
 func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 	js := streamTestJetStream(t)
-	alpha := parseConnectOptions(nil).streamConfig()
+	alpha := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	alpha.Subjects = append(slices.Clone(streamSubjects), "notifications.alpha.>")
-	beta := parseConnectOptions(nil).streamConfig()
+	beta := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	beta.Subjects = append(slices.Clone(streamSubjects), "notifications.beta.>")
 	beta.Subjects[slices.Index(beta.Subjects, "notifications.github.>")] = "notifications.github.pr.>"
 	if err := ensureStreamWithConfig(js, &alpha); err != nil {

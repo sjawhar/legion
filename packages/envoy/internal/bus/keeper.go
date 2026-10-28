@@ -19,7 +19,7 @@ const defaultKeepInterval = 30 * time.Second
 // withKeepInterval sets the keeper's period in place of defaultKeepInterval, so a test sees a
 // period pass without waiting one.
 func withKeepInterval(interval time.Duration) ConnectOption {
-	return func(o *connectOpts) { o.keepInterval = interval }
+	return clientOption(func(o *connectOpts) { o.keepInterval = interval })
 }
 
 // startKeeper starts the keeper of a client whose start reconciled the stream with cfg

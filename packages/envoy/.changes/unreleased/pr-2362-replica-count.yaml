@@ -13,8 +13,9 @@ body: |-
     it took any integer. Dispatch's server reads it from a new settings table row, where it created
     the stream and its redelivery bucket with a single replica, and so does
     `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
-    (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the start then
-    stops with an error naming `ENVOY_NATS_REPLICAS=<n>`; a refused bucket raise names the bucket
+    (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the listener's start
+    then stops with an error naming `ENVOY_NATS_REPLICAS=<n>` (Dispatch's server, which connects in
+    the background, serves on and logs `envoy nats reconnect hook failed` with that error); a refused bucket raise names the bucket
     too, as `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded` (a grant
     without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds). A cluster
     with one of three servers stopped creates a new stream at 3 copies, one offline peer assigned,
