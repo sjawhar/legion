@@ -376,15 +376,82 @@ func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 	}
 }
 
+// A move made again is judged by the push that made it again, as a move to a fresh commit is: the
+// branch moves h0..h1, returns h1..h0 by a forced push, and h0..h1 is pushed again, a red settling
+// at each head. The control pushes the third push to a fresh commit h1b instead. Without its push
+// the second arrival of h1 would be judged unchained, as if its push were lost: the review App's
+// red tests pushed again after the implementer's forced return would count a fix attempt and leave
+// the red unplanned, so it would send the work back; the implementer's code pushed again after the
+// review App's forced return would keep the review App's red planned. Each holds with the pushes
+// delivered before their heads and after them.
+func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+	judged := func(firstByApp, backByApp, againByApp, late bool, again string) record.PullRequest {
+		first := record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: firstByApp}
+		back := record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, ByReviewApp: backByApp}
+		redo := record.ClassifiedPush{SHA: again, Before: "h0", ByReviewApp: againByApp}
+		var facts []runFact
+		for _, step := range []struct {
+			push record.ClassifiedPush
+			head string
+			id   int64
+		}{{first, "h1", 2}, {back, "h0", 3}, {redo, again, 4}} {
+			if late {
+				facts = append(facts, arrives(step.head), settles(step.head, step.id, "ci"), pushed(step.push))
+			} else {
+				facts = append(facts, pushed(step.push), arrives(step.head), settles(step.head, step.id, "ci"))
+			}
+		}
+		pr := red
+		for _, f := range facts {
+			pr = stored(t, deliver(f, pr))
+		}
+		return pr
+	}
+	for _, tc := range []struct {
+		name                              string
+		firstByApp, backByApp, againByApp bool
+		fix                               int
+		counted                           string
+		planned                           bool
+	}{
+		// The review App's pushes spare the count and plan the red; the implementer's forced return
+		// after the first clears the plan, and the red tests pushed again plan it once more.
+		{"the review App's red tests pushed again after the implementer's forced return", true, false, true, 1, "", true},
+		// The implementer's first push counts at h1; the review App's forced return plans the red,
+		// and the implementer's code pushed again onto that planned red counts nothing and clears it.
+		{"the implementer's code pushed again after the review App's forced return", false, true, false, 2, "h1", false},
+	} {
+		for _, late := range []bool{false, true} {
+			fresh := judged(tc.firstByApp, tc.backByApp, tc.againByApp, late, "h1b")
+			again := judged(tc.firstByApp, tc.backByApp, tc.againByApp, late, "h1")
+			for _, got := range []struct {
+				name string
+				pr   record.PullRequest
+			}{{"a fresh commit h1b", fresh}, {"h1 made again", again}} {
+				if got.pr.Run != nil || got.pr.FixAttempts != tc.fix || got.pr.HeadCounted != tc.counted || got.pr.PlannedRed != tc.planned {
+					t.Errorf("%s, pushes late %v, %s: run open %v, fix=%d counted=%q planned=%v, want no run, fix=%d counted=%q planned=%v",
+						tc.name, late, got.name, got.pr.Run != nil, got.pr.FixAttempts, got.pr.HeadCounted, got.pr.PlannedRed, tc.fix, tc.counted, tc.planned)
+				}
+			}
+			if RedSendsBack(again) != RedSendsBack(fresh) {
+				t.Errorf("%s, pushes late %v: h1 made again sends the work back %v, a fresh commit %v", tc.name, late, RedSendsBack(again), RedSendsBack(fresh))
+			}
+		}
+	}
+}
+
 // The limit of a repeat (record.Move.Repeat): it stands for the push of its two heads at the next
 // arrival by that move that no chain of other recorded pushes reaches, and cannot be told from a
 // push not yet delivered by another path. The implementer's h0..h1 is delivered twice, so the
 // second delivery is the move's repeat; the branch returns to h0, and the review App pushes h0..hx
 // and hx..h1, hx never synchronized. Delivered before h1 arrives, those pushes are h1's chain, the
 // review App's planned red. Delivered after, h1 has already been judged by the repeat, the
-// implementer's code, and no run waits for them. Main judged both orders alike, through a head run,
-// but left a run open on every move made again; the move made again is the common case. Pinned so
-// a change to it is deliberate.
+// implementer's code, and no run waits for them. Without the repeat both orders are judged alike,
+// through a head run, but every move made again is judged unchained, as if its push were lost
+// (TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain), which takes far less than this case.
+// Pinned so a change to it is deliberate.
 func TestARepeatStandsForAPushNotYetDeliveredByAnotherPath(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}

@@ -118,14 +118,7 @@ func moveIndex(moves []record.Move, before, sha string) int {
 // spends push (unspentPushes). A push that carries an approval across is never spent, and changes
 // no move.
 //
-// The repeat is what lets a move made again find its push when that push arrived first. Without
-// it, h0..h1, a forced return h1..h0 and h0..h1 pushed again leave h1's second arrival with no
-// chain, and a head run that waits for a push already delivered. The repeat is no code on its way
-// (CodeOnItsWay) and plans nothing (unchainedPlan): a push delivered twice looks the same until a
-// head arrives by its move. Nor can a repeat be told from a push of another path to the same head
-// not delivered yet: an arrival it chains opens no head run, so such pushes, delivered after, leave
-// the judgement the repeat gave (TestARepeatStandsForAPushNotYetDeliveredByAnotherPath). That takes
-// the same two heads pushed again and another path to them, its middle head never synchronized.
+// What the repeat is for, and the one case it judges by the wrong push, are unspentPushes's.
 func pushedMoves(moves []record.Move, push record.ClassifiedPush) []record.Move {
 	i := moveIndex(moves, push.Before, push.SHA)
 	if i < 0 || carriesApproval(push) {
@@ -280,6 +273,27 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // own; the move keeps what it spent as its own push or its repeat (pushedMoves). A push that did
 // not say which head it replaced is never a link: it stays on its way until a head arrives
 // (arrival), and then goes.
+//
+// A push is matched to a move by its two heads alone, so the same two heads pushed again - h0..h1,
+// a forced return h1..h0, then h0..h1 once more - are spent too, as the first push delivered twice
+// is: neither is code on its way (CodeOnItsWay), and neither plans anything until a head arrives
+// by its move. The move keeps the later push as its repeat (record.Move.Repeat), and h1's next
+// arrival by that move, when no chain of other recorded pushes reaches it from the recorded head,
+// is judged with the repeat as its push (arrivalPushes): who pushed it sets the planned mark and
+// whether the count is spared, as for a move to a fresh commit, and no head run waits for a push
+// already delivered. Without the repeat that arrival would be judged unchained, as if its push
+// were lost (unchainedPlan, sparedMove): the review App's red tests pushed again after an
+// implementer's forced return would count a fix attempt and leave the red unplanned, which sends
+// the work back, and an implementer's code pushed again after the review App's forced return would
+// keep the red planned (TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain).
+//
+// One case is judged by the repeat when another push decides it, so its judgement depends on
+// delivery order (TestARepeatStandsForAPushNotYetDeliveredByAnotherPath). It takes all of: a move
+// whose later push of the same two heads is recorded as its repeat; the branch then reaching the
+// move's head by another path of pushes (h0..hx, hx..h1) whose middle head never arrives; and those
+// pushes delivered after the head. The repeat chains that arrival, so no head run opens, and the
+// other path's pushes, arriving later, replay nothing: the judgement stays the repeat's. With those
+// pushes delivered before the head, they are its chain and decide it.
 func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival bool) []record.ClassifiedPush {
 	made := map[[2]string]bool{}
 	for _, m := range moves {
