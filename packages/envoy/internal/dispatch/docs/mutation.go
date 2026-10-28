@@ -393,6 +393,41 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 			}
 		}
+		// An upload over open anchors writes the room the target with its anchors already on it,
+		// built first in a scratch document no one else sees: the target written there, each open
+		// anchor marked again where its quote now stands, and the tree read back. Writing the
+		// target to the room without its anchors and marking them again re-formats every anchored
+		// run twice, stripping each anchor and adding it back: a tombstone per anchor per upload
+		// that the room keeps for the document's life, even where the upload left the anchored text
+		// unchanged. pmdoc.Update leaves the text it finds unchanged as it is, so writing the tree
+		// with its anchors leaves the anchored text the upload did not touch alone.
+		write := target
+		if len(reanchors) > 0 {
+			scratch := newDocumentCopy()
+			scratchFragment := scratch.GetXmlFragment(fragmentName)
+			var anchorErr error
+			scratch.Transact(func(txn *crdt.Transaction) {
+				if anchorErr = pmdoc.Update(txn, scratchFragment, target); anchorErr != nil {
+					return
+				}
+				for _, reanchor := range reanchors {
+					if _, anchorErr = markQuoteInTxn(txn, scratchFragment, target, reanchor.mark.anchor.Quote, nil, &reanchor.range_.From, MarkSpec{
+						Kind:  MarkKind(reanchor.mark.markType),
+						ID:    reanchor.mark.anchor.MarkID,
+						Attrs: reanchor.attrs,
+					}); errors.Is(anchorErr, pmdoc.ErrTargetNotFound) {
+						anchorErr = nil
+						continue
+					} else if anchorErr != nil {
+						return
+					}
+				}
+				write, anchorErr = pmdoc.ReadInTransaction(txn, scratchFragment)
+			})
+			if anchorErr != nil {
+				return anchorErr
+			}
+		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			// A repair keeps nothing of the unreadable tree, which pmdoc.Update would otherwise
@@ -401,26 +436,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			if length := fragment.Len(); repairing && length > 0 {
 				fragment.Delete(transaction, 0, length)
 			}
-			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
-				return
-			}
-			for _, reanchor := range reanchors {
-				if _, updateErr = markQuoteInTxn(transaction, fragment, target, reanchor.mark.anchor.Quote, nil, &reanchor.range_.From, MarkSpec{
-					Kind:  MarkKind(reanchor.mark.markType),
-					ID:    reanchor.mark.anchor.MarkID,
-					Attrs: reanchor.attrs,
-				}); errors.Is(updateErr, pmdoc.ErrTargetNotFound) {
-					updateErr = nil
-					continue
-				} else if updateErr != nil {
-					return
-				}
-			}
+			updateErr = pmdoc.Update(transaction, fragment, write)
 		})
-		if updateErr != nil {
-			return updateErr
-		}
-		return nil
+		return updateErr
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
 		return canonical, nil

@@ -1,0 +1,311 @@
+package docs
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+)
+
+// uploadAnchor is one open anchor a test places before an upload: a comment, or the one ask a
+// document may hold in these tests (insertAnchoredAsk's fixed id).
+type uploadAnchor struct {
+	kind  MarkKind
+	quote string
+}
+
+// placedAnchor is an open anchor as the room held it before the upload: its row, its mark's range
+// and its mark's attributes.
+type placedAnchor struct {
+	uploadAnchor
+	id     string
+	table  string
+	range_ pmdoc.Range
+	attrs  pmdoc.Attrs
+}
+
+// placeUploadAnchors marks each of anchors in the room with an open row behind it, as a comment or
+// an ask anchors itself, and returns them as the room then holds them.
+func placeUploadAnchors(t *testing.T, service *Service, artifactID string, anchors []uploadAnchor) []placedAnchor {
+	t.Helper()
+	placed := make([]placedAnchor, 0, len(anchors))
+	for index, anchor := range anchors {
+		var id, table string
+		switch anchor.kind {
+		case MarkAsk:
+			id, table = insertAnchoredAsk(t, service, artifactID, anchor.quote), "asks"
+		case MarkComment:
+			id = insertAnchoredCommentWithID(t, service, artifactID, fmt.Sprintf("00000000-0000-4000-8000-%012d", 100+index), anchor.quote)
+			table = "comments"
+		default:
+			t.Fatalf("no row anchors a %s mark", anchor.kind)
+		}
+		placed = append(placed, placedAnchor{uploadAnchor: anchor, id: id, table: table})
+	}
+	before := liveTree(t, service, artifactID)
+	for index := range placed {
+		anchor := &placed[index]
+		range_, quote, found := pmdoc.FindMark(before, string(anchor.kind), anchor.id)
+		if !found || quote != anchor.quote {
+			t.Fatalf("%s %s before the upload covers %q found=%t, want %q", anchor.kind, anchor.id, quote, found, anchor.quote)
+		}
+		attrs, found := pmdoc.MarkAttrs(before, string(anchor.kind), anchor.id)
+		if !found {
+			t.Fatalf("%s %s before the upload has no attributes", anchor.kind, anchor.id)
+		}
+		anchor.range_, anchor.attrs = range_, attrs
+	}
+	return placed
+}
+
+// comparableTree is node as two trees are compared here: by JSON value, so an attribute the room
+// holds as one Go type and the parser writes as another still compares equal, with no empty
+// attribute or mark set and no null attribute (the room does not hold one the parser writes, such
+// as a table cell's colwidth), and with no block id unless keepBlockIDs.
+func comparableTree(t *testing.T, node *pmdoc.Node, keepBlockIDs bool) string {
+	t.Helper()
+	var visit func(*pmdoc.Node) map[string]any
+	visit = func(node *pmdoc.Node) map[string]any {
+		out := map[string]any{"type": node.Type}
+		attrs := map[string]any{}
+		for key, value := range node.Attrs {
+			if value != nil && (keepBlockIDs || key != pmdoc.BlockIDAttr) {
+				attrs[key] = value
+			}
+		}
+		if len(attrs) > 0 {
+			out["attrs"] = attrs
+		}
+		if node.Text != "" {
+			out["text"] = node.Text
+		}
+		if len(node.Marks) > 0 {
+			out["marks"] = node.Marks
+		}
+		if len(node.Children) > 0 {
+			children := make([]any, 0, len(node.Children))
+			for _, child := range node.Children {
+				children = append(children, visit(child))
+			}
+			out["children"] = children
+		}
+		return out
+	}
+	encoded, err := json.Marshal(visit(node))
+	if err != nil {
+		t.Fatalf("encode tree: %v", err)
+	}
+	return string(encoded)
+}
+
+func sameAttrs(t *testing.T, got, want pmdoc.Attrs) bool {
+	t.Helper()
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("encode attributes: %v", err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode attributes: %v", err)
+	}
+	return string(gotJSON) == string(wantJSON)
+}
+
+// An upload over open anchors leaves the room the text it uploaded with each anchor on the text
+// it re-anchors to: the quote's occurrence nearest where the anchor stood, under the attributes
+// the anchor had. An anchor whose quote the upload deleted leaves the document, and its row
+// orphans at settlement.
+func TestAnUploadLeavesTheAnchorsOnTheTextItKeeps(t *testing.T) {
+	for _, test := range []struct {
+		name, seed, upload string
+		anchors            []uploadAnchor
+		orphaned           []string
+	}{
+		{
+			name:   "anchors in table cells",
+			seed:   "Intro.\n\n| Name | Value |\n| --- | --- |\n| alpha | first cell |\n| beta | second cell |\n",
+			upload: "Intro, revised.\n\n| Name | Value |\n| --- | --- |\n| alpha | first cell |\n| beta | other cell |\n",
+			anchors: []uploadAnchor{
+				{kind: MarkComment, quote: "first cell"},
+				{kind: MarkComment, quote: "beta"},
+				{kind: MarkAsk, quote: "alpha"},
+			},
+		},
+		{
+			name:   "two overlapping anchors of one type",
+			seed:   "The quick brown fox jumps over the lazy dog\n",
+			upload: "The quick brown fox leaps over the lazy dog\n",
+			anchors: []uploadAnchor{
+				{kind: MarkComment, quote: "quick brown fox"},
+				{kind: MarkComment, quote: "brown"},
+			},
+		},
+		{
+			name:   "a quote that moved",
+			seed:   "The quick brown fox\n\nA slow brown cat\n",
+			upload: "A new first paragraph.\n\nThe very quick brown fox\n\nA slow brown cat\n",
+			anchors: []uploadAnchor{
+				{kind: MarkComment, quote: "brown fox"},
+				{kind: MarkAsk, quote: "slow brown"},
+			},
+		},
+		{
+			name:   "a quote the upload deletes",
+			seed:   "The quick brown fox jumps\n",
+			upload: "The quick brown cat jumps\n",
+			anchors: []uploadAnchor{
+				{kind: MarkComment, quote: "fox"},
+				{kind: MarkComment, quote: "quick"},
+			},
+			orphaned: []string{"fox"},
+		},
+		{
+			name:   "a comment whose quote now lands in a code block",
+			seed:   "Intro.\n\nrun the tests\n",
+			upload: "Intro.\n\n```\nrun the tests\n```\n",
+			anchors: []uploadAnchor{
+				{kind: MarkComment, quote: "run the tests"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.seed)
+			placed := placeUploadAnchors(t, service, artifactID, test.anchors)
+			before := liveTree(t, service, artifactID)
+			target, err := parseReplacing(before, test.upload)
+			if err != nil {
+				t.Fatalf("parse the upload: %v", err)
+			}
+
+			if _, err := joinedReplaceText(service, artifactID, test.upload, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("upload: %v", err)
+			}
+			after := liveTree(t, service, artifactID)
+			if got, want := comparableTree(t, pmdoc.StripAnchorMarks(after), false), comparableTree(t, pmdoc.StripAnchorMarks(target), false); got != want {
+				t.Fatalf("the room after the upload, its anchors stripped =\n%s\nwant the upload's tree\n%s", got, want)
+			}
+			orphaned := map[string]bool{}
+			for _, quote := range test.orphaned {
+				orphaned[quote] = true
+			}
+			for _, anchor := range placed {
+				from := anchor.range_.From
+				want, err := pmdoc.FindQuote(target, anchor.quote, nil, &from)
+				if errors.Is(err, pmdoc.ErrTargetNotFound) {
+					if !orphaned[anchor.quote] {
+						t.Fatalf("the upload drops %q, which the case does not expect to orphan", anchor.quote)
+					}
+					if _, _, found := pmdoc.FindMark(after, string(anchor.kind), anchor.id); found {
+						t.Errorf("%s %s over the deleted %q is still in the room", anchor.kind, anchor.id, anchor.quote)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("find %q in the upload: %v", anchor.quote, err)
+				}
+				if orphaned[anchor.quote] {
+					t.Fatalf("the upload keeps %q, which the case expects to orphan", anchor.quote)
+				}
+				got, _, found := pmdoc.FindMark(after, string(anchor.kind), anchor.id)
+				if !found || got != want {
+					t.Errorf("%s %s over %q after the upload = %+v found=%t, want %+v", anchor.kind, anchor.id, anchor.quote, got, found, want)
+				}
+				if attrs, found := pmdoc.MarkAttrs(after, string(anchor.kind), anchor.id); !found || !sameAttrs(t, attrs, anchor.attrs) {
+					t.Errorf("%s %s attributes after the upload = %v, want %v", anchor.kind, anchor.id, attrs, anchor.attrs)
+				}
+			}
+
+			settleCurrentGeneration(t, service, artifactID)
+			for _, anchor := range placed {
+				if stored := loadAnchor(t, service, anchor.table, anchor.id); stored.Orphaned != orphaned[anchor.quote] {
+					t.Errorf("%s %s row after settlement orphaned=%t, want %t", anchor.kind, anchor.id, stored.Orphaned, orphaned[anchor.quote])
+				}
+			}
+		})
+	}
+}
+
+// An ask mark is not allowed in a code block, so an upload that moves an open ask's quote into
+// one is refused, as a write that would leave the document outside its schema, and the room keeps
+// the tree it held.
+func TestAnUploadMovingAnAskQuoteIntoACodeBlockIsRefused(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro.\n\nrun the tests\n")
+	placeUploadAnchors(t, service, artifactID, []uploadAnchor{{kind: MarkAsk, quote: "run the tests"}})
+	before := liveTree(t, service, artifactID)
+
+	_, err := joinedReplaceText(service, artifactID, "Intro.\n\n```\nrun the tests\n```\n", model.Actor{Kind: "user", ID: "alice"})
+	if !errors.Is(err, ErrDocSchema) || !strings.Contains(err.Error(), `mark "dispatchAsk" is not allowed in code_block`) {
+		t.Fatalf("upload moving the ask's quote into a code block = %v, want the ask mark refused there", err)
+	}
+	if got, want := comparableTree(t, liveTree(t, service, artifactID), true), comparableTree(t, before, true); got != want {
+		t.Fatalf("the room after the refused upload =\n%s\nwant the tree it held\n%s", got, want)
+	}
+}
+
+// durableHistory is the document's stored history once every update its room applied is durable:
+// its rows and their bytes, each update kept as the room applied it until a fold.
+func durableHistory(t *testing.T, service *Service, artifactID string) (rows, bytes int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+		t.Fatalf("wait for live updates to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for live updates to become durable: %v", err)
+	}
+	return storedUpdateCount(t, service.store, artifactID), storedUpdateBytes(t, service.store, artifactID)
+}
+
+// An upload that changes one token far from every open anchor writes the room an update little
+// larger than that token: the anchored text it leaves unchanged keeps its anchors as they were,
+// rather than losing and regaining each, a re-formatting per anchor that the room and its stored
+// history would keep for the document's life.
+func TestAnUploadChangingOneTokenWritesASmallUpdateOverOpenAnchors(t *testing.T) {
+	const anchors, uploads, perUploadBound = 20, 3, 2048
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	paragraphs := make([]string, 0, anchors)
+	placing := make([]uploadAnchor, 0, anchors)
+	for index := range anchors {
+		paragraphs = append(paragraphs, fmt.Sprintf("Paragraph %d says topic%02d plainly and moves on.", index, index))
+		placing = append(placing, uploadAnchor{kind: MarkComment, quote: fmt.Sprintf("topic%02d plainly", index)})
+	}
+	document := func(revision int) string {
+		return fmt.Sprintf("Revision token r%d\n\n%s\n", revision, strings.Join(paragraphs, "\n\n"))
+	}
+	seedServiceText(t, service, artifactID, document(0))
+	placed := placeUploadAnchors(t, service, artifactID, placing)
+
+	rowsBefore, bytesBefore := durableHistory(t, service, artifactID)
+	for revision := 1; revision <= uploads; revision++ {
+		if _, err := joinedReplaceText(service, artifactID, document(revision), model.Actor{Kind: "user", ID: "alice"}); err != nil {
+			t.Fatalf("upload revision %d: %v", revision, err)
+		}
+	}
+	rowsAfter, bytesAfter := durableHistory(t, service, artifactID)
+	if rowsAfter < rowsBefore+uploads {
+		t.Fatalf("the stored history went from %d rows to %d over %d uploads: a fold ran, and the bytes no longer measure the uploads", rowsBefore, rowsAfter, uploads)
+	}
+	perUpload := (bytesAfter - bytesBefore) / uploads
+	t.Logf("each upload of one token over %d open anchors wrote %d bytes", anchors, perUpload)
+	if perUpload >= perUploadBound {
+		t.Fatalf("each upload of one token over %d open anchors wrote %d bytes, want under %d", anchors, perUpload, perUploadBound)
+	}
+	after := liveTree(t, service, artifactID)
+	for _, anchor := range placed {
+		if got, quote, found := pmdoc.FindMark(after, string(anchor.kind), anchor.id); !found || got != anchor.range_ || quote != anchor.quote {
+			t.Errorf("comment %s after the uploads = %+v %q found=%t, want %+v %q", anchor.id, got, quote, found, anchor.range_, anchor.quote)
+		}
+	}
+}
