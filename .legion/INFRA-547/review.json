@@ -2,25 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-547",
-  "completed": "2026-10-28T10:01:24Z",
-  "round": 5,
-  "reviewedHead": "09d3e2c9781b30dcacea705fd6132690d6b793ab",
-  "codeHead": "f18ca5a7db3ef4a6223d0d59aa757ae303ae3392",
+  "completed": "2026-10-28T10:11:05Z",
+  "round": 6,
+  "reviewedHead": "1da22cf89bd3b5cc1eda167d24b92dcbc2b8b3f3",
+  "codeHead": "6220ef2bac729b9c9adc85b71a26c3342e40f7f9",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 4,
-  "correctnessFindingsStanding": 0,
-  "whyChangesRequested": "No correctness finding stands: the round-4 403 finding is fixed, and the merge of main (with #2228's final version) is faithful. Four cleanup findings stand, all in comments or docs this change wrote. The deployment instructions allow no deferral. Spec v2 also requires another forward merge (sjawhar/legion#2362, still open) before acceptance, so these add no merge latency.",
-  "ci": "Required set on main: lint, typecheck, test, pr-title. CI head f18ca5a7; compare to 09d3e2c9 is handoffsOnly true (2 files). At 10:00Z: lint, typecheck and pr-title success, test in_progress, Envoy jobs in progress or queued.",
-  "threads": "12 threads, all mine, all resolved. Round 4: PRRT_kwDORFy7ds6w1GnA accepted (1e1f7db5). PRRT_kwDORFy7ds6w1GnH: I accepted its role-forward sentence; its other premises are restated as an inline finding this round.",
-  "e2eLines": "Both present. The tester's round 8 re-ran the soak at f18ca5a7, with the lane off and on, all received, errored 0; captured messages now come back through #2228's merged replay.",
-  "thermo": "thermonuclear-deep-review: APPROVE at f18ca5a7. It found the merge keeps #2228's final version everywhere; claude-envoy dist matches a fresh build (scripts/build.ts --check); the listener, bus, store and notify tests pass; the prefix is byte-identical to the listener's on head and main. thermonuclear-code-quality: CHANGES at f18ca5a7, cleanup only. I take the request_record comment and the prefix cross-reference. I judged Registry.RoleHolder, now test-only and documented as such, not a defect.",
+  "important": 1,
+  "minor": 1,
+  "ci": "Required set on main: lint, typecheck, test, pr-title. CI head 6220ef2b; every check queued at 10:10Z. GitHub reports the pull request CONFLICTING, so no merge ref exists for its pull_request runs. On f18ca5a7, test and the Envoy jobs were cancelled by the push. No required check has completed on a head carrying main's merge.",
+  "threads": "15 threads, all mine, all resolved. Round 5: PRRT_kwDORFy7ds6xEXLr, PRRT_kwDORFy7ds6xEXL0 and PRRT_kwDORFy7ds6xEXL7 accepted (6220ef2b).",
+  "e2eLines": "Both present.",
+  "thermo": "Not re-run this round. The code delta since f18ca5a7, where the pair ran (deep review APPROVE; code quality cleanup only), is 6220ef2b: Go comments and a pi-envoy CHANGELOG entry, with no executable change (git diff e24ab951 6220ef2b). The next round reviews the forward merge, which changes code, and runs the pair at that head.",
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/request_record.go:43-51", "description": "The rewritten comment says bus.ErrPublishDenied is reached only by the core publishes, and that only the send route's JetStream publish is never denied. Replay's NextStoredMessage also reaches confirmPublished (stored.go:49,103), and the publish route's own JetStream publish is never denied either. State the real rule: only refuseBusUnavailable records this outcome, from writeBusUnavailable's 403."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go:226-232", "description": "The listener's publishDeniedPrefix doc names only a test and a log filter as readers. The daemon now keys a final, uncapped decision on this exact string (notify.go:94), so name that reader; confirmed.go names notify.ErrNoHolder the same way. Also, notify.go:91 says 'a listener of main', which goes stale; name the release that added the prefix."},
-    {"severity": "minor", "file": "packages/daemon/internal/daemon/outbox.go:738-739", "description": "The comment says the issue is told of a refused or denied packet 'as the merger's prompt says the daemon does'. internal/prompts/go/merger.md says only that the daemon reports a role with no live holder."},
-    {"severity": "minor", "file": "packages/pi-envoy/CHANGELOG.md", "description": "No INFRA-547 entry, although pi-envoy ships the changed envoy skill and envoy_publish description, and its README/AGENTS text changed. claude-envoy and envoy-client each record the change."}
+    {"severity": "important", "file": "packages/envoy/CHANGELOG.md", "description": "The pull request is CONFLICTING with main (packages/envoy/CHANGELOG.md, after sjawhar/legion#2419), so it cannot merge, and GitHub runs no pull_request checks without a merge ref. Merge main forward. Main's AGENTS.md now forbids editing CHANGELOG.md and says an open pull request moves its entries into fragments (packages/<pkg>/.changes/unreleased/INFRA-547-<slug>.yaml, kind + body) when it next merges main; this branch edits the CHANGELOG.md of envoy, envoy-client, claude-envoy and pi-envoy. Spec v2 also wants sjawhar/legion#2362 (not merged at 10:10Z) on main before acceptance."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go:231", "description": "The new comment sentence about the daemon's reader runs to 156 characters on one line; wrap it to the file's width."}
   ],
-  "stack": "#2228 merged (85713740) and is in the branch through main b295a3fb. Spec v2: #2370 merges after sjawhar/legion#2362 (INFRA-546, approved, not merged at 10:00Z), with main carrying it before acceptance."
+  "stack": "#2228 merged and is in the branch. #2362 is still open."
 }
