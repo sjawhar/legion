@@ -1983,6 +1983,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises);
   the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
 
+- `GET /api/v1/dashboard/builds` (any authenticated caller, `api/dashboard_builds.go`) answers `{serving, live}`:
+  `serving` is the entry chunk (`/assets/index-*.js`) of the dashboard build this process serves (`api.Deps.DashboardEntry`, which `cmd/dispatch` takes from its boot's `dashboard.Publish`;
+  `""` when it serves none), and `live` the distinct entry chunks of the builds the live server processes serve (`processes.Live` joined to `dashboard_builds` on the build id, `routes.DashboardBuild`'s hex), sorted, `[]` when none.
+  The dashboard's "A new version is available" notice (`web/src/features/shell/DeploymentResilience.tsx`) asks only this route and offers itself only on a `200` whose `live` holds exactly one entry other than the tab's own, so no tab is told to reload while a rolling update or a rollback runs two builds;
+  an older process's `404`, a `401`, a `5xx` or a network failure offers nothing.
+
 - Every session that writes to an ask follows it:
   `asks.FollowAuthor` runs at all three ask insert sites (`POST .../asks`, approval requests, ask blocks indexed from documents) and on every ask reply, whether it arrives through `POST .../comments` or through the delivery callback `POST /api/v1/comments/{id}/reply`, so no insert path can miss it;
   `store/migrations/0029_ask_followers.up.sql` backfills existing asks and replies.

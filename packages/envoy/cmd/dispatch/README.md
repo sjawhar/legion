@@ -64,22 +64,6 @@ Each item below names a variable, then its purpose.
   and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses.
   Leave unset in every real deployment.
 
-- `DISPATCH_ASSET_STORE_BUCKET`
-
-  Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`).
-  When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment.
-  It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time.
-  It never reads `index.html` or a non-asset path from the bucket.
-  An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key.
-  An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once:
-  a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away.
-  A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key
-  — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing.
-  A client that disconnects while still queued for room logs nothing above a debug line and gets no response.
-  The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket:
-  without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404.
-  Leave it unset for local-only static serving.
-
 - `DISPATCH_DEV_SIGNIN`
 
   Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance.
@@ -87,14 +71,24 @@ Each item below names a variable, then its purpose.
   a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy.
   That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base.
   While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`).
-  The session cookie is signed with a key generated for that process alone, so it is worthless on any other server;
+  The session cookie is signed with a key generated for that process alone, so it is worthless on any other server, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY` (below) gives the processes of one local harness one key;
   what a signed-in session writes to the database is not.
   It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows.
   Give a dev-sign-in server a database no other server uses:
   the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on.
-  Since it generates its key at every start, a dev-sign-in server refuses to start beside any other live server on its database, and any other server refuses to start beside it (Running more than one process, below);
+  Without `DISPATCH_DEV_SIGNIN_SHARED_KEY` it generates its key at every start, so a dev-sign-in server refuses to start beside any other live server on its database, and any other server refuses to start beside it (Running more than one process, below);
   a restart after a kill, which leaves the killed process's row behind, waits up to about 20 seconds for that row to lapse.
+  The processes given one shared value start beside each other.
   Any value other than `1` or unset is refused.
+
+- `DISPATCH_DEV_SIGNIN_SHARED_KEY`
+
+  Only with `DISPATCH_DEV_SIGNIN=1`, which every fence above still applies to; boot refuses it otherwise.
+  Every process given the same value signs session cookies with one key, so a person signed in on one of them stays signed in on the others:
+  the browser suite's two-process mode (`packages/dispatch/e2e/run-server.sh`) gives both of its servers one random value per run.
+  The key is not the value but the base64url of HMAC-SHA256 keyed by it over the fixed label `dispatch dev sign-in` (`devSignInSharedSigningKey`), so a production `DISPATCH_SIGNING_KEY` placed here signs no cookie, and seals no refresh token, that the production server accepts, and that server's cookies sign nobody in here.
+  `DISPATCH_SIGNING_KEY` stays refused beside it.
+  Unset, each dev-sign-in process generates a key of its own.
 
 - `DISPATCH_FILE_STORE_BUCKET`
 
@@ -126,7 +120,8 @@ An issue created through the default also gets a `repo:owner/name` label.
 `DISPATCH_SERVER_URL` IS the sign-in callback origin.
 It must equal the URL humans type into their browser, and the sign-in pool's app client must list `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
 
-`DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are removed: a boot that still sets either is refused, naming what replaced it.
+`DISPATCH_ALLOWED_LOGINS`, `DISPATCH_APP_CLIENT_SECRET` and `DISPATCH_ASSET_STORE_BUCKET` are removed:
+a boot that still sets any of them is refused, naming what replaced it.
 
 Agents normally authenticate with a personal `dsp_` token minted in Settings, sent as `Authorization: Bearer <token>`.
 `DISPATCH_AGENT_TOKEN` remains the shared devbox fallback and does not attribute callers to an owner.
@@ -350,6 +345,8 @@ A request that reaches the process looking local (`ssh -L`, `socat`, a proxy tha
 The per-process key bounds the cookie, not every credential a dev session can write:
 a `dsp_` token it mints, and the session and token rows its sign-out changes, live in the database, and every server that reads that database acts on them.
 A dev-sign-in server therefore needs a database of its own.
+The one exception to the per-process key is a harness that runs several dev-sign-in processes on one database on purpose, as the browser suite's two-process mode does:
+`DISPATCH_DEV_SIGNIN_SHARED_KEY` gives them one key, derived from the value under a dev-only label, so their cookies are each other's and never a production server's.
 
 ## Local Postgres
 
@@ -480,6 +477,13 @@ What the two processes share, and what each keeps to itself:
   until then only what needs it answers `503`.
   `/healthz` reports each as `nats`, `signin` and `service_tokens`, and none of them fails the probe.
 
+- Each build's dashboard assets are in the database.
+  Every process publishes its web dist's assets at boot, before it listens (`internal/dispatch/dashboard`, migration `0136`), and answers a local miss under `/assets/` from there (Routes, below), so a page of one build served by one process is served its chunks by a process of another build.
+  A process that cannot publish (the database refuses the write, or the build holds a file over 8 MiB, which CI's `bun run check:asset-sizes` in `packages/dispatch` refuses first) exits before it is ready, so a rolling update keeps the processes it would have replaced.
+  A restart on a build already stored writes no bytes.
+  The prune after each publish keeps every build a live server process serves and the 20 builds started most recently;
+  a failed prune is logged and the boot goes on.
+
 **Two processes do not share a live document session.**
 Durable convergence is unconditional: every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is the union of them, so no edit is lost whichever process took it, no process writes a settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and a version whose room is behind the head is rendered from the stored document (`storedTree`).
 What is per-process is the live room: while a room is resident in one process it does not receive the other's updates, so presence and cursors show only the peers on that process.
@@ -541,7 +545,7 @@ end the holder or let it finish and start the server again.
 That query can come back empty: a prepared transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432).
 A migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
-The notes below describe migrations through `0135`.
+The notes below describe migrations through `0136`.
 A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.
 
 Migrations `0056`–`0062` make search indexing linear.
@@ -849,6 +853,13 @@ Its census answers `0` for the same reasons.
 Migration `0135_server_processes` creates two tables:
 `server_processes`, the registry of live server processes, and `server_build_announcements`, each build the fleet has announced as `server.started` (Running more than one process, above).
 It reads, locks and rewrites nothing that exists, and the release before it neither reads nor writes either table, so that release runs over the new schema unchanged and the census answers `0`.
+
+Migration `0136_dashboard_assets` creates `dashboard_builds`, `dashboard_assets` and `dashboard_build_assets`, where every server process publishes its dashboard build's assets at boot and from which it answers a page of another build that asks it for that build's chunks (`internal/dispatch/dashboard`).
+It creates tables and touches no row; its census answers `0`.
+The release before it never reads or writes these tables, so it serves beside `0136` unaffected while both run
+— its own pages are served from its own image, as before
+— and rolling Dispatch back past `0136` is an image rollback alone, with no schema to restore:
+the tables are left for the next release that carries them, whose boot prunes what no build still needs.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1198,10 +1209,9 @@ the docs site's HTTP API reference is generated from it.
 The list below is a summary.
 An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell.
-When `DISPATCH_ASSET_STORE_BUCKET` is configured, a missing local file under `/assets/` is read whole from the same key in the retained-assets bucket before Dispatch answers;
-it never reads `index.html` or a non-asset path from that bucket.
-An absent object remains `404 {"error":"not found"}` and any other store failure is a 502 with no cache header;
-without the setting every local asset miss remains the 404.
+Every server process publishes its dashboard build's assets into the database at boot (Running more than one process, above), so a missing local file under `/assets/` is read whole from the database under the same key (`assets/<file>`) before Dispatch answers, through a cache of at most 64 MiB the process's requests share;
+it never reads `index.html` or a non-asset path from there.
+A path no build published remains `404 {"error":"not found"}` and any other read failure is a 502 with no cache header.
 The dashboard's pages (`index.html` and the shell served for a browser route) carry `Cache-Control: no-cache` and an `ETag` of their bytes, no `Last-Modified`, and its hashed `/assets` files `public, max-age=31536000, immutable`, so a browser keeps no page from another build.
 
 
@@ -1390,6 +1400,12 @@ Each item below names a path with its method and identity, then its purpose.
 
   Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token;
   `service` is a verified service-account token's Kubernetes subject, null for every other bearer).
+
+- `/api/v1/dashboard/builds` (GET; cookie, trusted header, or bearer)
+
+  Which dashboard builds are served: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (the registry of live server processes joined to `dashboard_builds` on the build id), sorted.
+  The dashboard offers "A new version is available" only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds.
+  An older process answers `404`, which the dashboard reads as no new version.
 
 - `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` (GET; cookie, trusted header, or bearer)
 
