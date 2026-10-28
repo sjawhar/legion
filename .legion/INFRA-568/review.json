@@ -2,40 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T11:16:09Z",
-  "decision": "changes_requested",
-  "round": 4,
-  "reviewedCodeHead": "62c33b1410494072d47a15f009fda1694f2ace88",
+  "completed": "2026-10-28T13:16:39Z",
+  "decision": "approved",
+  "round": 5,
+  "reviewedCodeHead": "4b1f15ff0411eea3cccd5fc3efd5541fc1107323",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/suggestions.go:683",
-      "description": "Since the merge, the check uses main's attachAskStates, which writes results[i].Ask row by row and then reads resolved asks' last answers from events. When that second read fails (for example the check's 5 s allowance ends during it), resolved asks keep State resolved with Answer nil. fillRelatedItems only logs and goes on, so the client prints 'Ask: closed with no answer: retracted' for an ask a person answered. The deep review reproduced this with an overlay test: events locked, a 1 s context, ask = {State:resolved Answer:<nil>}. The branch's own helper before the merge set nothing on error. Fix: on error, clear Ask on every candidate (or make the helper set states only once both reads succeed), and add a test that pins it. The comment at :666 and the contract comment on WriteSuggestion.ask must say ask is absent when it could not be read."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/related-check.ts:170",
-      "description": "The merge brought main's renderer of the same SearchAsk wire type (search-answer.ts askStateLines, #2363). The client now has two renderers that word one state differently (dispatch search: 'Closed with no answer: <kind> by <actor> at <t>: <reason>'; the check: 'Ask: closed with no answer: <kind>', with no who, when or why). The bundler had to rename one to askStateLines2 in every dist file. Export main's renderer and call it from the check's item and decision lines, then delete related-check.ts:166-203. Update the pinned strings and the envoy-client fragment."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_row.go:62",
-      "description": "DecodeAskAnswer and DecodeAskResolution were exported for the branch's own search_ask.go, which the merge dropped. Only ScanAsk in the same file calls them now. Restore main's ask_row.go, so the PR's diff for that file is empty."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundFourFindings": {
+    "PRRT_kwDORFy7ds6xF_aK": "accepted: fixed in da35e400. fillRelatedItems clears Ask on every candidate when attachAskStates errors, before Related and Decision. The new test fails with the clearing loop removed (overlay) and passes 3 of 3 with it.",
+    "PRRT_kwDORFy7ds6xF_aY": "accepted: fixed in da35e400. The check prints ask states through search-answer.ts askStateLines; the old renderer is deleted; dist is a fresh build.",
+    "PRRT_kwDORFy7ds6xF_aj": "accepted: fixed in da35e400. docs/ask_row.go equals main's."
+  },
+  "architectQuestion": "The line 'Answer state not reported by this Dispatch; open the link to read the ask.' on a failed read does not mislead about whether the ask was answered. It is literally true, claims nothing about the answer, and sends the reader to the link. A failed read also clears the decision, so no 'past decision' line contradicts it. It may suggest an older server to an operator, but the reader's next step is the same. No round opened.",
   "notDefects": [
-    "related-recall.sh:113 spells dispatch:// as dispatch:/{2}; the regex is equivalent.",
-    "selected null vs []: both decode paths go through model.AskAnswer.UnmarshalJSON, which reads null or absent as []; TestRelatedCheckShowsAnAnswerWithNoOptionChosen passes.",
-    "caa83a01 touches only packages/dispatch/web and packages/proof-editor; no conflict with docs/ask_blocks.go."
+    "askLines' Array.isArray guard (related-check.ts:164-171) has no client test for an unknown state. The guard is correct and needed; the gap is Minor."
   ],
   "verified": {
-    "fingerprint": "Last review (APPROVE) commit_id ee774688: 5860ba95...; head 62c33b14: e89a38de..., changed. New round; thermonuclear pair run again.",
-    "fragments": "Six .changes/unreleased/pr2397-*.yaml fragments are valid against each package's .changie.yaml, and every former entry is present. The four CHANGELOG.md files equal main's.",
-    "ci": "Required checks at code head 62c33b14 (lint, typecheck, test, pr-title) were queued when read; a request for changes does not wait. The compare from 62c33b14 to 4469d89a changes only .legion/.",
-    "thermonuclear": "deep-review: CHANGES (the Medium above, reproduced). code-quality: CHANGES (the renderer duplication and the dead exports).",
-    "threads": "No new threads; my three earlier threads are answered and resolved."
+    "merge": "4b1f15ff merges main 0a921021. Its only conflict, the routes_table.go GET/POST /api/v1/issues/{key}/asks descriptions, keeps main's GET text and the branch's POST text. No semantic conflict.",
+    "ci": "Required set: lint, typecheck, test, pr-title. All four success at code head 4b1f15ff, the newest pull_request CI head. The compare from 4b1f15ff to 63c6706a changes only .legion/ (2 files).",
+    "mergeState": "GitHub reported the pull request CONFLICTING at 13:16Z, after main moved again. The implementer's next forward merge comes back to review for the fingerprint check.",
+    "thermonuclear": "deep-review APPROVE and code-quality APPROVE at 63c6706a.",
+    "threads": "All six threads are resolved, each with my accepting reply.",
+    "e2eLines": "E2E (implementer) and E2E (tester) present."
   }
 }
