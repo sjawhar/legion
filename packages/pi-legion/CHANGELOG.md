@@ -39,6 +39,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   that call's check alone, so a call rejected for a path or a failed task stays rejected, and
   nothing counts twice. `specWork` is the one list of checks that `checked` and the findings
   judge both read.
+- The skill-scenario scorer compares the spec writes it reads in the transcript with the versions
+  Dispatch recorded for the run's session (`spec-versions.json`). A write through a helper function
+  of the agent's own, a list built in a variable or an answer hidden by `>/dev/null` made a version
+  no command showed, so `checked` could pass on the writes it saw alone. Each such version is now a
+  spec write at its recorded time, unchecked unless a check counts for it, and `routed` needs the
+  skill read before it too. A row whose two counts disagree is flagged `writes_seen=N versions=M`,
+  with each unseen version and each shown write no version matches under it.
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at

@@ -818,6 +818,9 @@ interface SpecFixture {
   texts?: object[];
   /** Subagent transcripts beside the session's, by name (subagentTranscript). */
   subagents?: Record<string, object[]>;
+  /** The second (as `second` counts) of each version the session wrote, from version 2; by
+   * default versions 2 and 3, after every entry of the transcript. */
+  versions?: number[];
 }
 /** A time `seconds` after the first entry of a spec run's transcript: timed gives entry N the time
  * of second N. */
@@ -887,9 +890,9 @@ function specRun(name: string, fixture: SpecFixture = {}) {
       "spec.md": spec,
       "plan.md": "# Plan\n\n1. Add greet.\n",
       "spec-versions.json": JSON.stringify(
-        [2, 3].map((version) => ({
-          version,
-          created_at: `2026-10-24T10:0${version}:00Z`,
+        (fixture.versions ?? [120, 180]).map((at, index) => ({
+          version: index + 2,
+          created_at: second(at),
           authors: [{ kind: "session", id: specSession }],
         }))
       ),
@@ -919,8 +922,8 @@ function specRun(name: string, fixture: SpecFixture = {}) {
   writeFileSync(path.join(dir, "source", "title.txt"), "Greet a person by name\n");
   writeFileSync(path.join(dir, "source", "messages.md"), personMessages);
   writeFileSync(path.join(dir, "source", "asks.json"), JSON.stringify(sourceAsks));
-  for (const version of [2, 3])
-    writeFileSync(path.join(dir, "spec-versions", `${version}.md`), spec);
+  for (const index of (fixture.versions ?? [120, 180]).keys())
+    writeFileSync(path.join(dir, "spec-versions", `${index + 2}.md`), spec);
   for (const [file, text] of Object.entries(fixture.documents ?? {}))
     writeFileSync(path.join(dir, "documents", file), text);
   const subagents = path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc");
@@ -1610,6 +1613,40 @@ specRun("spec-writing-head-99", {
     Summary: subagentTranscript("Summarize the person's messages.", 6.2, 6.8),
     NoReport: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 6.2, 6.8, ""),
   },
+});
+// checked: a write through a helper function of the agent's own shows no command the scorer reads,
+// but Dispatch recorded its version for the session. That version is a spec write at its own time
+// (version 3 below, at second 12.5 or 14.5, during the eval cell), and the row is flagged.
+const helperWrite =
+  'import subprocess\ndef edit(issue, ops):\n    subprocess.run(["dispatch", "doc-edit", "--issue", issue, "--ops-json-file", ops])\nedit("LWEVAL-7", "ops.json")';
+// No check between the first write and the helper's: unchecked.
+specRun("spec-writing-head-100", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    evalCell("e2", helperWrite, ""),
+    checkOf("c2"),
+    specEdit("w2", 4),
+    finish
+  ),
+  versions: [8.5, 12.5, 16.5],
+});
+// A check between them: it counts for the helper's write.
+specRun("spec-writing-head-101", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c3"),
+    evalCell("e2", helperWrite, ""),
+    checkOf("c2"),
+    specEdit("w2", 4),
+    finish
+  ),
+  versions: [8.5, 14.5, 18.5],
 });
 // refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
 // `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
@@ -2777,6 +2814,24 @@ test("checked: a check started from an eval cell counts from its own transcript,
     "check NoReport (transcript NoReport.jsonl) for spec write 1 does not count: its transcript holds no report"
   );
   expect(row).not.toContain("check Summary");
+});
+
+test("checked: a version Dispatch recorded for the session that no shown write made is a write, and flagged", () => {
+  const unseen = rowOf("spec-writing-head-100");
+  expect(scoresOf("spec-writing-head-100")).toEqual({ ...allPass, checked: "false" });
+  expect(unseen.split("\n")[0]).toContain(" writes=3 shared=0 copies=0 writes_seen=2 versions=3");
+  expect(unseen).toContain(
+    "versions: Dispatch recorded 3 versions of the spec by the run's session, and the transcript shows 2 spec writes"
+  );
+  expect(unseen).toContain(
+    `    version 3 (${second(12.5)}): no write the transcript shows made it`
+  );
+  expect(unseen).toContain("unchecked writes: 1 of 3");
+  // The check before it counts for it; the row is still flagged.
+  expect(scoresOf("spec-writing-head-101")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-101").split("\n")[0]).toContain(" writes_seen=2 versions=3");
+  // A run whose shown writes match its recorded versions carries no flag.
+  expect(rowOf("spec-writing-head-1")).not.toContain("writes_seen=");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {

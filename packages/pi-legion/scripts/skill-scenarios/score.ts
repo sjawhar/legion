@@ -715,6 +715,17 @@ export const SpecVersions = z.array(
     actor: Actor.nullish(),
   })
 );
+/** The versions of spec-versions.json that session `own` wrote (one of its `authors`, or its
+ * `actor` when it lists none), in version order. */
+export function sessionVersions(runDir: string, own: string): z.infer<typeof SpecVersions> {
+  return json(path.join(runDir, "spec-versions.json"), SpecVersions)
+    .filter((version) =>
+      (version.authors ?? (version.actor ? [version.actor] : [])).some(
+        (author) => author.kind === "session" && author.id === own
+      )
+    )
+    .toSorted((a, b) => a.version - b.version);
+}
 const AskOption = z.looseObject({ label: z.string(), description: z.string().nullish() });
 /** state-<turn>.json: after the turn, the issue's open question asks (never the approval request)
  * and its open approval request. */
@@ -1501,11 +1512,21 @@ export interface RejectedCheck {
   problem: string;
 }
 export interface SpecWork {
-  /** Each spec write the tool accepted, in order, and whether a spec-only check that counts came
-   * after the write before it (or the session's start) and before it. */
+  /** Each spec write, in order, and whether a spec-only check that counts came after the write
+   * before it (or the session's start) and before it: each write the transcript shows Dispatch
+   * accepted, and each version Dispatch recorded for the session that none of those made
+   * (`unseen`), at its place in time. */
   writes: { index: number; at: string; text: string; checked: boolean }[];
   checks: SpecCheck[];
   rejected: RejectedCheck[];
+  /** The spec writes the transcript shows, and the versions spec-versions.json records for the
+   * session. */
+  seen: number;
+  versions: number;
+  /** The recorded versions no write the transcript shows made, each at the first entry after its
+   * time (`index`), and the texts of the writes it shows that no recorded version matches. */
+  unseen: { version: number; at: string; index: number }[];
+  unmatched: string[];
 }
 /** The opening tag of Oh My Pi's envelope of one task's end (prompts/tools/task-summary.md). Its
  * attributes give the task's id. taskNames reads the opening tags alone, so a closing tag that a
@@ -1753,55 +1774,118 @@ function subagentRun(
  *   write before that one, by the transcripts' timestamps. A subagent that a `task` call names is
  *   that call's check alone, so a call rejected for its path or its failed task stays rejected.
  * Each `dispatch` command of a call is a write of its own (operationsOf), so two writes in one
- * call with no check between them leave the second unchecked. The checks are in the order of the
- * writes they count for, and of when each started. */
+ * call with no check between them leave the second unchecked.
+ *
+ * A write the transcript cannot show, as one through a helper function of the agent's own, a list
+ * built in a variable, or an answer line `>/dev/null` hid, still made a version, and
+ * spec-versions.json records each version with its session and time. So the writes the
+ * transcript shows are matched to the versions recorded for the session (sessionVersions): each to
+ * the version its answer names, else to the first one left that Dispatch made at or after the
+ * write's call. A recorded version no shown write matches (`unseen`) is a spec write too, at its
+ * recorded time and at the place in the transcript that time falls, and is checked only when a
+ * check above counts for it. A shown write no recorded version matches (`unmatched`) is still a
+ * write; specRow flags both. The checks are in the order of the writes they count for, and of when
+ * each started. */
 export function specWork(runDir: string, reach: string[], fixture: SpecFixture): SpecWork {
   const entries = session(runDir);
   const results = outcomes(entries);
+  const own = sessionId(entries);
+  // Each call of the session with the spec writes it shows, apart from the checks below, so the
+  // writes are known before they are matched to the recorded versions.
+  const calls = steps(entries).map((step) => ({
+    step,
+    shown:
+      step.tool === "task"
+        ? []
+        : operationsOf(step, results.get(step.id)).flatMap((operation) =>
+            operation.kind === "dispatch" && writesSpec(operation.call, fixture, operation.answer)
+              ? [{ text: operation.call.text, answer: operation.answer }]
+              : []
+          ),
+  }));
+  const recorded = (own === undefined ? [] : sessionVersions(runDir, own)).map((version) => ({
+    version: version.version,
+    at: version.created_at,
+    matched: false,
+  }));
+  const unmatched: string[] = [];
+  for (const { step, shown } of calls)
+    for (const write of shown) {
+      const named = Number(/\bversion (\d+)\b/.exec(write.answer)?.[1]);
+      const match =
+        recorded.find((version) => !version.matched && version.version === named) ??
+        recorded.find(
+          (version) => !version.matched && Date.parse(version.at) >= Date.parse(step.at)
+        );
+      if (match === undefined) unmatched.push(write.text);
+      else match.matched = true;
+    }
+  // Each unseen version at the first entry after its time: a call whose message came later cannot
+  // have checked it.
+  const unseen = recorded
+    .filter((version) => !version.matched)
+    .map((version) => {
+      const after = entries.findIndex(
+        (entry) => Date.parse(entry.timestamp ?? "") > Date.parse(version.at)
+      );
+      return { ...version, index: after < 0 ? entries.length : after };
+    });
+
   const writes: SpecWork["writes"] = [];
   const checks: (SpecCheck & { started: number })[] = [];
   const rejected: RejectedCheck[] = [];
   const named = new Set<string>();
   let pending: { step: Step; assignment: string }[] = [];
-  for (const step of steps(entries)) {
+  // A write at entry `index`: each pending `task` call's check counts for it, or is rejected.
+  const record = (index: number, at: string, text: string) => {
+    let checked = false;
+    for (const check of pending) {
+      const result = results.get(check.step.id);
+      const outcome = checkOutcome(entries, check.step, result, index);
+      if ("problem" in outcome)
+        rejected.push({
+          tasks: taskNames(check.step, result).join(", ") || "(unnamed)",
+          via: `call ${check.step.id}`,
+          write: writes.length,
+          problem: outcome.problem,
+        });
+      else {
+        checks.push({
+          assignment: check.assignment,
+          report: outcome.report,
+          write: writes.length,
+          started: Date.parse(check.step.at),
+        });
+        checked = true;
+      }
+    }
+    writes.push({ index, at, text, checked });
+    pending = [];
+  };
+  let next = 0;
+  for (const { step, shown } of [...calls, { step: undefined, shown: [] }]) {
+    for (; next < unseen.length; next++) {
+      const version = unseen[next];
+      if (version === undefined || (step !== undefined && version.index > step.index)) break;
+      record(
+        version.index,
+        version.at,
+        `version ${version.version} (recorded ${version.at}; no command of the transcript shows it)`
+      );
+    }
+    if (step === undefined) break;
     if (step.tool === "task") {
       for (const name of taskNames(step, results.get(step.id))) named.add(name);
       const assignment = strings(step.args).join("\n\n");
       if (specOnly(assignment, reach)) pending.push({ step, assignment });
       continue;
     }
-    for (const operation of operationsOf(step, results.get(step.id))) {
-      if (operation.kind !== "dispatch" || !writesSpec(operation.call, fixture, operation.answer))
-        continue;
-      let checked = false;
-      for (const check of pending) {
-        const own = results.get(check.step.id);
-        const outcome = checkOutcome(entries, check.step, own, step.index);
-        if ("problem" in outcome)
-          rejected.push({
-            tasks: taskNames(check.step, own).join(", ") || "(unnamed)",
-            via: `call ${check.step.id}`,
-            write: writes.length,
-            problem: outcome.problem,
-          });
-        else {
-          checks.push({
-            assignment: check.assignment,
-            report: outcome.report,
-            write: writes.length,
-            started: Date.parse(check.step.at),
-          });
-          checked = true;
-        }
-      }
-      writes.push({ index: step.index, at: step.at, text: operation.call.text, checked });
-      pending = [];
-    }
+    for (const write of shown) record(step.index, step.at, write.text);
   }
   const writeTimes = writes.map((write) => Date.parse(write.at));
-  for (const { name, entries: own } of subagentSessions(runDir)) {
+  for (const { name, entries: subagent } of subagentSessions(runDir)) {
     if (named.has(name)) continue;
-    const run = subagentRun(own);
+    const run = subagentRun(subagent);
     if (run === undefined || !specOnly(run.assignment, reach)) continue;
     const write = writeTimes.findIndex((at) =>
       run.report === "" ? at > run.started : at > run.reported
@@ -1828,6 +1912,10 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
       .toSorted((a, b) => a.write - b.write || a.started - b.started)
       .map(({ assignment, report, write }) => ({ assignment, report, write })),
     rejected: rejected.toSorted((a, b) => a.write - b.write),
+    seen: calls.reduce((sum, call) => sum + call.shown.length, 0),
+    versions: recorded.length,
+    unseen: unseen.map(({ version, at, index }) => ({ version, at, index })),
+    unmatched,
   };
 }
 
@@ -2219,8 +2307,10 @@ const indented = (text: string, depth = 6) =>
  *     row. A `task` call's check counts for a write when its task call and every task's completed,
  *     non-empty report came after the write before it and before this write, in transcript order
  *     (checkOutcome); a subagent started another way, as from an eval cell, counts from its own
- *     transcript when it started after the write before and reported before this one. Each check
- *     that counts for no write is printed with why.
+ *     transcript when it started after the write before and reported before this one. A version
+ *     Dispatch recorded for the session that no write the transcript shows made is a write too
+ *     (specWork), and the row is flagged `writes_seen=N versions=M` with each gap under it. Each
+ *     check that counts for no write is printed with why.
  *   - refusals: every refused `dispatch` call (refusalBlocks: an `error` line of the CLI's ledger,
  *     or a refusal a call's output shows that the ledger holds no line of: an `eval` cell's, whose
  *     kernel knows no session, or one the CLI made with no session) is followed by a call
@@ -2229,8 +2319,9 @@ const indented = (text: string, depth = 6) =>
  *     fixed the call from the refusal alone. Each failing refusal is printed with its text.
  *   - plan: the person approved the spec, the issue holds plan.md (capture-spec runs after the
  *     approval), and the transcript read skill://writing-plans.
- *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write, and
- *     never read REMOVED_SKILL. `ref` is the first half.
+ *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write (a
+ *     version no write it shows made included), and never read REMOVED_SKILL. `ref` is the first
+ *     half.
  *   - chat: no call of the interactive `ask` tool (surfaceOf's chat), and every state-<turn>.json
  *     but the last lists an open approval request, or an open ask whose id is not in seeded.json.
  *   - quoted: every run sharedRuns finds has the verdict `names` in shared-runs.json. Each run is
@@ -2264,8 +2355,10 @@ function specRow(
     (op) => op.kind === "dispatch" && writesSpec(op.call, fixture, op.answer)
   );
   const reads = ops.flatMap((op, place) =>
-    op.kind === "read" ? [{ place, target: op.target }] : []
+    op.kind === "read" ? [{ place, index: op.step.index, target: op.target }] : []
   );
+  // A version no write the transcript shows made is a spec write at its own place too.
+  const firstUnseen = work.unseen[0]?.index ?? Number.POSITIVE_INFINITY;
   const details: string[] = [];
 
   const outline = outlineProblems(spec);
@@ -2276,7 +2369,19 @@ function specRow(
   const neither = findings.rows.filter((row) => row.verdict === "neither");
   const unchecked = work.writes.filter((write) => !write.checked);
   const checked = work.writes.length > 0 && unchecked.length === 0 && neither.length === 0;
-  if (work.writes.length === 0) details.push("checked: the transcript holds no spec write");
+  if (work.writes.length === 0) details.push("checked: the session made no spec write");
+  // Dispatch's record of the session's versions against the writes the transcript shows.
+  const disagree =
+    work.seen !== work.versions || work.unseen.length > 0 || work.unmatched.length > 0;
+  if (disagree)
+    details.push(
+      `versions: Dispatch recorded ${work.versions} versions of the spec by the run's session, and the transcript shows ${work.seen} spec writes`,
+      ...work.unseen.map(
+        (version) =>
+          `  version ${version.version} (${version.at}): no write the transcript shows made it; scored as a spec write, unchecked unless a check counts for it`
+      ),
+      ...work.unmatched.map((text) => `  no recorded version matches the write: ${text}`)
+    );
   if (unchecked.length > 0)
     details.push(
       `unchecked writes: ${unchecked.length} of ${work.writes.length}`,
@@ -2299,6 +2404,7 @@ function specRow(
   const routedRead = reads.some(
     (read) =>
       (firstWrite < 0 || read.place < firstWrite) &&
+      read.index < firstUnseen &&
       readsSkill(read.target, "dispatch-writing-specs")
   );
   const removed = reads.filter(
@@ -2401,6 +2507,7 @@ function specRow(
       proposals.map((row) => row.verdict)
     )}`,
     `writes=${work.writes.length} shared=${shared.length} copies=${copies}`,
+    ...(disagree ? [`writes_seen=${work.seen} versions=${work.versions}`] : []),
   ].join(" ");
   return {
     run,
