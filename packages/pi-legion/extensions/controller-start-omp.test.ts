@@ -1367,7 +1367,6 @@ for (const variant of ["the start claim never answers", "the start command never
     async () => {
       const startupHold = newHold();
       const registration = newHold();
-      cleanup.push(async () => registration.release());
       let sid: string | undefined;
       const session = await startController(
         {
@@ -1382,6 +1381,9 @@ for (const variant of ["the start claim never answers", "the start command never
         },
         variant === "the start command never runs" ? CONTROLLER_ARGS.slice(0, -1) : CONTROLLER_ARGS
       );
+      // Pushed after the stand-in's own cleanup, so it runs first: the stand-in's `server.stop`
+      // waits for the held register handler, which ends only on this release.
+      cleanup.push(async () => registration.release());
       await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
       const opened = await session.until("the session's listener registration", () => sid);
       const inbound = await controllerInbound(setup().nats);
