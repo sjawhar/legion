@@ -7,9 +7,9 @@
   },
   "issue": "INFRA-639",
   "bundle": {
-    "tar_zst_sha256": "995082c90a40f11d796717c53eb94d9cefea15f57ede60e98987d3787d33893d",
-    "bytes": 61943024,
-    "fetched_at": "2026-10-28T11:44:01.035718339Z",
+    "tar_zst_sha256": "0fc93267120e428496b0e45e87a53c7620ba353724935407dffc65865dbbd41c",
+    "bytes": 61967121,
+    "fetched_at": "2026-10-28T13:36:57.763322591Z",
     "counts": {
       "issues": 1047,
       "placeholders": 0,
@@ -23,6 +23,7 @@
       "comments_resolved": 271,
       "anchored_open": 10350,
       "asks_open": 68,
+      "asks_resolved_blocks": 8,
       "window_events": 5379,
       "window_by_type": {
         "artifact.created": 72,
@@ -64,25 +65,25 @@
         "file": "linux-replay-2026-10-26.tar.zst.part00",
         "slug": "linux-replay-2026-10-26-tar-zst-part00",
         "ref": "dispatch://INFRA-639/artifact/linux-replay-2026-10-26-tar-zst-part00",
-        "version": 1,
+        "version": 2,
         "bytes": 25165824,
-        "sha256": "43cd24bdaf6525d2de8d48d4d1270d506cf1ba6889e06ed5ee5f1d9156dc8a28"
+        "sha256": "bd3c65d5572844d75eb28787811dc105009add2f174e857379ec80a6e18821e3"
       },
       {
         "file": "linux-replay-2026-10-26.tar.zst.part01",
         "slug": "linux-replay-2026-10-26-tar-zst-part01",
         "ref": "dispatch://INFRA-639/artifact/linux-replay-2026-10-26-tar-zst-part01",
-        "version": 1,
+        "version": 2,
         "bytes": 25165824,
-        "sha256": "824fb0ac8050e8893fc55fdff2ef3c6d6f846bf2a60373c1075ba4e76a1ab87b"
+        "sha256": "116583f7e6e5aac0866fe3f52424bf55bbec68402a52e7126167181ce3ee4ca2"
       },
       {
         "file": "linux-replay-2026-10-26.tar.zst.part02",
         "slug": "linux-replay-2026-10-26-tar-zst-part02",
         "ref": "dispatch://INFRA-639/artifact/linux-replay-2026-10-26-tar-zst-part02",
-        "version": 1,
-        "bytes": 11611376,
-        "sha256": "d459a7c77629841a914b0cb7f957d50a8c1d9eec0e0872e41488bf5500777995"
+        "version": 2,
+        "bytes": 11635473,
+        "sha256": "577e4b6a4b818fa74f99cb53852e9ded90b1d50baf029755662b1b8b6c8bf6e6"
       }
     ]
   },
