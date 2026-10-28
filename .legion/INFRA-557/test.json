@@ -2,34 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-28T17:35:00Z",
-  "round": 4,
-  "testedHead": "39a730805f22d2b6df1230e589e4a298b263e392",
-  "handoffHead": "576041bb2190cad39a1cea374c788cfed196fd15",
-  "fullRound": "Fingerprint at dc6cf439 is 72551f1b5fa7d3e3fd7e953dd3b6a2b19b8919c94c5a080a4ab346d662a1183a; at 39a73080 it is efc62d877b1051c6b7861c3d3263f85059aeec2d917d7127ccfae83a693ca4f1. Changed: the conflict merge touched cmd/listener/main.go and internal/cistore. So this is a full round.",
+  "completed": "2026-10-28T18:55:00Z",
+  "round": 5,
+  "testedHead": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+  "handoffHead": "c51cb3eb18136ced6a719bfff92f337938c99500",
+  "scope": "Narrowed by the INFRA-63 architect (2026-10-28 17:25Z): test the one fix (a dead holder's in-flight attempt taken over at once after a SIGKILL, order within 15 s) with the red row unchanged, and check that the existing rows did not regress. A new finding that is not a correctness defect is an observation, not a fail.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 39a73080: every row PASS, ok 546.754s. Re-ran $TMPDIR/smoke/smoke.sh with a binary built at 39a73080 against a real nats-server 2.10.29. SIGTERM: 0 refused, 40 unique, in send order, the last 3.33 s after the signal. Read mergeable_state blocked (no conflict) on GitHub. Ran TestTwoBuilds/a_build_from_before_the_lease against a listener built from main 80cc97a6: PASS, 302 messages each prompted once. I did not re-run the implementer's cistore unit test; CI owns unit suites. Its behaviour is exercised end to end by my CI summary row below."
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 256345d7: all 24 rows PASS, ok 514.907s. Re-ran its SIGKILL smoke loop: `bash $TMPDIR/smoke/smoke.sh <binary built at 256345d7> tester5-KILL-<i> KILL` 6 times, each 40 of 40 in send order. Confirmed with `git diff a4b72ae3 256345d7` that the red row TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s is unchanged; only TestTwoPodsPromptWhatAKilledPodOnlyAttempted's assertion moved from the old 35 s deferral to the take-over."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Spec acceptance 'SIGKILL of the active pod with a standby running gives delivery' as the architect bounded it (Q2: per-session order kept, within 15 s; a repeat with the same id allowed)",
-      "evidence": "Red test packages/envoy/cmd/listener/multiprocess_test.go TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s, shown failing in 2 of 2 runs by `cd packages/envoy && go test -tags multiprocess -count=2 -run '^TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s$' -v ./cmd/listener`: 'ses_mp_midprompt took evt-mp-0002 (published 3ms, prompted 6.19s ...) before evt-mp-0001 (published 0s, prompted 35.008s ...), out of the publish order'. The active pod is SIGKILLed while its prompt for evt-mp-0001 is in flight, after it has written the ledger attempt. The new holder took the killed pod's expired lease, yet it defers that attempt as another pod's live one ('listener delivery deferred to another pod's attempt') for the 35 s attempt window. TestTwoPodsSIGKILLHandsOverInOrderWithin15s leaves the in-flight message out of what it checks. Real surface: $TMPDIR/smoke/smoke.sh KILL with a 39a73080 binary and a real nats-server, one run of three: 'count: 39', m15 missing at the 25 s deadline, and pod-b logged the same deferral line for m15's event. The other two runs did not hit the in-flight window. [inference] Fix: an attempt by the boot named in the expired lease record the new holder took is taken over at once; the settle batch then sorts it by stream sequence."
+      "criterion": "Round-4 failure (architect Q2): a SIGKILL with a prompt in flight keeps the session's order and delivers within 15 s; a repeat with the same id is allowed",
+      "surface": "two real cmd/listener binaries for one machine id against an in-process nats-server 2.10.29; a port session whose first prompt the test holds unanswered when the active pod is SIGKILLed",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=8 -timeout 30m -v -run '^TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s$' ./cmd/listener (plus once in the full run)",
+      "observed": "9 of 9 PASS: the in-flight message reached its session first, at most 6.26 s after the kill, every message in publish order",
+      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+      "negativeControl": "the same row at 39a73080: 'ses_mp_midprompt took evt-mp-0002 (published 3ms, prompted 6.19s ...) before evt-mp-0001 (published 0s, prompted 35.008s ...), out of the publish order', 2 of 2 runs"
+    },
+    {
+      "criterion": "Former holders accumulate: two SIGKILLs in a row, each mid-prompt, still keep order within 15 s",
+      "surface": "three real cmd/listener binaries against an in-process nats-server; pod-a SIGKILLed mid-prompt, then the pod that took over SIGKILLed mid-prompt, the third pod takes over",
+      "command": "throwaway row TestTesterTwoSIGKILLsMidPromptKeepOrder ($TMPDIR/infra557-test/tester_ci_test.go.r5keep), go test -tags multiprocess -count=8 (plus once alone)",
+      "observed": "9 of 9 PASS: every message to the session in publish order, the first about 6.2 s after the second kill",
+      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+      "negativeControl": "the single-kill form of the row at 39a73080 delivered the in-flight message 35.004 s after the kill, out of order (round 4)"
+    },
+    {
+      "criterion": "Take-over on real binaries keeps every message once and in order (SIGKILL and SIGTERM)",
+      "surface": "two listener processes built at 256345d7 against a real nats-server 2.10.29 process, a port session on a local HTTP server, 40 sends through the standby, the active pod signalled after the 15th",
+      "command": "bash $TMPDIR/smoke/smoke.sh $TMPDIR/infra557-test/listener-head5 tester5-KILL-<1..6> KILL; bash $TMPDIR/smoke/smoke.sh $TMPDIR/infra557-test/listener-head5 tester5-TERM TERM",
+      "observed": "SIGKILL 6 of 6: 0 refused, 40 unique, in send order, the last 4.59-5.54 s after the signal, no deferral logged; SIGTERM: 40 of 40 in send order, the last 3.39 s after the signal",
+      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+      "negativeControl": "a SIGKILL smoke run at 39a73080: 'count: 39', m15 missing at the 25 s deadline, pod-b logged 'listener delivery deferred to another pod's attempt'"
     }
   ],
-  "failed": 1,
   "passedChecks": [
-    "CI summary loop across a lease loss and take-back (merge interaction with main #2367): two pods with ENVOY_WEBHOOKS=github and signed check_run/check_suite deliveries. pod-a lost the lease to a 7 s cut and took it back on pod-b's SIGTERM. PRs 101/102/103 each got exactly one pr.<n>.checks event, pod-a did not panic, and a check run in progress (PR 104) produced 0 events. 4 of 4 runs.",
-    "Graceful stop under heavy load (a message every 2 ms, 4 sessions): 2,484 messages in order, no repeat, slowest 2.9 s",
-    "Both pods SIGTERMed together, then a new pod: every message, in order, no repeat",
-    "Sole pod restarted under load: 3,051 messages, every one delivered",
-    "Rollback to a pre-lease build (main 80cc97a6) as standby: old build active 2.97 s after SIGTERM, 447 messages each once",
-    "Rolling update of two replicas with surge 1: 366 messages within 10 s, in order",
-    "Node loss, then a graceful stop of the new holder: in order, slowest 2.8 s after SIGTERM",
-    "CI at 39a73080 read on GitHub: build, changes, lint, test, typecheck and the Daemon Go suite queued (not waited on); PR mergeable"
+    "All 24 multiprocess rows at 256345d7, including every earlier red row",
+    "Throwaway regression rows from rounds 3-4: CI summary loop across a lease loss and take-back (one pr.<n>.checks per PR, 0 for an in-progress run, no panic); graceful stop under heavy load (2,609 messages in order); both pods stopped together; sole-pod restart (2,991 messages); rollback to a pre-lease build of main (449 messages each once); rolling update (364 within 10 s, in order); graceful stop after a node loss"
+  ],
+  "observations": [
+    "No CI run on PR #2404 has completed yet. At 256345d7 the Tests, Legion Envoy and Contracts, Docs and Worker Image runs were queued when read, about 20 minutes after creation, and not waited on. Every check at 39a73080 shows cancelled, superseded by the next push. The reviewer reads the head's checks before approving, and a required red returns the issue on its own.",
+    "A pod that lost the lease but is still alive also counts as a former holder (a partition, or a lost node whose prompt still completes). Its attempt is taken over at once, so a session can get a repeat with the same event id. The spec allows that, and the implement handoff records it as the architect's rule."
   ],
   "notes": [
-    "Throwaway rows: $TMPDIR/infra557-test/tester_mp_test.go.r4keep and tester_ci_test.go.r4keep. Not committed.",
-    "The red row conflicts with the documented 35 s attempt deferral (README 'State the pods share', TestTwoPodsPromptWhatAKilledPodOnlyAttempted), but only for an attempt by the expired holder the new holder replaced; a live pod's attempt is a different case."
+    "Throwaway rows: $TMPDIR/infra557-test/tester_mp_test.go.r4keep and tester_ci_test.go.r5keep. Not committed."
   ]
 }
