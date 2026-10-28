@@ -93,14 +93,15 @@ const commentRecipientsQuery = `
 	order by key, min(rank)
 `
 
-// loadCommentRecipients reads, in one query for a whole batch, the sessions a person's reply under
-// each comment of commentIDs reaches on their own topics, keyed by that comment's id. commentIDs
-// are canonical uuids (canonicalIDs). They are every session that wrote a comment in the comment's
-// thread (its root first, then each reply in the order it was written), then every session the
-// thread's document credits (documentCreditsSQL; none when the thread is on no document), each
-// once. People are left out, since a person has no Envoy topic. A comment that has no row has no
-// entry. The actor and the sessions the reply's mentions reach are skipped by the caller
-// (addAuthorRoutes).
+// loadCommentRecipients reads, in one query for a whole batch (or for one id, when loadRecipients
+// runs a refused one again per id), the sessions a person's reply under each comment of commentIDs
+// reaches on their own topics, keyed by that comment's id. commentIDs are canonical uuids
+// (validIDs): a reply_to that is no uuid names no comment and is never read. They are every
+// session that wrote a comment in the comment's thread (its root first, then each reply in the
+// order it was written), then every session the thread's document credits (documentCreditsSQL;
+// none when the thread is on no document), each once. People are left out, since a person has no
+// Envoy topic. A comment that has no row has no entry. The actor and the sessions the reply's
+// mentions reach are skipped by the caller (addAuthorRoutes).
 func loadCommentRecipients(ctx context.Context, db queryer, commentIDs []string) (map[string][]string, error) {
 	if len(commentIDs) == 0 {
 		return map[string][]string{}, nil

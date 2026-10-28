@@ -66,7 +66,7 @@ A target is one row however many reasons it has. For example, when a comment men
 that claims its issue, that session has one row with `owed_reasons` `claimant;mention`. A role
 mention and a session target are different rows, also when the role resolved to that session.
 
-A target's subject is the subject the outbox's `publishRoute` uses for it: `session:<id>` is
+A target's subject is the subject the outbox's `addRoute` uses for it: `session:<id>` is
 `notifications.agent.<id>`, and `role:<token>` is `notifications.role.<token>`.
 
 ## `comments.csv` columns

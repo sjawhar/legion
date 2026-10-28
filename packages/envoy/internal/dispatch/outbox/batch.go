@@ -275,26 +275,32 @@ type batchEvent struct {
 	pendingEvent
 	item contracts.Envelope
 	// delivered is the set of the event's published_destinations (publishedDestinationSet).
-	// destinationsOf are every destination the event has; resolveErr is why the list is
-	// incomplete, when it is, and resolveLost that the error is the batch's context ending (a
-	// comment recipient query the process's stop cancelled), which releases the event rather than
-	// backing it off; mentionPending is a session's copy left out of the list for a mention still
-	// being sent, which blocks the event (eventDestinations, settleEvent). A copy so left out is no
+	// destinationsOf are every destination the event has; resolveErr is why the list ends short,
+	// when it does, and resolveLost that the error is the batch's context ending (a
+	// recipient read the process's stop cancelled), which releases the event rather than backing
+	// it off; mentionPending is a session's copy left out of the list for a mention still being
+	// sent, which blocks the event (eventDestinations, settleEvent). A copy so left out is no
 	// destination of the event, so it holds none of the owner's later events back.
 	delivered      map[string]struct{}
 	destinationsOf []destination
 	resolveErr     error
 	resolveLost    bool
 	mentionPending bool
-	sends          []*chainSend
-	// held are the not-due events of the owner that held a destination of this one back.
+	// incomplete is that the list ends at a recipient read the batch has no answer for
+	// (unansweredRecipients): the sessions that read would add are unknown, so the event holds its
+	// owner's later events back from every session its list does not name (planChains).
+	incomplete bool
+	sends      []*chainSend
+	// held are the earlier events of the owner that held a destination of this one back without a
+	// send of this batch: one that is not due, or one whose list is incomplete.
 	held    []blocker
 	outcome outcome
 }
 
 // blocker is what held an event's send to a destination back: an earlier event of its owner that
-// had that destination unreached. It is either an event of the batch whose send to it failed, whose
-// outcome then says when the held one is tried again, or one that is not due, until its
+// had that destination unreached, or whose list is incomplete and does not name it. It is either
+// an event of the batch, whose outcome then says when the held one is tried again - its send to
+// the destination failed, or its recipient read did - or one that is not due, until its
 // nextAttempt.
 type blocker struct {
 	event *batchEvent
@@ -353,13 +359,24 @@ type chain struct {
 
 // planChains orders each owner's sends. An owner's events are walked in id order, and each
 // destination an event has not reached yet goes on its owner's chain for that destination's key -
-// unless an earlier event of the owner that is not due has that key unreached, in which case the
-// event is held back from it (batchEvent.held). Every destination key of every owner is a chain of
-// its own, and a chain's sends go one at a time (sendChains), so the order holds per (owner,
-// destination key): event N+1 of an owner reaches a destination only after every earlier
-// unpublished event of that owner bound for it has. A destination that stalls - its send failed, or
-// its event is waiting out a back-off - holds back that destination's later events of that owner
-// and nothing else.
+// unless an earlier event of the owner that is not due has that key unreached, or an earlier event
+// whose list is incomplete does not name it (below), in which case the event is held back from it
+// (batchEvent.held). Every destination key of every owner is a chain of its own, and a chain's
+// sends go one at a time (sendChains), so the order holds per (owner, destination key): event N+1
+// of an owner reaches a destination only after every earlier unpublished event of that owner bound
+// for it has. A destination that stalls - its send failed, or its event is waiting out a back-off -
+// holds back that destination's later events of that owner and nothing else.
+//
+// An event whose list ends at a recipient read the batch has no answer for (batchEvent.incomplete:
+// the read failed, or the event is not due and the batch did not take it) may be bound for any
+// session that read would name. So every later event of its owner is held back from each session
+// key - an agent subject, or a role route's key - that the incomplete list does not name, behind a
+// blocker that falls due when the incomplete event is tried again: the event itself when it is
+// due, whose back-off or release its outcome carries, and its nextAttempt when it is not. A key
+// the list names, reached or not, chains as any other: the owner's topic comes before every read
+// (eventDestinations), so the owner's topic family is never held this way. So a recipient read
+// that fails holds back the later session copies of the owners whose events asked it, and nothing
+// else.
 //
 // The order is kept per destination key, not per session: a session that subscribes to an issue's
 // topic family and is also routed to by its events receives on two keys, so when event N's topic
@@ -375,9 +392,16 @@ type chain struct {
 // An event with no owner has no destination and forms no chain; an event that cannot be read has
 // none either, and holds nothing back.
 func planChains(events []*batchEvent) []*chain {
+	// unknownSessions is an incomplete event's hold: the keys its list names, and what holds the
+	// owner's later events back from every other session key.
+	type unknownSessions struct {
+		named map[string]struct{}
+		by    blocker
+	}
 	var chains []*chain
 	byOwner := map[string]map[string]*chain{}
 	blocked := map[string]map[string]blocker{}
+	unknown := map[string][]unknownSessions{}
 	for _, event := range events {
 		if event.failure != nil || event.owner == "" {
 			continue
@@ -403,8 +427,16 @@ func planChains(events []*batchEvent) []*chain {
 				}
 				continue
 			}
+			held := len(event.held)
 			if by, ok := blocked[event.owner][key]; ok {
 				event.held = append(event.held, by)
+			}
+			for _, earlier := range unknown[event.owner] {
+				if _, ok := earlier.named[key]; !ok {
+					event.held = append(event.held, earlier.by)
+				}
+			}
+			if len(event.held) > held {
 				continue
 			}
 			keyed := byOwner[event.owner][key]
@@ -416,6 +448,16 @@ func planChains(events []*batchEvent) []*chain {
 			send := &chainSend{event: event, dest: dest}
 			keyed.sends = append(keyed.sends, send)
 			event.sends = append(event.sends, send)
+		}
+		if event.incomplete {
+			hold := unknownSessions{named: make(map[string]struct{}, len(event.destinationsOf)), by: blocker{event: event}}
+			if !event.due {
+				hold.by = blocker{until: event.nextAttempt}
+			}
+			for _, dest := range event.destinationsOf {
+				hold.named[dest.key()] = struct{}{}
+			}
+			unknown[event.owner] = append(unknown[event.owner], hold)
 		}
 	}
 	return chains

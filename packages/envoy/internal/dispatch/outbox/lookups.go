@@ -3,12 +3,14 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -45,7 +47,8 @@ type mentionDeliveries struct {
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
 // every id asked for, so that the batch reads each kind once (loadLookups). An event's destinations
 // ask for the same ids whatever the answers are, so a second pass over resolved lookups asks for
-// exactly these.
+// exactly these. A not-due event asks through untaken, after every due event has asked, so its
+// recipient reads are the same taken or untaken ones in both passes (resolveDestinations).
 type wanted struct {
 	asks, comments, messages, documents, threads, issues, mentions map[string]struct{}
 }
@@ -93,17 +96,68 @@ func (w *wanted) mentionDeliveries(commentID string) (mentionDeliveries, error) 
 	return mentionDeliveries{}, nil
 }
 
-// lookups is what a batch read for the ids its events asked for (loadLookups). failed holds each
-// id that no read can answer - an id that is no uuid, which the column it is read from refuses, an
-// author whose JSON does not decode, or an id of a comment recipient query that failed - keyed by
-// its kind and id, with the error the event's destinations then report.
+// unansweredRecipients is a recipient read - the sessions a reply under a comment reaches, the
+// sessions an issue's primary document credits, the sessions a document credits - that an event's
+// destinations needed and the batch has no answer for: the read of its id failed
+// (loadRecipients), or the event is not due and the batch did not take it (untaken). The event's
+// list ends there (eventDestinations), so it names none of the sessions the read would have added,
+// and planChains holds its owner's later events back from every session the list does not name
+// (batchEvent.incomplete).
+type unansweredRecipients struct{ err error }
+
+func (e *unansweredRecipients) Error() string { return e.err.Error() }
+
+func (e *unansweredRecipients) Unwrap() error { return e.err }
+
+// errNotDue is what untaken answers a recipient read the batch did not take.
+var errNotDue = errors.New("the batch reads no recipients for an event that is not due")
+
+// untaken is the lookup a not-due event's destinations read (resolveDestinations). The batch takes
+// no recipient read for an event it does not send: readBatch reads an owner's whole window, so the
+// read of an event backed off on a row no read can take - a credit list jsonb_array_elements
+// refuses - would otherwise cost every batch a statement that fails and a run of each of its ids
+// alone (loadRecipients). Its comment recipients, primary document authors and document credits
+// answer from lookup only for an id a due event of the batch asked for (taken), and otherwise
+// unanswered (errNotDue) - except a reply_to that is no uuid, which no read takes for any event
+// (validIDs) and which answers from lookup, with no session. Every other read answers from lookup.
+type untaken struct {
+	lookup
+	taken *wanted
+}
+
+func (u untaken) documentAuthors(artifactID string) ([]string, error) {
+	if _, ok := u.taken.documents[artifactID]; !ok {
+		return nil, &unansweredRecipients{err: errNotDue}
+	}
+	return u.lookup.documentAuthors(artifactID)
+}
+
+func (u untaken) commentRecipients(commentID string) ([]string, error) {
+	_, taken := u.taken.threads[commentID]
+	if _, err := uuid.Parse(commentID); err == nil && !taken {
+		return nil, &unansweredRecipients{err: errNotDue}
+	}
+	return u.lookup.commentRecipients(commentID)
+}
+
+func (u untaken) primaryDocumentAuthors(issueKey string) ([]string, error) {
+	if _, ok := u.taken.issues[issueKey]; !ok {
+		return nil, &unansweredRecipients{err: errNotDue}
+	}
+	return u.lookup.primaryDocumentAuthors(issueKey)
+}
+
+// lookups is what a batch read for the ids its events asked for (loadLookups). Each map of a uuid
+// kind is keyed by the id's canonical form (canonicalID), as every read keys its rows, and
+// primaries by the issue's key. failed holds each id no read answers - an id that is no uuid,
+// which the column it is read from refuses (validIDs; a thread's is not failed but has no entry),
+// or an id whose recipient read failed (loadRecipients) - keyed by its kind and that same key, with
+// the error the event's destinations then report.
 type lookups struct {
 	asks      map[string][]string
 	roots     map[string]json.RawMessage
 	messages  map[string]json.RawMessage
 	documents map[string][]string
-	// threads is keyed by the canonical form of the comment's uuid, as loadCommentRecipients
-	// reads it.
 	threads   map[string][]string
 	primaries map[string][]string
 	mentions  map[string]mentionDeliveries
@@ -111,17 +165,19 @@ type lookups struct {
 }
 
 func (l *lookups) followers(askID string) ([]string, error) {
-	if err := l.failed["ask:"+askID]; err != nil {
+	id := canonicalID(askID)
+	if err := l.failed["ask:"+id]; err != nil {
 		return nil, err
 	}
-	return l.asks[askID], nil
+	return l.asks[id], nil
 }
 
 func (l *lookups) rootCommentAuthor(commentID string) (model.Actor, bool, error) {
-	if err := l.failed["comment:"+commentID]; err != nil {
+	id := canonicalID(commentID)
+	if err := l.failed["comment:"+id]; err != nil {
 		return model.Actor{}, false, err
 	}
-	root, ok := l.roots[commentID]
+	root, ok := l.roots[id]
 	if !ok {
 		return model.Actor{}, false, nil
 	}
@@ -129,10 +185,11 @@ func (l *lookups) rootCommentAuthor(commentID string) (model.Actor, bool, error)
 }
 
 func (l *lookups) messageAuthor(messageID string) (model.Actor, bool, error) {
-	if err := l.failed["message:"+messageID]; err != nil {
+	id := canonicalID(messageID)
+	if err := l.failed["message:"+id]; err != nil {
 		return model.Actor{}, false, err
 	}
-	author, ok := l.messages[messageID]
+	author, ok := l.messages[id]
 	if !ok {
 		return model.Actor{}, false, nil
 	}
@@ -140,22 +197,19 @@ func (l *lookups) messageAuthor(messageID string) (model.Actor, bool, error) {
 }
 
 func (l *lookups) documentAuthors(artifactID string) ([]string, error) {
-	if err := l.failed["document:"+artifactID]; err != nil {
+	id := canonicalID(artifactID)
+	if err := l.failed["document:"+id]; err != nil {
 		return nil, err
 	}
-	return l.documents[artifactID], nil
+	return l.documents[id], nil
 }
 
-// commentRecipients answers a comment id that is no uuid with no session: no comment has it.
 func (l *lookups) commentRecipients(commentID string) ([]string, error) {
-	if err := l.failed["thread:"+commentID]; err != nil {
+	id := canonicalID(commentID)
+	if err := l.failed["thread:"+id]; err != nil {
 		return nil, err
 	}
-	parsed, err := uuid.Parse(commentID)
-	if err != nil {
-		return nil, nil
-	}
-	return l.threads[parsed.String()], nil
+	return l.threads[id], nil
 }
 
 func (l *lookups) primaryDocumentAuthors(issueKey string) ([]string, error) {
@@ -166,10 +220,11 @@ func (l *lookups) primaryDocumentAuthors(issueKey string) ([]string, error) {
 }
 
 func (l *lookups) mentionDeliveries(commentID string) (mentionDeliveries, error) {
-	if err := l.failed["mention:"+commentID]; err != nil {
+	id := canonicalID(commentID)
+	if err := l.failed["mention:"+id]; err != nil {
 		return mentionDeliveries{}, err
 	}
-	return l.mentions[commentID], nil
+	return l.mentions[id], nil
 }
 
 func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {
@@ -187,17 +242,25 @@ type queryer interface {
 
 // loadLookups reads what want asks for, one statement per kind that asks anything, so a batch costs
 // at most seven reads however many events it holds: ask followers, thread root authors, message
-// authors, document authors, mention deliveries, comment recipients (loadCommentRecipients) and
-// primary document authors (loadPrimaryDocumentAuthors). Each read is the per-id read the outbox
-// made before, over a set of ids: the same rows, in the same order for each id. An id that is no
-// uuid is never sent to Postgres, which would refuse the whole statement over it; it is recorded
-// failed, as the per-id read failed on it before, except a comment recipient's, which has no
-// entry.
+// authors, document credits (loadDocumentSessionAuthors), mention deliveries, comment recipients
+// (loadCommentRecipients) and primary document authors (loadPrimaryDocumentAuthors). Each read is
+// the per-id read the outbox made before, over a set of ids: the same rows, in the same order for
+// each id. Every kind but the issues' is a uuid, read and answered in its canonical form
+// (validIDs, canonicalID); an id that is no uuid is never sent to Postgres, which would refuse the
+// whole statement over it, and is recorded failed, as the per-id read failed on it before - but a
+// reply's reply_to, which then names no thread, has no recipients and fails nothing.
 //
-// A read of the first five kinds that fails fails the batch, which is then left unrecorded and read
-// again. A comment recipient read that fails fails only the events that asked it (failRecipients):
-// each event's destinations end at the step that needed it, after its owner topic, route and
-// claimant (eventDestinations), and the batch's other events are untouched.
+// A read of ask followers, thread root authors, message authors or mention deliveries that fails
+// fails the batch, which is then left unrecorded and read again. A recipient read - document
+// credits, comment recipients or primary document authors - that Postgres refuses is run again for
+// each of its ids alone (loadRecipients), and an id whose own run fails fails only the events that
+// asked it: each such event's destinations end at the step that needed it, after its owner topic,
+// route and claimant (eventDestinations), the event's owner's later events are held back from
+// every session its list does not name (planChains), and the batch's other events, those that
+// asked the same statement for other ids among them, are untouched. So a row no recipient read
+// can take - a credit list jsonb_array_elements refuses - backs off the events that read it and
+// holds back their owners' later session copies, and nothing else. A recipient read that fails
+// for the stop or a lost connection fails every event that asked it, as each run alone would.
 func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error) {
 	found := &lookups{
 		asks: map[string][]string{}, roots: map[string]json.RawMessage{},
@@ -210,6 +273,8 @@ func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error
 	messages := validIDs(want.messages, "message", "load message author %q", found.failed)
 	documents := validIDs(want.documents, "document", "load document %q session authors", found.failed)
 	mentions := validIDs(want.mentions, "mention", "load mention deliveries of comment %q", found.failed)
+	threads := validIDs(want.threads, "thread", "", found.failed)
+	issues := slices.Sorted(maps.Keys(want.issues))
 	if err := loadFollowers(ctx, db, asks, found); err != nil {
 		return nil, err
 	}
@@ -219,58 +284,98 @@ func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error
 	if err := loadMessageAuthors(ctx, db, messages, found); err != nil {
 		return nil, err
 	}
-	if err := loadDocumentSessionAuthors(ctx, db, documents, found); err != nil {
-		return nil, err
-	}
+	loadRecipients(ctx, db, loadDocumentSessionAuthors, documents, "document", found.documents, found.failed)
 	if err := loadMentionDeliveries(ctx, db, mentions, found); err != nil {
 		return nil, err
 	}
-	threads, err := loadCommentRecipients(ctx, db, canonicalIDs(want.threads))
-	if err != nil {
-		failRecipients(want.threads, "thread", err, found.failed)
-	} else {
-		found.threads = threads
-	}
-	primaries, err := loadPrimaryDocumentAuthors(ctx, db, slices.Sorted(maps.Keys(want.issues)))
-	if err != nil {
-		failRecipients(want.issues, "issue", err, found.failed)
-	} else {
-		found.primaries = primaries
-	}
+	loadRecipients(ctx, db, loadCommentRecipients, threads, "thread", found.threads, found.failed)
+	loadRecipients(ctx, db, loadPrimaryDocumentAuthors, issues, "issue", found.primaries, found.failed)
 	return found, nil
 }
 
-// validIDs returns the ids of set that are uuids, sorted, and records each other one in failed
-// under kind, with the error format names it by.
+// validIDs returns the canonical form (canonicalID) of every id of set that is a uuid, sorted and
+// each once. Every other id is recorded in failed under kind, with the error format names it by -
+// except a thread's, the reply_to of a reply: one that is no uuid replies under no comment, so its
+// thread reaches no session, and it is neither read nor failed (commentRecipients answers it no
+// session and no error, and the reply holds nothing back). format is unused for a thread's.
 func validIDs(set map[string]struct{}, kind, format string, failed map[string]error) []string {
-	ids := make([]string, 0, len(set))
-	for _, id := range slices.Sorted(maps.Keys(set)) {
-		if _, err := uuid.Parse(id); err != nil {
-			failed[kind+":"+id] = fmt.Errorf(format+": not a uuid: %w", id, err)
-			continue
-		}
-		ids = append(ids, id)
-	}
-	return ids
-}
-
-// canonicalIDs returns the canonical form of every id of set that is a uuid, sorted and each once:
-// loadCommentRecipients keys its rows by that form. An id that is no uuid is left out.
-func canonicalIDs(set map[string]struct{}) []string {
 	canonical := map[string]struct{}{}
 	for id := range set {
-		if parsed, err := uuid.Parse(id); err == nil {
-			canonical[parsed.String()] = struct{}{}
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			if kind != "thread" {
+				failed[kind+":"+id] = fmt.Errorf(format+": not a uuid: %w", id, err)
+			}
+			continue
 		}
+		canonical[parsed.String()] = struct{}{}
 	}
 	return slices.Sorted(maps.Keys(canonical))
 }
 
-// failRecipients records err, a comment recipient read that failed, against every id of set under
-// kind: every event that asked the read carries the failure, and no other event does.
-func failRecipients(set map[string]struct{}, kind string, err error, failed map[string]error) {
-	for id := range set {
-		failed[kind+":"+id] = err
+// canonicalID is the key a lookup of a uuid kind answers id under: the canonical text of a uuid,
+// which is what uuid::text writes and so what every read keys its rows by, or id itself when it is
+// no uuid, which validIDs records failed under, or, for a thread, leaves with no entry.
+func canonicalID(id string) string {
+	if parsed, err := uuid.Parse(id); err == nil {
+		return parsed.String()
+	}
+	return id
+}
+
+// recipientRead is a recipient read - loadDocumentSessionAuthors, loadCommentRecipients or
+// loadPrimaryDocumentAuthors: one statement over ids, answering each id's sessions keyed by it.
+type recipientRead func(ctx context.Context, db queryer, ids []string) (map[string][]string, error)
+
+// loadRecipients runs read over ids in one statement and adds each id's sessions to into. A
+// statement Postgres refuses (refusedStatement) - over a row of one id no read can take, a credit
+// list jsonb_array_elements refuses - names no id, so it is run again once for each id alone: an
+// id whose own run answers gets its sessions, and one whose own run Postgres refuses is recorded
+// failed (failRecipients) with that run's error. So one id's row fails only the events that asked
+// that id, whichever owners asked the statement's other ids. A statement that fails otherwise -
+// ctx ended, or the connection was lost or never made - would fail every run alike, so every id it
+// read is recorded failed with its error, which releases the events when it is the stop
+// (batchEvent.resolveLost); a run of one id that fails so records its id and every id not yet run.
+func loadRecipients(ctx context.Context, db queryer, read recipientRead, ids []string, kind string, into map[string][]string, failed map[string]error) {
+	sessions, err := read(ctx, db, ids)
+	if err == nil {
+		maps.Copy(into, sessions)
+		return
+	}
+	if len(ids) == 1 || !refusedStatement(ctx, err) {
+		failRecipients(ids, kind, err, failed)
+		return
+	}
+	for i := range ids {
+		sessions, err := read(ctx, db, ids[i:i+1])
+		switch {
+		case err == nil:
+			maps.Copy(into, sessions)
+		case refusedStatement(ctx, err):
+			failRecipients(ids[i:i+1], kind, err, failed)
+		default:
+			failRecipients(ids[i:], kind, err, failed)
+			return
+		}
+	}
+}
+
+// refusedStatement reports whether err is Postgres refusing a statement it ran (a
+// *pgconn.PgError) while ctx is still live: a failure of the rows the statement read, which a run
+// over fewer ids may not meet. ctx ending, and a connection lost or never made, are not.
+func refusedStatement(ctx context.Context, err error) bool {
+	var refused *pgconn.PgError
+	return ctx.Err() == nil && errors.As(err, &refused)
+}
+
+// failRecipients records err, a recipient read of ids that failed - document credits, comment
+// recipients or primary document authors - against every id of ids under kind, as unanswered
+// recipients: every event that asked one of those ids carries the failure, and no other event
+// does.
+func failRecipients(ids []string, kind string, err error, failed map[string]error) {
+	unanswered := &unansweredRecipients{err: err}
+	for _, id := range ids {
+		failed[kind+":"+id] = unanswered
 	}
 }
 
@@ -374,19 +479,15 @@ const documentSessionAuthorsQuery = `
 `
 
 // loadDocumentSessionAuthors lists, for every artifact in ids that is a document, the sessions it
-// credits (documentCreditsSQL): the one that created it and every one a version lists, each once
-// and in the order the document first credits it, its creator first. People, and session credits
-// with no id, are left out (sessionCreditSQL).
-func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string, found *lookups) error {
+// credits (documentCreditsSQL), keyed by the artifact's id: the one that created it and every one
+// a version lists, each once and in the order the document first credits it, its creator first.
+// People, and session credits with no id, are left out (sessionCreditSQL). An artifact that is no
+// document, or has no row, has no entry.
+func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (map[string][]string, error) {
 	if len(ids) == 0 {
-		return nil
+		return map[string][]string{}, nil
 	}
-	documents, err := loadKeyedSessions(ctx, db, "load the batch's document session authors", documentSessionAuthorsQuery, ids)
-	if err != nil {
-		return err
-	}
-	found.documents = documents
-	return nil
+	return loadKeyedSessions(ctx, db, "load document session authors", documentSessionAuthorsQuery, ids)
 }
 
 // mentionDeliveryQuery groups every comment's mention attempts by the comment and the session each

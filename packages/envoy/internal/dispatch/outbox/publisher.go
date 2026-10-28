@@ -140,7 +140,7 @@ func failedAnswer(err error) <-chan error {
 }
 
 // scanBatch reads a batch (readBatch) and publishes it (publishBatch): it resolves its events'
-// destinations with the batch's followers, authors, comment recipients and mention deliveries read
+// destinations with the batch's followers, authors, recipients and mention deliveries read
 // in at most seven statements (loadLookups) and its role routes' holders read once per role
 // (resolveRoleHolders), and sends it through one window (Publisher.WindowUntil) as
 // chains: the sends of one owner's events to one destination key go one at a time, in id order,
@@ -150,7 +150,9 @@ func failedAnswer(err error) <-chan error {
 // subject family it receives them on, while the sends to different owners or destination keys land
 // in whatever order their answers allow. A send that fails holds back only its own chain, and an
 // event that is not due holds back its owner's later events only from the destinations it has not
-// reached. What the batch came to is written in one statement (recordBatch).
+// reached - and, when its list ends at a recipient read the batch has no answer for, from every
+// session it does not name, as an event whose recipient read failed does. What the batch came to
+// is written in one statement (recordBatch).
 //
 // A failure is classified once every answer is in. A send that met a lost or replaced connection
 // (bus.ErrUnavailable) is no fault of its event, and its event is released with no attempt
@@ -605,13 +607,19 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 }
 
 // resolveDestinations gives every event of a batch that has an owner and can be read its envelope
-// and destinations (eventDestinations), reading the followers, authors, comment recipients and
-// mention deliveries all of them need at once (loadLookups). An event whose envelope cannot be
-// built has no destination, and the error backs it off. A lookup that failed because ctx ended -
-// a comment recipient query the process's stop cancelled (loadLookups) - marks its event
-// resolveLost, which releases it as a send the stop cut off does (settleEvent).
+// and destinations (eventDestinations), reading the followers, authors, recipients and mention
+// deliveries all of them need at once (loadLookups). An event whose envelope cannot be built has no
+// destination, and the error backs it off. A lookup that failed because ctx ended - a recipient
+// read the process's stop cancelled (loadLookups) - marks its event resolveLost, which releases it
+// as a send the stop cut off does (settleEvent).
+//
+// A not-due event is never sent, so the batch takes no recipient read for it (untaken): its due
+// events ask first, and a not-due event's comment recipients, primary document authors and
+// document credits are answered only where a due event asked the same. An event whose list ends at
+// a recipient read the batch has no answer for, failed or untaken, is incomplete
+// (unansweredRecipients, batchEvent.incomplete).
 func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) error {
-	want := newWanted()
+	var resolvable []*batchEvent
 	for _, event := range events {
 		if event.failure != nil || event.owner == "" {
 			continue
@@ -627,20 +635,36 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 			continue
 		}
 		event.item = item
-		_, _, _ = eventDestinations(event.event, item.Topic, event.routing, want)
+		resolvable = append(resolvable, event)
+	}
+	want := newWanted()
+	for _, due := range []bool{true, false} {
+		for _, event := range resolvable {
+			if event.due == due {
+				_, _, _ = eventDestinations(event.event, event.item.Topic, event.routing, lookupOf(event, want, want))
+			}
+		}
 	}
 	found, err := loadLookups(ctx, deps.Store.Pool, want)
 	if err != nil {
 		return err
 	}
-	for _, event := range events {
-		if event.failure != nil || event.owner == "" || event.resolveErr != nil {
-			continue
-		}
-		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(event.event, event.item.Topic, event.routing, found)
+	for _, event := range resolvable {
+		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(event.event, event.item.Topic, event.routing, lookupOf(event, found, want))
 		event.resolveLost = event.resolveErr != nil && ctx.Err() != nil && errors.Is(event.resolveErr, ctx.Err())
+		var unanswered *unansweredRecipients
+		event.incomplete = errors.As(event.resolveErr, &unanswered)
 	}
 	return nil
+}
+
+// lookupOf is the lookup event's destinations read: look itself for a due event, and look through
+// untaken, with the recipient reads the due events of the batch took, for one that is not due.
+func lookupOf(event *batchEvent, look lookup, taken *wanted) lookup {
+	if event.due {
+		return look
+	}
+	return untaken{lookup: look, taken: taken}
 }
 
 // destinations collects an event's destinations, each subject once: a subject an earlier route
@@ -700,8 +724,8 @@ func (d *destinations) leftToMention(sessionID string) bool {
 // a new comment whose mentions resolved to a session are read before anything else, so a lookup of
 // them that fails leaves the event with no destination. Any other lookup that fails, or a route
 // that does not parse, ends the list there: the destinations before it are returned with the
-// error, which backs the event off once they are sent. So a comment recipient query that failed
-// (loadLookups) still lets the owner topic, the route and the claimant go first.
+// error, which backs the event off once they are sent. So a recipient read the batch has no answer
+// for (unansweredRecipients) still lets the owner topic, the route and the claimant go first.
 func eventDestinations(event model.Event, ownerTopic string, routing routing, look lookup) (list []destination, mentionPending bool, err error) {
 	d := &destinations{seen: map[string]struct{}{}}
 	if event.Type == "comment.created" && len(payloadMentionedSessions(event.Payload)) > 0 {
@@ -913,12 +937,13 @@ func addPrimaryDocumentAuthors(event model.Event, routing routing, look lookup, 
 // its root and each reply, then every session the thread's document credits, which the batch reads
 // for all its replies in one query (loadLookups, loadCommentRecipients); when that query failed,
 // its error ends the event's destinations here. A new comment on a document (no reply_to and no
-// ask_id), and its edit, reach every session that document credits (loadDocumentSessionAuthors); a
-// new comment on an issue's conversation names no document and reaches no author. A resolution or
-// a reopening reaches the thread root's author only, so the reopening a reply makes tells no new
-// session twice. artifact.human_edited, which the notice sweep appends once a person's quiet window
-// on a document ends (docs.sendEditNotice), reaches every session the document its payload's
-// artifact_id names credits. Ask threads are not walked here: their asker and repliers are the
+// ask_id), and its edit, reach every session that document credits (loadDocumentSessionAuthors,
+// whose failed query ends the event's destinations here too); a new comment on an issue's
+// conversation names no document and reaches no author. A resolution or a reopening reaches the
+// thread root's author only, so the reopening a reply makes tells no new session twice.
+// artifact.human_edited, which the notice sweep appends once a person's quiet window on a document
+// ends (docs.sendEditNotice), reaches every session the document its payload's artifact_id names
+// credits, read the same way. Ask threads are not walked here: their asker and repliers are the
 // ask's followers (addFollowerRoutes). The event's own actor is skipped, and so is a session the
 // comment's mentions resolved to (payloadMentionedSessions) once its mention delivered the comment
 // (recipientFilter); an author whose mention failed is added instead.

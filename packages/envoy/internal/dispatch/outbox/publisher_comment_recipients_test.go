@@ -583,6 +583,296 @@ func TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTo
 	}
 }
 
+// A reply whose reply_to is not a uuid replies under no comment, so its thread reaches no session:
+// the reply is published to its owner topic, its route and its claimant, with no attempt counted,
+// and holds nothing back.
+func TestAReplyToAnIDThatIsNoUUIDReachesNoThreadSessionAndPublishes(t *testing.T) {
+	sami := model.Actor{Kind: "user", ID: "sami"}
+	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", new("role:reviewer"))
+	claimIssue(t, database, "T-1", claimant)
+	comment := seedThreadComment(t, database, "T-1", "", sami, nil)
+	replied := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: comment, ReplyTo: new("not-a-uuid")})
+	message := appendIssueMessage(t, database, broker)
+
+	deps := withHeldRoles(Deps{Store: database, Publisher: &recordingPublisher{}})
+	if _, err := scanBatch(context.Background(), deps, unfenced{}, holding(t, deps).instance); err != nil {
+		t.Fatalf("scan batch: %v", err)
+	}
+	got := readEventRow(t, database, replied.ID)
+	want := []string{"notifications.dispatch.issue.T-1.comment.created", roleTopic, contracts.AgentSubject(claimant.ID)}
+	if got.publishedAt == nil || got.attempts != 0 || got.nextAttempt != nil || !slices.Equal(got.destinations, want) {
+		t.Fatalf("the reply to a non-uuid id has published_at %v, attempt_count %d, next_attempt_at %v and published_destinations %v, want it published to %v with no attempt counted",
+			got.publishedAt, got.attempts, got.nextAttempt, got.destinations, want)
+	}
+	if other := readEventRow(t, database, message.ID); other.publishedAt == nil || other.attempts != 0 {
+		t.Fatalf("the issue's later message has published_at %v and attempt_count %d, want it published", other.publishedAt, other.attempts)
+	}
+}
+
+// repairDocumentCredits gives every version of the document artifactID names an empty credit list,
+// which every recipient query reads again: the document then credits its creator alone.
+func repairDocumentCredits(t *testing.T, database *store.Store, artifactID string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`update artifact_versions set authors = '[]'::jsonb where artifact_id = $1`, artifactID); err != nil {
+		t.Fatalf("repair the credits of document %s: %v", artifactID, err)
+	}
+}
+
+// makeDue makes each event's back-off fall due now, as the passing of time would.
+func makeDue(t *testing.T, database *store.Store, events ...model.Event) {
+	t.Helper()
+	ids := make([]int64, 0, len(events))
+	for _, event := range events {
+		ids = append(ids, event.ID)
+	}
+	if _, err := database.Pool.Exec(context.Background(),
+		`update events set next_attempt_at = now() where id = any($1) and next_attempt_at is not null`, ids); err != nil {
+		t.Fatalf("make events %v due: %v", ids, err)
+	}
+}
+
+// An event whose recipient read failed lists its owner topic, route and claimant and nothing
+// after, so the sessions it is still bound for are unknown. A later event of its owner that is
+// bound for such a session - the thread root's author, told of the thread's resolution - is held
+// back from it until the failed event is tried again, and reaches it after the failed event does;
+// the destinations the failed event did list, the claimant here, chain as usual. The cases are
+// the three recipient reads: a reply's thread sessions, the sessions of the primary document of an
+// issue nobody routes or claims, and the sessions of the document a comment is anchored on.
+func TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBeforeIt(t *testing.T) {
+	sami := model.Actor{Kind: "user", ID: "sami"}
+	rooter := model.Actor{Kind: "session", ID: "session-rooter"}
+	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
+	writer := model.Actor{Kind: "session", ID: "session-writer"}
+	for _, tc := range []struct {
+		name string
+		// arrange returns the event whose recipient read fails, the later event that reaches
+		// rooter, and the document whose credits break and are then repaired.
+		arrange func(t *testing.T, database *store.Store, broker *events.Broker) (failed, later model.Event, document string)
+		// wantFirst is the later event's sessions in the first batch: those the failed event
+		// listed.
+		wantFirst []string
+	}{
+		{
+			name: "a reply's thread sessions",
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) (model.Event, model.Event, string) {
+				claimIssue(t, database, "T-1", claimant)
+				spec := seedDocument(t, database, new("T-1"), "spec", writer, []model.Actor{writer})
+				root := seedThreadComment(t, database, "T-1", spec, rooter, nil)
+				reply := seedThreadComment(t, database, "T-1", "", sami, &root)
+				replied := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: reply, ReplyTo: &root})
+				resolved := appendCommentEvent(t, database, broker, "comment.resolved", sami, model.Comment{ID: root, Anchor: &model.Anchor{ArtifactID: spec}})
+				return replied, resolved, spec
+			},
+			wantFirst: []string{claimant.ID},
+		},
+		{
+			name: "the primary document's sessions, on an issue nobody routes or claims",
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) (model.Event, model.Event, string) {
+				spec := seedSpec(t, database, "T-1", rooter, []model.Actor{rooter})
+				comment := seedThreadComment(t, database, "T-1", "", sami, nil)
+				root := seedThreadComment(t, database, "T-1", "", rooter, nil)
+				commented := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: comment})
+				resolved := appendCommentEvent(t, database, broker, "comment.resolved", sami, model.Comment{ID: root})
+				return commented, resolved, spec
+			},
+			wantFirst: []string{},
+		},
+		{
+			name: "the sessions of the document a comment is anchored on",
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) (model.Event, model.Event, string) {
+				claimIssue(t, database, "T-1", claimant)
+				notes := seedDocument(t, database, new("T-1"), "notes", rooter, []model.Actor{rooter})
+				comment := seedThreadComment(t, database, "T-1", notes, sami, nil)
+				root := seedThreadComment(t, database, "T-1", "", rooter, nil)
+				commented := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: comment, Anchor: &model.Anchor{ArtifactID: notes}})
+				resolved := appendCommentEvent(t, database, broker, "comment.resolved", sami, model.Comment{ID: root})
+				return commented, resolved, notes
+			},
+			wantFirst: []string{claimant.ID},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			broker := events.NewBroker()
+			seedIssue(t, database, "T-1", nil)
+			failed, later, document := tc.arrange(t, database, broker)
+			breakDocumentCredits(t, database, document)
+
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher}
+			holder := holding(t, deps).instance
+			scan := func(t *testing.T) {
+				t.Helper()
+				if _, err := scanBatch(context.Background(), deps, unfenced{}, holder); err != nil {
+					t.Fatalf("scan batch: %v", err)
+				}
+			}
+			scan(t)
+			first, held := readEventRow(t, database, failed.ID), readEventRow(t, database, later.ID)
+			if first.attempts != 1 || first.nextAttempt == nil {
+				t.Fatalf("the event whose recipient read failed has attempt_count %d and next_attempt_at %v, want it backed off", first.attempts, first.nextAttempt)
+			}
+			if held.publishedAt != nil || held.attempts != 0 || held.nextAttempt == nil || held.nextAttempt.After(*first.nextAttempt) {
+				t.Fatalf("the later event has published_at %v, attempt_count %d and next_attempt_at %v, want it held back no later than the failed event's retry at %v",
+					held.publishedAt, held.attempts, held.nextAttempt, *first.nextAttempt)
+			}
+			want := []string{}
+			for _, sessionID := range tc.wantFirst {
+				want = append(want, contracts.AgentSubject(sessionID))
+			}
+			if got := agentTopics(held.destinations); !slices.Equal(got, want) {
+				t.Fatalf("the later event reached sessions %v in the first batch, want %v, the ones the failed event listed", got, want)
+			}
+
+			repairDocumentCredits(t, database, document)
+			makeDue(t, database, failed, later)
+			scan(t)
+			for _, event := range []model.Event{failed, later} {
+				if row := readEventRow(t, database, event.ID); row.publishedAt == nil {
+					t.Fatalf("%s event %d was not published once the credits were repaired: %+v", event.Type, event.ID, row)
+				}
+			}
+			var order []string
+			for _, item := range publisher.all() {
+				if item.Topic == contracts.AgentSubject(rooter.ID) {
+					order = append(order, item.SourceEventID)
+				}
+			}
+			if want := []string{fmt.Sprint(failed.ID), fmt.Sprint(later.ID)}; !slices.Equal(order, want) {
+				t.Fatalf("%s received events %v, want %v: the failed event first, then the later one", rooter.ID, order, want)
+			}
+		})
+	}
+}
+
+// A document whose credit list no read can take backs off the comment anchored on it, and holds
+// back nothing but the later session copies of that comment's issue: the batch is recorded, the
+// issue's later event reaches the claimant its failed event listed and waits for the failed
+// event's retry for the thread root's author, and another issue's events in the same batch
+// publish - among them a comment anchored on a healthy document, whose credits the batch reads in
+// the same statement as the broken document's (loadRecipients runs that statement again for each
+// id alone once Postgres refuses it).
+func TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopies(t *testing.T) {
+	sami := model.Actor{Kind: "user", ID: "sami"}
+	writer := model.Actor{Kind: "session", ID: "session-writer"}
+	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
+	rooter := model.Actor{Kind: "session", ID: "session-rooter"}
+	other := model.Actor{Kind: "session", ID: "session-other"}
+	credited := model.Actor{Kind: "session", ID: "session-credited"}
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	seedSecondIssue(t, database, "T-2")
+	claimIssue(t, database, "T-1", claimant)
+	notes := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer})
+	breakDocumentCredits(t, database, notes)
+	comment := seedThreadComment(t, database, "T-1", notes, sami, nil)
+	root := seedThreadComment(t, database, "T-1", "", rooter, nil)
+	otherRoot := seedThreadComment(t, database, "T-2", "", other, nil)
+	otherReply := seedThreadComment(t, database, "T-2", "", sami, &otherRoot)
+	healthy := seedDocument(t, database, new("T-2"), "plan", credited, []model.Actor{credited})
+	healthyComment := seedThreadComment(t, database, "T-2", healthy, sami, nil)
+	commented := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: comment, Anchor: &model.Anchor{ArtifactID: notes}})
+	resolved := appendCommentEvent(t, database, broker, "comment.resolved", sami, model.Comment{ID: root})
+	otherReplied := appendIssueCommentEvent(t, database, broker, "T-2", "comment.created", sami, model.Comment{ID: otherReply, ReplyTo: &otherRoot})
+	otherResolved := appendIssueCommentEvent(t, database, broker, "T-2", "comment.resolved", sami, model.Comment{ID: otherRoot})
+	anchored := appendIssueCommentEvent(t, database, broker, "T-2", "comment.created", sami, model.Comment{ID: healthyComment, Anchor: &model.Anchor{ArtifactID: healthy}})
+
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher}
+	if _, err := scanBatch(context.Background(), deps, unfenced{}, holding(t, deps).instance); err != nil {
+		t.Fatalf("scan batch: %v", err)
+	}
+	failed := readEventRow(t, database, commented.ID)
+	if failed.publishedAt != nil || failed.attempts != 1 || failed.nextAttempt == nil {
+		t.Fatalf("the comment on the broken document has published_at %v, attempt_count %d and next_attempt_at %v, want it backed off",
+			failed.publishedAt, failed.attempts, failed.nextAttempt)
+	}
+	if want := []string{"notifications.dispatch.issue.T-1.comment.created", contracts.AgentSubject(claimant.ID)}; !slices.Equal(failed.destinations, want) {
+		t.Fatalf("the comment on the broken document recorded published_destinations %v, want %v", failed.destinations, want)
+	}
+	held := readEventRow(t, database, resolved.ID)
+	if want := []string{"notifications.dispatch.issue.T-1.comment.resolved", contracts.AgentSubject(claimant.ID)}; !slices.Equal(held.destinations, want) {
+		t.Fatalf("the issue's later event recorded published_destinations %v, want %v: its owner topic and the claimant the failed event listed", held.destinations, want)
+	}
+	if held.publishedAt != nil || held.attempts != 0 || held.nextAttempt == nil || held.nextAttempt.After(*failed.nextAttempt) {
+		t.Fatalf("the issue's later event has published_at %v, attempt_count %d and next_attempt_at %v, want it held back no later than the failed event's retry at %v",
+			held.publishedAt, held.attempts, held.nextAttempt, *failed.nextAttempt)
+	}
+	for _, item := range publisher.all() {
+		if item.SourceEventID == fmt.Sprint(resolved.ID) && item.Topic == contracts.AgentSubject(rooter.ID) {
+			t.Fatalf("the issue's later event reached %s, a session the failed event may yet reach first", rooter.ID)
+		}
+	}
+	for _, event := range []model.Event{otherReplied, otherResolved} {
+		row := readEventRow(t, database, event.ID)
+		if row.publishedAt == nil || row.attempts != 0 || !slices.Equal(agentTopics(row.destinations), []string{contracts.AgentSubject(other.ID)}) {
+			t.Fatalf("the other issue's %s event has published_at %v, attempt_count %d and published_destinations %v, want it published to %s",
+				event.Type, row.publishedAt, row.attempts, row.destinations, other.ID)
+		}
+	}
+	row := readEventRow(t, database, anchored.ID)
+	if want := []string{"notifications.dispatch.issue.T-2.comment.created", contracts.AgentSubject(credited.ID)}; row.publishedAt == nil || row.attempts != 0 || !slices.Equal(row.destinations, want) {
+		t.Fatalf("the other issue's comment on a healthy document has published_at %v, attempt_count %d and published_destinations %v, want it published to %v",
+			row.publishedAt, row.attempts, row.destinations, want)
+	}
+}
+
+// An event that is not due is never sent, so the batch takes no recipient read for it: one backed
+// off on a thread whose document's credit list no read can take does not fail another issue's
+// reply read in the same batch, and its own issue's later events still publish.
+func TestTheBatchTakesNoRecipientReadForAnEventThatIsNotDue(t *testing.T) {
+	sami := model.Actor{Kind: "user", ID: "sami"}
+	writer := model.Actor{Kind: "session", ID: "session-writer"}
+	other := model.Actor{Kind: "session", ID: "session-other"}
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	seedSecondIssue(t, database, "T-2")
+	claimIssue(t, database, "T-1", model.Actor{Kind: "session", ID: "session-claimant"})
+	spec := seedDocument(t, database, new("T-1"), "spec", writer, []model.Actor{writer})
+	breakDocumentCredits(t, database, spec)
+	root := seedThreadComment(t, database, "T-1", spec, writer, nil)
+	reply := seedThreadComment(t, database, "T-1", "", sami, &root)
+	broken := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: reply, ReplyTo: &root})
+
+	deps := Deps{Store: database, Publisher: &recordingPublisher{}}
+	holder := holding(t, deps).instance
+	if _, err := scanBatch(context.Background(), deps, unfenced{}, holder); err != nil {
+		t.Fatalf("scan the broken reply's batch: %v", err)
+	}
+	if row := readEventRow(t, database, broken.ID); row.attempts != 1 {
+		t.Fatalf("the reply on the broken thread has attempt_count %d after its batch, want 1", row.attempts)
+	}
+	if _, err := database.Pool.Exec(context.Background(),
+		`update events set next_attempt_at = now() + interval '1 hour' where id = $1`, broken.ID); err != nil {
+		t.Fatalf("move the broken reply's back-off out: %v", err)
+	}
+	message := appendIssueMessage(t, database, broker)
+	otherRoot := seedThreadComment(t, database, "T-2", "", other, nil)
+	otherReply := seedThreadComment(t, database, "T-2", "", sami, &otherRoot)
+	otherReplied := appendIssueCommentEvent(t, database, broker, "T-2", "comment.created", sami, model.Comment{ID: otherReply, ReplyTo: &otherRoot})
+
+	if _, err := scanBatch(context.Background(), deps, unfenced{}, holder); err != nil {
+		t.Fatalf("scan the batch beside the broken reply: %v", err)
+	}
+	row := readEventRow(t, database, otherReplied.ID)
+	if row.publishedAt == nil || row.attempts != 0 || !slices.Equal(agentTopics(row.destinations), []string{contracts.AgentSubject(other.ID)}) {
+		t.Fatalf("the other issue's reply has published_at %v, attempt_count %d and published_destinations %v, want it published to %s",
+			row.publishedAt, row.attempts, row.destinations, other.ID)
+	}
+	if row := readEventRow(t, database, message.ID); row.publishedAt == nil {
+		t.Fatalf("the broken reply's issue's message was not published: %+v", row)
+	}
+	if row := readEventRow(t, database, broken.ID); row.attempts != 1 || row.publishedAt != nil {
+		t.Fatalf("the reply on the broken thread, not due, has attempt_count %d and published_at %v, want it left as it was", row.attempts, row.publishedAt)
+	}
+}
+
 // A process that stops mid-batch releases the batch's events (settle), and an event whose recipient
 // query failed is no exception: it is neither backed off nor left claimed, whether the stop is what
 // failed the query or the query failed in the store and the stop came while the batch's answers
@@ -624,6 +914,36 @@ func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) 
 			t.Fatalf("publish the batch: %v", err)
 		}
 		assertReleased(t, database, replied, commented, message)
+	})
+
+	// Every destination the event lists before its recipient read is reached already, so the
+	// batch has no send of it to lose: the read the stop cancelled is what releases it
+	// (batchEvent.resolveLost), rather than backing it off.
+	t.Run("the stop cancels the recipient query of an event with nothing else to send", func(t *testing.T) {
+		database := storetest.Open(t)
+		broker := events.NewBroker()
+		seedIssue(t, database, "T-1", nil)
+		seedSpec(t, database, "T-1", writer, []model.Actor{writer})
+		root := seedThreadComment(t, database, "T-1", "", writer, nil)
+		reply := seedThreadComment(t, database, "T-1", "", sami, &root)
+		replied := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: reply, ReplyTo: &root})
+		if _, err := database.Pool.Exec(context.Background(),
+			`update events set published_destinations = array['notifications.dispatch.issue.T-1.comment.created'] where id = $1`, replied.ID); err != nil {
+			t.Fatalf("record the reply's owner topic reached: %v", err)
+		}
+
+		deps := Deps{Store: database, Publisher: &recordingPublisher{}}
+		holder := holding(t, deps).instance
+		pending, _, err := readBatch(context.Background(), deps)
+		if err != nil {
+			t.Fatalf("scan the batch: %v", err)
+		}
+		stopped, stop := context.WithCancel(context.Background())
+		stop()
+		if _, err := publishBatch(stopped, deps, unfenced{}, holder, pending, false); err != nil {
+			t.Fatalf("publish the batch: %v", err)
+		}
+		assertReleased(t, database, replied)
 	})
 
 	t.Run("the query fails in the store and the stop comes before the answers", func(t *testing.T) {

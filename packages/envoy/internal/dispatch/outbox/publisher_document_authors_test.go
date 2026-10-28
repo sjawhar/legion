@@ -288,7 +288,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 
 // The author routes skip the event's own actor wherever they find it, so a writer is never told
 // of its own comment even should an agent's comment notify.
-func TestPublishAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing.T) {
+func TestAddAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	writer := model.Actor{Kind: "session", ID: "session-writer"}

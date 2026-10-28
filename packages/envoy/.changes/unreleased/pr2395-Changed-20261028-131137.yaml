@@ -26,11 +26,14 @@ body: |-
     once per message and recipient; one under a key its caller chose carries none, since two distinct
     envelopes can share that key, and the stream stores each. A send NATS does not acknowledge on a
     live connection is now backed off with its attempt counted and the error kept in
-    `events.publish_error`, where it was resent at every scan. Nothing scans on a period any
-    more: a LISTEN on new events and on the hold's release, the process's own commits, a NATS
-    reconnect and a timer to the earliest due retry wake it. Each process uses one more Postgres
-    connection (the outbox's pool is two, so its hold's renewal never waits behind a batch) and holds
-    one more LISTEN connection: 88 connections per process at its ceiling, from 86
+    `events.publish_error`, where it was resent at every scan. When a comment-recipient,
+    primary-document-author or document-credit read fails, only the events that asked for it back
+    off, and the owner's later events wait for that event's retry before reaching any agent or role
+    the failed event may still reach; one unreadable credit list no longer stops the outbox. Nothing
+    scans on a period any more: a LISTEN on new events and on the hold's release, the process's own
+    commits, a NATS reconnect and a timer to the earliest due retry wake it. Each process uses one
+    more Postgres connection (the outbox's pool is two, so its hold's renewal never waits behind a
+    batch) and holds one more LISTEN connection: 88 connections per process at its ceiling, from 86
     (`store.ConnectionsPerProcess`). Migrations `0136_duty_holds` (a new table) and
     `0137_outbox_claim` (three partial indexes on `events`, `events.publish_error`, and the drop of
     `events_unpublished` and `events_unpublished_ready`) apply at boot. `0137` builds its indexes

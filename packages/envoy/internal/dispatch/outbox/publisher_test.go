@@ -471,7 +471,7 @@ func TestRunSkipsAnUnfollowedSession(t *testing.T) {
 
 // A human adding or removing a follower is told to that session directly: with no
 // whole-issue subscription (the default), its own topic is the only place it listens.
-func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
+func TestAddAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
 	for _, eventType := range []string{"ask.follower_added", "ask.follower_removed"} {
 		t.Run(eventType, func(t *testing.T) {
 			database := storetest.Open(t)
@@ -933,7 +933,7 @@ func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
 	}
 }
 
-func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
+func TestAddAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -947,7 +947,7 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 	}
 }
 
-func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
+func TestAddAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	event := model.Event{
@@ -964,7 +964,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 	}
 }
 
-func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
+func TestAddAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	event := model.Event{
