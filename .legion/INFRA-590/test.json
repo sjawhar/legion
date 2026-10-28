@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-590",
+  "completed": "2026-10-28T19:40:00Z",
+  "round": 7,
+  "testedHead": "bf30591dd483da80b3cb0e3965416537535329c2",
+  "previousTestedHead": "46d1a34527ef71289796bd8a5fbd9ec5ab17069f",
+  "fingerprint": "The implementer's comment 6477528943 gives the fingerprint 738b1186… -> 6bcc8281… for the merge of main 20ba65a67 (#2366). It differs, because #2366 rewrote the outbox publisher this PR rewrites, so this round is a full round, not a re-check.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Ran the implementer's commands again at bf30591d on this pod's Postgres 17. The multiprocess package passed (621.9 s). The outbox (249.0 s; TestTheBatchResolvesFollowersAuthorsRecipientsAndMentionDeliveriesInAtMostSevenStatements logs 7 lookups for 98 events), deliveryaudit, duty, bus and cmd/listener packages all passed. I drove #2366's delivery cases on two real processes myself (proof below)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "#2366 in the batch model on two real processes: a person's reply reaches every thread writer and the thread document's authors; a person's comment on an unrouted, unclaimed issue reaches its primary document's authors; a delivered mention keeps the own-topic copy off, a failed one still gets it; each once",
+      "surface": "two real envoy-dispatch binaries (multiprocess harness, throwaway probe TestProbe2366DeliveryOnTwoProcesses) on one Postgres and NATS, with ENVOY_URL at a fake Envoy listener that answers /v1/registry and /v1/messages/send (refusing a send whose text holds 'fail-me'); writes alternate between the two processes; sessions on their agent subjects and a watcher on the issue topics",
+      "command": "cd packages/envoy (scratch copy) && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -run TestProbe2366 -v ./cmd/dispatch",
+      "observed": "Issue X was created by session D, with no route and no claim. T1 wrote an anchored root comment on X's spec and T2 replied. A person's reply reached T1 1, T2 1, D 1 (the watcher 1). A person's plain comment reached D 1, T1 0, T2 0. A person's comment mentioning session:D that the fake delivered: D's own topic 0. The same with a refused send: D's own topic 1. The fake listener recorded both sends. Each session's frames are in seq order per owner (requireInOrder)",
+      "headSha": "bf30591dd483da80b3cb0e3965416537535329c2",
+      "negativeControl": "The refused mention send ('fail-me', HTTP 503 from the fake) is the deliberately broken input: its comment did reach D's own topic, where the delivered one did not"
+    },
+    {
+      "criterion": "A failed recipient query backs off only the events that needed it, after their owner topic, route and claimant, and they are delivered once the read works again",
+      "surface": "the same two real processes; X's spec version's authors set to the JSON scalar '\"broken\"', which the recipient SQL's jsonb_array_elements refuses",
+      "command": "update artifact_versions set authors = '\"broken\"' for X's spec; a person's reply in X's thread, and a person's comment on issue Y, which is routed to session R; read events.attempt_count, publish_error and published_destinations; then set authors back to '[]'",
+      "observed": "Y's comment reached R 1 and the watcher 1 at once. X's reply was backed off: attempt_count 1, publish_error 'load primary document authors: ERROR: cannot extract elements from a scalar (SQLSTATE 22023)'. Its owner topic was reached ([notifications.dispatch.issue.<X>.comment.created], watcher 1), and T1, T2 and D had 0. After the repair, the retry reached T1 1, T2 1 and D 1 within 3.0 s, and the watcher still held exactly 1 copy",
+      "headSha": "bf30591dd483da80b3cb0e3965416537535329c2",
+      "negativeControl": "The corrupted author list is the broken input; the event that needed it stopped at its owner topic while the routed issue's comment was unaffected"
+    },
+    {
+      "criterion": "The two extra lookup statements per batch cost nothing visible at tonight's load",
+      "surface": "the committed black-box harness TestTheOutboxLoadSteps (real processes, HTTP writes, NATS reads) and TestOutboxThroughputUnderRemoteLatency, at the pre-merge head 46d1a345 (5 lookups) and at bf30591d (7), on one machine back to back; also main 20ba65a67",
+      "command": "DISPATCH_OUTBOX_LOAD_STEPS=1 go test -tags multiprocess -run TestTheOutboxLoadSteps -v ./cmd/dispatch, and go test -run TestOutboxThroughputUnderRemoteLatency -v ./internal/dispatch/outbox/, in each tree",
+      "observed": "Load steps, p99 ms, pre-merge then head: 4/s with 1 process 16.1 -> 15.7; 40/s with 1 process 14.2 -> 23.5; 4/s with 2 processes 17.9 -> 16.3; 40/s with 2 processes 10.9 -> 18.1. Every step published ~40/s with 0 undelivered. Burst drain 528/622 -> 721/573 ms. These are within the run-to-run spread recorded earlier (p99 0.5-1.3 s on a 2-core pod). Remote latency, pre-merge then head: 50 ms 206.6/179.6 -> 204.1/200.3 events/s; 150 ms 74.7/74.1 -> 74.4/74.0; bursts 17.5/6.2 -> 17.8/6.1. Head's new comment-reply case: 176.7/196.3 (50 ms) and 74.2/72.9 (150 ms) events/s",
+      "headSha": "bf30591dd483da80b3cb0e3965416537535329c2",
+      "negativeControl": "The harness fails a step on any event not delivered within 60 s; none failed. Main's own run of the remote-latency test (951/760/483/441 events/s for messages, 887/772/478/451 for replies) is the old one-window design without per-destination order, the cost THROUGHPUT.md already records; it is not the two lookups"
+    },
+    {
+      "criterion": "One publisher; a killed, cut, silently cut or frozen publisher is replaced within 10 s; each session takes each event once and in order",
+      "surface": "the repository's multiprocess harness at the head",
+      "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "ok, 621.9 s. Take-over: SIGKILL 5.249 s, NATS cut 3.004 s, silent cut 2.312 s, SIGSTOP 5.711 s. 200 comments: watcher 200, role holder 80, author 60, each once and in order. Killed mid-batch: comment 1 at sequence 3, comment 2 at 4",
+      "headSha": "bf30591dd483da80b3cb0e3965416537535329c2",
+      "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the resumed process started no batch"
+    }
+  ],
+  "observations": [
+    "CI at bf30591d: every check was queued when read.",
+    "No new Dispatch key in added text. The only hits are LEGION-101 (already on main) and INFRA-560 inside the file name of an existing main learning, which the new connection-count learning links to.",
+    "The four retro learnings are named <slug>-pr2395.md and their front matter names only sjawhar/legion#2395. The controller's 10:05Z addendum (comment c283c5cf) says to leave related_issues out; these keep it with a PR reference and no Dispatch key. I recorded that for the architect; I did not fail it.",
+    "Main's reds the controller named are main's (relayed 13:57Z and 15:44Z)."
+  ]
+}
