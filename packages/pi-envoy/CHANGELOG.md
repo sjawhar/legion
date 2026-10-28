@@ -1,18 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
 
 - AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
   review, a file missing when the gate ran) warn by default: the write posts with its warning and
   an entry the report counts. They refuse only when the session chose block (`OMP_ASKGATE=block`,
   or its `experiments` entry's `askgate_block` arm on). A model's revise verdict still blocks by
   default, and no model role or a gate that did not load still refuses in both modes.
-- Every registration names the plugin: `plugin` `@sjawhar/pi-envoy` and `plugin_version` this
-  package's version, which the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and
-  `envoy_sessions`, show (INFRA-548).
-
 - A session shows once each Envoy message it missed while its NATS connection or a subscription
   was down, NATS was restarting or the session was not running. It asks its listener's new
   `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
@@ -233,20 +235,6 @@
   clipped the end of a rewrite (its options and recommendation), and the review's output budget is
   4,096 tokens, from 1,200, which a rewrite of a 1,450-character question already used 1,106 of,
   thinking included; an answer cut off there holds no verdict and the write posts unreviewed.
-- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
-  52 s when its first redial also hangs, instead of after up to 6 minutes: it dials with
-  `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the connection dropped
-  after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
-  catch-up, so the session shows the messages sent meanwhile once (INFRA-548).
-
-- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
-  nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
-  process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
-  socket of a transport that never finished connecting. The patch also makes nats.js close a stale
-  connection without flushing it first, so a session that published agent-stream frames after its
-  path froze still reconnects: the flush never completed behind data the dead path never
-  acknowledged, and the session never redialed (INFRA-548).
-
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
   numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only

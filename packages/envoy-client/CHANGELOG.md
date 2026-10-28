@@ -1,18 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Changed
-
-- **Breaking:** `subscribe()` takes a required `plugin: { name, version }` and sends it on every
-  registration as `plugin` and `plugin_version`, so the listener's session list names the plugin
-  and build each session runs. `SessionWireSchema` (and so `listSessions` and `envoy_sessions`)
-  keeps both as optional strings, so a row from an older listener or plugin still parses
-  (INFRA-548).
-
-- **Breaking:** `@legion/envoy-client/nats-auth` is no longer a package export: `src/nats-auth.ts`
-  stays the module `natsConnectionOptions` builds its credential with, so a session dials NATS
-  only with those options and their ping settings. No package imported it (INFRA-548).
 
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
@@ -83,20 +73,6 @@
   of a process that is gone and that nothing changed for two hours (`sweepStores`).
 - The `dispatch` refusal for a missing `DISPATCH_HOST` says to send the command as a bash call from
   an agent's session, or to set your own session id to run it by hand.
-- `@legion/envoy-client/nats-connection`: `natsConnectionOptions({ servers, name, seed })`, the
-  nats.js `connect` options every session plugin dials with: its credential, reconnecting forever
-  2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with the connection dropped after
-  two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
-  within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
-  helpers in `test/`, exported as `@legion/envoy-client/test/stall-proxy` (a TCP proxy whose
-  `freeze()` stops forwarding and reading without closing either side, recording when each
-  connection was accepted, first subscribed and closed), `@legion/envoy-client/test/envoy-stack`
-  (a real natsd and listener each stack builds with `go build` from `packages/envoy` into its own
-  scratch directory, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) and
-  `@legion/envoy-client/test/stall-scenario` (`runFreezeScenario`, the freeze both plugins' stall
-  tests run), back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests. `replay`
-  exports `REPLAYED_SUFFIX`, the words a replayed frame's text ends with (INFRA-548).
-
 - `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
   notification stream stored on a subject it follows while its own NATS subscription was down,
   through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
@@ -209,6 +185,15 @@
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
 
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
+
 - `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
   envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse
   leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
@@ -216,17 +201,6 @@
   and `sessionSettings` says it in its notice.
 
 ### Fixed
-
-- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) no longer keeps
-  its socket open after nats.js gives up on it at its 20 s dial timeout: nats.js 2.29.3 closed
-  only a transport that had finished connecting, so the abandoned socket held the process alive.
-  `patches/nats@2.29.3.patch`, which bun applies at install, makes nats.js's `NodeTransport` keep
-  the socket from the moment it dials and destroy it when a transport that never connected is
-  closed. The patch also makes nats.js close a stale connection (two unanswered pings) without
-  flushing it first: behind data the dead path never acknowledged that flush never completed, so
-  the transport never closed and a session that had published since the path froze never
-  redialed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed, and that a client
-  that wrote 32 MiB the frozen path never read reconnects within 60 s (INFRA-548).
 
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file

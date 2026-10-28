@@ -1,14 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
-
-- Every registration names the plugin: `plugin` `@sjawhar/claude-envoy` and `plugin_version` the
-  version directory Claude Code's plugin cache installed it under (the marketplace commit's first
-  12 characters), or `source` for a bundle outside the plugin cache, which the listener's
-  `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show. `dist/` was rebuilt
-  (INFRA-548).
 
 - The channel server delivers once each Envoy message the session missed while its NATS
   subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
@@ -71,6 +65,12 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
 
@@ -154,21 +154,6 @@
   `http://127.0.0.1:1` (INFRA-253).
 
 ### Fixed
-
-- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
-  52 s when its first redial also hangs, instead of after up to 6 minutes: the channel server
-  dials with `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the
-  connection dropped after two unanswered pings, in place of nats.js's default 120 s ping. The
-  reconnect runs the catch-up, so the session is handed the messages sent meanwhile once. `dist/`
-  was rebuilt (INFRA-548).
-
-- A channel server whose NATS redial once hung (its TCP connect, or a server that never sends
-  `INFO`) still exits on SIGTERM: nats.js gave up on that redial at its 20 s dial timeout but left
-  its socket open, which held the process alive. The bundle carries `patches/nats@2.29.3.patch`,
-  which makes nats.js destroy the socket of a transport that never finished connecting. The patch
-  also makes nats.js close a stale connection without flushing it first, so a channel server whose
-  connection holds data the frozen path never acknowledged still reconnects: the flush never
-  completed behind that data, and the server never redialed. `dist/` was rebuilt (INFRA-548).
 
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
