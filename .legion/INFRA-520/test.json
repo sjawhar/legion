@@ -2,23 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T18:50:00Z",
-  "round": 10,
-  "headTested": "e3044b12bfa583384a1103a214353c9576237e19 (code head 757229848e8c)",
-  "previousRound": "Review round 2 (review.json at 3ed7e4d4) asked for six things: the fallback over every file under a Go module, envoy_go and envoy_smoke narrow again through exact script entries, a step-level change falling to everything, -race read, README, and docs-pages' bounds. 75722984 answers all six. 44544200 merges main up to 53f39ba0 (#2300).",
-  "ci": "CI run 40741975291 at 75722984 (created 18:06:16Z) was queued at 18:45Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it. Main's #2233 reds are not this pull request's (controller, dispatch://INFRA-520/comment/6def465e-6c18-472c-b6d1-998ffd76ab1f).",
+  "completed": "2026-10-28T19:45:00Z",
+  "round": 11,
+  "headTested": "de79624f74b9b43d2a4d9391e2df597ed4d8c5ba (code head 20e98c18ba3f)",
+  "previousRound": "Review round 3 (review.json at cad74205) found three items. The architect decided them in dispatch://INFRA-520/comment/bafbc258-757d-4ef1-a6ab-1f3ad62b5bdd: (2) script lines read as bash does and (3) an env allowlist are fixed as 'falls to everything'; (1) environment writes inside local actions or repository scripts are the written boundary. 20e98c18 implements both fixes and the boundary text (check-ci-filters.sh:84-88, the router guide's line 175).",
+  "ci": "CI run 40752361615 at 20e98c18 (created 19:13:33Z) was queued at 19:40Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At e3044b12. check-ci-filters.test.sh: 113 passed, 0 failed, including every tester red case from rounds 3 to 8. check-ci-filters.sh on the tree exits 0: 24 gates (envoy-go 1941 files, envoy-smoke 179), and docs-pages.yaml's on.push.paths equals the docs filter. check-image-trigger-paths.sh passes (5 image builds). ci-ok.test.sh: 42 passed. actionlint v1.7.7 on ci.yaml exits 0. With workflow_paths.PathsFilter, envoy_go matches .github/go-release-targets.json, scripts/go-third-party-notices.sh, the listener and envoy-infra files, and not packages/daemon/internal/zz/x.go. envoy_smoke matches the envoy-infra plugin's command and not the daemon file. Both are narrow again. The exact entries (ci_job_reads.py:314-330, 559-568, 651-654) pin envoy-go's unit-test and pack scripts and envoy-smoke's schema script whole. Their Runs (./... with ./internal/dispatch/api for the unit tests; ./cmd/listener per architecture in go-release-targets.json with GOOS/GOARCH; ./cmd/pulumi-resource-envoy-infra) cover what each script compiles. #2300's merged change to the deleted envoy-and-contracts.yaml (pi-legion's NATS service and LEGION_TEST_NATS_URL) is in ci.yaml's pi-legion job (nats:2.10@sha256:5498ba57…, LEGION_TEST_NATS_URL nats://127.0.0.1:4222). README.md:166 names docs-pages.yaml. docs-pages.yaml:195-196 and docs/site/README.md:13 state the 3,000-file and 100-pending bounds. GitHub reports #2316 MERGEABLE."
+    "how": "At de79624f. check-ci-filters.test.sh: 131 passed, 0 failed. check-ci-filters.sh on the tree exits 0 (24 gates; docs-pages.yaml's push paths equal the docs filter). ENV_ALLOWED (ci_filter_coverage.py:465-469) lists only test configuration (database URLs, image names, LEGION_E2E*, LEGION_TEST_*, TESTCONTAINERS_RYUK_DISABLED), none of which go reads. script_lines splits only on \\n and strips only space and tab, and script_reason refuses any character outside printable ASCII, tab and \\n. GitHub reports #2316 MERGEABLE. Main has no .github change after the last merge."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
+      "criterion": "Filter drift, conservative rule (round-3 review): a step script bash would read differently, and an env name go can reach, fall to everything; allowed test configuration does not",
+      "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the command ci.yaml's ci-filters job runs",
+      "command": "Five ci.yaml edits, each reverted after, then `PATH=<venv with PyYAML>:$PATH .github/scripts/check-ci-filters.sh`: (cr) envoy-go's natslive step run: as \"go test -tags natslive ./internal/testnats/\\n\\r# || (cd ../daemon && go build ./cmd/legion)\\n\" (the reviewer's probe); (nbsp) the same hidden command after a U+00A0 then #; (xdg) `XDG_CONFIG_HOME: ${{ github.workspace }}/.cfg` in 'Test the Go daemon''s env; (path) `PATH: /opt/othergo/bin:/usr/bin:/bin` there; (allowed) `LEGION_TEST_NATS_URL` there",
+      "observed": "cr exit 1, 'which this check does not reduce (its step's script holds the character U+000D)', 23 problems. nbsp exit 1, '\u2026 U+00A0', 23 problems. xdg exit 1, '(step \"Test the Go daemon\"'s env sets XDG_CONFIG_HOME)', 24 problems. path exit 1, '\u2026 sets PATH', 24 problems. allowed exit 0, 'every ci.yaml filter matches every file its job reads (24 gates) \u2026'",
+      "headSha": "20e98c18ba3f",
+      "negativeControl": "At 14b78008 the reviewer recorded exit 0 for the \\r# probe ('envoy-go: 1941 files, 0 uncovered') and for XDG_CONFIG_HOME. The allowed-name edit is the control in the other direction: it changes nothing a go command compiles, and the check still passes"
+    },
+    {
       "criterion": "Filter drift, conservative rule: a step-level change around a simple go line, and any edit to a pinned script, fall to everything",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the command ci.yaml's ci-filters job runs",
       "command": "Five ci.yaml edits, each reverted after, then `PATH=<venv with PyYAML>:$PATH .github/scripts/check-ci-filters.sh`: (1) daemon-go-postgres-16's step as `run: |` with `cd ../envoy` before the unchanged go line (the reviewer's probe); (2) `shell: bash --noprofile --norc -eo pipefail {0}` on 'Test the Go daemon'; (3) envoy-go's pinned unit-test script with `../../packages/daemon/...` added to its go list; (4) `env: GOFLAGS: -tags=probe` on that step; (5) that step's working-directory moved to packages/envoy/infra",
-      "observed": "Each exits 1 with 22 to 24 named files, e.g. (1) 'daemon-go-postgres-16 reads packages/envoy/.changes/unreleased/….yaml, which its filter daemon_go_postgres_16 does not match …'; (3) 'envoy-go reads packages/daemon/.gitignore … step \"Unit test envoy Go package\"'s pinned script, which this check does not reduce (the step's script is not the pinned text), so it counts as reading every …'; (4) '… (step \"Unit test envoy Go package\"'s env sets GOFLAGS) …'; (5) '… (its step runs in packages/envoy/infra, the entry's in packages/envoy) …'. The unmodified tree exits 0",
+      "observed": "Each exits 1 with 22 to 24 named files, e.g. (1) 'daemon-go-postgres-16 reads packages/envoy/.changes/unreleased/\u2026.yaml, which its filter daemon_go_postgres_16 does not match \u2026'; (3) 'envoy-go reads packages/daemon/.gitignore \u2026 step \"Unit test envoy Go package\"'s pinned script, which this check does not reduce (the step's script is not the pinned text), so it counts as reading every \u2026'; (4) '\u2026 (step \"Unit test envoy Go package\"'s env sets GOFLAGS) \u2026'; (5) '\u2026 (its step runs in packages/envoy/infra, the entry's in packages/envoy) \u2026'. The unmodified tree exits 0",
       "headSha": "757229848e8c",
       "negativeControl": "At a87f1fec the reviewer's probe (1) exited 0 ('daemon-go-postgres-16: 3003 files, 0 uncovered'). The non-.go files now named (a .changes yaml, .gitignore) show the fallback covers every file under a Go module, not only .go files"
     },
@@ -26,7 +34,7 @@
       "criterion": "Filter drift: a -race go line's closure includes the files the race build constraint compiles in",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree",
       "command": "packages/envoy/racehelper/h.go plus packages/daemon/internal/record/zz_race_test.go (//go:build race, importing github.com/sjawhar/envoy/racehelper), then check-ci-filters.sh, then both files removed",
-      "observed": "exit 1: '::error file=packages/envoy/racehelper/h.go::test reads packages/envoy/racehelper/h.go, which its filter test does not match … \"Test the concurrent packages under the race detector\": go test -count=1 -race ./interna…'",
+      "observed": "exit 1: '::error file=packages/envoy/racehelper/h.go::test reads packages/envoy/racehelper/h.go, which its filter test does not match \u2026 \"Test the concurrent packages under the race detector\": go test -count=1 -race ./interna\u2026'",
       "headSha": "757229848e8c",
       "negativeControl": "The reviewer recorded exit 0 for the same probe at a87f1fec ('test: 3435 files, 0 uncovered')"
     },
@@ -44,7 +52,7 @@
       "command": "9 crafted NEEDS cases (round 3); ci-ok.test.sh at e3044b12 (42 passed)",
       "observed": "A selected job left skipped, changes failed, lint failed, an unselected job cancelled, and a draft each fail. The pass cases pass",
       "headSha": "8f85e3ef6c14d0fff4e62a2da2624dd52d8803c0",
-      "negativeControl": "'::error::envoy-go ended skipped, but changes selected it …'"
+      "negativeControl": "'::error::envoy-go ended skipped, but changes selected it \u2026'"
     },
     {
       "criterion": "2. A change to one file selects exactly the jobs that read it; a closed pull request cancels its waiting run",
@@ -56,8 +64,9 @@
     }
   ],
   "notProven": [
-    "No CI run of a #2316 head has completed: run 40741975291 at 75722984 is queued.",
+    "No CI run of a #2316 head has completed: run 40752361615 at 20e98c18 is queued.",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
-    "The Runs of an exact script entry are kept by hand. The check proves the filter covers them, and that any change to the script falls to everything, but not that the Runs name all an unchanged script compiles. I read the three scripts against their Runs and found them complete."
+    "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (the reviewer's install-uv GITHUB_ENV probe passes). check-ci-filters.sh:84-88 states this boundary: the check answers accidental drift, and a deliberate hidden write is the review's to catch.",
+    "The Runs of an exact script entry are kept by hand. I read the three against their scripts and found them complete."
   ]
 }
