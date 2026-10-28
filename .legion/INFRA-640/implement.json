@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-640",
-  "completed": "2026-10-28T13:55:00Z",
+  "completed": "2026-10-28T14:05:52Z",
   "proof": [
+    {
+      "criterion": "Conflict round: the forward merge of main@origin 5fbd8391 keeps equivalence (AC2a/AC2b) at the merged head",
+      "surface": "pmdoc test suite with the opt-in corpus of 30 real LINUX specs, and the docs suite on Postgres 17 + pgvector, at the merged head",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/ && PMDOC_ANCHOR_CORPUS=$TMPDIR/i640/linux-specs go test ./internal/dispatch/pmdoc/ -run 'FindMarks|Reanchor|YTextRanges' -count=1 -v && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -run 'Anchor|Mark|Replace|Reanchor|Refresh|Suggestion|Settle' -count=1",
+      "observed": "build and vet clean; pmdoc real-spec run ok 917.395s with every test PASS and none skipped; docs anchor/mark/upload/settlement tests ok 154.9s. Fingerprint 2cd0fa3a... -> b24a4ea3... (changed: the CHANGELOG entry became packages/envoy/.changes/unreleased/pr2447-Changed-20261028-134448.yaml)",
+      "headSha": "f67fcb4298e9",
+      "negativeControl": "The negative controls of the AC2a and AC2b entries below (FindMarks separator at an empty marked run, leaf elements descended, stale MarkWriter table, FindDiscardingMiss returning nil, refresh without ORDER BY) each fail the named test; the merge changed none of the code they exercise"
+    },
     {
       "criterion": "AC1: merge rule of the shared context on LINUX's replay",
       "surface": "Dispatch server (packages/envoy/cmd/dispatch) built at base 59f6647d and head 8279d988 on local Postgres 17.11 + pgvector 0.8.7 and NATS 2.12.1 JetStream, driven by the INFRA-512 architect's replay (tools/load.py from infra512-replay-tools-tgz, replay-inputs.tar.gz sha256 4299570e...f42949, seed migrated once by the base build, 762-session fake listener)",
@@ -64,7 +72,7 @@
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/docs/anchored_write_bench_test.go",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md"
+    "packages/envoy/.changes/unreleased/pr2447-Changed-20261028-134448.yaml"
   ],
   "trickyParts": [
     "FindMarks reproduces FindMark's quote walk exactly, including empty marked runs: one is written only when a later run of the same span carries the span past it.",
@@ -74,7 +82,8 @@
   "deviations": [
     "MarkQuote's 'written mark is missing' ErrDocSchema refusal now fires after applyLive's append and version write instead of inside the callback (plan decision 3); the caller's transaction rolls back on it, and it is reachable only on a pmdoc position bug.",
     "openAnchoredMarks gained ORDER BY created_at, id at the INFRA-512 architect's request (defect found by INFRA-642's implementer), so refresh event order is now stable rather than unchanged.",
-    "AC2c used a serial copy of the replay tool, because the tool's shared random generator makes two concurrent base runs differ."
+    "AC2c used a serial copy of the replay tool, because the tool's shared random generator makes two concurrent base runs differ.",
+    "Conflict round: main@origin (5fbd8391) merged forward as f67fcb42; the CHANGELOG.md entry moved to a changie fragment (Issue=pr2447, per the architect). The replay CPU measurement ran at 8279d988, before the merge; main's applyLive change (#2416, forkHeld) drops only writes that leave the fork unchanged and does not touch refreshAnchors."
   ],
   "openQuestions": []
 }
