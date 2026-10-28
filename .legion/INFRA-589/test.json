@@ -2,33 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-27T19:10:00Z",
-  "round": 4,
-  "headTested": "9692d2fd4e743ca30e161224f9ad6f9034be4fbc (code head 5ad8c796; meta.json build_commit 9692d2fd, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester on ports 25432-29120, seed at migration 129 (this build's level), box_busy_before 0.6-8.8% on every step. The pod was replaced after the runs: the run directories under /legion/scratch are gone. The commands and outputs below are as I observed them in that pod. The red test reproduces the finding with no stack.",
+  "completed": "2026-10-28T10:20:00Z",
+  "round": 5,
+  "headTested": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c (code head 1e673f40; meta.json build_commit bdc451d3, build_dirty false)",
+  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod. The pod had been replaced, so I built a fresh LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120, /legion/scratch/tmp/lt-tester.env) with the one run-step.sh command: setup, installs, initdb, seed at migration 129 in 1,113 s. box_busy_before was 0.8-0.9% on the steps read. The stack is stopped; the seed is kept.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove each of the three round-2 review fixes live on my own stack. A holder in another PID namespace: a helper held the lock on fd 8, with a record pid absent from /proc. meta.json: a foreign run with both tokens, then a scan of every step file for them. Sampler reads: an unreachable -pg, then Postgres stopped mid-window. I re-ran smoke, three 1x steps, the report mix, routes-alt, the series and the negative controls. Each held as the implementer reported."
+    "how": "Re-ran the implementer's two foreign runs: -pg naming a database without the trigger, and -pg unreachable. I checked the exit, the marks in every table, meta.json and a token scan. Then smoke, a 1x step, routes-alt (no writes, so no commit rows to read), a killed Dispatch, the negative controls and a 60 s series, all on my own fresh stack. The red test commits_unread_test.go is unchanged since my commit a4e846c7; the implementer reports it passing, and CI has not run it at this head (failure 1)."
   },
   "failures": [
     {
-      "criterion": "Every count a step reports is either measured or marked as not measured (the hidden-error class of review round 1 finding 4 and round 2 finding 3, which hold for the lock probes and the 5 s sampler): a step whose loadtest.event_commits read fails must not show 0 committed writes, 0 / 0 receipts and empty delivery as if they were measured",
-      "evidence": "stack.sh loadgen run -allow-foreign with all eight endpoint and token flags for the local stack, but -pg postgres://postgres@127.0.0.1:25432/postgres (a database without the commit trigger, as a cluster database without commit-trigger.sql is), -events 1 -sessions 10 -requests 2 -duration 30s -warmup 5s -grace 5s: rc=0. summary.json: offered 31, committed 0, every write 2xx (write_ms.n sums to 31), issue_topic_receipts 0, expected 0, events.commits_error 'read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation \"loadtest.event_commits\" does not exist (SQLSTATE 42P01)'. A count by the run's nonce on database dispatch, which holds the trigger, found 35 committed events. TABLES.md row: '| foreign-notrigger | ... | 1.00 / 1.03 / 0.00 | 0 / 0 | - | - | 0 / 0 | ...', and Write latency '(0 / 1)', '(0 / 8)', ... for every kind, with no mark and no note. Only run.log names the error. An unreachable -pg (127.0.0.1:1) gave the same 0.00 committed with no mark in the Events table, while its Resources row was marked '(5 failed reads)'. The README's cluster-run section ('What this harness does not do') says such a run gets 'no delivery latency from commit, unless its database has the trigger'; in fact it reports zero commits and zero receipts. Red test (its own commit, 'test(envoy): a load-test step whose commit rows were not read shows no measured zero commits (red)'): packages/envoy/loadtest/commits_unread_test.go, TestTablesDoNotShowUnreadCommitsAsZero. `cd packages/envoy && go test -count=1 -run TestTablesDoNotShowUnreadCommitsAsZero ./loadtest/` fails at commits_unread_test.go:44 (committed rate '1.00 / 1.03 / 0.00'), :47 (receipts '0 / 0') and :51 (a kind's '(0 / n)'). go test ./loadtest runs in CI's envoy-go job."
+      "criterion": "The head can merge and carries CI: GitHub runs the required checks and envoy-go (which runs the red tests) only on a head that merges cleanly with main",
+      "evidence": "gh pr view 2369 --json mergeable -> CONFLICTING at head bdc451d3, read at 09:2xZ and again at 10:2xZ on 2026-10-28. gh api commits/<sha>/check-runs -> zero check runs at code head 1e673f40 and at handoff head bdc451d3. Since the branch's last merge of main, main has changed packages/envoy/CHANGELOG.md (+203/-), packages/envoy/AGENTS.md and .github/workflows/envoy-and-contracts.yaml, all of which this branch edits. The architect agreed (Envoy, 09:25Z) to complete as fail naming the conflict, so the implementer merges forward. The next round compares the unchanged-diff fingerprints and runs the bare gates."
     }
   ],
   "failed": 1,
-  "verifiedThisRound": [
-    "Review finding 1: a helper held .run.lock on fd 8 with a record naming pid 999999. run-step.sh and stack.sh reset each refused, exit 1: 'is locked by a process that is not visible in this PID namespace ... Do not remove .../.run.lock: that run still holds it'. After the helper exited, with the record still naming the dead pid, lock_root took the lock (the new record carries pidns).",
-    "Review finding 2: a foreign run with -token <stack dispatch token> and --listener-token=<stack listener token> left neither token in any file of its step or in its stderr (grep -cF 0 each). meta.json was mode 600, args '-token','<redacted>' and '--listener-token=<redacted>'. Every ordinary step's meta.json was mode 600, with no token in smoke-r4 or step-1x-r4a.",
-    "Review finding 3: a foreign run with -pg 127.0.0.1:1 gave resources.pg_read_errors 5; Resources row 'foreign-pg (5 failed reads)', with '-' in the Postgres columns and the note under the table; run.log 'sampler: postgres: failed to connect ...'. In probe-fail-r4, Postgres SIGINTed 45 s into the window: exit 1 'postgres (pid 40687) exited during the step', commit_order_lock.errors 1969, ungranted_locks.errors 41, pg_read_errors 9, each a marked row. A run-step.sh during it was refused, naming probe-fail-r4.",
-    "A1/A3 smoke-r4 (--events 2 --sessions 50 --requests 10 --duration 90s, five kinds at 20): 29/29, 30/30, 30/30, 50/50, 34/34; receipts 865/865; 50 registered, 300 subscriptions; delivery p50/p90/p99 from arrival 413/894/1,445 ms, from commit 38/125/423; clock_anomalies 0; read errors 0.",
-    "A4: step-1x-r4a/b lock held 99.1%/100%, waiters p50 23/44, committed 0.23/1.29 of 3.99 events/s; the series' 1x held 100%, waiters 36, 0.61. Report mix: held 99.2%, waiters 50, 1.63 of 3.83. Box busy during the steps (61-65%) matched the stack's own CPU (60-65%), so no outside load caused the low 0.23.",
-    "A5 routes-alt-r4: routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0.",
-    "A2 run-series.sh: series-20261027T181008Z, exit 0, one build line; six steps each with summary.json, TABLES.md, cpu.pprof, heap.pprof; 8 tables; every step had 0 read errors and no commits_error.",
-    "A6: 47 distinct column headers, 0 missing from the README.",
-    "Negative controls: POST on line 3 refused naming line 3; -url $DISPATCH_URL refused; --event-mix bogus refused; events max id 10004 before and after."
+  "proof": [
+    {
+      "criterion": "Round-4 failure: a step whose commit rows were not read shows '-' with a mark, never a measured zero, and fails",
+      "surface": "stack.sh loadgen run -allow-foreign and loadgen tables on the real local stack",
+      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign <all eight flags for the local stack> -pg 'postgres://postgres@127.0.0.1:25432/postgres?sslmode=disable' -nats-server-name <stack name> -name foreign-notrigger -events 1 -sessions 10 -requests 2 -duration 30s -warmup 5s -grace 5s; loadgen tables; then the same with -pg 'postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable' as foreign-unreach",
+      "observed": "foreign-notrigger rc=1: 'loadgen run: the run's commit rows were not read (summary.json events.commits_error: read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation \"loadtest.event_commits\" does not exist (SQLSTATE 42P01)); the step's committed, receipt and de[livery columns do not measure the load]'. Events row '| foreign-notrigger (commit rows not read) | ... | 1.00 / 1.03 / - | 0 / 0 | - | - | - | ...'; kinds '(- / 1)', '(- / 8)', '(- / 9)', '(- / 8)', '(- / 5)'; Resources and SSE rows marked, with 'Dispatch CPU-s per operation' '-'; the note in 4 tables. The lock, ungranted and xid tables are unmarked with real values, because their reads on that database worked. foreign-unreach rc=1, same commit mark; Resources '(commit rows not read) (7 failed reads)'; lock, ungranted and xid rows '(1 failed reads)' with '-' cells; meta.json postgres_version '' and postgres_version_error 'failed to connect ...'. Neither run left either token in any step file or in its output.",
+      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
+      "negativeControl": "smoke-r5 and step-1x-r5 on the stack's own database: exit 0, commits_error null, no 'not read' or 'failed reads' text in TABLES.md; routes-alt-r5 (events 0, so no markers to read): exit 0, commits_error null, no mark"
+    },
+    {
+      "criterion": "A1/A3 at this head: five kinds, N sessions on agent and issue topics, delivery from arrival and from commit",
+      "surface": "packages/envoy/loadtest CLI, fresh stack built and seeded by run-step.sh",
+      "command": "run-step.sh smoke-r5 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20 (from an empty LOADTEST_ROOT)",
+      "observed": "done in 1,375 s, the seed included; 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered; receipts 865/865; 50 registered; delivery p50/p99 from arrival 377/1,335 ms, from commit 36/424; clock_anomalies 0; lock, sampler and xid read errors 0; Postgres version 16.2 recorded; xids 7.6/s",
+      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
+      "negativeControl": "--event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1; events max id 10004 before and after"
+    },
+    {
+      "criterion": "A4 and the stack-exit failure at this head",
+      "surface": "same",
+      "command": "run-step.sh step-1x-r5 --events 4 --sessions 400 --requests 60; run-step.sh killed-r5 --events 1 --sessions 20 --requests 5 --duration 60s with kill -KILL <stack.json pids.dispatch> 45 s into the window",
+      "observed": "step-1x-r5 exit 0: lock held 100%, waiters p50 44, 1.58 of 3.99 events/s committed, 1,425/1,425 receipts. killed-r5 EXIT=1: 'dispatch (pid 13022) exited during the step ...', row 'killed-r5 (dispatch exited)'",
+      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
+      "negativeControl": "route-mix POST on line 3 -> 'line 3: method \"POST\" is refused', exit 1; -url $DISPATCH_URL -> '-url differs from stack.json ... refused', exit 1"
+    },
+    {
+      "criterion": "A2, A5, A6 at this head",
+      "surface": "same; README.md",
+      "command": "run-series.sh --duration 60s; run-step.sh routes-alt-r5 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series, smoke-r5 and foreign-unreach TABLES.md searched in backticks in README.md",
+      "observed": "series-20261028T100014Z exit 0, six complete step directories, 8 tables, no commits_error, 1x held 100%; routes ['other GET /api/v1/projects'], 294/294 2xx; 47 headers ok, 0 missing; README names '(commit rows not read)' in 9 places",
+      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
+      "negativeControl": "run-series.sh's own step runs pass the run lock; a series step with no commit error is not marked"
+    }
   ],
   "observations": [
-    "CI at code head 5ad8c796 when read: lint, typecheck and test were still queued. The red test of round 1 (run-step.test.sh) is unchanged."
+    "No defect found in the round-4 fix. The only failure is the merge conflict, and the CI it blocks."
   ]
 }
