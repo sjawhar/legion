@@ -38,8 +38,8 @@ type BlockIndexTick struct {
 	// issue messages it indexed with the block grammar.
 	Documents int
 	Items     int
-	// LiveAhead is how many owed documents it skipped because their live text is ahead of their
-	// latest version and differs from it: owed a settlement that has not run.
+	// LiveAhead is how many owed documents, none of a closed issue, it skipped because their live
+	// text is ahead of their latest version and differs from it: owed a settlement that has not run.
 	LiveAhead int
 	// OwedDocuments and OwedItems are what is still owed after the tick.
 	OwedDocuments int
@@ -62,7 +62,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	ctx = store.WithTransactionTracking(ctx)
 	var cursor string
 	// logged is the last tick this loop logged: a tick that indexed nothing and leaves the same
-	// counts (a closed document whose live text stays ahead, skipped every tick) logs nothing.
+	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
 	// period is this loop's own interval at this moment, the wait the last tick asked for, as
@@ -110,22 +110,29 @@ func (s *Service) blockIndexTick(ctx context.Context, cursor string, liveAhead l
 	return BlockIndexReconcileInterval, tick.Cursor
 }
 
-// owedDocument is a document owed a block index as it was listed: its latest version, and the
-// marked_at of its pending settlement, zero when it owes none.
+// owedDocument is a document owed a block index as it was listed: its latest version, the
+// marked_at of its pending settlement, zero when it owes none, and whether its issue is open (a
+// project's document is).
 type owedDocument struct {
 	id       string
 	version  int
 	markedAt time.Time
+	open     bool
 }
 
 // liveAheadDocuments is, by id, each owed document a tick found live ahead (indexOwedDocument), as
 // it was listed then. Every update appended to a document's store moves its pending settlement's
 // marked_at (markSettlementPending), and every version write moves its version, so a document
-// listed again with both unchanged still holds the stored live text a tick found ahead: it is
-// counted live ahead without being read or locked. Only the store's text is remembered: a room
-// this server holds can be ahead of the store (an edit not yet appended) or behind it (another
-// process's append it has not yet been evicted for), so a document is neither remembered nor
-// taken from here while one is resident.
+// listed again with both unchanged, and its issue still open, still holds the stored live text a
+// tick found ahead: it is counted live ahead without being read or locked. Only a listing that
+// reads the issue open uses it: the listing reads the issue with no lock, while live ahead is
+// decided under the owner row's lock, so an entry can carry a listed close that the lock saw
+// undone, and a close can leave the version, the mark and the room as they were. A closed issue's
+// document is indexed rather than skipped, so one listed with its issue closed is read again.
+// Only the store's text is
+// remembered: a room this server holds can be ahead of the store (an edit not yet appended) or
+// behind it (another process's append it has not yet been evicted for), so a document is neither
+// remembered nor taken from here while one is resident.
 type liveAheadDocuments map[string]owedDocument
 
 // ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past after (a
@@ -141,6 +148,9 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 	owed, err := s.owedDocuments(ctx, after)
 	if err != nil {
 		return tick, err
+	}
+	if s.afterBlockIndexListed != nil {
+		s.afterBlockIndexListed()
 	}
 	documentsFull := len(owed) == blockIndexDocumentBatch
 	liveAhead.forgetUnlisted(after, owed, documentsFull)
@@ -161,7 +171,9 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 				"artifact", document.id, "error", err)
 		case ahead:
 			tick.LiveAhead++
-			if cold && !document.markedAt.IsZero() && s.srv.GetDoc(document.id) == nil {
+			// Every entry is a document its listing read open: the lock can have seen a reopen the
+			// listing missed, and a listing that reads the issue closed must read the document again.
+			if cold && document.open && !document.markedAt.IsZero() && s.srv.GetDoc(document.id) == nil {
 				liveAhead[document.id] = document
 			}
 		case indexed:
@@ -199,12 +211,14 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 	return tick, nil
 }
 
-// stillLiveAhead reports whether document, as listed now, is one liveAhead holds at the same
-// version and settlement mark, with no room of this server resident for it.
+// stillLiveAhead reports whether document, as listed now with its issue open, is one liveAhead
+// holds at the same version and settlement mark, with no room of this server resident for it.
+// liveAhead holds only documents listed open (ReconcileBlockIndex); a listing that reads the issue
+// closed always reads the document again.
 func (s *Service) stillLiveAhead(liveAhead liveAheadDocuments, document owedDocument) bool {
 	found, ok := liveAhead[document.id]
-	return ok && found.version == document.version && found.markedAt.Equal(document.markedAt) &&
-		s.srv.GetDoc(document.id) == nil
+	return ok && document.open && found.version == document.version &&
+		found.markedAt.Equal(document.markedAt) && s.srv.GetDoc(document.id) == nil
 }
 
 // forgetUnlisted drops each document past after, up to the last of owed while the batch is full,
@@ -223,9 +237,9 @@ func (liveAhead liveAheadDocuments) forgetUnlisted(after string, owed []owedDocu
 }
 
 // owedDocuments lists, in id order, at most blockIndexDocumentBatch documents owed a block index
-// past after, each with its latest markdown version and its pending settlement's marked_at. A
-// document with no markdown version has nothing to index and is listed with version 0, which
-// indexOwedDocument passes over.
+// past after, each with its latest markdown version, its pending settlement's marked_at and
+// whether its issue is open. A document with no markdown version has nothing to index and is
+// listed with version 0, which indexOwedDocument passes over.
 func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocument, error) {
 	var cursor any
 	if after != "" {
@@ -235,8 +249,11 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 		select b.artifact_id::text,
 		       coalesce((select max(v.number) from artifact_versions v
 		                 where v.artifact_id = b.artifact_id and v.markdown is not null), 0),
-		       (select p.marked_at from doc_settlements_pending p where p.artifact_id = b.artifact_id)
+		       (select p.marked_at from doc_settlements_pending p where p.artifact_id = b.artifact_id),
+		       i.closed_at is null
 		from document_block_versions b
+		left join artifacts a on a.id = b.artifact_id
+		left join issues i on i.key = a.issue_key
 		where b.version is null and ($1::uuid is null or b.artifact_id > $1::uuid)
 		order by b.artifact_id
 		limit $2
@@ -249,7 +266,7 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 	for rows.Next() {
 		var document owedDocument
 		var markedAt *time.Time
-		if err := rows.Scan(&document.id, &document.version, &markedAt); err != nil {
+		if err := rows.Scan(&document.id, &document.version, &markedAt, &document.open); err != nil {
 			return nil, fmt.Errorf("scan a document owed a block index: %w", err)
 		}
 		if markedAt != nil {
@@ -272,10 +289,25 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 //
 // The live text is indexed only where it is the latest version's text: when the document owes no
 // settlement, or owes one but its live markdown equals the version's stored markdown byte for
-// byte. A document whose live text is ahead of its latest version, and differs from it, is
-// skipped and reported liveAhead, and stays owed: indexing it at that version would date a later
-// edit's blocks to it. Its settlement indexes it when it writes the next version - which, on a
-// closed issue, waits for the issue to reopen (RunSettlementResumption resumes open issues only).
+// byte. A document of an open issue or of a project whose live text is ahead of its latest
+// version, and differs from it, is skipped and reported liveAhead, and stays owed: indexing it at
+// that version would date a later edit's blocks to it. Its settlement indexes it when it writes
+// the next version.
+//
+// A closed issue's document is the exception: no settlement runs while its issue is closed
+// (RunSettlementResumption resumes open issues only), so it is indexed at its latest version from
+// that version's own text, with each block the version holds under the id of the index's row
+// that holds its text, every such row claiming its block before any live text is compared, or
+// else of the live block matched to it by text (closedVersionBlocks), read under the owner row.
+// The issue's close, its final sweep and the repair write ask states into the live document and
+// no version (WriteIssueAskStates), and the close may leave an edit it could not settle. A block
+// that only such an edit made is not indexed, since no version holds its text, and a block it
+// changed or deleted keeps the version and text its row holds: the reopen's settlement indexes
+// the edit at the version it writes, the first that holds it, as block history names only
+// versions that hold a block's text. The live blocks were read before the owner row was locked,
+// so they are used only while the pending settlement's marked_at, which every appended update
+// moves, is still the one listed; otherwise the document is left owed for the next tick to read
+// again. A version this build cannot read back is indexed with no blocks.
 //
 // A document the server cannot read (ErrDocumentUnloadable, ErrDocOutsideSchema) or that has no
 // stored state has no block to show, so its latest version's markdown is indexed with no blocks.
@@ -304,7 +336,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 	defer tx.Rollback(ctx)
-	owner, _, err := lockArtifactOwner(ctx, tx, document.id)
+	owner, open, err := lockArtifactOwner(ctx, tx, document.id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
@@ -314,10 +346,11 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	var version int
 	var stored string
 	var versionAt time.Time
-	var owed, pending bool
+	var owed bool
+	var markedAt *time.Time
 	err = tx.QueryRow(ctx, `
 		select v.number, v.markdown, v.created_at, b.version is null,
-		       exists (select 1 from doc_settlements_pending p where p.artifact_id = b.artifact_id)
+		       (select p.marked_at from doc_settlements_pending p where p.artifact_id = b.artifact_id)
 		from document_block_versions b
 		join lateral (
 			select number, markdown, created_at from artifact_versions
@@ -326,7 +359,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		) v on true
 		where b.artifact_id = $1
 		for no key update of b
-	`, document.id).Scan(&version, &stored, &versionAt, &owed, &pending)
+	`, document.id).Scan(&version, &stored, &versionAt, &owed, &markedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
@@ -339,8 +372,24 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	switch {
 	case unreadable || markdown == "" && len(blocks) == 0:
 		markdown, blocks = stored, nil
-	case pending && markdown != stored:
-		return false, true, nil
+	case markedAt != nil && markdown != stored:
+		if open {
+			return false, true, nil
+		}
+		if !markedAt.Equal(document.markedAt) {
+			return false, false, nil
+		}
+		indexRows, err := indexedBlocks(ctx, tx, document.id)
+		if err != nil {
+			return false, false, err
+		}
+		held, heldBlocks, err := closedVersionBlocks(stored, markdown, blocks, indexRows)
+		if err != nil {
+			slog.Warn("dispatch: block index cannot read back a closed issue's document version; it is indexed with no blocks",
+				"artifact", document.id, "version", version, "error", err)
+			held, heldBlocks = stored, nil
+		}
+		markdown, blocks = held, heldBlocks
 	}
 	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
 		return false, false, err
