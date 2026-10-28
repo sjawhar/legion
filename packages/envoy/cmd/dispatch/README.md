@@ -90,12 +90,20 @@ App JWT, which is why Dispatch runs this. The webhook the App delivers to is the
 publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
 reach the stream adds nothing to the stream.
 
-- A delivery the listener answered with 5xx, or that GitHub could not complete, is redelivered
-  on the next sweep. If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most
-  five times.
-- A redelivery request GitHub refuses (for example 422) delivers nothing. It is asked again on
-  the same backoff, at most five times, even after its failed attempt is older than the sweep's
-  hour: a refused request adds no attempt to GitHub's log, so the sweep's record brings it back.
+- Every failed delivery is asked for again, whatever status code its failed attempts carry: a
+  5xx, an attempt GitHub could not complete, and a 4xx alike (the listener's 401 for a signature
+  it cannot check, 400 for a body it cannot use, 422 for a publish NATS refused), since what the
+  listener cannot take now it may take later. The first request goes on the next sweep. While no
+  attempt is `OK`, the next request is due 2, 4, 8, 16 and 32 minutes after the one before, then
+  every 60 minutes. A redelivery request GitHub refuses (for example 422) delivers nothing and is
+  asked again on the same schedule, as is an accepted request whose redelivery never appears in
+  GitHub's log.
+- The sweep stops asking 72 hours after the first failed attempt it saw for the delivery, since
+  GitHub keeps a delivery 72 hours, or when GitHub answers the redelivery request 404 (it no
+  longer has the delivery). It logs
+  `level=ERROR msg="webhook delivery expired undelivered"` once per delivery, with `requests`,
+  `first_delivered_at` and `reason` (`GitHub keeps a delivery 72 hours` or
+  `GitHub no longer has the delivery`).
 - A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
@@ -104,22 +112,22 @@ reach the stream adds nothing to the stream.
   a request already sent when another sweeper records a limit is not recalled. It logs
   `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
   apart, as GitHub asks of a large number of POSTs.
-- A delivery the listener answered with 4xx is never redelivered: the listener refused the
-  request itself, and the same bytes would fail the same way.
 - A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
-  for it was recorded as refused (an accepted request whose answer was lost).
-- Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
-  `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
-  Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
+  for it was recorded as refused (an accepted request whose answer was lost). When the sweep had
+  made at least one request for it, it logs `level=INFO msg="webhook delivery recovered"` once,
+  with `requests`, the number of requests the delivery took.
+- Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
   attempts listed), `deliveries` (the deliveries the sweep decided: the GUIDs of the listed failed
-  attempts, plus refused deliveries the listing no longer returns), and one count per outcome,
+  attempts, plus the open deliveries the listing no longer returns), and one count per outcome,
   which add up to `deliveries`. `closed` is a delivery an earlier sweep settled (GitHub recorded it
-  `OK`, it was refused terminally, or it was given up on): its failed attempt stays listed until it
-  is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's
-  sweeps count the burst as `closed`.
-  `pending` is a redelivery GitHub accepted and has not made yet.
-- A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
-  cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
+  `OK`, or it expired): its failed attempt stays listed until it is older than the sweep's hour, so
+  after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
+  `waiting` is a delivery whose next request is not due yet. A delivery the sweep's cap of 300
+  requests left over is not counted; the next sweep takes it.
+- A sweep looks back one hour, and decides every delivery whose record is still open, neither
+  delivered nor expired, even when its attempts are older than that. After a gap in sweeping
+  (Dispatch down), it resumes from its cursor, back to GitHub's three days. The first sweep ever
+  made, with no cursor, looks back 72 hours.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
 bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap

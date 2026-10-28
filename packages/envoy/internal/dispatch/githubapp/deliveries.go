@@ -81,10 +81,14 @@ func (c *Client) Deliveries(ctx context.Context, since time.Time, before func() 
 	return listed, nil
 }
 
+// ErrNoDelivery is GitHub's 404 for a redelivery request: it no longer has the delivery (GitHub
+// keeps a delivery three days), so no later request can succeed.
+var ErrNoDelivery = errors.New("GitHub no longer has the delivery")
+
 // Redeliver asks GitHub to attempt a recorded delivery again
 // (`POST /app/hook/deliveries/{id}/attempts`). GitHub answers 202 and delivers asynchronously;
 // the outcome appears in the listing as a new attempt under the delivery's GUID. A rate-limited
-// answer is a *RateLimitError.
+// answer is a *RateLimitError, and a 404 is ErrNoDelivery.
 func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 	if c == nil {
 		return ErrNoAppKey
@@ -100,6 +104,9 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 	}
 	if limited := RateLimit(status, header, body); limited != nil {
 		return limited
+	}
+	if status == http.StatusNotFound {
+		return fmt.Errorf("POST %s: status %d: %w", target, status, ErrNoDelivery)
 	}
 	if status != http.StatusAccepted {
 		return fmt.Errorf("POST %s: status %d: %s", target, status, body)

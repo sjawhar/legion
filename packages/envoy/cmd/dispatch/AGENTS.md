@@ -161,7 +161,8 @@ redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redelive
 GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
 bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
 over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
-the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
+the rules: every failed delivery, 4xx included, is asked for again on a backoff until GitHub
+records it `OK` or 72 hours after its first failed attempt, GitHub's rate limits, the log lines.
 Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`)
 names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against a NATS that
 requires a user needs `NATS_NKEY_SEED_FILE`.

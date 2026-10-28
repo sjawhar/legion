@@ -2536,7 +2536,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
   protocol line, over which the server would close the listener's connection (`bus.ErrTooLarge`,
   naming the size), or a subject holding whitespace or an empty token, which no stream matches
   (`bus.ErrInvalidSubject`). The webhook is answered 422, which Dispatch's
-  redelivery sweep takes as terminal, and logged `<source> publish refused` (or
+  redelivery sweep asks for again like any failed delivery, until GitHub records it `OK` or 72
+  hours after its first failed attempt, and logged `<source> publish refused` (or
   `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
   commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
   at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since

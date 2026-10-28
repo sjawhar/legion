@@ -150,7 +150,7 @@ var listenerSignals = []struct {
 			{"ci-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=record, result=refused*, ...]`},
 			{"ci-head-suite-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=head||w2=suite, w3=record, result=refused*, ...]`},
 		},
-		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, the same input is refused on every attempt, and Dispatch's redelivery sweep does not retry a 4xx, so the delivery is lost (a refused CI record leaves its commit overflowed, never settling). Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
+		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, the same input is refused on every attempt, so Dispatch's redelivery sweep, which asks for a failed delivery again for 72 hours, cannot recover it and the delivery is lost (a refused CI record leaves its commit overflowed, never settling). Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
 	},
 	{
 		alarm: "stream-subject-dropped", metric: "StreamSubjectsDropped",

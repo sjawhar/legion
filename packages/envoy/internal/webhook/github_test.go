@@ -263,8 +263,8 @@ func TestGitHubHandler(t *testing.T) {
 			wantPublished: 1,
 		},
 		{
-			// An envelope NATS cannot take whole is refused the same way on every redelivery, so it
-			// is answered 4xx, which a redelivery sweep takes as terminal.
+			// An envelope NATS cannot take whole is refused the same way on every redelivery while
+			// the server's limits stand, so it is answered 422 rather than 503.
 			name:          "a publish refused as too large returns 422",
 			method:        "POST",
 			body:          pushEvent,
