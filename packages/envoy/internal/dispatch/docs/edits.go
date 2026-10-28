@@ -169,7 +169,7 @@ func (e *ErrPreconditionFailed) Error() string {
 }
 
 // nodeToken hashes a canonical semantic Proof representation, including inline marks but excluding
-// stable block identity and server-owned typed attributes: the SHA-256 of pmdoc.AppendTokenJSON's
+// stable block identity and server-owned typed attributes: the SHA-256 of pmdoc.EncodeTokenJSON's
 // encoding.
 func nodeToken(node *pmdoc.Node) (string, error) {
 	encoded, err := node.TokenJSON()
@@ -192,12 +192,12 @@ func tokenHash(encoded []byte) string {
 
 // encodedTokens is tree's document token and the token of each block in it, from one encoding of
 // the tree into one buffer this call allocates and drops: the document's is the hash of the whole
-// buffer and each block's the hash of its own span (pmdoc.AppendTokenJSON). Where several nodes
+// buffer and each block's the hash of its own span (pmdoc.EncodeTokenJSON). Where several nodes
 // carry one block id, the last of them in pre-order holds it, as an edit addressing the id reads.
 // An error is the tree's, as nodeToken(tree) returns it.
 func encodedTokens(tree *pmdoc.Node) (document string, blocks map[string]string, err error) {
 	var spans []pmdoc.TokenSpan
-	encoded, err := pmdoc.AppendTokenJSON(nil, tree, &spans)
+	encoded, err := pmdoc.EncodeTokenJSON(tree, &spans)
 	if err != nil {
 		return "", nil, err
 	}
