@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-593",
+  "completed": "2026-10-28T18:25:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
+  "proof": [
+    {
+      "criterion": "Acceptance 1, 2 and 5: a load reads the compacted row plus the newer rows; compaction survives a restart and runs without NATS; no row younger than 2 minutes is folded or rewritten.",
+      "surface": "envoy-dispatch built from the head, run as a process on a real Postgres 16.2 with DISPATCH_NATS_DISABLED=1, driven through its HTTP API",
+      "command": "bash $TMPDIR/infra593/e2e.sh (script and output: dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 2)",
+      "observed": "30 uploads of a 100 KB spec and 5 anchored comments made 41 rows; after a stop every row but the newest 3 was backdated an hour; 22 s after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 and 4 rows remained; the 3 young rows kept version, xmin and md5; the text sha256 was identical before, on the cold read after the restart, and after the fold; a 31st upload read back.",
+      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
+      "negativeControl": "The same script on main c3d09eec: its shutdown compaction folded all 41 rows into one, the row written seconds earlier included (row 41 rewritten, new xmin). At the head, a first run where the first process had already swept the aligned hour showed the restarted process's sweep skipped (leased pass skipped lease=document-compaction), the hourly period working as designed."
+    },
+    {
+      "criterion": "Acceptance 6: the cost of a load no longer grows with stored updates; 240/120 and 120/60 each at most 2.3x; the 240-version load at least 3x cheaper than main.",
+      "surface": "BenchmarkRoomLoad in internal/dispatch/docs against a real Postgres 16.2, documents written through the upload write path, backdated and compacted",
+      "command": "docs-main.test and docs-head.test -test.bench BenchmarkRoomLoad -test.benchtime 10x, 10 rounds interleaved ($TMPDIR/infra593/run-bench2.sh); benchstat golang.org/x/perf v0.0.0-20261009192801-be2c69fb417e (dispatch://INFRA-593/artifact/infra-593-benchmarks-single-decode-txt)",
+      "observed": "One compacted row: 60 versions 88.5 to 32.2 ms, 120 versions 181.3 to 60.1 ms, 240 versions 545.2 to 106.0 ms (5.1x). Head growth 240/120 = 1.76x, 120/60 = 1.87x. One row plus 15 young rows at 240 versions: 1,238.6 to 433.5 ms.",
+      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "negativeControl": "Main b295a3fb, interleaved in the same rounds, is the control: 545.2 ms at 240 versions. Before the single decode (head 4bbe8232) the same benchmark measured only 2.32x, and its profile showed two decodes of one row, which led to the change."
+    },
+    {
+      "criterion": "Acceptance 3 and 4: compaction never blocks writes or takes a shared or rooms connection, and the lock-free write drops its result on any change; an unloadable history still fails the room the way it did.",
+      "surface": "internal/dispatch/docs against a real Postgres 16.2",
+      "command": "CGO_ENABLED=1 go test -race -count=1 ./internal/dispatch/docs/ ./internal/dispatch/store/... (and the Compaction/Queue/Sweep/Load tests named in the PR body)",
+      "observed": "ok docs 1230 s, ok store 173 s under -race; TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode, TestACompactionHoldsNoSharedOrRoomsConnection, TestABrowserAppendLandsWhileACompactionIsInsideItsFold and the prune/rebuild/delete/concurrent/older-build/cursor/misread cases pass.",
+      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "negativeControl": "An undecodable single row and an undecodable merged log: the room load returns the same crdt error validateUpdate returns, state.failed holds it, no room is published, and a second access fails the same way."
+    },
+    {
+      "criterion": "Acceptance 2: document-compaction runs once across two processes.",
+      "surface": "two envoy-dispatch processes on one Postgres (cmd/dispatch multiprocess suite)",
+      "command": "go test -tags multiprocess -count=1 ./cmd/dispatch -run TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses -v",
+      "observed": "document-compaction: A ran 0 skipped 1, B ran 1 skipped 0; PASS in 69 s.",
+      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "negativeControl": "Process A's tick in the same aligned hour skipped (leased pass skipped), so no second pass ran."
+    },
+    {
+      "criterion": "Acceptance 7 and 8: an upload's CPU and room-load CPU on the committed load reproduction at step 1x, before and after.",
+      "surface": "BenchmarkUploadVersion through the HTTP upload route, and the INFRA-589 load harness (sjawhar/legion#2369 9d37005c) running real envoy-dispatch, listener, NATS and Postgres processes",
+      "command": "run-bench2.sh (BenchmarkUploadVersion, 10 interleaved rounds, cpuprofile of round 1); run-harness.sh (step 1x, 5 interleaved runs per side, plain and history-seeded seeds) (dispatch://INFRA-593/artifact/infra-593-harness-1x-txt)",
+      "observed": "Upload 1.022 s to 1.005 s (p=0.58); upload CPU 6.68 s to 6.12 s over 10 uploads, room load inside it 0.83 s to 0.59 s. Harness room-load cores, medians: plain 0.0601 to 0.0579; history 0.0599 to 0.0625, per committed write 0.085 to 0.077.",
+      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "negativeControl": "Main b295a3fb from the same seed and in the same interleaving is the control for every number; main's first plain run (committed 1.77/s, p50 28 s) shows the run-to-run variation the medians absorb."
+    }
+  ],
+  "filesChanged": [
+    ".dispatch/architecture/dispatch-docs.md",
+    "docs/site/src/content/docs/dispatch/running-dispatch.md",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/go.mod",
+    "packages/envoy/go.sum",
+    "packages/envoy/cmd/dispatch/main.go",
+    "packages/envoy/cmd/dispatch/compaction_sweep_test.go",
+    "packages/envoy/cmd/dispatch/history_memory_test.go",
+    "packages/envoy/cmd/dispatch/multiprocess_test.go",
+    "packages/envoy/internal/dispatch/api/approval_versions_test.go",
+    "packages/envoy/internal/dispatch/api/comment_document_authors_test.go",
+    "packages/envoy/internal/dispatch/api/upload_version_bench_test.go",
+    "packages/envoy/internal/dispatch/deliveryaudit/deliveryaudit_test.go",
+    "packages/envoy/internal/dispatch/docs/api.go",
+    "packages/envoy/internal/dispatch/docs/compaction.go",
+    "packages/envoy/internal/dispatch/docs/compaction_queue.go",
+    "packages/envoy/internal/dispatch/docs/compaction_sweep.go",
+    "packages/envoy/internal/dispatch/docs/fold.go",
+    "packages/envoy/internal/dispatch/docs/growth.go",
+    "packages/envoy/internal/dispatch/docs/ledger.go",
+    "packages/envoy/internal/dispatch/docs/pending_authors.go",
+    "packages/envoy/internal/dispatch/docs/persistence.go",
+    "packages/envoy/internal/dispatch/docs/read_cache.go",
+    "packages/envoy/internal/dispatch/docs/service.go",
+    "packages/envoy/internal/dispatch/docs/websocket.go",
+    "packages/envoy/internal/dispatch/docs/*_test.go (compaction, compaction_queue, compaction_sweep, load_fold, room_load_bench new; history_fold, marks, pending_authors, persistence, read_cache, room_recovery, service, settlement_repair, stale_room, stale_room_eviction, websocket, cold_read_bench changed)",
+    "packages/envoy/internal/dispatch/duty/exclusive.go",
+    "packages/envoy/internal/dispatch/outbox/publisher.go",
+    "packages/envoy/internal/dispatch/outbox/compaction_lease_test.go (deleted)",
+    "packages/envoy/internal/dispatch/store/pool.go"
+  ],
+  "trickyParts": [
+    "The compaction write re-reads (version, xmin) of every folded row inside its transaction and drops the fold on any difference; an append above the fold point changes nothing folded, so a write during the fold no longer drops it (the plan's acceptance 3a expected a drop; it is correct to commit).",
+    "A room load hands ygo no bytes: LoadDoc puts the state on the roomLoad record and onLoadDocument decodes it before anything reads or observes the document, under the pending cap ygo sets before the hook (maxUpdateItems, validateUpdate's cap).",
+    "The sweep's period is the aligned hour across processes and restarts (duty_passes): a process restarted within an hour that a process already swept leaves the due documents to its queue (noted by loads and appends) or to the next hour.",
+    "The ygo fork was patched (dependency-ordered retry of deferred items) and released as v1.51.3-sami.6, then sami.7, by the fork's release session; upstream reached the same fix in v1.51.12 (reearth/ygo #296, #312), which the fork's base predates."
+  ],
+  "deviations": [
+    "Acceptance 6's 1.25x condition (one row versus one row plus 15 young rows) is removed by the INFRA-514 architect's decision (2026-10-27T11:51Z, option A): each young row is a real update a load must integrate. The PR body records the young-row numbers, the profile and the drained-queue invariant.",
+    "D4 is revised by the INFRA-514 architect's decision (2026-10-28T10:39Z, option B): a room load decodes a single stored row once, in the load hook, and fails the room from that decode; plan.md version 2 records it. The 2.32x step before it stays in the PR body.",
+    "The plan's acceptance 3a expected a write during a held fold to make the compaction drop its result; under D1 an append above the fold point leaves every folded row unchanged, so the compaction commits; the tests check the write completes while the fold is held and the appended row stays as written.",
+    "compactIfIdle is removed: the room-close compaction passes wait = roomFailed(room) to compactRoom.",
+    "The sweep compacts what the queue's due rule (checkCompaction) calls due: the 15-minute age rule or 16 rows older than 2 minutes, a superset of D3's age rule alone.",
+    "The queue's first check of a noted room comes compactTail (2 minutes) after the note; no row a note adds can be due sooner.",
+    "Upload and harness numbers were taken at ee5938e6; the head 9eb0b4e2 adds only the forward merge of main and two test fixes in deliveryaudit_test.go. The harness history seed ran 28 versions and 25 comments on all 1,000 specs through main's API; main's shutdown then compacted every spec to one row, which both sides start from.",
+    "Merged main twice (GitHub reported the pull request conflicting each time); deliveryaudit_test.go, new on main, needed outbox.Deps.Docs removed and auth.SingleSigningKey for store.NewPgPeopleStore (main 20ba65a6 fails go vet there on its own)."
+  ],
+  "openQuestions": [
+    "The memory-tag suite (cmd/dispatch history_memory_test.go, memory_test.go) cannot run on this gVisor pod (/proc/<pid>/clear_refs permission denied); history_memory_test.go now backdates rows before the deploy-style stop so the stop's tail-rule compaction folds them. CI's memory lane passed at 4bbe8232 (Legion Envoy and Contracts: success)."
+  ]
+}
