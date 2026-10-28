@@ -1082,6 +1082,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
 				name, ended, flag[1], logTail)
 		}
+		if role, why, ok := bootprobe.RoleOverlaysRefused(logTail); ok {
+			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s refused role %s's Oh My Pi overlays: %s; the probe pod mounts runtime.kubernetes.pod's volumes as every pod does, so the %s's Oh My Pi would not start: add the file to the ConfigMap its mount serves, or correct role_config_files.%s — log tail: %s",
+				name, role, why, role, role, logTail)}
+		}
 		if refused := r.unreadableShares(name, pod); refused != nil {
 			return *refused
 		}
@@ -1201,6 +1205,9 @@ type probeSpec struct {
 // of its own whenever possible, so each boot's probe would ask for a node, and a probe minutes long
 // and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day
 // eviction window.
+// For each role role_config_files names (Options.RoleConfigFiles), in the workflow's order, it
+// passes that role's overlays (--role-config-files), which the probe reads as that role's Oh My Pi
+// will: none are passed for a deployment that names none.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -1215,6 +1222,15 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
 	command = append(command, "--role-references", p.RoleReferences.Encode(), "--role-namespaces", RoleProbeDir)
+	// Each role that names overlays of its own is read as it will start: the probe pod mounts the
+	// operator's volumes as every pod does, so a file a role's PI_CONFIG_FILES names and the mounts
+	// lack refuses the boot here, naming the role and the file, rather than that role's Oh My Pi at
+	// its first launch.
+	for _, role := range roleConfigRoles {
+		if files := r.roleConfigFiles[role]; len(files) > 0 {
+			command = append(command, bootprobe.RoleConfigFilesFlag, bootprobe.RoleConfigFilesValue(string(role), files))
+		}
+	}
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,

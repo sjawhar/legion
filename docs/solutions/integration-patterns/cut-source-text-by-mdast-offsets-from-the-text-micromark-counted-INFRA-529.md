@@ -40,16 +40,20 @@ micromark reads it:
 
 ## Evidence
 
-- `packages/proof-editor/src/read-only-directives.ts:189` cuts lines from the source with one
-  leading U+FEFF removed (fixed in `6af96b96`). Before that, `"\ufeff:::note\nbody\n:::\n"` lost its
-  closing `:::`, and `"\ufeffHello **b**\n\n:::note…"` drew an empty opening line (`RangeError: Empty
-  text nodes are not allowed`).
-- `:108-118` ends lines at CR or LF (fixed in `75cd715e`). Before that,
+- `packages/proof-editor/src/typed-block-drawing.ts:46-49` is `markdownSource`, the one helper that
+  returns the source with one leading U+FEFF removed (the U+FEFF fix landed in `6af96b96`, in
+  `read-only-directives.ts`; INFRA-565 moved it and the code below into `typed-block-drawing.ts`).
+  Before that fix, `"\ufeff:::note\nbody\n:::\n"` lost its closing `:::`, and
+  `"\ufeffHello **b**\n\n:::note…"` drew an empty opening line (`RangeError: Empty text nodes are
+  not allowed`).
+- `:129-139` in `drawDirective` ends lines at CR or LF (fixed in `75cd715e`). Before that,
   `":::a\r:::\r".repeat(3555)` (31,995 characters) drew 44,245,530 characters; after, 24,885.
-- `:28` and `:121-135` hold the closing-fence rule (fixed in `75cd715e`).
+- `:40` and `:142-156` hold the closing-fence rule (fixed in `75cd715e`).
 - Browser rows 3 and 4 of `packages/dispatch/e2e/unknown-directive.e2e.ts` post a lone-CR message
   and a BOM-led message through the real API and assert each line once.
-- Default mode's `remarkTypedBlocks` (`packages/proof-editor/src/block-schema.ts:286`) still passes
-  `file.toString()` unchanged. Review round 3 found no input whose result that changes, and named
-  one shared helper that returns the source as micromark counts it.
+- Both callers now read the source through `markdownSource`: read-only mode's transform and default
+  mode's `remarkTypedBlocks` (`packages/proof-editor/src/block-schema.ts:287`), which INFRA-565 moved
+  off `file.toString()`. Before that move, a leading U+FEFF shifted default mode's paragraph-line
+  refusal by one character: `"\ufeffhello\n::a"` parsed, and `"\ufeffx\n\n::: warning"` was refused
+  as `line 4:`. `packages/proof-editor/tests/typed-block-drawing.test.ts` pins both.
 - Related: `docs/solutions/testing/one-definition-implemented-in-go-and-in-the-browser-is-pinned-by-fixtures-both-suites-read-one-per-shape-the-two-parsers-could-disagree-on-LEGION-573.md`.

@@ -59,10 +59,13 @@ var Interval = 5 * time.Second
 // that has stopped answering costs a pass and not the loop: the next tick tries again.
 const statementTimeout = 3 * time.Second
 
-// publishTimeout bounds one publish. The bus client bounds its own publish too, but a client that
-// is still dialling or reconnecting must not hold the publishing transaction, and with it every
-// other process's publish, for longer than this: the next pass tries again.
-const publishTimeout = 10 * time.Second
+// publishTimeout bounds one publish: its context, which the bus client gives the reconnect wait,
+// the flush and the acknowledgement alike, and once it ends sends nothing. The bus client bounds
+// its own publish too, but a client that is still dialling or reconnecting must not hold the
+// publishing transaction, and with it every other process's publish, for longer than this: the
+// next pass tries again. A variable rather than a constant only so this package's tests can
+// shorten it; nothing else sets it.
+var publishTimeout = 10 * time.Second
 
 // publishPassTimeout bounds a pass's publishing transaction as a whole, its statements and its
 // publishes together, so a database link that stalls mid-pass ends the pass rather than the loop.
@@ -82,9 +85,10 @@ type Publisher interface {
 	// publishes nothing and takes no lock for it, so a process whose NATS is down never holds the
 	// publish back from a process whose NATS answers.
 	Connected() bool
-	// PublishReportingDuplicate publishes the envelope and returns once the stream has
-	// acknowledged it, reporting whether the stream already held it.
-	PublishReportingDuplicate(contracts.Envelope) (bool, error)
+	// PublishReportingDuplicateWithin publishes the envelope and returns once the stream has
+	// acknowledged it, reporting whether the stream already held it. ctx bounds the whole publish,
+	// and a publish whose ctx has ended sends nothing.
+	PublishReportingDuplicateWithin(context.Context, contracts.Envelope) (bool, error)
 }
 
 // Deps is what an Announcer reads and publishes through.
@@ -279,7 +283,9 @@ func (a *Announcer) publish(ctx context.Context) error {
 			failed = err
 			break
 		}
-		duplicate, err := publishWithin(ctx, a.deps.Publisher, item)
+		publishCtx, cancelPublish := context.WithTimeout(ctx, publishTimeout)
+		duplicate, err := a.deps.Publisher.PublishReportingDuplicateWithin(publishCtx, item)
+		cancelPublish()
 		if err != nil {
 			failed = fmt.Errorf("publish %s: %w", item.EventID, err)
 			break
@@ -294,29 +300,6 @@ func (a *Announcer) publish(ctx context.Context) error {
 		return errors.Join(failed, err)
 	}
 	return failed
-}
-
-// publishWithin is one publish, given up after publishTimeout or when ctx ends. A publish given up
-// on may still land; its announcement stays unpublished and a later pass publishes it again, which
-// the stream recognises as a duplicate.
-func publishWithin(ctx context.Context, publisher Publisher, item contracts.Envelope) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
-	defer cancel()
-	type outcome struct {
-		duplicate bool
-		err       error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		duplicate, err := publisher.PublishReportingDuplicate(item)
-		done <- outcome{duplicate, err}
-	}()
-	select {
-	case o := <-done:
-		return o.duplicate, o.err
-	case <-ctx.Done():
-		return false, ctx.Err()
-	}
 }
 
 // Envelope is the server.started envelope of announcement seq, which found every live process

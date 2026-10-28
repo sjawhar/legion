@@ -18,6 +18,7 @@ import {
   createComment,
   createIssue,
   createIssueArtifact,
+  createMessage,
   createProject,
   createProjectDocument,
   dashboardOrigin,
@@ -132,6 +133,16 @@ const shown = {
   spec: "Both builds serve every page.",
 };
 
+/** The issue message's flowchart, from one node to the other, which draws only once the Mermaid
+ *  renderer's worker has run. */
+const diagram = { from: "Canary", to: "Rollout" };
+
+/** Who posts the issue message: an agent, as messages are. */
+const messageAuthor = {
+  actor: { id: "e2e-two-builds-agent", kind: "session" as const },
+  as: "agent" as const,
+};
+
 const credentialRecord: CredentialRecord = {
   approver: "alice",
   decided: null,
@@ -180,9 +191,10 @@ interface Seeded {
 }
 
 /** What every route needs to show its own content rather than an empty or missing state: a
- *  project with an architecture source, an issue with a spec, a child, a comment and a document
- *  artifact, a project document, a live session with a broadcast, a replayed conversation and a
- *  picture, a credential record, and the delivery timeline's runs. */
+ *  project with an architecture source, an issue with a spec, a child, a comment, a message
+ *  holding a Mermaid diagram and a document artifact, a project document, a live session with a
+ *  broadcast, a replayed conversation and a picture, a credential record, and the delivery
+ *  timeline's runs. */
 async function seedEveryRoute(): Promise<Seeded> {
   await setLiveSessions([session]);
   await createProject({ key: "CORE", name: "Core" });
@@ -202,6 +214,11 @@ async function seedEveryRoute(): Promise<Seeded> {
   });
   await createIssue({ parent: issue.key, project: "CORE", title: shown.child });
   await createComment(issue.key, { body: shown.comment });
+  await createMessage(
+    issue.key,
+    { body: `\`\`\`mermaid\ngraph TD\n  ${diagram.from} --> ${diagram.to}\n\`\`\`\n` },
+    messageAuthor
+  );
   const issueArtifact = await createIssueArtifact(issue.key, {
     content: `# Rollout notes\n\n${shown.issueArtifact}\n`,
     name: "rollout-notes.md",
@@ -347,8 +364,17 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `${issue}/spec`,
     },
     {
+      // The message's diagram is the Mermaid worker's: without it the body shows its source.
+      loads: ["mermaid"],
       route: "/issues/:key/*",
-      shows: (page) => [page.locator("#issue-conversation-panel").getByText(shown.comment)],
+      shows: (page) => [
+        page.locator("#issue-conversation-panel").getByText(shown.comment),
+        page
+          .locator("#issue-conversation-panel")
+          .getByRole("img", { exact: true, name: "Rendered Mermaid diagram" })
+          .filter({ hasText: diagram.from })
+          .filter({ hasText: diagram.to }),
+      ],
       url: `${issue}/conversation`,
     },
     {

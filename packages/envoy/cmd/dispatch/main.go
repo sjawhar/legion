@@ -45,6 +45,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/listenfd"
 )
 
@@ -90,6 +91,10 @@ type bootConfig struct {
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
 	EditNoticeQuiet time.Duration
+	// ListenerRosterUncached makes every read of the listener's session list ask the listener
+	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
+	// the test hooks, sets it.
+	ListenerRosterUncached bool
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -309,6 +314,11 @@ func main() {
 		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
+	// interval below. It appends events and takes no copy lock, so it runs after
+	// restoreDecidedWordings, which takes the copy lock (see below).
+	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
+	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -387,7 +397,8 @@ func main() {
 	//     evictor (it closes the rooms resident in this process that the other process's writes
 	//     left behind the durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
-	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
+	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
+	//     above.
 	leases, err := database.Pool.Leases()
 	if err != nil {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
@@ -451,6 +462,9 @@ func main() {
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
 	// a build indexed without the block grammar.
 	go documentService.RunBlockIndexReconciliation(ctx, leases)
+	// The asks a process older than the withdrawal leaves on an issue it closes or
+	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
+	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -495,9 +509,9 @@ func main() {
 
 	// LEGION-781, INFRA-555: the announcer publishes server.started once each time every live
 	// server process comes to serve one build (startup.Announcer), and /healthz reports the latest
-	// announcement's commit as fleet_commit. It runs once this process is registered, below. A
-	// process without NATS announces into the database and leaves the publish to a process whose
-	// bus answers.
+	// announcement's commit as fleet_commit. It runs once this process is registered, below
+	// (joinRegistry, registry.go). A process without NATS announces into the database and leaves
+	// the publish to a process whose bus answers.
 	var announcements startup.Publisher
 	if natsClient != nil {
 		announcements = natsClient
@@ -506,12 +520,7 @@ func main() {
 
 	routesHandler, waitDelivery := routes.New(appCtx)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
-	}
+	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
 	// the process with 1: a supervisor must not read a port clash as a clean stop.
@@ -531,6 +540,13 @@ func main() {
 		SigningKeys:    signingKey.Fingerprints(),
 	}, leases, announcer)
 	if err != nil {
+		// A deploy that stops this process while the registration waits for a refusing peer's
+		// heartbeat to lapse (processes.Register's wait, up to a live window and a heartbeat) stops
+		// a process that has served nothing: a clean stop, not a failed start.
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			slog.Info("dispatch: stopped while waiting for admission to the registry of live server processes")
+			return
+		}
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
@@ -700,6 +716,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 		boot.EditNoticeQuiet = quiet
 	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROSTER_UNCACHED")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
+		}
+		boot.ListenerRosterUncached = raw == "1"
+	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
 		return bootConfig{}, err
@@ -758,7 +780,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if agentSecretsURL != "" {
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
-			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
+			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", redact.URL(agentSecretsURL))
 		}
 		boot.AgentSecretsURL = agentSecretsURL
 		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
@@ -811,7 +833,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	}
 	if boot.AgentSecretsURL != "" {
 		if !routes.LoopbackURL(boot.AgentSecretsURL) {
-			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", redact.URL(boot.AgentSecretsURL))
 		}
 	}
 	if !routes.LoopbackURL(boot.EnvoyURL) {
@@ -1023,6 +1045,28 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 		})
 }
 
+// issueAskRepairBootTimeout bounds the boot's repair of the asks of closed and reopened issues.
+// Each issue commits on its own, so a repair cut short keeps what it repaired, and the interval
+// pass (api.RunIssueAskRepair) repairs what it left.
+const issueAskRepairBootTimeout = 30 * time.Second
+
+// repairIssueAsks is the boot's repair of the asks a close or a reopen by a release older than
+// the withdrawal left (api.RepairIssueAsks), bounded by timeout: open asks on closed issues are
+// withdrawn, and withdrawn asks on open issues are restored. It sweeps only the closed issues'
+// documents marked owing a settlement within the last api.IssueAskRepairInterval, so a boot does
+// not read every closed issue's documents before it serves; the interval pass's first run sweeps
+// them all. Each issue it repairs has its own line; this logs the counts. A repair that fails or
+// runs out of time is logged and the start goes on, since api.RunIssueAskRepair repairs the rest
+// every api.IssueAskRepairInterval.
+func repairIssueAsks(ctx context.Context, deps api.Deps, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: repair the asks of closed and reopened issues", "dispatch: repaired the asks of closed and reopened issues",
+		func(ctx context.Context) ([]any, error) {
+			markedSince := time.Now().Add(-api.IssueAskRepairInterval)
+			repair, err := api.RepairIssueAsks(ctx, deps, &markedSince)
+			return repair.LogArgs(), err
+		})
+}
+
 // bootTask runs task, a repair the boot makes before it serves, bounded by timeout, and logs what
 // it reports: the counts task returns under done at INFO, or, when task fails or runs out of time,
 // those counts and the error under failed at ERROR. Either way the start goes on.
@@ -1051,6 +1095,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.AgentSecretsURL = boot.AgentSecretsURL
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
+	built.ListenerRosterUncached = boot.ListenerRosterUncached
 	built.DevSignIn = boot.DevSignIn
 	return built
 }
@@ -1129,12 +1174,15 @@ func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
 	return extra
 }
 
-// dispatchHandler mounts the one /healthz the process serves above every dashboard and API
-// route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
-// longer pattern, so "GET /healthz" wins over the router's "/".
+// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
+// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
+// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
+// answers 204 and touches nothing: it says only that the process answers, for a liveness or
+// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
 func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("/", handler)
 	return mux
 }

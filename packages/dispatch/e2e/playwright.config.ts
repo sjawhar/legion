@@ -13,6 +13,11 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
+// The `iphone` project runs only tests tagged `@phone`; which tests take the tag is in
+// `packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out with no failure.
+// The regex is anchored so `@phone` matches only as a whole whitespace-separated token, never
+// inside a longer one such as `@phones` or `x@phone`.
+const phoneTagged = /(^|\s)@phone(\s|$)/;
 // Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
 // named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
@@ -134,18 +139,20 @@ export default defineConfig({
           {
             name: "iphone",
             testIgnore: [plainHttpSpecs, multiprocessSpecs],
+            grep: phoneTagged,
             use: { ...devices["iPhone 13"], browserName: "chromium" },
           },
           // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
           // rule and the header session pickers' (the live view's model and thinking pickers) rest on
           // each engine dispatching a closed select's `change` in the key's own task, deep links meet
-          // each engine's chunk cancellation and the margin hold's frame and scroll order, and
-          // IndexedDB-backed document recovery must run in the engines people use. So those specs also
-          // run in WebKit.
+          // each engine's chunk cancellation and the margin hold's frame and scroll order,
+          // IndexedDB-backed document recovery must run in the engines people use, and a body's Mermaid
+          // diagram draws through each engine's SVG parser, shadow DOM and the ELK layout running in it.
+          // So those specs also run in WebKit.
           {
             name: "webkit",
             testMatch:
-              /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|offline-edits)\.e2e\.ts/,
+              /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|mermaid|offline-edits)\.e2e\.ts/,
             use: { ...devices["Desktop Safari"] },
           },
           // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -161,13 +168,14 @@ export default defineConfig({
           },
           // Firefox's native editing mishandles text typed over what follows a block's last line break,
           // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
-          // select dispatch, offline document recovery owns browser storage, and a click on a link
+          // select dispatch, offline document recovery owns browser storage, a click on a link
           // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-          // link). Those specs, and the whole deep-links spec, run in Firefox too.
+          // link), and a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
+          // the ELK layout running in it. Those specs, and the whole deep-links spec, run in Firefox too.
           {
             name: "firefox",
             testMatch:
-              /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|offline-edits|picture-link-click)\.e2e\.ts/,
+              /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
             use: { ...devices["Desktop Firefox"] },
           },
 

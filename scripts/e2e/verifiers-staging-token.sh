@@ -134,9 +134,9 @@ absent_issuer="${issuer%/*}/00000000000000000000000000000000"
 echo "== pgvector/pgvector (pinned digest) and nats:2.10 on ephemeral loopback ports"
 docker rm -f -v "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
 trap cleanup EXIT
-docker run -d --name "$pg_name" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_name" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \
-  -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 docker run -d --name "$nats_name" --cpus 1 --memory 512m -p 127.0.0.1::4222 -p 127.0.0.1::8222 nats:2.10 -js -m 8222 >/dev/null
 # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the
 # socket while nothing listens on 5432 yet, and a client that connects then is reset.
@@ -215,6 +215,19 @@ port_of() {
   esac
 }
 
+# wait_for_dispatch_healthz URL PID LOG [WHAT] waits up to 30 s for the dispatch at URL to answer
+# /healthz 200, leaving the answer's body in $body, and fails with LOG the moment PID exits first.
+# WHAT, when given, names the boot at the end of either failure.
+wait_for_dispatch_healthz() {
+  local i
+  for i in $(seq 1 100); do
+    curl -fs -o "$body" --max-time 5 "$1/healthz" && return 0
+    kill -0 "$2" 2>/dev/null || fail "dispatch exited during boot${4:+ $4}" "$3"
+    [ "$i" = 100 ] && fail "dispatch never answered /healthz${4:+ $4}" "$3"
+    sleep 0.3
+  done
+}
+
 echo "== dispatch serves against an issuer that does not answer"
 # INFRA-555: Dispatch reads no issuer at boot. It migrates, binds and serves, discovers the issuer
 # in the background, and until it has, /healthz reports service_tokens false and a JWT-shaped
@@ -227,14 +240,8 @@ dispatch_pid=$!
 dispatch_port=''
 port_of "dispatch against an issuer that does not answer" "$work/dispatch-absent-issuer.port" "$dispatch_pid" \
   dispatch_port "$work/dispatch-absent-issuer.log"
-for i in $(seq 1 100); do
-  curl -fs -o "$body" --max-time 5 "http://127.0.0.1:$dispatch_port/healthz" && break
-  kill -0 "$dispatch_pid" 2>/dev/null ||
-    fail "dispatch exited during boot against an issuer that does not answer" "$work/dispatch-absent-issuer.log"
-  [ "$i" = 100 ] &&
-    fail "dispatch never answered /healthz against an issuer that does not answer" "$work/dispatch-absent-issuer.log"
-  sleep 0.3
-done
+wait_for_dispatch_healthz "http://127.0.0.1:$dispatch_port" "$dispatch_pid" "$work/dispatch-absent-issuer.log" \
+  "against an issuer that does not answer"
 expect_body "dispatch's /healthz against an issuer that does not answer" '.service_tokens == false'
 echo "  /healthz → 200, service_tokens false"
 # Three base64url segments, so the bearer takes the verifier's path (oidc.LooksLikeJWT) rather than
@@ -297,12 +304,7 @@ dispatch_url="http://127.0.0.1:$dispatch_port"
 listener_url="http://127.0.0.1:$listener_port"
 # A binary that refuses to boot is a dead pid, not a slow one: say so at once, with its log,
 # instead of spending the whole window on a process that will never answer.
-for i in $(seq 1 100); do
-  curl -fs -o /dev/null --max-time 5 "$dispatch_url/healthz" && break
-  kill -0 "$dispatch_pid" 2>/dev/null || fail "dispatch exited during boot" "$work/dispatch.log"
-  [ "$i" = 100 ] && fail "dispatch never answered /healthz" "$work/dispatch.log"
-  sleep 0.3
-done
+wait_for_dispatch_healthz "$dispatch_url" "$dispatch_pid" "$work/dispatch.log"
 # The listener answers /healthz 200 with {"status":"starting"} before NATS is up, and /v1 is
 # 503 until then: wait for the healthy status, not for the port.
 for i in $(seq 1 100); do
