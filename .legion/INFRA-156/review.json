@@ -2,24 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-28T14:27:00Z",
-  "decision": "approved",
-  "round": 9,
-  "scope": "The architect set round 9 as upkeep: changelog fragments, the AGENTS.md sentence, and two tidy-ups that change no behaviour. Judged against round 9's diff (fe010e53, c5e2f63c): approve if done, the round-8 code is unchanged, and CI passes at the head.",
-  "headReviewed": "b2bee1a2b3b5ae9ad18a49115b22d8895db9fd9d",
-  "codeHead": "c5e2f63c93e0",
-  "previousReview": "5681227614 (REQUEST_CHANGES at f544a3fd)",
+  "completed": "2026-10-28T16:07:00Z",
+  "decision": "changes_requested",
+  "round": 10,
+  "headReviewed": "28dbd8954f54a93f227bb8ef9e3abbf27a735afc",
+  "codeHead": "233a8d614b19",
+  "previousReview": "5684279185 (APPROVE at 804737c8)",
+  "fingerprint": "847de598bf335cd0b164a6c095fe5b9d2be3c89d2c8ea634fc68dae9c52045e1 (804737c8) -> d44f78a64e7eeb0e04dfa02ea39aba7a853a9471fc2a2868ef93c8ebe45989af (28dbd895): changed, so a new round. The two PR diffs differ in: the migration renumber 0135 -> 0136, rebuild.go's merged doc comment, the slices import now from main, and the proof-editor AGENTS.md counts.",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "items": "(1) The four CHANGELOG.md files equal main's (merge base aeeee6c0). There are six pr2394-<slug>.yaml fragments, one per removed entry, each parsed and rendered by changie v1.26.0, with no Dispatch key. Two texts are reworded on purpose: the unexported constant's name and a quote that voids rather than ends. (2) The AGENTS.md sentence splits the characters that end the shortcut from those that void it, matching directive.go:373-379. (3) The read-back test reads the shared table, which gained six rows; no coverage is lost; the regenerated JSON is byte-identical. TYPED_BLOCK_ID_SHORTCUT_EXCLUDED is unexported with no importer. Fast-follow: none. Round-8 code is unchanged apart from the unexport.",
-  "localRuns": "contracts dispatch-block-ref.test.ts 112 pass; pmdoc filtered tests ok; contracts tsc clean; claude-envoy check-dist under the pinned Bun 1.4.4: dist/ and legion/ match a fresh build.",
-  "ci": "Every check-run at CI head ca457420 (compare to b2bee1a2: handoffsOnly true, 1 file) completed success or skipped, the required lint, typecheck, test and pr-title included. dispatch first failed on a Go module proxy stream error (proxy.golang.org INTERNAL_ERROR for bedrockruntime), and envoy-go-race on TestALoneRunnerMakesAPassOnEveryTick (a lease tick skipped 983 ms after the previous pass; that code is main's, untouched here). One rerun of the failed jobs: both success at 14:24Z and 14:08Z.",
-  "migrations": "main's highest is 0134. This PR's 0135_block_pointer_links collides with nothing on main. sjawhar/legion#2463 (also 0135) is open; by the agreement, whichever merges second renumbers.",
-  "threads": "18 threads, all resolved. The three round-8 threads (PRRT_kwDORFy7ds6xFB0j, PRRT_kwDORFy7ds6xFB0s, PRRT_kwDORFy7ds6xFB0x) are fixed in fe010e53 and c5e2f63c; accepted in the approval.",
+  "localRuns": "go build and vet clean; pmdoc (CI=1, engine included), docs, api, refs and store tests filtered to the PR's areas pass; contracts 112, envoy-client dispatch-execute 273 and proof-editor 161 pass; check-dist under Bun 1.4.4 matches.",
+  "mainInteraction": "#2361 (CommonMark escapes) does not touch directive.go, and the editor decodes directive attributes in HTML-attribute mode, so the PR's html.UnescapeString id decoding stays right. #2233's closed-issue index path keeps pointers (the deep review's scratch test). 0135_server_processes touches no graph table, no main migration restates graph_edges, and main added no edge kind. rebuild.go's merge is comment-only, and the closed-issue seed path and refuseBlockPointers never run on the same rebuild.",
+  "ci": "CI head 233a8d61 (compare to 28dbd895: handoffsOnly true, 2 files): all checks were queued at 15:45Z. A request for changes does not wait on CI.",
+  "threads": "18, all resolved; no new thread.",
+  "bodyEdit": "The reviewer corrected the PR body's 'Look at first' line to migration 0136.",
+  "fileSize": "api/server.go is now 1001 lines (main took it from 970 to 999; the PR adds 2). Accepted: writeHandlerError is the API's single error-to-status map, and this PR's branch belongs in it beside the other pmdoc sentinels.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at b2bee1a2. No finding. It rendered every fragment with changie and confirmed the test's coverage.",
-    "codeQuality": "Verdict: APPROVE at b2bee1a2. No finding."
+    "deepReview": "Verdict: CHANGES at 28dbd895. Medium: the merge kept the PR's built packages/claude-envoy/dist changes, which main's #2423 (78d5f6b61, inside the merge) forbids. Minor: the body's 'Look at first' named 0135 (fixed by the reviewer).",
+    "codeQuality": "Verdict: CHANGES at 28dbd895. server.go crosses 1000 lines (accepted, see fileSize). Merge resolution and main interaction are sound."
   },
-  "keyFindings": []
+  "keyFindings": [
+    {"severity": "important", "file": "packages/claude-envoy/dist", "description": "Main's #2423 (78d5f6b61, which merge 233a8d61 brought in) says a pull request never commits dist/ or legion/, a PR carrying such changes drops them at its next merge of main with `jj restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion`, and a reviewer asks for any such change to be dropped (packages/claude-envoy/AGENTS.md:151-163). The PR still changes dist/dispatch.js, envoy-channel.js and session-hook.js (+295 each). Drop them; keep the .changes fragment. Update the body's Size note, and plan the production check #2423 requires: the post-merge rebuild run and commit, and `bun run check-dist` there."}
+  ]
 }
