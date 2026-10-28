@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-648",
-  "completed": "2026-10-28T17:45:00Z",
+  "completed": "2026-10-28T18:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2467",
   "proof": [
     {
@@ -25,8 +25,8 @@
       "criterion": "A3 INFRA-647's invariant kept with a test that fails if read is changed elsewhere before the version is rendered",
       "surface": "go test ./internal/dispatch/docs/ on Postgres 17 + pgvector",
       "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -run 'TestSettlementReusesTheRenderOnlyOfAnUntouchedRead$|TestSettlementVersionsARepairTheRoomAlreadyHolds$|TestSettlementVersionsTheTreeOfAStampThatMintedNothing$'",
-      "observed": "pass; the new test requires exactly 1 reuse and 0 renders, the two INFRA-647 tests 0 reuses and 1 render; full docs package ok (583.9 s), race -count=3 ok",
-      "headSha": "886242cc47e77832edda8166af599d76c50831d1 (controls); 92a8c7bb597464f9400fb92d65965ba11b0c079e (suite)",
+      "observed": "pass; the new test requires exactly 1 reuse and 0 renders, the two INFRA-647 tests 0 reuses and 1 render; round 2 (review): its comment names only the ask-block reconciliation and its two mark fixtures are gone, since the mark listing runs after the reuse decision; full docs package ok (589.6 s at a0a78bdc), race -count=3 ok at 92a8c7bb",
+      "headSha": "a0a78bdcd3 (round-2 controls and suite; runtime code unchanged since b0d5039f89e75f11fd8e867cdb056521d4338153)",
       "negativeControl": "(a) append '!' to read's first text run after readSettlementTree: TestSettlementReusesTheRenderOnlyOfAnUntouchedRead fails at settlement_read_invariant_test.go:67 'reused the rendering of the tree it read, which changed after the read'; (b) changedTree() returns false: TestSettlementVersionsARepairTheRoomAlreadyHolds fails at :67 and at settlement_render_once_test.go:71 'reused ... 1 times and rendered again 0 times, want 0 reuses and 1 renders'"
     },
     {
@@ -69,5 +69,8 @@
     "Environment-only failures on this pod, none in touched code: pmdoc's four linear-time tests (10 ms clock; fail the same at base), files TestS3AgainstAnS3CompatibleServer (needs Docker), api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves on a C-collation cluster (passes on an ICU en-US cluster on port 55433)."
   ],
   "openQuestions": [],
+  "reviewRound": [
+    "Changes requested at 9a373de6 (code b0d5039f): five threads, all comments and test helpers. Fixed in 63ebec09 (invariant test comment and fixtures, readSnapshot.err dropped, ListMarks states its Validate precondition, markedAnchor moved to marks_test.go and shared by insertAnchoredAsk and insertAnchoredCommentWithID) and a0a78bdc (docs/solutions names the reuse decision's comment by its place). No runtime code changed, so the replay, equivalence and benchmark proofs above stand."
+  ],
   "discoveredComplexity": []
 }
