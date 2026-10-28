@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,13 +41,17 @@ import (
 // function's read of the record and its apply is still undone by it - the record moves back to the
 // head read here, judging it again, until the next pass moves it forward.
 //
-// Before the synchronize it applies the push that reached the new head when GitHub shows it
-// changed only the issue's own .legion/<issue>/ (handoffPush): the push webhook waits in the same
-// backlog, and without it a reviewer's approval followed by its handoff push would read as not
-// covering the head (classify.ApprovalStands), a round stuck for nothing. A push that may change
-// code is left to its webhook, as when a synchronize beats its push: a code head with no known push
-// is judged as such, and the push's own handler settles what only the push says, replaying the
-// head run the head opened (classify.ApplyPush).
+// Before the synchronize it applies, oldest first, the pushes that took the branch to the new head,
+// as their push webhooks would have carried them (headPushes): those webhooks wait in the same
+// backlog, or were lost, and the workflow judges a move by the chain of its pushes - whether it is a
+// fix attempt, whether the red it leaves is the review App's planned one
+// (classify.AdvancePullRequestHead), and whether an approval of the head below stands for it
+// (classify.ApprovalStands). When no recorded push ends at the new head they are the pushes
+// GitHub's activity of the branch shows (lostPushes); otherwise, or when that activity cannot be
+// followed, the one push GitHub's compare shows changed only the issue's own .legion/<issue>/
+// (handoffPush), or none, and a push that may change code is left to its webhook: a code head with
+// no known push is judged as such, and the push's own handler settles what only the push says,
+// replaying the head run the head opened (classify.ApplyPush).
 //
 // It returns the record as the pass goes on with it: as it stands when the head did not move, and
 // otherwise as the synchronize left it, so the mergeability, review and required-check reads after
@@ -70,18 +76,18 @@ func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Clie
 	if !w.unapplied(ctx, eventID) {
 		return pr, nil
 	}
-	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
-	push, notHandoff, err := handoffPush(read, github, pr, pr.HeadSHA, pull.Head.SHA)
-	handoff := notHandoff == ""
-	cancel()
+	pushes, err := w.headPushes(ctx, github, pr, pull.Head.SHA)
 	if err != nil {
 		return pr, err
 	}
 	w.log.Warn("workflow: GitHub shows a pull request at a head the daemon has not recorded; applying the synchronize its webhook would",
-		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "recorded", pr.HeadSHA, "head", pull.Head.SHA, "updated_at", pull.UpdatedAt, "handoffOnly", handoff)
-	if pushID := w.passEventID("push-read", pr.Repo, pr.Number, pr.HeadSHA+"..."+pull.Head.SHA); handoff && w.unapplied(ctx, pushID) {
-		if _, err := intake.ApplyFact(ctx, w.pool, "github", pushID, push, w.handlers...); err != nil {
-			return pr, fmt.Errorf("apply the handoff push to %s: %w", pull.Head.SHA, err)
+		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "recorded", pr.HeadSHA, "head", pull.Head.SHA, "updated_at", pull.UpdatedAt, "pushes", len(pushes))
+	for _, push := range pushes {
+		if !w.unapplied(ctx, push.eventID) {
+			continue
+		}
+		if _, err := intake.ApplyFact(ctx, w.pool, "github", push.eventID, push.fact, w.handlers...); err != nil {
+			return pr, fmt.Errorf("apply the push from %s to %s: %w", push.fact.Before, push.fact.After, err)
 		}
 	}
 	fact := intake.PullRequestSynchronized{Repo: pr.Repo, Number: pr.Number, Branch: pr.Branch, HeadSHA: pull.Head.SHA, Body: pull.Body, UpdatedAt: pull.UpdatedAt}
@@ -149,6 +155,153 @@ func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRe
 	// above are what those commits did to from (classify.sparesAttempt, carriesApproval).
 	changed, whole, unforced := strings.Join(paths, "\n"), "false", "false"
 	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: from, After: to, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, "", nil
+}
+
+// passPush is a push the pass rebuilt from its reads of GitHub, with the event id it is applied
+// under.
+type passPush struct {
+	eventID string
+	fact    intake.Push
+}
+
+// headPushes is the pushes followHead applies, oldest first, before the synchronize that moves pr
+// from its recorded head to head. When no recorded push ends at head (classify.HeadPushKnown), its
+// webhook lost or waiting behind the GitHub consumer's backlog, they are the pushes GitHub's
+// activity of the branch shows took it there (lostPushes). When a recorded push ends at head, or
+// that activity cannot be followed, which it logs, it is the one push from the recorded head to
+// head that GitHub's compare shows changed only the issue's own handoffs (handoffPush), or none. A
+// rate-limit answer, ctx ending, or any failure of handoffPush's compare is an error.
+func (w *workflowRuntime) headPushes(ctx context.Context, github githubrest.Client, pr record.PullRequest, head string) ([]passPush, error) {
+	if !classify.HeadPushKnown(pr, head) {
+		pushes, unfollowed, err := w.lostPushes(ctx, github, pr, head)
+		if err != nil || unfollowed == "" {
+			return pushes, err
+		}
+		w.log.Warn("workflow: the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; it applies none of them, and the synchronize",
+			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "branch", pr.Branch, "recorded", pr.HeadSHA, "head", head, "reason", unfollowed)
+	}
+	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
+	push, notHandoff, err := handoffPush(read, github, pr, pr.HeadSHA, head)
+	cancel()
+	if err != nil || notHandoff != "" {
+		return nil, err
+	}
+	return []passPush{{eventID: w.passEventID("push-read", pr.Repo, pr.Number, pr.HeadSHA+"..."+head), fact: push}}, nil
+}
+
+// lostPushes is the pushes that took pr's branch from the recorded head to head, oldest first, as
+// their push webhooks would have carried them, less those the record holds already (its pushes and
+// the moves it made): GitHub's activity of the branch (githubrest.Client.BranchActivity, its newest
+// hundred entries) followed back from head to the recorded head (followActivity). Each is GitHub's
+// push, force push or branch creation, with Before and After its two commits, Pusher its actor's
+// login - an App's <slug>[bot], the form of the push webhook's pusher.name, by which the workflow
+// tells the review App's pushes - Forced whether it was a force push, ChangedPaths what GitHub's
+// compare of its two commits lists (githubrest.Client.Compare, ChangedPaths), and Truncated when
+// GitHub may have cut that list (githubrest.CompareFilesLimit) or answered none. Repo and Branch
+// are the record's, the names the webhook's push carries. The workflow judges a move by the chain
+// of its pushes, so one push from the recorded head to head, compared whole, would judge it wrong.
+// Each push's event id names the project, the repository, the branch and the push's two commits,
+// so a later pass skips it before any transaction, and the push webhook arriving later is the same
+// push recorded again, which changes nothing (classify.ApplyPush).
+//
+// unfollowed says why the pushes cannot be rebuilt, and then there are none: the page does not
+// lead back from head to the recorded head, an entry on the way is no push, or GitHub answered a
+// read with an error. A rate-limit answer, or ctx ending, is an error: the pass ends there.
+func (w *workflowRuntime) lostPushes(ctx context.Context, github githubrest.Client, pr record.PullRequest, head string) ([]passPush, string, error) {
+	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
+	activity, err := github.BranchActivity(read, pr.Branch)
+	cancel()
+	if err != nil {
+		if endsPass(ctx, err) {
+			return nil, "", fmt.Errorf("read the activity of %s: %w", pr.Branch, err)
+		}
+		return nil, fmt.Sprintf("the read of the branch's activity failed: %v", err), nil
+	}
+	chain, unfollowed := followActivity(activity, pr.HeadSHA, head)
+	if unfollowed != "" {
+		return nil, unfollowed, nil
+	}
+	recorded := map[record.Move]bool{}
+	for _, p := range pr.Pushes {
+		recorded[record.Move{Before: p.Before, SHA: p.SHA}] = true
+	}
+	for _, m := range pr.Moves {
+		recorded[m] = true
+	}
+	var pushes []passPush
+	for _, entry := range chain {
+		if recorded[record.Move{Before: entry.Before, SHA: entry.After}] {
+			continue
+		}
+		read, cancel := context.WithTimeout(ctx, requiredChecksRead)
+		compare, err := github.Compare(read, entry.Before, entry.After)
+		cancel()
+		if err != nil {
+			if endsPass(ctx, err) {
+				return nil, "", fmt.Errorf("compare %s with %s: %w", entry.Before, entry.After, err)
+			}
+			return nil, fmt.Sprintf("the compare of %s with %s failed: %v", entry.Before, entry.After, err), nil
+		}
+		var changed *string
+		truncated := "true"
+		if compare.Files != nil {
+			if len(*compare.Files) < githubrest.CompareFilesLimit {
+				truncated = "false"
+			}
+			// The webhook's push leaves out a push's changed paths when it lists none.
+			if paths := strings.Join(githubrest.ChangedPaths(*compare.Files), "\n"); paths != "" {
+				changed = &paths
+			}
+		}
+		forced := strconv.FormatBool(entry.Type == "force_push")
+		pushes = append(pushes, passPush{
+			eventID: w.passEventID("push-read", pr.Repo, pr.Number, pr.Branch, entry.Before+"..."+entry.After),
+			fact: intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: entry.Before, After: entry.After,
+				ChangedPaths: changed, Truncated: &truncated, Forced: &forced, Pusher: entry.Actor.Login},
+		})
+	}
+	return pushes, "", nil
+}
+
+// endsPass says whether err, a read of the pass that failed, ends the whole pass: GitHub's rate
+// limit, which every later read on the installation meets, or ctx ending.
+func endsPass(ctx context.Context, err error) bool {
+	var answer *githubrest.Answer
+	return ctx.Err() != nil || (errors.As(err, &answer) && answer.RateLimited)
+}
+
+// pushActivity is the kinds of GitHub's activity of a branch that are its pushes, whose push
+// webhook carries the same two commits: a push, a force push, and the push that created the branch.
+var pushActivity = map[string]bool{"push": true, "force_push": true, "branch_creation": true}
+
+// followActivity is the entries of activity, GitHub's activity of a branch newest first, that took
+// the branch from from to to, oldest first: from the newest entry that left the branch at to, each
+// older entry in turn, each of which left the branch at the commit the newer one replaced, until one
+// replaced from. Every entry on the way must be a push (pushActivity). unfollowed says why the page
+// holds no such chain: no entry left the branch at to, the entries break off, one is no push, or the
+// page ends before from.
+func followActivity(activity []githubrest.Activity, from, to string) ([]githubrest.Activity, string) {
+	start := slices.IndexFunc(activity, func(entry githubrest.Activity) bool { return entry.After == to })
+	if start < 0 {
+		return nil, fmt.Sprintf("none of the %d newest entries of the branch's activity left it at %s", len(activity), to)
+	}
+	var chain []githubrest.Activity
+	at := to
+	for _, entry := range activity[start:] {
+		switch {
+		case entry.After != at:
+			return nil, fmt.Sprintf("the branch's activity before it reached %s left it at %s", at, entry.After)
+		case !pushActivity[entry.Type]:
+			return nil, fmt.Sprintf("the branch's activity reached %s by a %s, not a push", at, entry.Type)
+		}
+		chain = append(chain, entry)
+		if entry.Before == from {
+			slices.Reverse(chain)
+			return chain, ""
+		}
+		at = entry.Before
+	}
+	return nil, fmt.Sprintf("the %d newest entries of the branch's activity do not lead back from %s to the recorded head %s", len(activity), to, from)
 }
 
 // readListings is the required-checks pass's listing of the open pull requests of every repository

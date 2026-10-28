@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // compareFails, as pullRequestStandIn's changed, has every comparison answer 502.
@@ -842,12 +844,15 @@ func seedPassIssue(t *testing.T, pool *pgxpool.Pool, issue record.Issue, pr *rec
 // The pass's cost on the implement App's installation, whose hourly limit every pane's gh shares:
 // per served repository one listing request per hundred open pull requests, whatever their
 // branches and however many issues wait for one, and per recorded open pull request its own reads
-// (the pull request and its reviews, and its base's rulesets and protection once per base). No
-// request reads one issue's branch. Two served repositories: acme/widgets with 150 open pull
-// requests, two of them recorded open, one an implementing issue's whose opened was lost, on the
-// second page; sjawhar/legion with none, where an issue's implementer completed with none open. A
-// rate-limit answer to a listing ends the pass: no repository after it is listed, and nobody is
-// told a pull request is missing.
+// (the pull request and its reviews, and its base's rulesets and protection once per base); a
+// compare only for a head that moved, and the branch's activity with one compare per push the
+// record lacks only for a head that moved with no recorded push ending at it. No request reads one
+// issue's branch's pull requests. Two served repositories: acme/widgets with 150 open pull
+// requests, two of them recorded open - #86 moved by a push whose webhook arrived, #87 moved by
+// two pushes whose webhooks were lost - and one an implementing issue's whose opened was lost, on
+// the second page; sjawhar/legion with none, where an issue's implementer completed with none
+// open. A rate-limit answer to a listing ends the pass: no repository after it is listed, and
+// nobody is told a pull request is missing.
 func TestThePassKeepsItsRequestBudget(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -859,16 +864,22 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 			"/repos/acme/widgets/pulls": 2, "/repos/sjawhar/legion/pulls": 1,
 			"/repos/acme/widgets/pulls/86": 1, "/repos/acme/widgets/pulls/86/reviews": 1, "/repos/acme/widgets/pulls/87": 1, "/repos/acme/widgets/pulls/87/reviews": 1,
 			"/repos/acme/widgets/rules/branches/main": 1, "/repos/acme/widgets/branches/main": 1,
+			"/repos/acme/widgets/compare/code...code-2": 1, "/repos/acme/widgets/activity": 1,
+			"/repos/acme/widgets/compare/second...second-2": 1, "/repos/acme/widgets/compare/second-2...second-3": 1,
 		}},
 		{"the listing's second page rate limited", true, map[string]int{
 			"/repos/acme/widgets/pulls":    2,
 			"/repos/acme/widgets/pulls/86": 1, "/repos/acme/widgets/pulls/86/reviews": 1, "/repos/acme/widgets/pulls/87": 1, "/repos/acme/widgets/pulls/87/reviews": 1,
 			"/repos/acme/widgets/rules/branches/main": 1, "/repos/acme/widgets/branches/main": 1,
+			"/repos/acme/widgets/compare/code...code-2": 1, "/repos/acme/widgets/activity": 1,
+			"/repos/acme/widgets/compare/second...second-2": 1, "/repos/acme/widgets/compare/second-2...second-3": 1,
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+			// #86's push webhook arrived and its synchronize did not.
+			setCapturePullRequest(t, pool, func(pr *record.PullRequest) { pr.Pushes = []record.ClassifiedPush{{SHA: "code-2", Before: "code"}} })
 			issue := func(key, repo string) record.Issue {
 				return record.Issue{Key: key, Repo: repo, DefaultBranch: "main", GitHubRepo: repo, Tree: key, Project: "CAPTURE", Title: key,
 					Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V" + key}
@@ -880,7 +891,7 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 				Required: []string{"pr-checks-result"}, Mergeability: record.MergeabilityMergeable})
 			seedPassIssue(t, pool, issue("CAPTURE-3", "acme/widgets"), nil, record.PhaseRow{Issue: "CAPTURE-3", Role: claim.RoleImplementer, Claim: "implement-3", HandoffCommit: "third"})
 			seedPassIssue(t, pool, issue("CAPTURE-4", "sjawhar/legion"), nil, record.PhaseRow{Issue: "CAPTURE-4", Role: claim.RoleImplementer, Claim: "implement-4", HandoffCommit: "fourth"})
-			open := []string{passPull(86, "legion/CAPTURE-1", "code", "open", at, ""), passPull(87, "legion/CAPTURE-2", "second", "open", at, ""),
+			open := []string{passPull(86, "legion/CAPTURE-1", "code-2", "open", at, ""), passPull(87, "legion/CAPTURE-2", "second-3", "open", at, ""),
 				passPull(90, "legion/OTHER-5", "other", "open", at, "")}
 			for n := range 146 {
 				open = append(open, passPull(1000+n, "feature/"+strconv.Itoa(n), "f"+strconv.Itoa(n), "open", at, ""))
@@ -924,6 +935,15 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 					w.Write([]byte("[" + strings.Join(open[100:], ",") + "]"))
 				case "/repos/sjawhar/legion/pulls":
 					w.Write([]byte(`[]`))
+				case "/repos/acme/widgets/activity":
+					if r.URL.Query().Get("ref") != "refs/heads/legion/CAPTURE-2" || r.URL.Query().Get("per_page") != "100" {
+						t.Errorf("read the activity %s, want legion/CAPTURE-2's, a hundred to a page", r.URL)
+					}
+					w.Write([]byte("[" + activityEntry("legion/CAPTURE-2", "push", "second-2", "second-3", implementerLogin, at.Add(-time.Minute)) + "," +
+						activityEntry("legion/CAPTURE-2", "push", "second", "second-2", implementerLogin, at.Add(-2*time.Minute)) + "," +
+						activityEntry("legion/CAPTURE-2", "push", "first", "second", implementerLogin, at.Add(-time.Hour)) + "]"))
+				case "/repos/acme/widgets/compare/code...code-2", "/repos/acme/widgets/compare/second...second-2", "/repos/acme/widgets/compare/second-2...second-3":
+					w.Write([]byte(compareAnswer("ahead", "src/widget.go")))
 				case "/repos/acme/widgets/rules/branches/main":
 					w.Write([]byte(`[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
 				case "/repos/acme/widgets/branches/main":
@@ -960,6 +980,285 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 			}
 			if len(missing) != 1 || !strings.Contains(missing[0], "CAPTURE-4") || !strings.Contains(missing[0], "sjawhar/legion") {
 				t.Fatalf("pull-request-missing notices %q, want one for CAPTURE-4 on sjawhar/legion", missing)
+			}
+		})
+	}
+}
+
+// reviewAppLogin and implementerLogin are the bot accounts GitHub names the review App's and the
+// implement App's pushes by, in the push webhook's pusher.name and in the branch's activity alike.
+const (
+	reviewAppLogin   = "legion-review[bot]"
+	implementerLogin = "legion-implementer[bot]"
+)
+
+// activityEntry is one entry of GitHub's activity of branch (GET /activity) as GitHub answers it:
+// its kind (push, force_push, branch_creation, branch_deletion), the commits the branch held before
+// and after it, when, and its actor, of type Bot for an App's <slug>[bot].
+func activityEntry(branch, kind, before, after, actor string, at time.Time) string {
+	actorType := "User"
+	if strings.HasSuffix(actor, "[bot]") {
+		actorType = "Bot"
+	}
+	return fmt.Sprintf(`{"id":%d,"node_id":"RA_%s","before":%q,"after":%q,"ref":"refs/heads/%s","timestamp":%q,"activity_type":%q,`+
+		`"actor":{"login":%q,"id":41898282,"node_id":"BOT_1","type":%q,"site_admin":false}}`,
+		at.Unix(), after, before, after, branch, at.Format(time.RFC3339), kind, actor, actorType)
+}
+
+// compareAnswer is GitHub's compare of two commits with status, listing files as changed.
+func compareAnswer(status string, files ...string) string {
+	listed := make([]string, len(files))
+	for i, file := range files {
+		listed[i] = fmt.Sprintf(`{"filename":%q,"status":"modified"}`, file)
+	}
+	return `{"status":"` + status + `","ahead_by":1,"behind_by":0,"files":[` + strings.Join(listed, ",") + `]}`
+}
+
+// activityGitHub is GitHub's REST API for acme/widgets as a pass reads it after push webhooks of
+// legion/CAPTURE-1 were lost: pull request 86 open on that branch at head, last updated at
+// updated, with no reviews, on base main, which requires pr-checks-result and is unprotected; the
+// branch's activity, newest first, is activity, or GitHub answers activityStatus when it is set;
+// and the compare of each base...head in compares answers it, any other a 404. Every request is
+// counted in reads.
+type activityGitHub struct {
+	mu             sync.Mutex
+	head           string
+	updated        time.Time
+	activity       []string
+	activityStatus int
+	compares       map[string]string
+	reads          pathReads
+}
+
+// moved has GitHub show pull request 86 at head, last updated at updated, and the branch's
+// activity as activity, newest first.
+func (g *activityGitHub) moved(head string, updated time.Time, activity ...string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.head, g.updated, g.activity = head, updated, activity
+}
+
+func (g *activityGitHub) serve(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.reads.add(r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if compared, ok := strings.CutPrefix(r.URL.Path, "/repos/acme/widgets/compare/"); ok {
+			if answer, ok := g.compares[compared]; ok {
+				w.Write([]byte(answer))
+				return
+			}
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		pull := passPull(86, "legion/CAPTURE-1", g.head, "open", g.updated, "")
+		switch r.URL.Path {
+		case "/repos/acme/widgets/activity":
+			if ref, perPage := r.URL.Query().Get("ref"), r.URL.Query().Get("per_page"); ref != "refs/heads/legion/CAPTURE-1" || perPage != "100" {
+				t.Errorf("read the activity of %q, %q to a page; want refs/heads/legion/CAPTURE-1, 100", ref, perPage)
+			}
+			if g.activityStatus != 0 {
+				http.Error(w, `{"message":"Server Error"}`, g.activityStatus)
+				return
+			}
+			w.Write([]byte("[" + strings.Join(g.activity, ",") + "]"))
+		case "/repos/acme/widgets/pulls":
+			w.Write([]byte("[" + pull + "]"))
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(pull))
+		case "/repos/acme/widgets/pulls/86/reviews":
+			w.Write([]byte(`[]`))
+		case "/repos/acme/widgets/rules/branches/main":
+			w.Write([]byte(`[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
+		case "/repos/acme/widgets/branches/main":
+			w.Write([]byte(`{"name":"main","protected":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// reviewAppRuntime is requiredRuntime whose workflow knows the review App by reviewAppLogin, as a
+// workflow boot always does.
+func reviewAppRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
+	w := requiredRuntime(pool, api, log)
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewAppLogin: reviewAppLogin}, log)
+	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine}, reviewAppLogin
+	return w
+}
+
+// webhookPush is the intake.Push the push webhook of legion/CAPTURE-1 from before to after carries
+// (intake's decodePush): the paths its commits changed, the list whole, whether it was forced, and
+// its pusher.
+func webhookPush(before, after, paths string, forced bool, pusher string) intake.Push {
+	truncated, force := "false", strconv.FormatBool(forced)
+	return intake.Push{Repo: "acme/widgets", Branch: "legion/CAPTURE-1", Before: before, After: after, ChangedPaths: &paths, Truncated: &truncated, Forced: &force, Pusher: pusher}
+}
+
+// The review App pushes the tester's red tests and then its handoff, and both push webhooks are
+// lost, with the synchronize. The pass reads the branch's activity, follows it back from GitHub's
+// head to the recorded one (no further: the push that reached the recorded head is not compared),
+// and applies each push, oldest first, as its webhook would have carried it, then the synchronize.
+// The move is the review App's, so the record counts no fix attempt and the red the tests leave is
+// planned, as the webhooks would have left them. The push webhooks arriving afterwards change
+// nothing.
+func TestThePassRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+	github := &activityGitHub{compares: map[string]string{
+		"code...red-tests":           compareAnswer("ahead", "src/widget_test.go"),
+		"red-tests...tester-handoff": compareAnswer("ahead", ".legion/CAPTURE-1/test.json"),
+	}}
+	github.moved("tester-handoff", at,
+		activityEntry("legion/CAPTURE-1", "push", "red-tests", "tester-handoff", reviewAppLogin, at.Add(-time.Minute)),
+		activityEntry("legion/CAPTURE-1", "push", "code", "red-tests", reviewAppLogin, at.Add(-2*time.Minute)),
+		activityEntry("legion/CAPTURE-1", "push", "base", "code", implementerLogin, at.Add(-time.Hour)))
+	w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
+	w.readRequiredChecks(context.Background())
+	_, pr := capturePhase(t, pool)
+	if pr.HeadSHA != "tester-handoff" || pr.Run != nil {
+		t.Fatalf("after the pass the record is at %q with a head run %+v, want tester-handoff judged with its pushes", pr.HeadSHA, pr.Run)
+	}
+	if !pr.PlannedRed || pr.FixAttempts != 0 || pr.HeadCounted != "" {
+		t.Fatalf("after the pass plannedRed=%t fixAttempts=%d headCounted=%q, want the review App's red planned and no attempt counted (pushes %+v)",
+			pr.PlannedRed, pr.FixAttempts, pr.HeadCounted, pr.Pushes)
+	}
+	if got := headReads(t, pool, "push-read"); got != 2 {
+		t.Fatalf("the pass applied %d push facts, want 2", got)
+	}
+	if counts := github.reads.counts(); counts["/repos/acme/widgets/activity"] != 1 || counts["/repos/acme/widgets/compare/code...red-tests"] != 1 ||
+		counts["/repos/acme/widgets/compare/red-tests...tester-handoff"] != 1 || counts["/repos/acme/widgets/compare/base...code"] != 0 {
+		t.Fatalf("the pass read %v, want the activity once and each push past the recorded head compared once", counts)
+	}
+	lateWebhookChangesNothing(t, pool, w, webhookPush("code", "red-tests", "src/widget_test.go", false, reviewAppLogin))
+	lateWebhookChangesNothing(t, pool, w, webhookPush("red-tests", "tester-handoff", ".legion/CAPTURE-1/test.json", false, reviewAppLogin))
+}
+
+// The implementer pushes its fix onto the review App's planned red, and the push webhook is lost
+// with the synchronize. The pass rebuilds the push from the branch's activity: the implementer's
+// code clears the planned mark without counting the planned red. The fix's own red then stands
+// unplanned, so the implementer's next push, lost too, is a counted fix attempt. The fix's push
+// webhook arriving afterwards changes nothing.
+func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Implementing, "in_progress")
+	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
+		pr.HeadSHA, pr.CheckedHead, pr.Failing, pr.PlannedRed = "red-tests", "red-tests", []string{"pr-checks-result"}, true
+		pr.CheckRuns, pr.Generation, pr.Snapshot = []record.AttemptRun{{Name: "pr-checks-result", ID: 3}}, 2, "red-tests-red"
+		pr.Moves = []record.Move{{Before: "code", SHA: "red-tests"}}
+	})
+	github := &activityGitHub{compares: map[string]string{
+		"red-tests...fix": compareAnswer("ahead", "src/widget.go"),
+		"fix...fix-2":     compareAnswer("ahead", "src/widget.go"),
+	}}
+	fix := activityEntry("legion/CAPTURE-1", "push", "red-tests", "fix", implementerLogin, at.Add(-time.Minute))
+	tests := activityEntry("legion/CAPTURE-1", "push", "code", "red-tests", reviewAppLogin, at.Add(-time.Hour))
+	github.moved("fix", at, fix, tests)
+	w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
+	w.readRequiredChecks(context.Background())
+	_, pr := capturePhase(t, pool)
+	if pr.HeadSHA != "fix" || pr.Run != nil || pr.PlannedRed || pr.FixAttempts != 0 {
+		t.Fatalf("after the pass head %q plannedRed=%t fixAttempts=%d run %+v, want fix with the planned mark cleared, no attempt counted and no head run",
+			pr.HeadSHA, pr.PlannedRed, pr.FixAttempts, pr.Run)
+	}
+	lateWebhookChangesNothing(t, pool, w, webhookPush("red-tests", "fix", "src/widget.go", false, implementerLogin))
+
+	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
+		pr.CheckedHead, pr.Failing = "fix", []string{"pr-checks-result"}
+		pr.CheckRuns, pr.Generation, pr.Snapshot = []record.AttemptRun{{Name: "pr-checks-result", ID: 4}}, 3, "fix-red"
+	})
+	github.moved("fix-2", at.Add(time.Minute), activityEntry("legion/CAPTURE-1", "push", "fix", "fix-2", implementerLogin, at.Add(30*time.Second)), fix, tests)
+	w.readRequiredChecks(context.Background())
+	_, pr = capturePhase(t, pool)
+	if pr.HeadSHA != "fix-2" || pr.FixAttempts != 1 || pr.HeadCounted != "fix-2" || pr.PlannedRed {
+		t.Fatalf("after the next pass head %q fixAttempts=%d headCounted=%q plannedRed=%t, want fix-2 counted as one fix attempt against the fix's red",
+			pr.HeadSHA, pr.FixAttempts, pr.HeadCounted, pr.PlannedRed)
+	}
+}
+
+// The implementer force-pushes onto a red head, and the push webhook is lost with the synchronize.
+// The pass rebuilds the push from the branch's activity, forced, so the paths GitHub's compare
+// lists, only the issue's own handoffs, do not make it a handoff push: it is a counted fix attempt,
+// and an approval of the head it replaced does not stand for it. The same paths pushed without
+// rewriting history spare the attempt and carry the approval. Either way the head is judged with
+// its push, and the push webhook arriving afterwards changes nothing.
+func TestThePassRebuildsAForcePushLost(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		kind, status string
+		forced       bool
+		attempts     int
+	}{
+		{"push", "ahead", false, 0},
+		{"force_push", "diverged", true, 1},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Implementing, "in_progress")
+			setCapturePullRequest(t, pool, func(pr *record.PullRequest) { pr.Failing = []string{"pr-checks-result"} })
+			github := &activityGitHub{compares: map[string]string{"code...rewritten": compareAnswer(tc.status, ".legion/CAPTURE-1/implement.json")}}
+			github.moved("rewritten", at, activityEntry("legion/CAPTURE-1", tc.kind, "code", "rewritten", implementerLogin, at.Add(-time.Minute)))
+			w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
+			w.readRequiredChecks(context.Background())
+			_, pr := capturePhase(t, pool)
+			if pr.HeadSHA != "rewritten" || pr.Run != nil || pr.FixAttempts != tc.attempts {
+				t.Fatalf("after the pass head %q fixAttempts=%d run %+v, want rewritten judged with its push, %d attempts counted", pr.HeadSHA, pr.FixAttempts, pr.Run, tc.attempts)
+			}
+			if got := classify.ApprovalStands(*pr, "code"); got == tc.forced {
+				t.Fatalf("an approval of code stands for the head the %s left: %t, want %t (pushes %+v)", tc.kind, got, !tc.forced, pr.Pushes)
+			}
+			lateWebhookChangesNothing(t, pool, w, webhookPush("code", "rewritten", ".legion/CAPTURE-1/implement.json", tc.forced, implementerLogin))
+		})
+	}
+}
+
+// When the branch's activity does not lead back from GitHub's head to the recorded one - the
+// recorded head is not on the page, the way back is no push (the branch was deleted and pushed
+// again), or GitHub fails the read - the pass applies no push, logs a WARN saying why, and applies
+// the synchronize as it did before it read the activity.
+func TestThePassAppliesNoPushWhenTheActivityCannotBeFollowed(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	zero := strings.Repeat("0", 40)
+	for _, tc := range []struct {
+		name     string
+		activity []string
+		status   int
+	}{
+		{"the recorded head is not on the page", []string{activityEntry("legion/CAPTURE-1", "push", "other", "pushed", implementerLogin, at)}, 0},
+		{"the way back is no push", []string{activityEntry("legion/CAPTURE-1", "branch_creation", zero, "pushed", implementerLogin, at),
+			activityEntry("legion/CAPTURE-1", "branch_deletion", "code", zero, implementerLogin, at.Add(-time.Minute))}, 0},
+		{"GitHub fails the read", nil, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+			github := &activityGitHub{activityStatus: tc.status}
+			github.moved("pushed", at, tc.activity...)
+			var logged bytes.Buffer
+			w := reviewAppRuntime(pool, github.serve(t).URL, slog.New(slog.NewJSONHandler(&logged, nil)))
+			w.readRequiredChecks(context.Background())
+			_, pr := capturePhase(t, pool)
+			if pr.HeadSHA != "pushed" || headReads(t, pool, "head-read") != 1 {
+				t.Fatalf("after the pass the record is at %q, want pushed by the synchronize", pr.HeadSHA)
+			}
+			if got := headReads(t, pool, "push-read"); got != 0 || len(pr.Pushes) != 0 {
+				t.Fatalf("the pass applied %d push facts and the record holds %+v, want none", got, pr.Pushes)
+			}
+			warned := false
+			for _, line := range strings.Split(logged.String(), "\n") {
+				warned = warned || (strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, "the pass cannot rebuild from GitHub") && strings.Contains(line, `"head":"pushed"`))
+			}
+			if !warned {
+				t.Fatalf("the pass logged %s, want a WARN that it cannot rebuild the pushes", logged.String())
 			}
 		})
 	}
