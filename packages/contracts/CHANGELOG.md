@@ -4,22 +4,6 @@
 
 ### Added
 
-- `typedBlockIdAttribute` writes a typed block's id as Go's renderer writes it in the opening line
-  (`pmdoc.TypedBlockIDAttribute`): `#id`, or `id="…"` with `&`, `"`, line feeds and carriage
-  returns as character references when the id is empty or holds a
-  `TYPED_BLOCK_ID_SHORTCUT_EXCLUDED` character (a space, tab, line ending, `"`, `#`, `&`, `'`, `.`,
-  `<`, `=`, `>`, backtick or `}`). Both writers are tested against
-  `DISPATCH_TYPED_BLOCK_ID_SPELLINGS`, whose Go copy is
-  `packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json`.
-- A typed block's `block[]` attribute: `BlockAttributeKind` gains `"block[]"` and
-  `BlockAttributeSchema` gains `targets`, the block types it points at. `parseBlockPointerValue`
-  reads a value (canonical block references joined by exactly one space), and
-  `blockPointerValueProblem` and `blockPointersProblem` say why a value or a list of pointers is
-  refused, following the server's wording, with `parseCanonicalBlockReference` and `formatBlockReference`
-  for one reference, tested with Go's `pmdoc.ParseBlockPointerValue` against
-  `DISPATCH_BLOCK_POINTER_VALUES`. `GraphEdgeKind` admits
-  a `block[]` attribute's name beside the structural kinds, the kind of the edges its pointers
-  make.
 - `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
   `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
   `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it

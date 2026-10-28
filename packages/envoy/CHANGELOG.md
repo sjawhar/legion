@@ -4,15 +4,6 @@
 
 ### Added
 
-- A typed block's schema can declare an attribute of kind `block[]` that points at blocks: its
-  value is canonical block references joined by exactly one space, anything else refused, and
-  each block it names is a graph edge from the typed block of a kind named by the attribute,
-  which `GET /api/v1/references?kind=` accepts. Its `targets` limit the
-  block types it points at: an agent's or API write introducing a pointer to an existing block of
-  another type is refused (`400 INVALID_MARKDOWN`, or `INVALID_OP` on `attributes` from
-  `POST /edits`), a browser's edit never is, and every block-aware read lists a pointer's edge only
-  while its target has an allowed type (migration `0135_block_pointer_links`). No shipped block type
-  declares one yet.
 - `envoy-dispatch` serves `GET /livez`, answering 204 with no I/O, for liveness and startup probes
   that must not wait on or fail with Postgres, NATS or the file store; `/healthz` is unchanged.
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
@@ -1930,18 +1921,6 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
-
-- A typed block's id now reads back from the markdown Dispatch stores as the block holds it. A
-  browser can give a block any id, and the renderer wrote it `#` and the id as it was, so an id
-  holding a space, `.`, a quote or another character that ends the shortcut, such as `a b`, read
-  back as another id plus an undeclared attribute: the document's markdown no longer read back,
-  and a pointer from such a block was indexed as a pointer by a version write and as a mention by
-  the block-index reconciliation. Such an id is now written `id="a b"`, with `&`, `"`, line feeds
-  and carriage returns as character references, which the browser editor reads as well; an id the
-  shortcut holds is written `#id` as before. Go now reads every id the browser editor's shortcut
-  does (`q:1`, `décision`) and `id="…"`, and refuses an id written twice, an empty one, a shortcut
-  holding `&`, and a `blockId` attribute; a block schema may declare no attribute named `id` or
-  `blockId`.
 
 - An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
   from the text its search vector indexes - the question, the options' labels and descriptions,
