@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T16:25:00Z",
+  "completed": "2026-10-28T17:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -132,6 +132,14 @@
       "observed": "After the failed comment.delivery is recorded, exactly one Activity row reads 'could not deliver a comment mention to session:ghost' and none reads 'delivered a comment mention': 1 passed (4.9s).",
       "headSha": "ab61c138f1b9866a31c485860126d7317b6cc296",
       "negativeControl": "The same test with activity-model.ts at 50e5026d (before the fix): 1 failed, Expected 1, Received 0 for the 'could not deliver' row."
+    },
+    {
+      "criterion": "Mention delivery is not lost through a Dispatch restart: a mention a killed process claimed, whose resend then fails, still reaches its session (tester round 6; architect's ruling 2026-10-28T16:20Z).",
+      "surface": "The API handler with a killed process's claimed attempt (claim lapsed), a listener that answers nothing after the restart, the real outbox running throughout, then the next process's stranded passes; outbox claim/record path against Postgres",
+      "command": "go test ./internal/dispatch/api/ -run 'TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails|TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses|TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth|TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment|TestAClaimantWhoseResentMentionFailsStillHearsTheComment' -count=3; go test ./internal/dispatch/outbox/ -run 'TestABatchNeverMarksPublishedAnEventReopenedWhileItPublishedIt|TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey' -count=1",
+      "observed": "The resend fails, the settle reopens comment.created, and the outbox publishes s1's copy: exactly one copy (rounds 3-5's tests also pass, 3 of 3). The claimant case reaches s1 by the claimant copy. A batch publishing the row while the reopen commits leaves it unpublished and the next scan sends only s1's copy. The fallback copy carries agent.<session>.<comment>:<target>:<mode>.",
+      "headSha": "0ad38c9806b651f896fada51d0b56d7472501506",
+      "negativeControl": "At ab61c138 the red test failed (no copy) and the tester's crash.sh with the listener stopped left ses-a without c1; the claimant test fails with the reopen narrowed to suppressed_authors/route suppression; the claim test fails with recordBatch's guard removed."
     }
   ],
   "filesChanged": [
@@ -154,7 +162,10 @@
     "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/cmd/dispatch/shutdown_mentions_test.go",
     "packages/envoy/cmd/dispatch/shutdown_test.go",
+    "packages/envoy/cmd/listener/api.go",
+    "packages/envoy/cmd/listener/api_test.go",
     "packages/envoy/cmd/listener/dispatch_resolution_test.go",
+    "packages/envoy/internal/contracts/dedupe.go",
     "packages/envoy/internal/dispatch/api/agent_stream.go",
     "packages/envoy/internal/dispatch/api/agent_stream_test.go",
     "packages/envoy/internal/dispatch/api/ask_turn_test.go",
@@ -194,6 +205,7 @@
     "packages/envoy/internal/dispatch/events/stream.go",
     "packages/envoy/internal/dispatch/events/stream_test.go",
     "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/internal/dispatch/outbox/claim_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
@@ -228,7 +240,9 @@
     "Two forward merges of main (both on GitHub-reported conflicts), each fingerprinted on the PR. The second takes main's outbox/publisher.go whole (#2225) and drops this branch's claim-token edit and payload reopen in favour of extending main's leftToMention.",
     "A send that waits in its lane longer than model.DeliveryClaimLapse unclaimed is counted abandoned by main's outbox query, which then publishes the copy; the mention may also land (documented).",
     "The outbox settles an abandoned mention attempt only for a session or target a held-back copy asks about, so a mention no copy covers is still left to the stranded pass; settling also appends the comment.delivery receipt through the broker.",
-    "The outbox counts an attempt a sender claimed as abandoned only past model.StrandedMentionWindow (one hour, moved from the API to model so both read one value); within it a lapsed claim leaves the copy to the stranded pass without deferring. A resend that then fails for good leaves the session with whatever the first send delivered."
+    "The outbox counts an attempt a sender claimed as abandoned only past model.StrandedMentionWindow (one hour, moved from the API to model so both read one value); within it a lapsed claim leaves the copy to the stranded pass without deferring. A resend that then fails for good leaves the session with whatever the first send delivered.",
+    "The outbox's claim guard in recordBatch is back (a batch never marks published a row reopened after it read it), as agreed in writing with INFRA-590's implementer, because a failed mention now reopens comment.created.",
+    "The fallback copy carries the failed mention's dedupe key; a same-mode retry after the copy reached the session is then recorded duplicate and dropped (named in the PR body's risk line)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -237,6 +251,6 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 6,
-  "answersTest": "998a4bd23c775745ca9794df18d9f0e37c542001"
+  "round": 7,
+  "answersTest": "f0143601561128d6da3dcd70504c8fb5665d0bef"
 }
