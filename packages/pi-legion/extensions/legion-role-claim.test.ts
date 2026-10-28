@@ -14,7 +14,7 @@ const registered: Record<string, unknown> = JSON.parse(
   )
 );
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   nkeyAuthenticator,

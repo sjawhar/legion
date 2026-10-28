@@ -117,14 +117,15 @@ func (t linkReferenceDefinitions) Transform(node *ast.Paragraph, reader gmtext.R
 // later line closes.
 var unclosedFrontmatterKey = parser.NewContextKey()
 
-// frontmatterAttempt is a container's parser - a list's, a quote's or a footnote definition's -
-// that opens nothing at the document's level in a document opening with a front-matter opener no
-// later line closes (unclosedFrontmatterKey). The browser editor's parser tries front matter from
-// that opener to the document's end, and front matter is a construct no container opens in, so on
-// none of those lines does a container open at the document's level. With no line closing it, that
-// parser reads the lines again as the blocks they form without those containers: `---\n- a\n- b`
-// is a rule and one paragraph holding both lines, and `---\n> a` a rule and the paragraph `> a`.
-// Inside a typed block they open as anywhere else.
+// frontmatterAttempt is a container's parser - a list's, a quote's, a footnote definition's or a
+// typed block's - that opens nothing at the document's level in a document opening with a
+// front-matter opener no later line closes (unclosedFrontmatterKey). The browser editor's parser
+// tries front matter from that opener to the document's end, and front matter is a construct no
+// container opens in, so on none of those lines does a container open at the document's level.
+// With no line closing it, that parser reads the lines again as the blocks they form without those
+// containers: `---\n- a\n- b` is a rule and one paragraph holding both lines, `---\n> a` a rule
+// and the paragraph `> a`, and `---\n:::callout{kind="note" title="T"}\na\n:::` a rule and one
+// paragraph holding the three lines after it.
 type frontmatterAttempt struct{ parser.BlockParser }
 
 func (p frontmatterAttempt) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {

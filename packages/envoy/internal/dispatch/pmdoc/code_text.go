@@ -31,19 +31,25 @@ func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
 // block, a table - on a line that parser reads as ending them take it, and so does a quote, unless
 // such a container opens on the line right after the quote's blank line. A line that opens a
 // container instead (startsContainer: a quote, a list item of any list, or a definition) leaves
-// the blank line the block's, as do a typed block's fence and, but for a quote's, the document's
-// end. A last item and a definition nothing follows in its container end with the container around
-// them, and so does a last item whose next block lies outside its quote or typed block
-// (enclosingFlow): that container's own rule decides.
+// the blank line the block's, as do a typed block's own closing fence and, but for a quote's, the
+// document's end. A typed block no fence of its own closes ends where the container around it
+// ends, so that container's rule decides, as the browser editor's parser reads it. A last item and
+// a definition nothing follows in its container end with the container around them, and so does a
+// last item whose next block lies outside its quote or typed block (enclosingFlow): that
+// container's own rule decides.
 func blankTaker(code ast.Node, source []byte) ast.Node {
 	for container := code.Parent(); container != nil; container = container.Parent() {
 		switch container := container.(type) {
 		case *ast.Blockquote:
 			// The quote's blank lines are its own lines, so after one of them outside it, or at
-			// the end, the quote takes the code's last.
+			// the end, the quote takes the code's last - or, where the document ends in a line of
+			// the quote's markers alone (droppedQuoteLine), that line.
 			lines := code.Lines()
 			if next := nextBlock(container); next != nil && lines.Len() > 0 && startsContainer(next) &&
 				bytes.Count(source[lines.At(lines.Len()-1).Start:startOf(next)], []byte("\n")) == 1 {
+				return nil
+			}
+			if droppedQuoteLine(code, container, source) {
 				return nil
 			}
 			return container
@@ -65,10 +71,34 @@ func blankTaker(code ast.Node, source []byte) ast.Node {
 				return container
 			}
 		case *typedDirective:
-			return nil
+			if container.Closed {
+				return nil
+			}
 		}
 	}
 	return nil
+}
+
+// droppedQuoteLine reports whether source ends, right after code's last line, in a line with no
+// line feed that holds nothing past quote's markers: goldmark drops such a line, and the browser
+// editor's parser reads it as quote's last line, which quote takes in place of the code's. A line
+// with fewer markers than the quotes around code's lines stands outside quote.
+func droppedQuoteLine(code ast.Node, quote *ast.Blockquote, source []byte) bool {
+	lines := code.Lines()
+	if lines.Len() == 0 || nextBlock(code) != nil {
+		return false
+	}
+	tail := source[lines.At(lines.Len()-1).Stop:]
+	if len(tail) == 0 || bytes.IndexByte(tail, '\n') >= 0 {
+		return false
+	}
+	depth := 0
+	for node := ast.Node(quote); node != nil; node = node.Parent() {
+		if _, isQuote := node.(*ast.Blockquote); isQuote {
+			depth++
+		}
+	}
+	return bytes.Count(tail, []byte(">")) >= depth
 }
 
 // enclosingFlow is the nearest quote or typed block around node, or nil at the document's level.
