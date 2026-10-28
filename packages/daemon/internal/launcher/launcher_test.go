@@ -985,8 +985,9 @@ var testDatabase = ompsessions.Database{Instance: testInstance, Name: "legion_se
 // which the test owns, and check is the credential work the connector does before each of them, so
 // a test can refuse one dial and allow the next. While stalling (stallAt), every dial reaches a
 // silent upstream instead and stalls in a real TLS handshake, which, like the connector's own, ends
-// only when the dial's context does. Every dial records when it began and its context's deadline
-// (bounds), so a test reads the bound a dial was given from the dial itself, not from a clock.
+// only when the dial's context does. Every dial records when it began and its context's deadline,
+// and a stalled one when it ended (bounds), so a test reads the bound a dial was given from the
+// dial itself, and times only what the launcher did after it.
 type sessionDialer struct {
 	addr  string
 	check func() error
@@ -996,22 +997,29 @@ type sessionDialer struct {
 	silent string
 }
 
-// dialBound is what one Dial was given: the time it was entered and its context's deadline, if any.
+// dialBound is what one Dial was given: the time it was entered and its context's deadline, if
+// any, and for a stalled dial the time it returned.
 type dialBound struct {
 	entered     time.Time
 	deadline    time.Time
 	hasDeadline bool
+	ended       time.Time
 }
 
 func (d *sessionDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
 	bound := dialBound{entered: time.Now()}
 	bound.deadline, bound.hasDeadline = ctx.Deadline()
 	d.mu.Lock()
+	index := len(d.bounds)
 	d.bounds = append(d.bounds, bound)
 	silent := d.silent
 	d.mu.Unlock()
 	if silent != "" {
-		return stalledDial(ctx, silent)
+		conn, err := stalledDial(ctx, silent)
+		d.mu.Lock()
+		d.bounds[index].ended = time.Now()
+		d.mu.Unlock()
+		return conn, err
 	}
 	if d.check != nil {
 		if err := d.check(); err != nil {
@@ -1180,9 +1188,12 @@ func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
 // a start it gave up on, already queued behind that start, is read and obeyed, and the next
 // generation, once the instance answers, starts and is served.
 //
-// The bound is read from the stalled dial itself, its context's deadline against the time it was
-// entered, never from how long the reply took to arrive: everything around the dial (the
-// generation directory, the credential, the listen, the reply) runs as fast as the host lets it.
+// The bound has two halves, as proofTimeout splits the grace. The proof dial's half is read from
+// the stalled dial itself, its context's deadline against the time it was entered, never from a
+// clock around the whole start. The other half is the launcher's own work once the dial has given
+// up - the cleanup and the reply - timed from the dial's return to the reply's arrival: a refusal
+// that reached the daemon after it had stopped waiting fails here however correct the dial's
+// deadline was.
 func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
 	dialer := &sessionDialer{addr: idleUpstream(t)}
 	dialer.stallAt(silentUpstream(t))
@@ -1197,6 +1208,7 @@ func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits
 	stop := shimwire.LauncherStop{ID: "stop-1", Generation: 1, GraceMs: 1000}
 	g.send(stop)
 	got, ok := g.reply().(shimwire.LauncherStartResult)
+	answered := time.Now()
 	dialer.mu.Lock()
 	bounds := append([]dialBound(nil), dialer.bounds...)
 	dialer.mu.Unlock()
@@ -1207,6 +1219,8 @@ func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits
 		t.Fatal("generation 1's proof dial had no deadline")
 	} else if limit := proof.deadline.Sub(proof.entered); limit > grace/2 {
 		t.Fatalf("generation 1's proof dial was given %s, past half the %s stop grace", limit, grace)
+	} else if after := answered.Sub(proof.ended); proof.ended.IsZero() || after > grace/2 {
+		t.Fatalf("generation 1's refusal arrived %s after its proof dial gave up, past the other half of the %s stop grace", after, grace)
 	}
 	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
 		!strings.Contains(got.Error, "no answer within "+(grace/2).String()) {
