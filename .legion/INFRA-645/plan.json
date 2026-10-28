@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-645",
+  "completed": "2026-10-28T19:02:00Z",
+  "planDocument": "dispatch://INFRA-645/artifact/plan-md",
+  "base": "main a409c12811c1 (contains INFRA-643, sjawhar/legion#2453); build on INFRA-642 (sjawhar/legion#2448) if it has merged when implementation starts",
+  "summary": "Build C1-C4, exact and adding no resident memory: C1 MarkQuote's read-back takes applyLive's after-tree through a readBack parameter run inside mutate's guarded closure, removing the third fork read (marks.go:107) of every anchored write; C2 one liveWrite method returns the write's renderedTree when write.tree != nil && write.fork == fork, used by the version capture (mutation.go:1430), docTree (livewrite.go:690) and INFRA-642's applyMargin, heldTree unchanged; C3 the deferred release drops the fork whenever mutate panicked; C4 atomic counters beside renderPathCounts. Not built: N1 before-read reuse (no caller after INFRA-642), N2 incremental after-tree (not exact without a ygo export of changed types), N3 W9 fork copy (no exact zero-memory design). D1 (W9: spare fork memory and client-id bytes, or a ygo structural copy), D2 (INFRA-692's lock-free reader for fork reads), D3 (ygo changed-types export) go to the INFRA-512 architect; implementation does not wait for them.",
+  "changes": [
+    {"id": "C1", "files": ["packages/envoy/internal/dispatch/docs/mutation.go", "packages/envoy/internal/dispatch/docs/marks.go", "packages/envoy/internal/dispatch/docs/ask_block_text.go", "packages/envoy/internal/dispatch/docs/ask_lifecycle.go"], "what": "applyLive gains readBack func(left *pmdoc.Node) error; after mutate returns nil inside the same recoverMutation closure (INFRA-642: op.change's closure), left = treeOf(fork) then readBack(left); mutation.go:192 uses left when set. MarkQuote passes marks.go:111-118 unchanged and drops its read at :107; the other eight callers pass nil."},
+    {"id": "C2", "files": ["packages/envoy/internal/dispatch/docs/livewrite.go", "packages/envoy/internal/dispatch/docs/mutation.go", "packages/envoy/AGENTS.md"], "what": "(w *liveWrite) rendering(fork) (renderedTree, bool): the write's tree, markdown and offsets when w.tree != nil && w.fork == fork; replaces mutation.go:1430, used by docTree (.tree) and applyMargin if on main; heldTree untouched (no write-transaction caller; keeps the reader-owned-tree promise, AGENTS.md:569-573); docTree's doc comment and AGENTS.md:551-553 say its tree inside a write may be the write's own."},
+    {"id": "C3", "files": ["packages/envoy/internal/dispatch/docs/mutation.go"], "what": "the deferred release (mutation.go:117-128; INFRA-642 abandon) also runs whenever mutate panicked; ygo skips the update only when buildPhase2 itself panics (crdt/doc.go transactInternal, sjawhar/ygo v1.51.3-sami.4)."},
+    {"id": "C4", "files": ["packages/envoy/internal/dispatch/docs/tree.go"], "what": "atomic counters of fork tree reads made and avoided by C1/C2, beside renderPathCounts (tree.go:384), read only by tests and a measurement build."}
+  ],
+  "orderOfWork": [
+    "C4, C3, C1, C2, then tests 1-3 and the negative controls",
+    "base profile: state G and the gate in the PR body before any head run (Appendix A ignore lists not applied)",
+    "head build counted run k1",
+    "three alternating base/head runs on the architect's replay (INFRA-643's setup) or INFRA-639's if on main; forced-GC heap pairs",
+    "W9 measurement for D1 sent to notifications.role.legion-infra-infra-512-architect; build D1 (a) only if approved (criteria A8-A10)",
+    "write-up comment on dispatch://INFRA-512: N2 with the after-read share at head, N3, D1-D3 measurements and answers",
+    "doc comments, packages/envoy/AGENTS.md:551-573, changie fragment (go run github.com/miniscruff/changie@v1.26.0 new --kind Changed --custom Issue=pr<N>), no Dispatch key in commit subjects or changelog"
+  ],
+  "tests": [
+    "1 docs: MarkQuote makes two fork reads (counters), same Anchored, error precedence kept: outside schema, written mark missing, growth refusal, no change",
+    "2 docs: a Service test hook compares write.tree/markdown with a fresh treeOf/render at every forkLive exit, every C2 reuse and at publish, over anchored, suggestion (MarkQuote, SnapshotVersion, SuggestionKind, ProjectMark in one transaction), doc-edit+version and accept flows; counters show each reuse ran",
+    "3 docs: real-size corpus equivalence, skips without DISPATCH_TOKEN_CORPUS (LINUX specs, never committed) and needs DISPATCH_TEST_DATABASE_URL; a dump file usable at base and head compared with cmp, plus head-only hook and counter assertions"
+  ],
+  "acceptance": [
+    {"id": "A1", "criterion": "Merge rule (dispatch://INFRA-512/comment/63dcf4bd-d37e-47a6-9040-beeaea4cd364)", "surface": "Dispatch server (packages/envoy/cmd/dispatch) under the INFRA-512 replay: F=0.3, 1 read/write, 2 SSE, minutes 27-35, GOMAXPROCS=2, fresh restore of run/seeded.dump, inputs sha-checked", "command": "utime+stime from /proc/<pid>/stat over the step, 3 alternating base/head runs; G = base share of edge MarkQuote.func1 -> docs.treeOf (go tool pprof -peek 'docs\\.treeOf$') + docTree -> treeOf under -show_from SuggestionKind", "pass": "every head < every base, else the treeOf share under -show_from='docs\\.\\(\\*Service\\)\\.(MarkQuote|SuggestionKind)$' falls >= G/2 in median runs; a clearly higher head is explained; G/2 inside the base runs' spread of that share means a write-up, not a merge"},
+    {"id": "A2", "criterion": "An anchored write reads its document once after it writes", "surface": "same profiles; k1 counters", "command": "go tool pprof -peek 'docs\\.treeOf$'", "pass": "caller docs.(*Service).MarkQuote.func1 present at base, absent at head; C1 fired for every anchored comment of the step"},
+    {"id": "A3", "criterion": "Nothing anyone sees changes", "surface": "HTTP API of base and head builds on fresh restores of run/seeded.dump", "command": "on 10 LINUX specs: anchored comment, quote-anchored ask, suggestion comment, reply, accept, one-replace doc-edit; then GET text, blocks, versions", "pass": "only comment/ask/mark/session ids and timestamps normalised; anchored quotes and block ids, document token, markdown SHA-256, block tokens and ranges, version markdown byte-equal; tests 1-3 green; test 3 cmp identical"},
+    {"id": "A4", "criterion": "Nothing more stays in memory", "surface": "forced-GC heap (/debug/pprof/heap?gc=1) 20 s after the step, two base and two head", "command": "go tool pprof -diff_base <base> <head> -sample_index=inuse_space -top -focus='docs\\.'", "pass": "no positive in-use entry under applyLive, MarkQuote, docTree or the C2 method"},
+    {"id": "A5", "criterion": "Required checks and suites", "surface": "GitHub; the pod", "command": "lint, typecheck, test, pr-title; cd packages/envoy && go vet ./... && DISPATCH_TEST_DATABASE_URL=<local Postgres 17+pgvector> go test ./internal/dispatch/... ./cmd/dispatch/...", "pass": "green except main's known reds: recipients-claim e2e, TestDispatchConnectionsPerPodIsTheServers, mermaid.e2e.ts:194"},
+    {"id": "A6", "criterion": "Negative controls refuse", "surface": "the tests", "command": "dropRendering at livewrite.go:558-559 removed; readBack handed the before-tree; a docTree caller stamping ids; counters forced to no reuse; anchored block id one block off", "pass": "test 2, test 1, test 2 at publish, tests 1-2, test 3 cmp fail respectively"},
+    {"id": "A7", "criterion": "What is not built is written up and D1-D3 answered", "surface": "Dispatch", "command": "dispatch comment on INFRA-512; PR body quotes the architect's answers", "pass": "comment exists with measurements; answers quoted"},
+    {"id": "A8-A10", "criterion": "Only if D1 (a) is approved: spare removes the copy; caught-up spare equals a fresh fork; spare memory within the approved bound", "surface": "replay profiles; docs corpus test; forced-GC heaps per idle timer", "command": "as plan.md A8-A10", "pass": "as plan.md A8-A10"}
+  ],
+  "decisionsForArchitect": [
+    "D1 W9: (a) keep the published fork as the room's spare (6.5-27 MB per recently written room on the corpus, more with history; client id and clock continue across writes, so update bytes change) or (b) a ygo structural copy / faster whole-state apply (other repository) or (c) write-up; recommendation (c) unless the replay's warm copies exceed the merge rule's noise, and (b) measured as the no-memory option",
+    "D2 both W7 reads: INFRA-692's lock-free reader for the fork reads, by widening INFRA-692 or adopting it here once merged",
+    "D3 N2: whether a ygo export of a transaction's changed types is worth building"
+  ],
+  "requiredSkills": {
+    "implement": ["legion-worker: proof format, PR body (references/pr-body.md), the merge-rule evidence each proof carries", "dispatch: the write-up comment on INFRA-512 and fetching LINUX specs with doc-read", "envoy: sending D1's measurement to the INFRA-512 architect", "ce-simplify-code: the simplify pass the PR body records"],
+    "test": ["legion-worker: proof format and re-running A1-A6 from the tester's own builds", "dispatch: fetching the LINUX corpus with doc-read for test 3 and A3"],
+    "review": ["legion-worker: references/merge-gate.md and references/review-threads.md for the approval and threads"]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "No expected gain G; the built changes may save too little to measure (spread 9.62 s, share noise ~0.14 points).", "answer": "G defined from the base profile's MarkQuote.func1 -> treeOf edge plus docTree under SuggestionKind, stated before head runs; Appendix A ignore lists not applied; G/2 inside the base runs' spread of the share means a write-up, not a merge."},
+      {"finding": "W7 as named (the before and after reads) is not removed; INFRA-692's reader not considered.", "answer": "Plan says W7's pair needs memory or a ygo export (N2, D3); base W7 share restated with its command; INFRA-692's reader for forks is decision D2."},
+      {"finding": "C2's helper returned only a tree, so version capture would render again; applyMargin a fourth site.", "answer": "C2 returns renderedTree; capture keeps markdown and offsets; applyMargin uses it with the fork check."},
+      {"finding": "C2 exposes write.tree to readers; reader-owned-tree contract; no enforcement.", "answer": "heldTree left unchanged (no write-transaction caller); docTree's internal callers audited read-only; test 2's hook compares at every forkLive exit, reuse and publish; negative control for a stamping caller; AGENTS.md:551-573 updated."},
+      {"finding": "Panic after integration may leave a moved fork with write.tree.", "answer": "ygo emits the update on a callback panic (transactInternal) except when buildPhase2 panics; C3 releases on any panic; no test can provoke buildPhase2's panic, so none is claimed."},
+      {"finding": "Sequencing with INFRA-642, INFRA-644, INFRA-646.", "answer": "Build on 642 if merged; second to merge adapts; base re-run if main moves; 644's replica untouched; 646's call sites pass nil."},
+      {"finding": "X7 could ride without tests, acceptance or the client-id decision.", "answer": "D1 includes client id and CRDT bytes for Sami; architect channel named; A8-A10 apply only if approved."},
+      {"finding": "T3 base dump impossible as written; may not exercise C2.", "answer": "Split into a dump file usable at both revisions and head-only assertions; flows mirror the API order in one transaction; DB requirement stated."},
+      {"finding": "Acceptance criteria not machine-decidable (A1 clauses, A2 peek, A3 normalisation, A4 bound, A5 known reds).", "answer": "Each rewritten with exact commands, normalised fields, the heap diff check and the named known reds."},
+      {"finding": "No negative controls.", "answer": "Five controls added (A6)."},
+      {"finding": "Replay and inputs not pinned.", "answer": "Pinned as INFRA-643 ran it; INFRA-639 allowed if on main, recorded."},
+      {"finding": "ygo claims unverified by the analyst.", "answer": "Plan cites sjawhar/ygo v1.51.3-sami.4 files (crdt/transaction.go:20, yxml.go:388/649, store.go:67, merge.go:24, doc.go transactInternal), read by the planner and a scout."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
