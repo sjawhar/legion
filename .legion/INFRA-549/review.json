@@ -2,33 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T15:01:00Z",
-  "round": 5,
-  "reviewedCodeHead": "16234e5e20b8",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T15:29:30Z",
+  "round": 6,
+  "reviewedCodeHead": "e105aef3e044",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 1,
-  "roundFourThreads": {
-    "PRRT_kwDORFy7ds6xKae8": "partly fixed in c85984cdfb72 (first start correct); restart retry regression stands; I unresolved the thread",
-    "PRRT_kwDORFy7ds6xKafG": "accepted: fixed in 16234e5e20b8 (250m floor for the hub's pod shape)"
-  },
+  "threads": "All ten review threads carry my answer and are resolved; PRRT_kwDORFy7ds6xKae8 and PRRT_kwDORFy7ds6xLgkd accepted as fixed in e105aef3e044 (a restart keeps its ports), PRRT_kwDORFy7ds6xKafG fixed in 16234e5e20b8 (250m floor).",
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
-      "description": "hubServer.start draws three new ports on any retry (:447-450), also for the restarts in phases (b) :1074, (c) :1125, (e) :1272 and (f) :1320. The exporters' scrape targets (:1090) and the urls snapshot (:851-854) keep the old ports, so a restart that has to retry makes a later assertion fail (awaitLastSeqs at :1127, connectHub(urls[:1]) at :1155). At 253b920c a restart retried on the same ports. Fix: a restart keeps its ports (draw only on the first start), and the comment at :440-444 says why."
-    },
     {
       "severity": "minor",
       "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
-      "description": "Cleanup: loopbackPorts.mu guards a draw that only the test goroutine makes (draw calls require, so it cannot run elsewhere)."
+      "description": "Cleanup, not a defect: loopbackPorts.mu (:486) guards a draw only the test goroutine makes. Fast-follow, with podPriorityClass's duplicate of newDispatchDisruption's rule."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 16234e5e (Medium: restart retry moves ports that the exporters and urls hold). Floor and ratio verified against GKE docs and the chart.",
-    "codeQuality": "Verdict: CHANGES at 16234e5e (same restart finding; loopbackPorts.mu unneeded, cleanup)."
+    "deepReview": "Verdict: APPROVE at e105aef3 (first := s.proc == nil true only on a first start; no stale port consumer; comments accurate; no finding).",
+    "codeQuality": "Verdict: APPROVE at e105aef3 (no finding; loopbackPorts.mu still present, cleanup only)."
   },
-  "ci": "legion/INFRA-546 requires no check. At 16234e5e every pull_request run is queued; 253b920c's Legion Envoy and Contracts run was cancelled. Compare 16234e5e...96cddd2a handoffsOnly true, 2 files.",
-  "verifiedLocally": "At 16234e5e: gofmt clean on gcp, go vet -tags pulumilive,natslive ./gcp/ ok, go test -run TestClusteredNatsHub ./gcp/ ok, go test -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' ./gcp/ ok (36.4 s; leader kill, exactly-once 1000, reload with cid kept, (e) and (f) refusals)."
+  "ci": "legion/INFRA-546 requires no check and is not protected. At e105aef3 every pull_request run is queued or pending. Compare e105aef3...f7094da7 handoffsOnly true, 2 files. Known outside this PR: TestDispatchConnectionsPerPodIsTheServers (83 vs 84) fails at the base and on main, reported to the architect.",
+  "verifiedLocally": "At e105aef3: gofmt clean on gcp, go vet -tags pulumilive,natslive ./gcp/ ok, go test -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' ./gcp/ ok (36.7 s). Round 5's unit runs at 16234e5e cover the unchanged product code."
 }
