@@ -627,6 +627,21 @@ jobs:
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
+              # The dev OIDC issuer the multiprocess job's sign-in step signs the browser in at
+              # (e2e/run-signin-issuer.sh), and the packages it compiles beyond those above
+              # (`go list -deps ./cmd/dev-oidc-issuer` in packages/envoy).
+              - 'packages/envoy/cmd/dev-oidc-issuer/**'
+              - 'packages/envoy/internal/broker/enroll/**'
+              - 'packages/envoy/internal/broker/exchange/**'
+              - 'packages/envoy/internal/broker/machine/**'
+              - 'packages/envoy/internal/broker/oauth/**'
+              - 'packages/envoy/internal/broker/oauthstore/**'
+              - 'packages/envoy/internal/broker/oauthwire/**'
+              - 'packages/envoy/internal/broker/policy/**'
+              - 'packages/envoy/internal/broker/proof/**'
+              - 'packages/envoy/internal/broker/record/**'
+              - 'packages/envoy/internal/broker/secrets/**'
+              - 'packages/envoy/internal/broker/store/**'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
               # dev-postgres.test.sh (envoy-go) reads too.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
@@ -1066,6 +1081,12 @@ jobs:
         # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
         # multiprocess specs through the round-robin proxy.
         run: bun run e2e:multiprocess
+        working-directory: packages/dispatch
+      - name: Browser-test a sign-in across two server processes
+        # Both processes sign people in through the dev OIDC issuer (DISPATCH_E2E_SIGNIN=oidc,
+        # e2e/harness-signin.ts), and its one spec starts a sign-in on A and completes it on B. The
+        # step before built the dashboard; B serves A's build, which this spec does not tell apart.
+        run: DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()

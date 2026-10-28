@@ -1207,8 +1207,9 @@ this paragraph is where the harness-port rule lives — `README.md` and the `doc
 learnings point here rather than restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
-`PLAIN_HTTP_PORT`, `FAKE_BROKER_PORT`, and two-process mode's `DISPATCH_E2E_PORT_A` and
-`DISPATCH_E2E_PORT_B`, for every reader in `e2e/`, the Playwright config and the Bun listeners
+`PLAIN_HTTP_PORT`, `FAKE_BROKER_PORT`, two-process mode's `DISPATCH_E2E_PORT_A` and
+`DISPATCH_E2E_PORT_B`, and the sign-in issuer's `DISPATCH_E2E_SIGNIN_ISSUER_PORT` (below), for
+every reader in `e2e/`, the Playwright config and the Bun listeners
 included. `harnessPorts()` reads the environment when it is called, not when the
 module is imported, because the starters import it before the listeners have reported. Unset or
 empty is port `0`: the listener serves on a port the OS chooses and holds until it serves (the
@@ -1223,7 +1224,7 @@ are refused together, naming both: each port passes a per-port check on its own,
 consumer would otherwise fail in its own words — the second Bun listener dying on `EADDRINUSE`.
 Because the check lives with the resolution, those listeners refuse it too, not only the
 Playwright config. A's and B's ports take part in it only in two-process mode, the one mode that
-listens on them.
+listens on them, and the issuer's only under `DISPATCH_E2E_SIGNIN=oidc`.
 
 `e2e/harness-start.ts` is the harness's one starter. It starts the rows of
 `e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its
@@ -1291,13 +1292,43 @@ requires B to know them. The proxy shares its relay with the plain-HTTP proxy
 (`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it),
 and `e2e/__tests__/round-robin-proxy.test.ts` (`bun run test`) runs it against two Bun servers.
 Specs named `*.multiprocess.e2e.ts` run only there: the default run ignores them, and two-process
-mode runs them alone, in the `chromium` project. `bun run e2e:multiprocess` builds the dashboard
+mode runs them alone (the sign-in spec only under `DISPATCH_E2E_SIGNIN=oidc`, below), in the
+`chromium` project. `bun run e2e:multiprocess` builds the dashboard
 twice (`web/dist`, then `web/dist-b` with `DISPATCH_BUILD=e2e-b`, so its entry chunk differs from
 A's even where CI sets `GITHUB_SHA`; `web/vite.config.ts` takes `DISPATCH_BUILD` first) and runs
 Playwright through `e2e/run.ts` in two-process mode with B on `dist-b`, passing on extra arguments
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). CI's
 `dispatch-browser-multiprocess` job runs it. Two-process mode starts its own servers, so the
 Playwright config refuses it with `PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
+
+`DISPATCH_E2E_SIGNIN` picks how the harness's servers sign a person in (`e2e/harness-signin.ts`):
+unset or empty is dev sign-in, above, and `oidc` is the production sign-in, through
+`packages/envoy/cmd/dev-oidc-issuer`; any other value is refused by every importer and by
+`run-server.sh`, naming the allowed ones, and every importer refuses `oidc` without
+`DISPATCH_E2E_PROCESSES=2`. Under `oidc` the listener table starts `e2e/run-signin-issuer.sh`
+after the fakes and before the proxy: it builds the issuer as `run-server.sh` builds the server
+(`packages/envoy/dev-oidc-issuer-e2e`, gitignored, under its own lock), serves the code flow for
+the client `dispatch-e2e` with the secret the harness generates per run, which the script hands
+the issuer through a pipe, never a file or an argv, and signs in `alice@example.com`, a member of
+the group `dispatch-e2e-people`, at every authorization. It
+reports `issuer listening url=http://127.0.0.1:<port>` and the harness reads
+`DISPATCH_E2E_SIGNIN_ISSUER_PORT` from it; the issuer cannot bind a given port, so that variable set
+is refused. Each `run-server.sh` then takes `DISPATCH_E2E_SIGNIN_ISSUER_PORT`,
+`DISPATCH_E2E_SIGNIN_CLIENT_ID`, `DISPATCH_E2E_SIGNIN_CLIENT_SECRET`, `DISPATCH_E2E_SIGNIN_GROUP`
+and `DISPATCH_E2E_SIGNING_KEY` (one per run, in place of the dev shared key) as the server's
+`DISPATCH_SIGNIN_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_GROUP` and `DISPATCH_SIGNING_KEY`,
+requires them all, and sets no `DISPATCH_DEV_SIGNIN`. The Playwright config runs
+`e2e/signin.multiprocess.e2e.ts` alone under `oidc` and leaves it out otherwise, and
+`e2e/preflight.ts` skips its dev sign-in check there. The spec pins `/auth/start` to A and
+`/auth/callback` to B with two `dispatch-e2e-process` cookies, each with that path, since a route's
+header reaches only a navigation's first request and the callback is the issuer's redirect, and
+checks that the browser lands on the page `next` named, signed in on both processes, and that
+`/_proxy/requests` saw each served where it was pinned; against a server that kept the sign-in in
+the memory of the process that started it, B answers the callback 400 `invalid or expired state`.
+`e2e/__tests__/harness-signin.test.ts` (`bun run test`) holds the refusals and the listener table's
+wiring. Run it as `DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess`; CI's
+`dispatch-browser-multiprocess` job runs it after the dev sign-in specs, on the dashboard the step
+before built.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port

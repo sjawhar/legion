@@ -4,6 +4,7 @@ import { baseUrl } from "./api";
 import { targetedListeners } from "./harness-listeners";
 import { harnessPorts, harnessVariables } from "./harness-ports";
 import { harnessProcessCount } from "./harness-processes";
+import { harnessSignIn } from "./harness-signin";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
@@ -23,6 +24,10 @@ const phoneTagged = /(^|\s)@phone(\s|$)/;
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
 // runs them alone, in Chromium, since every other spec runs against one server already.
 const multiprocessSpecs = /\.multiprocess\.e2e\.ts$/;
+// The one spec of DISPATCH_E2E_SIGNIN=oidc (e2e/harness-signin.ts), whose servers sign people in
+// through the dev OIDC issuer alone: it runs only then, and every other multiprocess spec, which
+// signs in through dev sign-in, runs only without it.
+const signInSpecs = /\/signin\.multiprocess\.e2e\.ts$/;
 if (harnessProcessCount === 2 && process.env.PLAYWRIGHT_BASE_URL) {
   throw new Error(
     "DISPATCH_E2E_PROCESSES=2 runs against two Dispatch servers of this run's own behind the " +
@@ -102,9 +107,15 @@ if (!reuseServers && (!listing || unset.length < targeted.length)) {
 // timeout when that deadline is its observable contract (the keyboard chord-expiry test).
 const expectTimeout = 15_000;
 
-// Two-process mode's one project: the multiprocess specs, in Chromium.
+// Two-process mode's one project: the multiprocess specs, in Chromium, the sign-in spec alone under
+// DISPATCH_E2E_SIGNIN=oidc and every other one without it.
 const multiprocessProjects = [
-  { name: "chromium", testMatch: multiprocessSpecs, use: { ...devices["Desktop Chrome"] } },
+  {
+    name: "chromium",
+    testMatch: harnessSignIn === "oidc" ? signInSpecs : multiprocessSpecs,
+    testIgnore: harnessSignIn === "oidc" ? undefined : signInSpecs,
+    use: { ...devices["Desktop Chrome"] },
+  },
 ];
 
 export default defineConfig({

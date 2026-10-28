@@ -135,12 +135,27 @@ port, each is used as given when set and chosen by the OS when unset; the proxy 
 the servers, since both serve its origin, so A's and B's ports are held first (a
 `held-port.py keep` each) and each server serves on its keeper's port. Both servers sign
 cookies with one key the run generates, so a person stays signed in whichever answers. It runs
-only the `*.multiprocess.e2e.ts` specs, in Chromium, which the default run leaves out; arguments
-after `--` reach Playwright (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
+the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which the default run
+leaves out; arguments after `--` reach Playwright
+(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
 pins a request to one process with the `X-Dispatch-E2E-Process: a|b` header or a whole browser
 context with the `dispatch-e2e-process` cookie, and reads which process served what from the
 proxy's `/_proxy/requests` and `/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole
 contract. Any `DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
+
+`DISPATCH_E2E_SIGNIN=oidc` signs people in as a deployment does instead of through dev sign-in:
+the harness also starts `packages/envoy/cmd/dev-oidc-issuer` (`e2e/run-signin-issuer.sh`), and
+both servers take it as their sign-in issuer, under one `DISPATCH_SIGNING_KEY` per run. Only
+`e2e/signin.multiprocess.e2e.ts` runs then, which starts a sign-in at `/auth/start` on Dispatch A
+and completes it at `/auth/callback` on B:
+
+```bash
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess
+```
+
+It needs `DISPATCH_E2E_PROCESSES=2`, which `e2e:multiprocess` sets; any value other than `oidc`
+or unset is refused.
 
 ## Local instance
 

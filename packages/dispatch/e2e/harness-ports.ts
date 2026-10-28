@@ -9,7 +9,9 @@
  * proxy, which only the TypeScript harness reads. `DISPATCH_E2E_PORT_A` and `DISPATCH_E2E_PORT_B`
  * are Dispatch A's and B's in two-process mode (`e2e/harness-processes.ts`), where
  * `DISPATCH_E2E_PORT` is the round-robin proxy's; unset, each is held before the proxy starts, so
- * the proxy can name it (`e2e/harness-start.ts`).
+ * the proxy can name it (`e2e/harness-start.ts`). `DISPATCH_E2E_SIGNIN_ISSUER_PORT` is the dev
+ * OIDC issuer's under `DISPATCH_E2E_SIGNIN=oidc` (`e2e/harness-signin.ts`), which always serves
+ * on a port the OS chooses: `e2e/run-signin-issuer.sh` refuses it set.
  *
  * A set value that is not a port in canonical decimal is refused naming its variable, because
  * every later consumer turns it into something that names nothing: `net.connect` raises
@@ -26,6 +28,7 @@
  */
 
 import { harnessProcessCount } from "./harness-processes";
+import { harnessSignIn } from "./harness-signin";
 
 /** Each harness listener's port variable. */
 export const harnessVariables = {
@@ -36,6 +39,7 @@ export const harnessVariables = {
   fakeEnvoy: "FAKE_ENVOY_PORT",
   fakeGithub: "FAKE_GITHUB_PORT",
   plainHttp: "PLAIN_HTTP_PORT",
+  signinIssuer: "DISPATCH_E2E_SIGNIN_ISSUER_PORT",
 } as const;
 
 export type HarnessListenerKey = keyof typeof harnessVariables;
@@ -65,7 +69,7 @@ function harnessPort(env: NodeJS.ProcessEnv, variable: string): HarnessPort {
  *  every consumer would then fail in its own words — the second listener dying on `EADDRINUSE`
  *  without naming a variable. Refused here, where the ports resolve, so every caller refuses it
  *  the same way, including the Bun listeners. A's and B's ports take part only in two-process
- *  mode, the one mode that listens on them. */
+ *  mode, the one mode that listens on them, and the issuer's only under `DISPATCH_E2E_SIGNIN=oidc`. */
 export function harnessPorts(
   env: NodeJS.ProcessEnv = process.env
 ): Record<HarnessListenerKey, HarnessPort> {
@@ -77,11 +81,13 @@ export function harnessPorts(
     fakeEnvoy: harnessPort(env, harnessVariables.fakeEnvoy),
     fakeGithub: harnessPort(env, harnessVariables.fakeGithub),
     plainHttp: harnessPort(env, harnessVariables.plainHttp),
+    signinIssuer: harnessPort(env, harnessVariables.signinIssuer),
   };
   const given = Object.values(ports).filter(
     (entry) =>
       entry.port !== 0 &&
-      (harnessProcessCount === 2 || (entry !== ports.dispatchA && entry !== ports.dispatchB))
+      (harnessProcessCount === 2 || (entry !== ports.dispatchA && entry !== ports.dispatchB)) &&
+      (harnessSignIn === "oidc" || entry !== ports.signinIssuer)
   );
   const collisions = [...new Set(given.map((entry) => entry.port))]
     .map((port) => ({
