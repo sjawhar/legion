@@ -2,26 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-532",
-  "completed": "2026-10-28T21:32:23Z",
-  "round": 2,
+  "completed": "2026-10-28T23:15:57Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "d4201ff02ab5",
+  "reviewedCodeHead": "c7ed921aa5aa",
   "critical": 0,
-  "important": 1,
+  "important": 3,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/VersionView.tsx",
-      "description": "The INFRA-138 architect asked for this fix in this PR (21:20Z). A past version's comment link can land at the top of the page on first load. Cause, read in the code: ArtifactDocument.tsx:59-70 builds `highlight` as a new object on each render, and VersionView's effect lists `highlight` as a dependency (VersionView.tsx:119). So each parent render destroys the editor, builds a new one, and calls focusMark again. The tester traced 2-3 mounts per load, with the page collapsing to 720 px between them, and 2 misses in 45 chromium runs with a held diagram. Each remount also cancels the editor's draws, which can stop the worker while it draws. Fix: mount the version's editor once, for example by keying the effect on the highlight's id/quote/by and not on the object, or call focusMark after the final layout. Keep the tester's no-diagram row, and add a held-diagram row that checks the first landing. The reply-composer preventScroll change stays only if a row shows it is needed."
+      "file": "(pull request)",
+      "description": "GitHub reports #2472 as CONFLICTING with main, which has 39 commits past the fork point adee0aba. Files both sides change: biome.json, packages/dispatch/AGENTS.md, packages/dispatch/e2e/mermaid.e2e.ts, packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx, packages/dispatch/web/src/features/refs/mermaid-diagrams.ts, packages/dispatch/web/vite.config.ts, packages/proof-editor/AGENTS.md. GitHub runs no checks on a conflicting head, and the merge cannot happen. Reintegrate main by a merge, then rerun the proof on the merged head."
+    },
+    {
+      "severity": "important",
+      "file": "(CI)",
+      "description": "No CI ran at the code head. The newest pull_request run is at f3f2427a (lint, typecheck, test and pr-title passed there). 496afccf and c7ed921a change packages/dispatch/e2e/mermaid.e2e.ts and were pushed under a head that carries skip-checks: true, so the compare from f3f2427a to 59c090e1 is not handoffs-only. The forward-merge push carries no trailer and starts the runs. The four required checks must be green at that code head before approval (the INFRA-138 architect, 23:10Z)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/doc/VersionView.test.tsx",
+      "description": "The remount fix (f3f2427a) is held only by browser rows that catch it some of the time: the round-2 VersionView failed only 5 of 40 runs. One CI pass would likely miss a revert of the memo, or a lint-driven re-add of `highlight` to the effect's dependencies. Add a unit case: rerender with an equal new highlight object and expect `editors` to stay at length 1; rerender with a different comment and expect a second editor."
     }
   ],
-  "roundOneThreads": "All three threads answered as accepted: PRRT_kwDORFy7ds6xR5ZW (fixed in 73007702), PRRT_kwDORFy7ds6xR5Zf (fixed in 73007702), PRRT_kwDORFy7ds6xR5Zk (fixed in 8604eca5). The implementer has already resolved all three.",
-  "cleanupFastFollow": "e2e/mermaid.e2e.ts is now 1166 lines: move the worker/scroll init-script helpers into their own e2e module. Other items: focusInEditor's unused `refocus` parameter; the view's duplicated clear-preview statements (showPlainLayout and the unavailable branch); an Exclude<MermaidDrawing, {unavailable}> type for the cache; the duplicated failing-worker row text.",
+  "roundTwoThreads": "PRRT_kwDORFy7ds6xVEJw answered as accepted (fixed in f3f2427a); the implementer has already resolved it.",
+  "cleanupFastFollow": "The VersionView.tsx:55-59 comment names ArtifactDocument as the parent, but the parent is ProofDocument; state the rule in the present tense. Move the no-diagram version row and recordScrollEachFrame to doc.e2e.ts. Make the scroll-each-frame row fail on a large drop, not only on a drop to 0. Round-2 items still stand: split mermaid.e2e.ts (now 1226 lines), remove focusInEditor's unused refocus parameter, merge the view's two clear-preview copies, use an Exclude type for the cache.",
   "thermonuclear": {
-    "head": "d4201ff02ab5",
-    "deepReview": "APPROVE. No Medium or High. One Minor: no unit test covers focusInEditor's single re-run slot or its unbind rule. Checked and clear: fail() runs draws synchronously, a cancel can run during settle now that the view has no counter, `unavailable` never reaches the cache, the reader-action listeners do not cancel the triggering gesture, unbind and rebind.",
-    "codeQuality": "Cleanup-only findings (see cleanupFastFollow). No correctness defect."
-  },
-  "ci": "At code head d4201ff0 (newest pull_request run head; the compare to 7692f679 shows handoffsOnly true, 2 files), read at 21:2xZ: lint, typecheck, build success; test in progress; dispatch and the Go suites queued. Not waited on in a changes-requested round."
+    "head": "c7ed921aa5aa",
+    "deepReview": "APPROVE. No Medium or High. Minor: no deterministic regression lock (raised above), and the scroll row only catches a drop to exactly 0. Checked: the effect re-runs on a change of comment, quote, markdown, blockSchema, user or createEditor, and on nothing else; blockSchema and userQuery.data stay stable through structural sharing.",
+    "codeQuality": "The memo is the simplest key that passes lint. Findings are a deterministic unit test, the row's placement and the comment wording."
+  }
 }
