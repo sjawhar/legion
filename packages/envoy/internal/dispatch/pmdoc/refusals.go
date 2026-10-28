@@ -83,12 +83,19 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 			return refuse("a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph")
 		}
 		// The browser editor's parser reads a typed block as a container, so a definition inside
-		// one reads as one inside a quote does. Where a list item also stands around it, inside the
-		// typed block or outside it, that parser counts the definition's lines and the blank lines
-		// next to it otherwise when it decides whether the item is spread.
+		// one reads as one inside a quote does, but only one holding paragraphs alone is read alike
+		// by both parsers: where a list item stands around it, inside the typed block or outside
+		// it, or where it holds any other block (a list, a quote, code), that parser counts the
+		// definition's lines and the blank lines among them otherwise when it decides whether a
+		// list item is spread.
 		if _, typed := ancestor[*typedDirective](current); typed {
 			if _, item := ancestor[*ast.ListItem](current); item {
 				return refuse("a footnote definition inside a typed block with a list item around it, whose spacing the browser editor reads otherwise")
+			}
+			for child := current.FirstChild(); child != nil; child = child.NextSibling() {
+				if _, paragraph := child.(*ast.Paragraph); !paragraph {
+					return refuse("a footnote definition inside a typed block holding a block other than a paragraph, whose spacing the browser editor reads otherwise")
+				}
 			}
 		}
 	case *typedDirective:

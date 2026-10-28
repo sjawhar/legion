@@ -2019,8 +2019,10 @@ container, so a reference anywhere in the document reaches it. One inside a type
 item around it, inside the typed block or outside it, is refused, since that parser counts the
 definition's lines and the blank lines next to it otherwise when it decides whether the item is
 spread: it reads the first line of a definition opening on a later line, or of an empty one, as a
-blank line of the typed block, and a blank line inside the typed block as spacing the item. A
-definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
+blank line of the typed block, and a blank line inside the typed block as spacing the item. So
+is one inside a typed block that holds any block but paragraphs (a list, a quote, code): that
+parser reads a list there spread where this one stores it tight, so only a definition of
+paragraphs is read alike by both. A definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
 is stored as that parser reads it, its escapes and character references decoded
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
