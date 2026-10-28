@@ -2,39 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-28T15:12:00Z",
-  "round": 13,
-  "testedHead": "8a2bfae7e21832f55d84a5723e33eba44159c976 (code head; ec8efe54d8ef603f397063888d2a00bd16b96f76 above it changes only .legion/INFRA-220/implement.json and is what CI, the image and the live runs built). Red test 70f689e2 is above it.",
+  "completed": "2026-10-28T16:14:00Z",
+  "round": 14,
+  "testedHead": "f319ebaa648a7a737277c54b63d3e05a9d163426 (code head; 3efecd8d above it changes only .legion/). Red test 93354c7b is above it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 12's three items are fixed at 8a2bfae7e21832f55d84a5723e33eba44159c976. (1) `git grep -n 'LEGION_ANTHROPIC_API_KEY\\|ANTHROPIC_API_KEY_HDO\\|OSSV_LEGION_GATEWAY_KEY' 8a2bfae7e21832f55d84a5723e33eba44159c976 -- scripts docs AGENTS.md packages` finds nothing, and README 748-762 now fetches '<GATEWAY_KEY_NAME>' through '<runner>'. (2) The seven fragments are pr2186-<slug>.yaml, each with `custom: Issue: pr2186`. (3) No '+' line the branch adds under docs/solutions, packages/*/CHANGELOG.md or .changes carries a tracker key (grep for (INFRA|LEGION|LINUX|BET)-<n>: nothing)."
+    "how": "Round 13's two failures are fixed at f319ebaa648a7a737277c54b63d3e05a9d163426. `cd scripts/e2e/lib && bun test model-endpoint.test.ts claude-backend-key-runner.test.ts app-logins.test.ts install-key-file-model-route.test.ts` -> 45 pass, 0 fail. `cd packages/pi-legion && bun test scripts/skill-scenarios/rig.test.ts -t install_model_route` -> 6 pass, 0 fail. No '/v1/key/info' is left in scripts/e2e except the red test's explanatory comment. From this pod with no key, the cluster gateway's /key/info answers 401 (the route exists). bash -n ok on both proofs, model-endpoint.sh and session-db.sh."
   },
   "failures": [
     {
-      "criterion": "Each live proof's transcript names the gateway key's alias (the architect's requirement: alias legion-infra), the run's only record of which key the gateway saw",
-      "evidence": "lib/model-endpoint.sh:68 asks `$endpoint/v1/key/info`. The LiteLLM gateway serves key info at `/key/info`, not under /v1. From this pod, with no key, against the cluster gateway: /v1/key/info -> 404 (the same as /nonexistent-path -> 404), /key/info -> 401, /v1/models -> 401. With the key, the INFRA lead read /key/info -> key_alias legion-infra. So both live runs at ec8efe54d8ef603f397063888d2a00bd16b96f76 note 'names no key alias … GET /v1/key/info answered 404' instead of 'the model key is legion-infra' (dispatch://INFRA-220/artifact/infra220-ec8efe54-tmux-transcript-log, -sandbox-transcript-log). Red test 70f689e2: `cd scripts/e2e/lib && bun test model-endpoint.test.ts` -> 0 pass, 1 fail ('names no key alias … GET /v1/key/info answered 404'). With `/v1/key/info` changed to `/key/info` in model-endpoint.sh it passes: 1 pass. The comments and README lines that name `/v1/key/info` (claude-backend-tmux.sh:33, claude-backend-sandbox.sh:113, model-endpoint.sh:40/73/75, README.md:847/1050/3310) need the same correction."
-    },
-    {
-      "criterion": "The branch breaks no existing test of a script it changes",
-      "evidence": "CI run 40682524430 (Legion Envoy and Contracts, job pi-legion) at ec8efe54d8ef603f397063888d2a00bd16b96f76 failed 2 tests in packages/pi-legion/scripts/skill-scenarios/rig.test.ts: 'a setup that fails after install_model_route > cmd_profile removes the label's model-key and marks nothing ready' and '> judge_profiles removes both profiles' model-key and marks nothing ready'. Cause: f5d3866c made scripts/e2e/lib/install-key-file-model-route.sh source lib/model-endpoint.sh (line 63), and the test's fixture checkout copies only install-key-file-model-route.sh (rig.test.ts:128-131), so the installer fails with 'the model route (key-file) could not be installed'. Reproduced here: `cd packages/pi-legion && bun test scripts/skill-scenarios/rig.test.ts -t 'a setup that fails after install_model_route'` -> 0 pass, 2 fail. With the fixture also copying model-endpoint.sh: 2 pass, 0 fail. These existing tests are the red tests for this failure. Main's runs of that workflow are green before #2186."
+      "criterion": "The tmux proof refuses, in its prerequisites, a devbox whose Bun the run's own build cannot use",
+      "evidence": "Since main's #2423 (merged in at f319ebaa648a7a737277c54b63d3e05a9d163426), claude-backend-tmux.sh:623 runs `bun packages/claude-envoy/scripts/build.ts --out …`, and build.ts refuses any Bun but the one .bun-version pins (1.4.4: 'refusing to build under Bun 1.4.2: .bun-version pins 1.4.4'). The prerequisites never check it, so the INFRA lead's first tmux attempt at f319ebaa648a7a737277c54b63d3e05a9d163426 failed at the build line in the rig, on the devbox's default Bun 1.4.2. Red test 93354c7b: `cd scripts/e2e/lib && bun test claude-backend-bun-pin.test.ts` -> 0 pass, 1 fail. A stand-in bun reporting another version reaches 'FAIL prerequisites: lib/app-logins.ts printed no implement App login' instead of a prerequisites refusal naming 1.4.4. With a check after the tool list comparing `bun --version` to .bun-version it passes, and claude-backend-key-runner.test.ts still passes. The README needs a line that the proofs need the pinned Bun on PATH."
     }
   ],
-  "failed": 2,
+  "failed": 1,
   "liveRuns": [
     {
-      "run": "(a) claude-backend-tmux.sh",
-      "result": "PASS, 14:05:31-14:16:34Z, exit 0, 10/10 ok, binaries stamped ec8efe54d8ef603f397063888d2a00bd16b96f76 modified=false. Gateway only: 'checks keys: GET /v1/models with no key answered 401'. Alias not named (failure 1). No anthropic.com in the transcript. LEGION_E2E_ANTHROPIC_KEY_FILE was the gateway key file. I read dispatch://INFRA-220/artifact/infra220-ec8efe54-tmux-transcript-log."
+      "run": "(a) claude-backend-tmux.sh at f319ebaa648a7a737277c54b63d3e05a9d163426",
+      "result": "PASS, 15:48:02-15:56:37Z (second attempt, with the pinned Bun 1.4.4 first on PATH), exit 0, 10/10 ok (prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session, every-launch-endpoint-checked). Binaries stamped f319ebaa648a7a737277c54b63d3e05a9d163426 modified=false. Gateway only: 'checks keys: GET /v1/models with no key answered 401' and 'the model key is legion-infra: … (GET /key/info)'. No anthropic.com. I read dispatch://INFRA-220/artifact/infra220-f319ebaa-tmux-transcript-log."
     },
     {
-      "run": "(b) claude-backend-sandbox.sh",
-      "result": "PASS, 14:19:39-14:52:41Z, exit 0, 15/15 ok incl. pod-deleted-resumes-the-same-claude-session (58 earlier turns, 701495 bytes unchanged in the table and the restored file, marker quoted back) and namespace-clean (0 before and after). Image sha256:f2039af6a5280cb2bf53588d2e07ac3db8b8805040160db33b7ca7d55d73edac (Worker Image run 40682524400, label ec8efe54d8ef603f397063888d2a00bd16b96f76, accepted since ec8efe54d8ef603f397063888d2a00bd16b96f76 adds only .legion/ over 8a2bfae7e21832f55d84a5723e33eba44159c976 and no image of 8a2bfae7e21832f55d84a5723e33eba44159c976 is built). Binaries stamped ec8efe54d8ef603f397063888d2a00bd16b96f76 modified=false. Gateway in-cluster address for the pods, model claude-sonnet-5. Alias not named (failure 1). No anthropic.com."
+      "run": "(b) claude-backend-sandbox.sh at f319ebaa648a7a737277c54b63d3e05a9d163426",
+      "result": "Not run yet. Worker Image run 40718837841 had been queued with no runner since 15:43Z. By the architect's decision the INFRA lead runs it at f319ebaa648a7a737277c54b63d3e05a9d163426 once that image builds, and it covers the next head, since the Bun fix touches only claude-backend-tmux.sh and the README, which neither the image nor the sandbox proof runs."
     },
     {
       "run": "(c) SIGINT control",
-      "result": "14:56:25-15:00:56Z. The interrupt landed during architect-registers-the-gate, not right after prerequisites. Transcript: 'FAIL (check architect-registers-the-gate)', no 'FAIL cleanup' (so remove_app_keys removed the key directory), teardown deleted both Sandboxes, the ConfigMap, the providers Secret and the smoke branch, 'left of project ccs4790229: nothing', namespace-clean identical. The exit was 1, not 130: the interrupt ended a child of a polling check, which then failed, before bash ran its INT trap. The script reports that as a check failure rather than an interrupt. The clean-teardown property the control checks holds. I note it, not a failure. dispatch://INFRA-220/artifact/infra220-ec8efe54-sandbox-sigint-transcript-log"
+      "result": "Stands from ec8efe54 (round 13: teardown clean, no FAIL cleanup, nothing left). The diff ec8efe54..f319ebaa in claude-backend-sandbox.sh and lib/session-db.sh changes only the pgvector image reference, the tmpfs mount path and one comment. cleanup(), remove_app_keys, bridge-tunnel.sh and namespace-rig.sh are unchanged."
     }
   ],
-  "mainReds": "The architect named two known main reds (dispatch recipients-claim e2e; envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers). Neither appears in this head's required CI.",
-  "ci": "At ec8efe54d8ef603f397063888d2a00bd16b96f76: Tests 40682524363 (lint, typecheck, test) success, Docs success, PR Title success, Worker Image 40682524400 success. Legion Envoy and Contracts 40682524430 failure (pi-legion, failure 2).",
-  "nextRound": "Failure 1 changes the preflight both proofs run, so after the fix all three live runs are needed again at the new head, gateway only, and each transcript must show 'the model key is legion-infra'."
+  "mainReds": "Main's three known reds (mermaid.e2e.ts:194, recipients-claim route-close, TestDispatchConnectionsPerPodIsTheServers) are main's, by the architect's notes. None was read at this head, since its CI had not run.",
+  "ci": "At f319ebaa648a7a737277c54b63d3e05a9d163426, read 16:12Z: Worker Image 40718837841 queued (no runner). The rest of the head's runs had not completed.",
+  "nextRound": "(b)'s result at f319ebaa648a7a737277c54b63d3e05a9d163426; red test claude-backend-bun-pin.test.ts passing; bash -n; a local drive of the Bun check against a wrong Bun and the pinned one. No tmux rerun unless the fix touches more than the prerequisites."
 }
