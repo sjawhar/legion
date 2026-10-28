@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-158",
+  "completed": "2026-10-28T09:46:30Z",
+  "round": 14,
+  "generation": 4,
+  "head": "7975b8c31ad70caa3cca8c2ea2e2c950bd517a9b",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "ci": "Required set: lint, typecheck, test, pr-title. At CI head 7975b8c3: lint, typecheck, test success (run 40661127649); pr-title success (run 40661646616; an earlier run cancelled). The non-required claude-envoy job was still queued. Compare 7975b8c3...6aa98764 changes only .legion/.",
+  "thermonuclear": "At 7975b8c3, scoped to the eighteenth merge: thermonuclear-deep-review APPROVE (39 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality APPROVE (8 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
+  "fingerprint": "1802020631b1 -> 6aa98764de4b: 1281f2e2... -> 475d2094... changed. The two context-0 diffs differ only in three lines per claude-envoy bundle, exports_external.enum -> _enum2, from main's rebuild under Bun 1.4.4; the PR's 'withdrawn' addition is unchanged. The deep-review pass ran check-dist under Bun 1.4.4 at 7975b8c3: dist/ and legion/ match a fresh build.",
+  "checks": {
+    "changelogs": "each of the five resolutions is byte-identical to a union merge of both sides; nothing lost or duplicated, all under Unreleased",
+    "rest of merge": "touches no code of this pull request; main's new code has no resolution-kind switch missing withdrawn",
+    "retro": "87f9c3eb changes only docs/solutions and 903b5dc5 removed .legion/; this handoff writes it again"
+  },
+  "keyFindings": [],
+  "fastFollow": "none"
+}
