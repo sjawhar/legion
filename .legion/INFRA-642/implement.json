@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-642",
+  "completed": "2026-10-28T12:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2448",
+  "proof": [
+    {
+      "criterion": "A3: behaviour kept on the real route (create an anchored comment, reply, resolve, reopen, edit) between base and head",
+      "surface": "Local Dispatch server (packages/envoy/cmd/dispatch, GOMAXPROCS=2) on Postgres 17.11 + pgvector 0.8.7 with the INFRA-512 replay seed run/seeded.dump, driven over HTTP as the CLI and a signed-in person send",
+      "command": "$TMPDIR/a3/a3.sh <binary> <outdir> for base 460facf5 (twice) and head 1834eeb8 (twice), then diff <(jq -S . base/record.json) <(jq -S . head/record.json); LINUX-36, 398,934-byte spec, 12 open anchored comments, 5 anchors staled by SQL and one re-staled before each step",
+      "observed": "base1-vs-base2 0 lines, base1-vs-head2 0 lines, base2-vs-head2 0 lines (responses, 12 comment.anchor_refreshed events with actors and order, /text markdown and document token, /blocks tokens, comment list, comments.anchor rows). head1 differed from the others only in the order of the 5 anchor_refreshed events of the first step's MarkQuote (an unchanged applyLive write; refreshAnchors reads rows with no order by), equal as a set, and head1-vs-head2 shows the same 1,262-line reordering, so it is run-to-run row order. Before the merge with main: head 082b7ea7 vs base 59f6647d also 0 lines.",
+      "headSha": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+      "negativeControl": "Head built with recordLiveOperation skipping writeVersionTx for warm margin writes (dispatch-broken) -> 1,978 diff lines against base: stale quotes kept and 6 of 12 comment.anchor_refreshed events missing."
+    },
+    {
+      "criterion": "A1: merge rule on LINUX's replay (every head run uses less CPU than every base run)",
+      "surface": "Same local Dispatch, driven by the INFRA-512 architect's replay of LINUX's 22:55-23:34Z write log (tools/load.py, replay-inputs.tar.gz sha256 4299570e... OK), seed restored before every run",
+      "command": "/legion/scratch/tmp/a1/run.sh <binary> <run> -> tools/drive.sh <run> 0.3 1 27 8 2 (load.py F=0.3, rho=1, minutes 27-35, 2 SSE, GOMAXPROCS=2, whole-run CPU profile), interleaved base 460facf5 / head 1834eeb8, three each",
+      "observed": "base CPU-s 443.89, 432.10, 440.02; head 428.37, 417.13, 423.69 over 480.9 s each; max head 428.37 < min base 432.10. Spread 11.79 CPU-s, mean gain 15.6 CPU-s = 0.032 cores (3.6%). pprof -focus ProjectMark 12.31/11.87/12.10% -> 10.34/10.21/10.42%; updateChangesMarkdown 2.61/2.66/2.66% -> 2.63/2.34/2.54%.",
+      "headSha": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+      "negativeControl": "Base binary (the change absent) is the control: all three base runs used more CPU than every head run; base-vs-base spread 11.79 CPU-s."
+    },
+    {
+      "criterion": "A2: behaviour kept exactly, on real-size documents (equivalence test against the old whole-document write)",
+      "surface": "docs package against Postgres: two services on two databases seeded with the same bytes, the route's docs.Service calls in joined transactions",
+      "command": "go test ./internal/dispatch/docs/ -run TestAMarginWriteMatchesTheWholeDocumentWrite -count=1 -v; again with DISPATCH_TEST_SPEC_CORPUS=/legion/scratch/tmp/linux-specs (LINUX-129, -344, -345, -364, -43)",
+      "observed": "generated 399,822- and 614,637-byte specs: ok 139.6s; with the five LINUX specs (149-597 KB, 48 anchors each): ok 528.5s, 596 subtests passed. Comparisons cover the error, each appended update's class and effect, anchor rows, events, the write's kept rendering and credits, /text, /blocks, and the room's class and kept rendering.",
+      "headSha": "714ac4bc (test commit; code identical to 1834eeb8's docs package)",
+      "negativeControl": "applyMargin recording content_changed=true; skipping its anchor refresh; reusing a rendering taken before its own forkLive: each failed the test with a named mismatch."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/mutation.go",
+    "packages/envoy/internal/dispatch/docs/marks.go",
+    "packages/envoy/internal/dispatch/docs/livewrite.go",
+    "packages/envoy/internal/dispatch/docs/tree.go",
+    "packages/envoy/internal/dispatch/docs/growth.go",
+    "packages/envoy/internal/dispatch/docs/stale_room_test.go",
+    "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
+    "packages/envoy/internal/dispatch/api/schema_repair_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/.changes/unreleased/pr2448-Changed-20261028-101000.yaml"
+  ],
+  "trickyParts": [
+    "applyMargin reuses liveWrite.tree only after its own forkLive: buildFork/releaseFork/abandon drop the rendering whenever the fork moves.",
+    "The observer skip is limited to a margin write whose fork was warm-built from the very room instance the update is applied to; ygo encodes every update with its document's whole delete set, so a cold fork's margin update can delete text the room still holds (TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto).",
+    "refreshAnchors is called unconditionally from recordLiveOperation (writeVersionTx with a nil write), not through the anchorsTree guard: on an anchored root it is the first refresh that sees the new comment row."
+  ],
+  "deviations": [
+    "Measured gain 0.032 cores at F=0.3 against the plan's expected ~0.084; the rule's first condition (every head < every base) holds. The observer share did not move: in the replay rooms are mostly evicted between writes (roomIdleTimeout one minute, CLI-only load), so margin writes fork cold and are not tagged [INFERENCE]; INFRA-643's in-room check covers a cold write's publish.",
+    "A planned stale_room_test case 'room replaced by one lacking a delete the fork holds' was not built: the state is unreachable on current code (CloseRoom flushes before evicting while the write's advisory lock holds pending appends; a failed room refuses loads until it compacts under the same lock; a failure before the append is refused at recordLiveOperation's failure check). The cold-fork case is built and fails a tag that ignores the room instance.",
+    "Main moved to changie fragments; the changelog entry is packages/envoy/.changes/unreleased/pr2448-Changed-20261028-101000.yaml (Issue pr2448, no Dispatch key, per the controller's ruling), merged forward at 1834eeb8 after GitHub reported the PR conflicting."
+  ],
+  "openQuestions": []
+}
