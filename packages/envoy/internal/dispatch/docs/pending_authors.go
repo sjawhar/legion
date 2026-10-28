@@ -85,11 +85,18 @@ func (credit *UpdateCredit) landed() {
 	}
 	state := credit.state
 	state.mu.Lock()
-	if !credit.done {
-		credit.done = true
-		delete(state.inflight, credit.record.seq)
-	}
+	credit.landedLocked()
 	credit.service.unlockState(credit.room, state)
+}
+
+// landedLocked is landed for a caller that holds the credit's state.mu (commitConsuming), which
+// it leaves to that caller to release.
+func (credit *UpdateCredit) landedLocked() {
+	if credit == nil || credit.done {
+		return
+	}
+	credit.done = true
+	delete(credit.state.inflight, credit.record.seq)
 }
 
 // held records that the credit's room instance holds the update its append stored as version.
@@ -331,9 +338,11 @@ type roomCursor struct {
 //
 //   - the room's load, which starts the cursor at the head it read and the versions this process
 //     appended while it ran (keepInstance, roomLoad);
-//   - a browser append that committed, inside the lock it holds (PgVersioned.appendUpdate);
+//   - a browser append that committed, inside the lock it holds (PgVersioned.appendUpdate), and
+//     each room update its flush stored before it (PgVersioned.appendFlushing);
 //   - a live write's commit, for the versions its publish is about to apply to the room
-//     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate);
+//     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate), and a joined
+//     transaction's commit for the room updates it flushed (Ledger.takeRoomCursors);
 //   - settlement's own repair append, its superseded path included (settleRoomWithin);
 //   - the block-id backfill's stamp (backfillBlockIDs).
 //
@@ -432,8 +441,10 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 }
 
 // appendingCursor is the cursor the gate reads for an append to room: the calling transaction's
-// own write to room when it has one, whose fork is what the write was made on, otherwise the room
-// cursor its caller marked the context with. Nil is an append no cursor gates.
+// own write to room when it has one, whose fork is what the write was made on; otherwise, for an
+// append flushThrough makes, the room instance its updates were made in with the versions the
+// flush has appended folded in (roomFlush); otherwise the room cursor its caller marked the
+// context with. Nil is an append no cursor gates.
 //
 // A transaction's write decides for itself: a cold write, whose fork came from the store because
 // no room of this process held the document (coldFork), carries no cursor and is not gated. The
@@ -446,6 +457,12 @@ func appendingCursor(ctx context.Context, room string) documentCursor {
 			return nil
 		}
 		return write
+	}
+	if flush := flushGateFrom(ctx); flush != nil && flush.room == room {
+		if flush.cursor == nil {
+			return nil
+		}
+		return flush
 	}
 	if cursor := roomCursorFrom(ctx); cursor != nil {
 		return cursor

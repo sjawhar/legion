@@ -332,7 +332,22 @@ type renderedReplica struct {
 	// markdown is the room's rendered markdown as the replica's latest update left it, or as the
 	// log's base rendered before any; nil while the document is outside the schema.
 	markdown *string
+	// seq is the room instance's commit position: how many of the room's commits since its load
+	// the log has handed over, through every drain and every recover. Each update's class carries
+	// the position it was handed over at (documentUpdateClass.seq), the order the room's durable
+	// writers store them in (flushThrough). Guarded by mu.
+	seq uint64
+	// classify records each update a drain hands over (Service.classifyDrained), set by the
+	// room's load before ygo hands the room to anyone. Nil for a replica nothing classifies.
+	classify drainClassifier
 }
+
+// drainClassifier records update, which the room's log handed over at commit position seq, given
+// whether it changed the room's rendered markdown and the tree it rendered when it did (nil
+// otherwise, and valid only during the call). It reports whether the update is one the room's
+// settlement follows and whether it changed the content. It runs holding the replica's mu, so the
+// room's own record of what each update introduced moves forward in commit order.
+type drainClassifier func(update crdt.LoggedUpdate, seq uint64, changed bool, tree *pmdoc.Node) (settles, contentChanged bool)
 
 // lockForUpdate takes mu for the update observer. A read only tries mu, and takes it only while
 // no observer waits for it, so the observer waits at most for the one read already walking the
@@ -343,36 +358,55 @@ func (r *renderedReplica) lockForUpdate() {
 	r.waiting.Add(-1)
 }
 
-// observe is the update observer's turn with the replica: it waits for mu (lockForUpdate), drains
-// the room's update log, and moves the replica through each update the log hands over, in commit
-// order, rendering after each (updateChangesMarkdown). It calls classify, when given, with each
-// update, whether that update changed the room's rendered markdown, and the tree it rendered when
-// it did - nil otherwise, and valid only during the call - still holding mu, so the room's own
-// record of what each update introduced moves forward in commit order. The observer is the one
-// holder of mu that waits for it, and the one that drains the log: every committed update is
-// classified exactly once, by whichever observer reaches the log first.
-func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedUpdate, changed bool, tree *pmdoc.Node)) {
+// observe is the update observer's turn with the replica: it waits for mu (lockForUpdate) and
+// drains the room's update log (drainLocked). The observer and an exact read (readPoint) are the
+// holders of mu that wait for it, and the ones that drain the log: every committed update is
+// classified exactly once, by whichever of them reaches the log first. It reports whether any
+// update it classified is one the room's settlement follows, and whether any changed the content.
+func (r *renderedReplica) observe(room string, classify drainClassifier) (settles, changed bool) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
+	return r.drainLocked(room, classify)
+}
+
+// drainLocked drains the room's update log and moves the replica through what it hands over
+// (takeLocked). The caller holds mu.
+func (r *renderedReplica) drainLocked(room string, classify drainClassifier) (settles, changed bool) {
 	base, updates := r.log.Drain()
+	return r.takeLocked(room, base, updates, classify)
+}
+
+// takeLocked moves the replica through what one drain of the room's log handed over - base, when
+// it recorded one, and updates - in commit order, rendering after each update
+// (updateChangesMarkdown) and calling classify, when given, with each update and its commit
+// position. The caller holds mu.
+func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.LoggedUpdate, classify drainClassifier) (settles, changed bool) {
+	note := func(update crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
+		r.seq++
+		if classify == nil {
+			return
+		}
+		settled, credited := classify(update, r.seq, contentChanged, tree)
+		settles = settles || settled
+		changed = changed || credited
+	}
 	if base != nil {
 		r.start(room, base)
 	}
 	for i, update := range updates {
 		if r.doc == nil {
-			r.recover(room, updates[i:], classify)
-			return
+			r.recover(room, updates[i:], note)
+			return settles, changed
 		}
 		if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
-			r.recover(room, updates[i:], classify)
-			return
+			r.recover(room, updates[i:], note)
+			return settles, changed
 		}
-		changed, tree := r.updateChangesMarkdown(room)
-		if classify != nil {
-			classify(update, changed, tree)
-		}
+		contentChanged, tree := r.updateChangesMarkdown(room)
+		note(update, contentChanged, tree)
 	}
+	return settles, changed
 }
 
 // start makes the replica from base, the room's state as of just before the first update its log
@@ -396,20 +430,50 @@ func (r *renderedReplica) start(room string, base []byte) {
 // recover answers a replica that could not take an update, which leaves it holding no state the
 // room had: the log hands over every update it holds and records a fresh base at the room's next
 // commit (crdt.UpdateLog.Reset), so the replica starts again exactly there. Each update it could
-// not place - the rest of this drain and what the reset handed over - is classified as a content
+// not place - the rest of this drain and what the reset handed over - is noted as a content
 // change with no tree, since nothing tells what it changed: crediting a connected browser with an
 // edit that changed nothing loses less than an edit credited to nobody.
-func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, classify func(update crdt.LoggedUpdate, changed bool, tree *pmdoc.Node)) {
+func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, note func(update crdt.LoggedUpdate, changed bool, tree *pmdoc.Node)) {
 	unplaced = append(unplaced, r.log.Reset()...)
 	r.doc, r.markdown = nil, nil
 	slog.Error("dispatch: the document's rendered copy starts again at the room's next commit; updates it could not place count as content changes",
 		"room", room, "updates", len(unplaced))
-	if classify == nil {
-		return
-	}
 	for _, update := range unplaced {
-		classify(update, true, nil)
+		note(update, true, nil)
 	}
+}
+
+// readPoint is live, the room document this replica follows, as of an exact commit position: its
+// state, encoded, and seq, the position of the last commit that state holds, every update through
+// which has a class in the room's queue. A durable writer that forks or versions the room from
+// state stores those updates first (flushThrough), so what it writes follows the room's commit
+// order. It waits for mu as the update observer does and drains the log as the observer would,
+// classifying what it drains, so the replica then holds the room through its last drained update.
+// It takes the copy and releases mu: its caller does its database work holding no replica lock.
+//
+// A replica holding no state - the room has had no transaction since its load, or the replica is
+// in its recover state, waiting for the base the room's next commit records - has no copy to give,
+// so the copy is taken from live under live's document lock instead. That copy is exact when the
+// log hands over nothing after it: every commit before the log's last reset (or its opening) was
+// handed over, and classified, before it (UpdateLog.Reset hands over every update it holds), and
+// the first commit after it records a base before its transaction runs, under the same document
+// lock the copy takes. A base the log hands over after the copy means a commit ran; the replica
+// then starts from it, and the read is taken again. It returns settles and changed for the
+// updates it classified, as observe does. The caller must not hold live's document lock.
+func (r *renderedReplica) readPoint(room string, live *crdt.Doc, classify drainClassifier) (state []byte, seq uint64, settles, changed bool) {
+	r.lockForUpdate()
+	defer r.mu.Unlock()
+	settles, changed = r.drainLocked(room, classify)
+	for r.doc == nil {
+		copied := crdt.EncodeStateAsUpdateV1(live, nil)
+		base, updates := r.log.Drain()
+		if base == nil && len(updates) == 0 {
+			return copied, r.seq, settles, changed
+		}
+		took, credited := r.takeLocked(room, base, updates, classify)
+		settles, changed = settles || took, changed || credited
+	}
+	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, settles, changed
 }
 
 // keepReplica makes the replica live's update observer keeps, moving through log, live's update

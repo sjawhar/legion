@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -74,8 +75,12 @@ type liveWrite struct {
 	forkCursor *roomCursor
 	cold       bool
 	updates    [][]byte
-	// versions are the doc_updates versions updates were appended at, one each.
+	// versions are the doc_updates versions updates were appended at, one each. flushed is the
+	// room updates the write's transaction stored ahead of its own appends (Ledger.flushThrough),
+	// nil while it has stored none: the room holds them already, so they are never published, but
+	// they are this transaction's appends all the same (withOwnAppends).
 	versions []persistence.Version
+	flushed  *roomFlush
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyLive) for the version its transaction may write, and
 	// offsets each identified block's byte range in markdown from that same render.
@@ -295,8 +300,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 //
 // Why the false verdict is worth a lock. It sent the write down the cold path (forkLive), which
 // reads the stored document - and the store of a room still writing is behind the room by
-// whatever its persistence worker has not appended yet, in the order its observers fired rather
-// than the order the room applied them (consumeUpdateClass). A version prefix of that is not a
+// whatever its persistence worker has not appended yet. A version prefix of that need not be a
 // state the document ever held: an update whose deletes landed without the inserts they replaced
 // leaves a tree with no block in it at all, which every write starting from it refuses
 // (ErrDocOutsideSchema). A room confirmed behind the head has no such store: nothing it still
@@ -511,14 +515,15 @@ func (w *liveWrite) heldThrough() int64 {
 // versions this transaction has appended itself: they are in its fork, and in no room until the
 // write publishes, so every head read inside its transaction counts them and no cursor does. An
 // accept writes its text change and its margin projection as two appends of one transaction, so
-// without this the second would find the head one past the fork and be refused.
+// without this the second would find the head one past the fork and be refused. The room updates
+// the transaction flushed are its appends too, interleaved with its own by version.
 func (w *liveWrite) withOwnAppends(base int64) int64 {
-	for _, version := range w.versions {
-		if int64(version) == base+1 {
-			base++
-		}
+	if w.flushed == nil || len(w.flushed.versions) == 0 {
+		return foldAppended(base, w.versions)
 	}
-	return base
+	appended := slices.Concat(w.versions, w.flushed.versions)
+	slices.Sort(appended)
+	return foldAppended(base, appended)
 }
 
 // dropRendering forgets the rendering and the anchor refresh taken from a fork that has moved.

@@ -68,10 +68,13 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. AppendUpdateWithCredit is the one way a room's own update reaches the store: it appends
-// the update, classified as content or not, with the browser edit's in-flight credit, which it
-// takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
-// API transaction use AppendUpdateTx, classifying the update the way the room's update observer
+// store. AppendUpdateWithCredit is the one way a room's own persistence reaches the store: it
+// appends the update, classified as content or not, with the browser edit's in-flight credit, which
+// it takes and lands under the document's advisory lock (UpdateCredit), after the room's earlier
+// updates no writer has stored yet (flushThrough). AppendRoomUpdateTx appends one of those room
+// updates inside a durable writer's transaction, with the class and credit the room's update
+// observer recorded for it (flushThrough). Document writes that join an API transaction use
+// AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
 // transaction, through the same persistence boundary as its preflight load. Head is the version
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
@@ -81,6 +84,7 @@ type Deps struct {
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
+	AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
@@ -167,14 +171,14 @@ type Service struct {
 	// classifying and crediting its own update and every other committed before it that no
 	// observer has reached yet. A repair's observer does not run it. Nil outside tests; tests use
 	// it to hold an observer before it classifies anything: the held update stays unclassified
-	// unless another transaction's observer reaches the log first, which classifies it in commit
-	// order (renderedReplica).
+	// unless another transaction's observer, or an exact read (readPoint), reaches the log first,
+	// which classifies it in commit order (renderedReplica).
 	beforeObserveUpdate func(room string)
 	// afterCreditUpdate runs in a room's update observer once its drain of the update log has
-	// classified a content change and credited its authors, outside the replica's lock, and before
-	// it records its own update's class and arms the room's settlement. Nil outside tests; tests
-	// use it to hold that window, in which the observer's own update is credited but neither
-	// pending (recordUpdateClass) nor handed to persistence, whose observer runs after this one.
+	// classified a content change, credited its authors and recorded each update's class, outside
+	// the replica's lock, and before it arms the room's settlement. Nil outside tests; tests use it
+	// to hold that window, in which the observer's own update is credited and pending
+	// (recordUpdateClass) but not handed to persistence, whose observer runs after this one.
 	afterCreditUpdate func(room string)
 	// afterLiveCommit runs once a transaction's writes to a document have committed and the
 	// document's advisory lock is gone with them, before the publish applies them to the room.
