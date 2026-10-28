@@ -232,21 +232,23 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // (unchainedPlan, sparedMove). The review App's red tests pushed again after an implementer's
 // forced return count a fix attempt and leave the red unplanned, so the red sends the work back;
 // an implementer's code pushed again after the review App's forced return keeps the red planned.
-// Its head run stays open until its bound (maxRunSteps), and a red at each head of that run is
-// held up to 10 minutes (workflow's redHold) before it is decided as it stands. Letting a move
-// keep its repeat for the next arrival by it would judge that arrival by its push, but a repeat
-// cannot be told from a push not yet delivered on another path to the same head (h0..hx and
-// hx..h1, hx never synchronized): an arrival the repeat chains opens no head run, so that path's
-// pushes, delivered after, would never replay the judgement, which is then wrong in some orders.
+// Its head run stays open at least until its bound (maxRunSteps), and for good when heads follow
+// with no other steps between them (below); a red at each head of that run is held up to 10
+// minutes (workflow's redHold) before it is decided as it stands. Letting a move keep its repeat
+// for the next arrival by it would judge that arrival by its push, but a repeat cannot be told
+// from a push not yet delivered on another path to the same head (h0..hx and hx..h1, hx never
+// synchronized): an arrival the repeat chains opens no head run, so that path's pushes, delivered
+// after, would never replay the judgement, which is then wrong in some orders.
 // Two pushes of the same two heads, and a push of another path not yet delivered, look the same,
 // so this is open for a design that tells them apart.
 //
-// A head run a lost push opened can stay open with no end. The run bounds its pushes counting from
-// its anchor head (boundedPushes in ApplyPush), and from there no later push lies on the path
-// forward, since the lost link is the first. When heads follow with no other steps between them,
-// after 16 heads the oldest of their pushes go, those heads replay unchained, and the run stays at
-// maxRunSteps steps for good. In the probe that found it, a settlement at each head closed the run
-// after 17 heads with the judgement unchanged, so the impact found was small.
+// A head run a lost push, or a move made again, opened can stay open with no end. The run bounds
+// its pushes counting from its anchor head (boundedPushes in ApplyPush), and from there no later
+// push lies on the path forward, since the missing link is the first. When heads follow with no
+// other steps between them, after 16 heads the oldest of their pushes go, those heads replay
+// unchained, and the run stays at maxRunSteps steps for good. In the probe that found it, a
+// settlement at each head closed the run after 17 heads with the judgement unchanged, so the
+// impact found was small.
 func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival bool) []record.ClassifiedPush {
 	made := map[record.Move]bool{}
 	for _, m := range moves {
