@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"html"
 	"reflect"
 	"regexp"
 	"slices"
@@ -39,7 +38,7 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
-			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+			util.Prioritized(frontmatterAttempt{nestingGuard{BlockParser: &typedDirectiveParser{}}}, 950),
 			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
@@ -286,10 +285,14 @@ var inlineMarkdown, storedMarkdown, flankingMarkdown = newInlineReader(editorRul
 // parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
 // does, after a definition for each of labels, the footnote labels it refers to. It is the
 // renderer's read-back of a run it wrote, where a reference is only a reference beside its
-// definition.
-func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
+// definition. diverged is whether the parse, under editorRules or storedRules, read a `*` or `_`
+// run that could open or close otherwise under flankingRules (flankingDivergenceKey); where it did
+// not, flankingMarkdown reads the same source as storedMarkdown does, to the same nodes and error.
+func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) (nodes []*Node, diverged bool, err error) {
+	context := parser.NewContext()
 	if len(labels) == 0 {
-		return readInline(markdown, reader.run, nil)
+		nodes, err = readInline(markdown, reader.run, context, nil)
+		return nodes, context.Get(flankingDivergenceKey) != nil, err
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -297,20 +300,21 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root, err := parseSource(reader.withDefinitions, source, parser.NewContext())
+	root, err := parseSource(reader.withDefinitions, source, context)
+	diverged = context.Get(flankingDivergenceKey) != nil
 	if err != nil {
-		return nil, err
+		return nil, diverged, err
 	}
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
-		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
+		return nil, diverged, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
 	paragraph, err := convert(first, source, 1, footnoteLabels(root))
 	if err != nil {
-		return nil, err
+		return nil, diverged, err
 	}
 	sortNodeMarks(paragraph)
-	return paragraph.Children, nil
+	return paragraph.Children, diverged, nil
 }
 
 // referencedLabels is the footnote labels nodes refer to, each once, in order.
@@ -331,15 +335,15 @@ func referencedLabels(nodes []*Node) []string {
 // budget, its caller write's, on the elements it makes. Markdown that forms more than one
 // paragraph, or holds text after its paragraph's last line, is ErrSchema.
 func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
-	return readInline(markdown, inlineMarkdown.run, budget)
+	return readInline(markdown, inlineMarkdown.run, parser.NewContext(), budget)
 }
 
-// readInline is ParseInline read with inline, one of an inlineReader's parsers, counting the
+// readInline is ParseInline read with inline, one of an inlineReader's parsers, in context, a new
+// parse context its caller may read after the parse (parseInlineWithDefinitions), counting the
 // elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
-func readInline(markdown string, inline parser.Parser, budget *WriteBudget) (nodes []*Node, err error) {
+func readInline(markdown string, inline parser.Parser, context parser.Context, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	context := parser.NewContext()
 	var count *parseCount
 	if budget != nil {
 		context.Set(writeBudgetKey, budget)
@@ -664,7 +668,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string, depth in
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": decodeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes, depth)
 	case *extensionast.Table:
@@ -845,7 +849,7 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
-		"src":   unescapeMarkdownText(image.Destination),
+		"src":   decodeMarkdownText(image.Destination),
 		"alt":   text.String(),
 		"title": titleOrNil(image.Title),
 	}}, nil
@@ -903,21 +907,23 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
 		switch current := child.(type) {
 		case *ast.Text:
-			value := parseTextValue(current.Value(source), active)
+			// Goldmark's text stops before its line's ending, so only what the break trims is taken
+			// off, and off the text as written: a reference to a line feed or a space before the
+			// break is text to both parsers.
+			raw := current.Value(source)
 			hard, soft := current.HardLineBreak(), current.SoftLineBreak()
 			if hard || soft {
 				if _, run, backslash := lineSuffix(current, source); backslash {
-					value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
+					raw = bytes.TrimSuffix(raw, []byte("  "))
 				} else {
 					// The browser editor's parser reads the spaces and tabs a line ends with, which
 					// trimLineSuffixes took off, as a hard break only where they are two spaces
 					// or more and no tab; goldmark breaks hard at any two spaces ending the line.
-					value = strings.TrimSuffix(value, "\n")
 					hard = len(run) >= 2 && !strings.Contains(run, "\t")
 					soft = !hard
 				}
 			}
-			children = appendTextPiece(children, value, active)
+			children = appendTextPiece(children, parseTextValue(current, raw, active), active)
 			if hard {
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
@@ -932,7 +938,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				}
 			}
 		case *ast.String:
-			children = appendTextPiece(children, parseTextValue(current.Value, active), active)
+			children = appendTextPiece(children, parseTextValue(current, current.Value, active), active)
 		case *ast.Emphasis:
 			var marks []Mark
 			if current.Level >= 2 {
@@ -1004,8 +1010,8 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			// matches a reference to its definition by the label as written. Both labels are
 			// stored decoded and written from that, so one matching only as written, before
 			// decoding (`[^&AUML;]` beside `[^&auml;]: `), would not match once written.
-			decoded := unescapeMarkdownText([]byte(label))
-			if definition := unescapeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
+			decoded := decodeMarkdownText([]byte(label))
+			if definition := decodeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
 				return nil, nil, fmt.Errorf("%w: footnote reference %q matches its definition %q only as written, before their character references are decoded, which the document's markdown cannot keep", ErrSchema, decoded, definition)
 			}
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
@@ -1031,17 +1037,22 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	return joinTexts(children), ended, nil
 }
 
-func unescapeMarkdownText(value []byte) string {
-	return html.UnescapeString(string(util.UnescapePunctuations(value)))
-}
-
-func parseTextValue(value []byte, marks []Mark) string {
+// parseTextValue is the text value of node, under marks, as the browser editor reads it:
+// code as written, and other text decoded (decodeMarkdownText) with each line feed it holds a
+// space, as that editor's import reads every line feed in text (remarkSoftBreakAsSpace in
+// packages/proof-editor/src/dispatch-soft-breaks.ts), a decoded `&#10;` included. An image's alt
+// text keeps its line feeds: that import reads the alt as an attribute, as written.
+func parseTextValue(node ast.Node, value []byte, marks []Mark) string {
 	for _, mark := range marks {
 		if mark.Type == "inlineCode" {
 			return string(value)
 		}
 	}
-	return unescapeMarkdownText(value)
+	decoded := decodeMarkdownText(value)
+	if strings.IndexByte(decoded, '\n') < 0 || insideImage(node) {
+		return decoded
+	}
+	return strings.ReplaceAll(decoded, "\n", " ")
 }
 
 func appendInline(target *[]*Node, nodes []*Node) {
@@ -1119,7 +1130,7 @@ func titleOrNil(title []byte) any {
 	if len(title) == 0 {
 		return nil
 	}
-	return unescapeMarkdownText(title)
+	return decodeMarkdownText(title)
 }
 
 func parseAnchorMark(value string) (Mark, bool) {
