@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-632",
+  "completed": "2026-10-28T18:25:30Z",
+  "testedHead": "464377da97100b501400d709128f7cd74c56c43b",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its commands at 464377da: the checker on the three guides (exit 0, 0 B stdout, 0 B stderr) and on main 690c0136's files (exit 1: 2,408 R1, 295 R2, 7 R3); the Commands awk check (head exit 0; main exit 1 at AGENTS.md:51,58,60,84); restructure.ts --strict --report on main 690c0136's three files, all three outputs cmp-identical to head; check-differences.ts per file (78/265/38 entries, 0 unexplained); check-rendered.ts per file (exit 0); replay/run.sh (exit 0, 36 PASS); the reclaim, census and config Go tests and skills-guard (pass). Every figure it recorded reproduced. Its Acceptance 1 claim that no line holds two sentences does not hold: the checker it relies on misses the lines in failures 2 and 3."
+  },
+  "failed": 3,
+  "failures": [
+    {
+      "criterion": "Acceptance 4 and 'Proven on: the repository's CI': lint, typecheck, test and pr-title pass on the head",
+      "evidence": "GitHub reports sjawhar/legion#2474 mergeable=CONFLICTING, mergeStateStatus=DIRTY (gh pr view 2474 --json mergeable,mergeStateStatus, 18:20Z). `git merge-tree --write-tree origin/main 464377da` conflicts in AGENTS.md, docs/kubernetes.md, scripts/e2e/README.md, packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md against main a409c128 (main took 53f39ba02, #2300, on the guides after 690c0136). pr-and-main.yaml says GitHub starts no pull_request run at a head that conflicts with its base: `gh api repos/sjawhar/legion/actions/runs?head_sha=<sha>` lists no run for 464377da or ff331abc, and the PR has no check at all. Remedy: the plan's 'On every conflict with main' recipe (merge main, take main's three files, restructure.ts --strict, re-run the proof), then CI is read at the new head. Note: sjawhar/legion#2422 has moved past the head this branch carries (now 42036be5, with byte-order-mark handling in scripts/semantic-line-breaks.ts that 7f815cff lacks), so when #2422 merges the base merge takes main's checker and re-applies this PR's checker changes, as plan D1 says."
+    },
+    {
+      "criterion": "Acceptance 1: outside fenced code blocks no line holds more than one sentence (and Acceptance 2's rendering: the guide renders as text)",
+      "evidence": "docs/kubernetes.md:2239 and :2325 each start with `<dir>` inside a code span that a line break cuts. `<dir>` is a block-level tag (CommonMark HTML block kind 6), which interrupts the paragraph, so GitHub and micromark read lines 2239-2255 and 2325-2346 as raw HTML blocks: the checker never reads them for R1, and GitHub does not render them as the paragraph's text. They hold lines of two or more sentences (2239, 2246, 2251, 2326, 2333, 2339, 2345). The same two blocks are on main (690c0136 lines 2858 and 2990); the restructure keeps them. Red test: scripts/semantic-line-breaks.guides.test.ts 'the root guide, the e2e README and the Kubernetes doc hold no raw HTML block, which the checker skips' (commit 706f07f3), failing with docs/kubernetes.md:2239 and :2325: `bun test scripts/semantic-line-breaks.guides.test.ts`. A fix: a named restructure.ts edit that keeps `<dir>` off the start of a line (inside its code span), then --write."
+    },
+    {
+      "criterion": "Acceptance 1: outside fenced code blocks no line holds more than one sentence",
+      "evidence": "Four lines hold a sentence and then a sentence in parentheses: scripts/e2e/README.md:3623 ('…which is right for a proof. (A call's parent is…'), docs/kubernetes.md:1831 ('…until a person removes it. (The 5.5 GiB…'), :3397 ('…why that bullet is marked. (The credential-less gate…'), :4282 ('…([Configuration](#configuration)). (The TypeScript daemon's…'). Found by an independent scan of every non-fence line. The checker passes them because SENTENCE_START (scripts/semantic-line-breaks.ts:143) does not take `(` as a sentence start. A probe copy of the checker with `\\([\\p{Lu}`]` added to SENTENCE_START reports exactly these four lines across the three guides and the two Envoy guides, and nothing else. Red test: scripts/semantic-line-breaks.test.ts 'R1 finds a second sentence that opens with a parenthesis' (commit e1a9bee1), failing with empty stdout: `bun test scripts/semantic-line-breaks.test.ts -t parenthesis`. Fixing it in the checker is a third checker change on #2422's paths beyond the two the architect's 18:13Z correction names; that is the architect's decision."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Acceptance 2: nothing lost; head regenerates byte for byte; headings, anchors and pinned phrases unchanged",
+      "surface": "restructure.ts and the checks a reviewer runs, plus an independent word-multiset comparison of main 690c0136's files and the head's",
+      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; a word-count diff (words lost or gained per token); heading and in-file link diffs; grep of the pinned phrases",
+      "observed": "restructure exit 0 and all three outputs identical to head; 0 unexplained hunks; rendered exit 0; words lost only header-row and fence words (AGENTS: bash 2, Task, Location, Notes, row 2; e2e: meaning 6, when, passes, rows; kubernetes: and 5, row 3, this 1 from reword-k8s-cgo-paragraph); headings identical (10/55/56); in-file links identical (0/131/170); all ten pinned phrases present",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "the reclaim Go tests with docs/kubernetes.md's 'Delete list' line indented two spaces (restored after): both TestTheReclaimParagraph tests FAIL ('yields no path')"
+    },
+    {
+      "criterion": "Acceptance 3: edits to different sentences or different items merge clean; two items added at different places of one list merge clean",
+      "surface": "git merge-tree --write-tree on a throwaway repository seeded with the head's three guides, edits of my own (not the implementer's patches)",
+      "command": "bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE (8 pairs: two sentences of the Production check paragraph; two new commands at two places; a new command and another command's edit; two tools added to the capability-check list; two lib items added to the e2e index; two sentences of one e2e section; and two controls), plus replay/run.sh",
+      "observed": "8/8 PASS: the six clean pairs merge clean, the same-sentence and same-point controls conflict; replay/run.sh exit 0, 36 PASS. Its b1d8a21b1e8f AGENTS pair (a new item inserted directly before an item whose first line the other side edits) conflicts, which the implementer records as a deviation from the plan's expectation; it is a sentence change next to an insertion, git's settled limit, and the architect decides whether it counts",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "the same script on main 690c0136's three files: the Production check pair conflicts (FAIL expected=clean observed=conflict)"
+    },
+    {
+      "criterion": "The checker warns where a verbatim element turns it off for the rest of a file (spec), with the exit code unchanged",
+      "surface": "bun scripts/semantic-line-breaks.ts [--write] on scratch files",
+      "command": "12 scratch files: <pre> mid-paragraph, in a code span and a fence, in an HTML comment, in indented code, upper case <PRE>, escaped \\<pre>, in a link title, <code> after an autolink, <code> in a list item, <textarea>, <kbd> in a blockquote; a file with an R1 finding before a <code> and a second <pre> after; R3 before and after a <pre>; R3 at 50 and 51 rows and a nested item",
+      "observed": "warns once per file, on stderr, naming the tag's own line, in check mode and in --write on changed and unchanged files; no warning for a code span, fence, indented code, escape or link title; the exit code follows the findings (1 with an R1 before the tag, 0 otherwise); R3 is still checked after the tag; 50 rows pass and 51 fail; a parent's own lines after a nested list count toward it",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "the same files without a tag print no warning and the findings return (j.md: exit 1, R1)"
+    }
+  ],
+  "notes": [
+    "Re-check needed after the base merge: the fingerprint will differ (the guides are regenerated on a newer main), so the next round is a full test round.",
+    "`<!-- <pre> -->` makes the checker warn `<pre> opens a verbatim element` although a comment opens no element; the freeze is markVerbatim's rule from sjawhar/legion#2422 and the warning's consequence sentence is true. Reported, not a failure."
+  ]
+}
