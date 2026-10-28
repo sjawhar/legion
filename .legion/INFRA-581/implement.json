@@ -2,40 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-581",
-  "completed": "2026-10-28T14:01:38Z",
+  "completed": "2026-10-28T18:45:12Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2403",
   "proof": [
     {
-      "criterion": "Review finding 1 and 2: the list-item fence inputs no longer throw and read as main reads them; indented code and an unclosed fence after a closing fence read as Go reads them",
-      "surface": "the headless engine every Dispatch surface draws with (read-only and default) and pmdoc's fixture contract",
-      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; cd packages/envoy && go test -p 1 -count=1 -skip Linear ./internal/dispatch/pmdoc/",
-      "observed": "fixtures up to date (100 documents, 43 splice cases); pmdoc ok; the six reviewer inputs read identically to main's construct in both modes with no throw; old-vs-new fuzz with fences, HTML flow and indented code in items and quotes: 0 new throws over 3 x 60,000",
-      "headSha": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
-      "negativeControl": "With the previous construct (3d9fd4e9^) bun run check throws `Cannot close directiveContainer ... a different token (codeFenced) is open`, and TestParseMatchesMilkdownForFixtures fails on indented-code-after-a-closed-callout and item-fence-before-a-callout-after-blank-lines"
+      "criterion": "Review 5685122469: Go no longer accepts, with a list-item spread the browser reads otherwise, the two shapes main refused (quoted item ending in a footnote definition whose typed block holds an unclosed fence before blank lines; footnote definition in a typed block with a list item around it)",
+      "surface": "pmdoc.ParseForWrite, the API's document write path, driven by the reviewer pair's probe harness (/legion/scratch/tmp/rv581r2) rebuilt from this workspace",
+      "command": "go test -c -overlay /legion/scratch/tmp/infra581/probe/overlay.json then /legion/scratch/tmp/infra581/r6/exp.sh broad (all 20 reviewer sets, 137,187 inputs, plus generated family probes of 14,927 inputs) and bun regmain.ts",
+      "observed": "inputs main refused and head accepts with another reading: 0 for both shapes (l4: 6 refused, 6 accepted and equal; l6: 0 accepted mismatches; generated families: 0, from 85 + 18 at 5ea2cdfb); 2 unique documents remain, differing only in an indented code block's trailing whitespace line, which main misreads with no typed block; the 192 inputs 799b379f accepted that are now refused were all refused at main",
+      "headSha": "c54bf052c3e078c431b9f8d21813c1c51b1d43f0",
+      "negativeControl": "At 799b379f the reviewer's two inputs (`Text[^f].\\n\\n- x\\n  :::callout{kind=\"note\" title=\"T\"}\\n  [^f]:\\n      note\\n  :::\\n` and `> - [^f]: :::callout{}\\n>       ```\\n>\\n>\\n`) are accepted; at head both are refused naming the spacing the browser reads otherwise"
     },
     {
-      "criterion": "Go reads an unclosed fence in a typed block inside a list item, quote or footnote definition, and the list spacing around it, as the browser does",
-      "surface": "pmdoc.ParseForWrite (the API's document write path)",
-      "command": "cd packages/envoy && go test -p 1 -count=1 -run 'TestParseMatchesMilkdownForFixtures|TestFixturesAreWithinSchema' ./internal/dispatch/pmdoc/; bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base main",
-      "observed": "pass; differential every gate 0, PASS (head stores 100 of 100, main 91); 24,192 probe shapes: 3,844 newly match the browser, 0 regressions, stripped of typed blocks byte-identical before and after",
-      "headSha": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
-      "negativeControl": "With fc8278df's code_text.go change stashed, 5 new fixtures fail TestParseMatchesMilkdownForFixtures; with c5984d7e's list-spacing change stashed, 3 new fixtures fail (one refused, two differ from Milkdown)"
-    },
-    {
-      "criterion": "No stored document changes its reading (review finding 3, architect's census)",
-      "surface": "every stored document version in production Dispatch, all 13 projects",
-      "command": "census/crawl.ts (INFRA-172's crawler through GET /api/v1/artifacts/{id}/versions/{n}) then census-cmp/run.sh: Go ParseForWrite/Render at main 2df3353c vs 1642bee9, engine default and read-only",
-      "observed": "6,346 documents, 31,160 versions, 0 failures; 0 versions change Go reading or re-rendered bytes, 0 change browser reading; 0 with a leading --- before a typed block, 0 nested past 32, 0 footnote or link-reference definitions in a ::: block, 0 latest versions with the documented spread-policy shape",
-      "headSha": "1642bee901e2661cfc6955591d70966e8c5d5e29",
-      "negativeControl": "The hand-made `---\\n\\n:::callout{kind=\"note\" title=\"T\"}\\nbody\\n:::\\n` through the same pipeline counts as changed in Go and in both engine modes (front-matter rule), and a footnote definition in a callout counts as a Go change (refused at main, read at head)"
-    },
-    {
-      "criterion": "A1 at the round's head: the nested bodies draw with no main-thread gap of 1,000 ms or more, measured from the first comments request",
-      "surface": "Dispatch Conversation tab in Chromium against the real Go Dispatch server and Postgres 17 + pgvector",
-      "command": "LEGION_ROLE=implementer source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts nested-directive.e2e.ts unknown-directive.e2e.ts text-typed-blocks.e2e.ts --project=chromium --project=iphone --reporter=json",
-      "observed": "15 passed, 0 unexpected; nested-directive gaps 377 ms and 424 ms; document-write row passed",
-      "headSha": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
-      "negativeControl": "Main's lib-remark-directive-plugin.ts (flow construct) swapped in and the SPA rebuilt: first input 'Test timeout of 30000ms exceeded', second 'the main thread ran no task for 10962 ms while the card drew'"
+      "criterion": "The corpus holds the shapes, with no regression and no stored version changing its reading",
+      "surface": "pmdoc's corpus-errors contract and the stored-document differential",
+      "command": "cd packages/envoy && go test -p 1 -count=1 -skip Linear ./internal/dispatch/pmdoc/ (then docs, api separately); bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base main; cd pmdoc/gen && bun run check",
+      "observed": "pmdoc, docs, api ok; TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused refuses all 23 new corpus-errors files in every caller-markdown reader; TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes passes unchanged; differential every gate 0, PASS (head 100/100, main 91); fixtures up to date; stored versions holding either shape: 0 of 31,160 (round-4 census found no footnote definition inside a ::: block)",
+      "headSha": "c54bf052c3e078c431b9f8d21813c1c51b1d43f0",
+      "negativeControl": "The 23 corpus-errors files are accepted by ParseForWrite at 799b379f (previous workers' stash runs: 36 + 33 test errors with the refusals removed)"
     }
   ],
   "filesChanged": [
@@ -54,7 +38,8 @@
     "packages/envoy/cmd/dispatch/README.md, packages/envoy/CHANGELOG.md, packages/envoy/AGENTS.md",
     "round 2: packages/envoy/internal/dispatch/pmdoc/refusals.go, parse_test.go, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md; merge 1075e8a3 resolving packages/proof-editor/AGENTS.md and packages/envoy/CHANGELOG.md",
     "round 3: merge 8c392590 resolving packages/envoy/CHANGELOG.md (both sides kept)",
-    "round 4: proof-editor directive-container.ts, new directive-factories.ts, AGENTS.md; pmdoc code_text.go, list_spacing.go, source_lines.go, fixtures_test.go, 11 corpus files, fixtures.json; dispatch e2e nested-directive.e2e.ts; packages/envoy/.changes/unreleased/pr2403-*.yaml (CHANGELOG.md restored to main); merges 67fe5f9e and 799b379f"
+    "round 4: proof-editor directive-container.ts, new directive-factories.ts, AGENTS.md; pmdoc code_text.go, list_spacing.go, source_lines.go, fixtures_test.go, 11 corpus files, fixtures.json; dispatch e2e nested-directive.e2e.ts; packages/envoy/.changes/unreleased/pr2403-*.yaml (CHANGELOG.md restored to main); merges 67fe5f9e and 799b379f",
+    "round 5: pmdoc list_spacing.go, refusals.go, list_spacing_test.go, 23 corpus-errors files; packages/envoy/AGENTS.md; changelog fragment pr2403-Fixed-20261028-133501.yaml"
   ],
   "trickyParts": [
     "The construct keeps the old flow construct's reading through a resolveAll on the document construct: it rewrites the lineEndingBlank after each fence to lineEnding in each child flow's events before subtokenize, and moves container exit events so trailing blank lines and lazy lines attach as they did; a lazyContentEnd construct registered under the null code ends a block on a line that does not reach it, as the old sub-document did.",
@@ -71,7 +56,8 @@
     "Round 4: no label bound: the copied factoryLabel already refuses a label at its 33rd nested `[`; label_long's cost is micromark's link-label parsing of bracket runs with no `:::` needed (architect agreed; INFRA-625).",
     "Round 4: Go's spread for a typed block holding a blank line in a list item keeps the documented goldmark-looseness policy (architect agreed); stored latest versions holding it: 0.",
     "Round 4: main's playwright config runs only @phone-tagged rows on the iphone project, so the nested-directive rows run on chromium only.",
-    "Round 4: the browser engine half of the census ran on the 3,679 versions that can open a `:::name` block; a sample of skipped versions showed no difference."
+    "Round 4: the browser engine half of the census ran on the 3,679 versions that can open a `:::name` block; a sample of skipped versions showed no difference.",
+    "Round 5: refused every footnote definition in a typed block with a list item around it (main's refusal, minus top-level typed blocks) instead of narrower predicates, which still left 103 mismatches in generated family probes; 192 inputs 799b379f accepted are refused again, all refused at main."
   ],
   "openQuestions": []
 }
