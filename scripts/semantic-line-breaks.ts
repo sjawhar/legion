@@ -1,9 +1,9 @@
 // Checks and re-lays out the semantic line breaks of a markdown file, so concurrent edits to it
 // touch different lines: one sentence per line (R1), a blank line before each list item (R2), and
 // no list item or table row longer than one screen (R3, which counts a nested item's lines toward
-// that item, not toward its parent). It is not a CI gate:
-// packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
-// `--write` fixes it by changing only whitespace.
+// that item, not toward its parent). It is not a CI gate: the guides that
+// scripts/semantic-line-breaks.guides.test.ts checks keep this layout, and `--write` fixes it by
+// changing only whitespace.
 //
 // `--write` is conservative by rule. It leaves a leading YAML front matter block (closed by `---`
 // or by YAML's `...`) and the text of a setext heading byte for byte, and R1 does not read them.
@@ -102,10 +102,10 @@ const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
 /**
  * The start of an element whose line breaks GitHub shows, a raw-text element or inline code, as
  * raw HTML may hold it anywhere: in a tag, an attribute value, a comment, a processing
- * instruction, CDATA or a malformed tag. The name may be followed by anything but a name
- * character, so `<preview` is no match.
+ * instruction, CDATA or a malformed tag. The name, captured, may be followed by anything but a
+ * name character, so `<preview` is no match.
  */
-const VERBATIM_OPEN = /<(?:pre|code|tt|kbd|samp|textarea|script|style)(?![A-Za-z0-9-])/i;
+const VERBATIM_OPEN = /<(pre|code|tt|kbd|samp|textarea|script|style)(?![A-Za-z0-9-])/i;
 /** Whitespace inside inline HTML: spaces and tabs, and at most one line ending. */
 const TAG_SPACE = String.raw`[ \t]*(?:\r?\n[ \t]*)?`;
 /** CommonMark's open tag: a tag name, attributes each led by whitespace, an optional `/`, `>`. */
@@ -587,7 +587,8 @@ function markVerbatim(
         for (const line of lines.slice(first)) line.verbatim = true;
         const at = start + match.index;
         const line = first + text.slice(0, at).split("\n").length - 1;
-        return { line, tag: `${match[0].toLowerCase()}>` };
+        const [, name = ""] = match;
+        return { line, tag: `<${name.toLowerCase()}>` };
       }
     }
     first = last + 1;
@@ -872,7 +873,7 @@ function needsBlankBefore(
  * The document with each paragraph re-laid out and a blank line before each list item; verbatim
  * lines stay byte for byte.
  */
-function relayout(text: string, blocks = scanBlocks(splitLines(text).lines)): string {
+function relayout(text: string, blocks: Blocks): string {
   const { lines, trailingNewline } = splitLines(text);
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
@@ -1055,7 +1056,7 @@ function renderDifference(parse: Parse, before: string, after: string): string |
  * first pass misread a construct, so the file is not written.
  */
 function secondRelayoutDifference(text: string): string | undefined {
-  const again = relayout(text);
+  const again = relayout(text, scanBlocks(splitLines(text).lines));
   if (again === text) return undefined;
   const lines = text.split("\n");
   const changed = again.split("\n");
@@ -1118,12 +1119,21 @@ function check(text: string, blocks: Blocks): Finding[] {
     }
   }
   // R3 counts an item's own lines. Each line from an item's first line to its last non-blank one
-  // belongs to that item, unless a nested item, which starts later, claims it. So a nested item is
-  // checked on its own, and text after a nested list counts toward its parent. A blank line between
-  // a nested item and what follows it inside the parent counts toward the parent; a blank line
-  // after an item's last line outside any enclosing item counts toward no item.
+  // belongs to that item, unless a nested item's span also holds it: then the innermost such item,
+  // the last of them in blocks.items, takes it, also when it starts on its parent's line (`- - x`).
+  // So a nested item is checked on its own, and text after a nested list counts toward its parent.
+  // A blank line, or a run of them, right before a line that opens a list item counts toward no
+  // item, so the blank lines R2 requires between items never add up in an enclosing item. Any
+  // other blank line inside an item's span counts toward the item that holds it, as the one
+  // between a nested item and its parent's paragraph after it counts toward the parent; a blank
+  // line after an item's last line outside any enclosing item counts toward no item.
   const owners = new Array<ListItem | undefined>(lines.length).fill(undefined);
   for (const item of blocks.items) owners.fill(item, item.first, item.last + 1);
+  for (const item of blocks.items) {
+    for (let index = item.first - 1; index >= 0 && isBlank(lines[index] ?? ""); index--) {
+      owners[index] = undefined;
+    }
+  }
   const own = new Map<ListItem, number>();
   for (const [index, line] of lines.entries()) {
     const owner = owners[index];

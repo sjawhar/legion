@@ -8,6 +8,8 @@ import { gfm } from "micromark-extension-gfm";
 
 const SCRIPT = resolve(import.meta.dir, "semantic-line-breaks.ts");
 const REPO_ROOT = resolve(import.meta.dir, "..");
+/** The root guide, the e2e README and the Kubernetes doc. */
+const GUIDES = ["AGENTS.md", "scripts/e2e/README.md", "docs/kubernetes.md"];
 
 /** Runs the script as a contributor does: `bun scripts/semantic-line-breaks.ts [--write] <files>`. */
 function run(args: string[]) {
@@ -30,11 +32,7 @@ test("the Envoy guide and the Dispatch server README keep the layout", () => {
 });
 
 test("the root guide, the e2e README and the Kubernetes doc keep the layout", () => {
-  const { exitCode, stdout, stderr } = run([
-    "AGENTS.md",
-    "scripts/e2e/README.md",
-    "docs/kubernetes.md",
-  ]);
+  const { exitCode, stdout, stderr } = run(GUIDES);
   expect(stdout).toBe("");
   expect(stderr).toBe("");
   expect(exitCode).toBe(0);
@@ -51,7 +49,7 @@ test("the root guide, the e2e README and the Kubernetes doc hold no raw HTML blo
   // the middle of a paragraph, as GitHub reads it: every line up to the next blank line is then raw
   // HTML, which R1 never reads and GitHub does not render as the paragraph's text.
   const found: string[] = [];
-  for (const file of ["AGENTS.md", "scripts/e2e/README.md", "docs/kubernetes.md"]) {
+  for (const file of GUIDES) {
     const tree = fromMarkdown(readFileSync(resolve(REPO_ROOT, file), "utf8"), {
       extensions: [gfm()],
       mdastExtensions: [gfmFromMarkdown()],

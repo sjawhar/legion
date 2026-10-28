@@ -141,6 +141,16 @@ test("R3 does not count a nested list toward its parent: a short parent passes",
   expect(exitCode).toBe(0);
 });
 
+test("R3 does not count the blank lines R2 requires between nested items toward their parent", async () => {
+  // The 50 nested items and the 49 blank lines between them run 99 screen rows, 101 with the
+  // parent's own two lines, and `--write` could remove none of the blank lines.
+  const nested = Array.from({ length: 50 }, (_, n) => `  - Child ${n + 1}.\n`).join("\n");
+  const path = await markdownFile(`- Parent item.\n\n${nested}`);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
 test("R3 reports a nested item longer than one screen at the nested item, not its parent", async () => {
   const path = await markdownFile(
     `- Parent item.\n\n  - Nested item.\n${sentenceLines(55, "    ", "Line")}`
@@ -155,13 +165,13 @@ test("R3 counts a parent's paragraph after its nested list toward the parent", a
     `- Parent item.\n\n  - Nested item.\n\n${sentenceLines(50, "  ", "Continuation")}`
   );
   const { exitCode, stdout } = run([path]);
-  expect(stdout).toBe(`${path}:1: R3: 53 screen rows: - Parent item.\n`);
+  expect(stdout).toBe(`${path}:1: R3: 52 screen rows: - Parent item.\n`);
   expect(exitCode).toBe(1);
 });
 
 test("R3 gives a nested item the same verdict whether a sibling follows it or nothing does", async () => {
-  // The blank line after the nested item counts toward the parent when a sibling follows, and
-  // toward no item at the end of the file: the nested item runs its marker line plus `extra` rows.
+  // The blank line after the nested item counts toward no item, whether a sibling follows it or the
+  // file ends: the nested item runs its marker line plus `extra` rows.
   const parent = (extra: number, after: string) =>
     `- Parent item.\n\n  - Nested item.\n${sentenceLines(extra, "    ", "Line")}\n${after}`;
   for (const after of ["", "  - Sibling item.\n"]) {
