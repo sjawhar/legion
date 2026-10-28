@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-631",
+  "completed": "2026-10-28T20:55:00Z",
+  "round": 24,
+  "headTested": "a83ba5dcf5a225f7920a153255edc5a3f5388769",
+  "codeHead": "e3bf209c93ce",
+  "scope": "Conflict-only round: forward merge of main c24ea568 (main@origin) and a guides regeneration. Retro removed .legion/INFRA-631/ again (7b0aa72e), so restructure.ts is no longer on the branch; the implementer regenerated with it pinned at 1b2ea974, and so did I. scripts/semantic-line-breaks.ts and its tests are unchanged since round 19 (empty diff 28c556e8..head for scripts/), so that round's whole-repository sweep stands.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran at a83ba5dc: `git show 1b2ea974:.legion/INFRA-631/restructure.ts` run with `--strict --line-breaks scripts/semantic-line-breaks.ts` on main c24ea568's two files exits 0 and is byte-identical to the head guides; checker exit 0 on both guides."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
+      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?",
+      "observed": "exit 0, no output",
+      "headSha": "a83ba5dcf5a225f7920a153255edc5a3f5388769",
+      "negativeControl": "the same command on main c24ea568's old-layout files exits 1 with 2,170 R1 findings"
+    },
+    {
+      "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
+      "surface": "restructure.ts (pinned at 1b2ea974) as the reviewer re-runs it, compared with the guides at head",
+      "command": "git show 1b2ea974:.legion/INFRA-631/restructure.ts > $TMPDIR/infra631-test24/restructure.ts; bun $TMPDIR/infra631-test24/restructure.ts --strict --line-breaks scripts/semantic-line-breaks.ts <c24ea568 AGENTS.md> <out> <c24ea568 README.md> <out>; cmp with head",
+      "observed": "exit 0, no warning; both outputs byte-identical to the head guides",
+      "headSha": "a83ba5dcf5a225f7920a153255edc5a3f5388769",
+      "negativeControl": "restructure.ts --strict exits 1 and writes nothing when an anchor is missing (round 2)"
+    },
+    {
+      "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
+      "surface": "git merge-tree --write-tree on branches made from the new-layout files with the committed patches",
+      "command": "TMPDIR=$TMPDIR/infra631-test24/rpw bash $TMPDIR/infra631-test20/fake/.legion/INFRA-631/replay/run.sh $LEGION_WORKSPACE  (replay/ taken from 67c0c11c, since retro removed it from the branch)",
+      "observed": "exit 0, 11/11 PASS",
+      "headSha": "a83ba5dcf5a225f7920a153255edc5a3f5388769",
+      "negativeControl": "append(c), two items at one point of Routes, conflicts; same-sentence controls 728b5e297fb5 and 4440fc7b57a2 conflict"
+    }
+  ],
+  "localCi": {
+    "why": "The architect's 16:38Z rule: local runs at the code head stand in for the queued required CI. Code head e3bf209c; toolchain as CI pins it (Bun 1.4.4, changie v1.26.0, Go 1.27.1, PyYAML 6.0.2). Logs: $TMPDIR/infra631-test24/local/.",
+    "lint": "PASS: all eleven check scripts, gofmt -l (none), `bun install --frozen-lockfile`, `bunx biome check .` (1,240 files, no errors) exit 0.",
+    "typecheck": "PASS: `go vet -tags e2e ./...` in packages/daemon exit 0.",
+    "test": "PASS: verify-build, release-push, changelog-fold, release-bump and the eleven check-*.test.sh scripts, third-party notices, semantic-line-breaks (89 pass) and its guides test, sessions-import-pods, scripts/dispatch biome/tsc/test (113 pass), scripts/github-apps biome/tsc, all exit 0. `bun test scripts/e2e/lib`: 655 pass, 2 fail, both 'docker' not on PATH. The Go daemon tests, -race and Stage 1 need Postgres, Docker, tmux, user namespaces and cgo and cannot run here; this PR changes no Go file."
+  },
+  "verified": [
+    "Required CI on GitHub at 20:51Z: at the code head e3bf209c lint, test, typecheck, build x2, changes, pr-title and the daemon Postgres 16 suite are queued; none is red. Mergeable against main c24ea568 (main@origin at 20:51Z)."
+  ],
+  "notes": []
+}
