@@ -26,9 +26,7 @@ func TestAPullRequestRecordedBefore0060NamesNoStartOfItsMoves(t *testing.T) {
 		 0, '', '[]', 'h4', 'h2', false, 0, 'open', '', '[]', '', '')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	migrateThrough(t, store, 60)
 	var counted, countedFrom, arrivedFrom string
 	if err := store.Pool().QueryRow(ctx, `select head_counted, head_counted_from, head_arrived_from from pull_requests where issue = 'LEGION-208'`).
 		Scan(&counted, &countedFrom, &arrivedFrom); err != nil {

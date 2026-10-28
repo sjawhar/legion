@@ -46,6 +46,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // machineLoginPendingTTL bounds how long a typed-code machine login waits for a human to decide
@@ -683,7 +684,7 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 	if err != nil || u.Port() != "0" || fakeSecretsFile != "" {
 		return nil
 	}
-	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", publicURL)
+	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", redact.URL(publicURL))
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from

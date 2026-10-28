@@ -108,6 +108,7 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 	}
 	if pr.HeadSHA != fact.Commit {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.Commit)
+		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.HeadAt)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
