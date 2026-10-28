@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-647",
+  "completed": "2026-10-28T10:25:05Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 2 after the forward merge of main 460facf5 (d276dc19) and the changelog move to changie fragments. Read 460facf5..6a4f1234: the PR's own diff is service.go, ask_blocks.go and settlement_render_once_test.go with the same blobs as at 5d2d9883 (a19de660..1c26a244, 1d009da3..38435bc3, 6285ba68), packages/envoy/AGENTS.md, two packages/envoy/.changes/unreleased/pr2416-*.yaml fragments matching .changie.yaml's fragmentFileFormat and its required Issue key, four docs/solutions learnings, and the handoff; main changed nothing under internal/dispatch/docs or pmdoc between 9652564f and 460facf5 (its ask_transitions.go now stores an empty selection as [] at answer time). The fingerprint moved, so this was a full round: rebuilt both sides at the new base and head and drove them again (proof below). The implementer's replay was not re-run (its inputs are not on this pod's scratch); the independent profiles agree with it in direction, as in round 1."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Settled versions identical to today's; what people and agents see is unchanged",
+      "surface": "A local Dispatch server (cmd/dispatch, GOWORK=off builds of git archive 460facf5 = base and 6a4f1234 = head) on Postgres 17.11 + pgvector 0.8.7, driven through the dispatch CLI (issue, doc-edit, doc-read) and the human answer/resolve routes after dev sign-in",
+      "command": "$TMPDIR/t647/side.sh <side> <db> <port> scenario.py <side>.dump (fresh database, server with DISPATCH_TEST_SETTLE_DELAY=300ms; create, mention target, 3 plain edits, answer ask-ship [Yes], answer ask-free with an empty selection and text, plain edit, delete answered ask-free, re-insert it, plain edit, insert ask-new, retract it, reword decided ask-ship, insert a mention, table edit; then the normalized dump); diff base vs head",
+      "observed": "Identical after putting two rows with equal text (both blocks deleted at v8) in a stable order: 538 lines each, sha256 3d1e92212ebdd5f385807c57c137665a98fb645b539d78f9f3c98bf7e551bfbc (17 versions' normalized markdown, document_blocks rows, document_block_texts per version, block_refs, refs excerpts, asks, event types). On each side 16 of 16 steps' latest version equals the live doc-read, every indexed text_sha256 is sha256 of its stored text, the index is at version 17, 0 server ERROR lines.",
+      "headSha": "6a4f1234b738fc400f6f6fcb1fbb4394c5b7e638",
+      "negativeControl": "The head build with the reuse made unconditional (`if false && (versioned != read || reconciliation.changedTree())`) writes 15 versions, not 17: at reinsert-answered-ask and reword-decided-ask the latest version differs from the live document (the settlement's restore of the answered block and of the decided wording is never versioned); 135 diff lines against head."
+    },
+    {
+      "criterion": "Render once",
+      "surface": "CPU profiles (/debug/pprof/profile, DISPATCH_PPROF_PORT) of the same local base and head servers",
+      "command": "$TMPDIR/t647/side.sh <side> <side>perf647 18677 perf.py prof-<side>-<n>.pb.gz 40 for base-1, head-1, base-2, head-2, base-3, head-3 (seed a 125,098-byte spec, 40 plain replace edits each waited to its version, under one CPU profile; server CPU-s from /proc/<pid>/stat over the loop); go tool pprof -lines -peek 'docs\\.renderTree' and -top -cum -nodecount=1000000",
+      "observed": "Base renders in settleRoomWithin at service.go:1428 (0.21 / 0.15 / 0.17 s) and at the version render service.go:1594 (0.14 / 0.19 / 0.15 s); head only at service.go:1429 (0.19 / 0.11 / 0.13 s), no samples at the version render. settleRoomWithin cumulative share base 9.32 / 10.58 / 10.16 %, head 9.40 / 7.03 / 6.75 % (median 10.16 -> 7.03). Server CPU-s over the loop base 6.25 / 6.42 / 6.57, head 6.08 / 6.32 / 5.92 (mean 6.41 -> 6.11), nothing contradicting the function share.",
+      "headSha": "6a4f1234b738fc400f6f6fcb1fbb4394c5b7e638",
+      "negativeControl": "The base profiles of the same workload keep both renders (1428 and 1594), so the split tells the builds apart."
+    },
+    {
+      "criterion": "Regression tests pin the reuse condition",
+      "surface": "The docs package's settlement on real Postgres 17.11 + pgvector (DISPATCH_TEST_DATABASE_URL), at 6a4f1234",
+      "command": "GOWORK=off go test ./internal/dispatch/docs/ -run 'TestSettlementVersionsARepairTheRoomAlreadyHolds|TestSettlementVersionsTheTreeOfAStampThatMintedNothing' -count=3 -v, at head and with the condition replaced by the fix ranking's `if len(slots) > 0 {`",
+      "observed": "Head: both pass 3 of 3. Ranking condition: both fail.",
+      "headSha": "6a4f1234b738fc400f6f6fcb1fbb4394c5b7e638",
+      "negativeControl": "The ranking's len(slots) > 0 fails both tests; round 1 showed `versioned != read` alone fails the repair test, `changedTree()` alone the stamp test, and the nil selection the repair test (same blobs)."
+    }
+  ],
+  "ci": "Read on GitHub at 6a4f1234 at 10:24Z: build, changes, lint, test, typecheck queued; one pr-title run cancelled and one queued. No check run at bd79cf21. Not waited for."
+}
