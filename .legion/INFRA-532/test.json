@@ -2,50 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-532",
-  "completed": "2026-10-28T18:46:00Z",
+  "completed": "2026-10-28T21:22:00Z",
+  "round": 2,
+  "testedHead": "fc3cadb9e3fb4d7246d379a7ac32ae4f5677f7c6",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command (mermaid.e2e.ts minus the comment too-large row) in chromium, iphone, webkit and firefox, one project at a time, --workers=1, under a pod-memory cap (peak 5.9 GB): 16 passed in each. Re-ran its red leg in chromium: base product code (packages/dispatch/web and packages/proof-editor/src restored from 349f14eb) under the head's rows fails R1, R3, R5, R7, R8 and R9 on the reasons it quotes. Re-ran two of its scratch controls (sanitizer bypass, refocus no-op) with the same failures. Bundle: org.eclipse.elk only in mermaid-render.worker-*.js, lib-*.js 204,420 bytes."
+    "how": "I ran the implementer's command again at fc3cadb9 (mermaid.e2e.ts without the comment too-large row) in chromium, iphone, webkit and firefox. I ran one project at a time, with --workers=1, under a pod-memory cap (peak 6.7 GB). Result: 19 passed in each project. I ran the round's red leg again: packages/dispatch/web and packages/proof-editor/src restored from 832e86fe (round-1 code), under the head's rows, in chromium. The comment-link row failed with 'viewport ratio 0' and the failing-worker row failed with an old diagram still shown (count 1), as the implementer reported."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A1 and spec paragraph 4: a document diagram styles nothing outside it, fetches no Google font, and hostile markup runs and fetches nothing, in a comment and in the document",
-      "surface": "Dispatch document page /issues/<KEY>/spec and the Conversation comment thread, real Go server and Postgres, chromium/iphone/webkit/firefox",
-      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 --grep-invert \"a diagram too large to draw in time shows the reason, and the page keeps responding\"",
-      "observed": "16 passed in each of chromium, iphone, webkit, firefox (R1-R9 and the comment rows). Scratch: three diagrams (two identical) each mount one svg in their own shadow root, none in the light DOM, no page sheet holds fonts.googleapis (chromium, webkit, firefox).",
-      "headSha": "24d38807",
-      "negativeControl": "sanitizeElement skipped in sanitizeMermaidSvg, rebuilt: R1 fails on a https://fonts.googleapis.com/css2?family=Inter request, R2 and R3 on window.__hostile entries (chromium). Base product code from 349f14eb: R1 fails on sentinels.svgText rgb(1, 2, 3), R3 on hostile.example import.css/image.png/xlink-image.png/style.png requests."
+      "criterion": "Review finding 1 (condition 3): a comment link and a margin card click on the live document land on the quote after a diagram above it draws, also with the browser's default scroll anchoring",
+      "surface": "Dispatch live document /issues/<KEY>/spec?comment=<id> and its margin, held and real Mermaid worker, chromium/iphone/webkit/firefox",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 --grep-invert \"a diagram too large to draw in time shows the reason, and the page keeps responding\"; scratch zz-tester-scratch-mermaid.e2e.ts (not committed): comment link without withoutScrollAnchoring, held and unheld worker; margin card click, held worker, anchoring off",
+      "observed": "The comment-link row passed in all four projects. With default anchoring, the quote ends at the viewport centre after the draw: 0 px chromium, 0/-1 px webkit, 1 px firefox, and -40 px on iphone, the same as before the draw. With a held diagram and anchoring off, a margin card click lands again after the draw: offset before/after 1/1 chromium, 0/-1 webkit, 0/0 firefox. The reader-scrolled row passed in all four projects.",
+      "headSha": "fc3cadb9",
+      "negativeControl": "refocusAfterDiagrams made a no-op and the SPA rebuilt: R7, R8 and the comment-link row fail with toBeInViewport 'viewport ratio 0' in chromium and webkit. Round-1 product code (832e86fe): the comment-link row fails with 'viewport ratio 0' in chromium."
     },
     {
-      "criterion": "Condition 3: a block link and a highlighted mark land on their block whether or not a diagram above drew, with the browser's default scroll anchoring as a person has it",
-      "surface": "Document page with #b-<id> and past version ?v=1&comment=<id>, held and unheld Mermaid worker, scroll anchoring at the browser default (overflow-anchor auto), chromium/iphone/webkit/firefox",
-      "command": "scratch copies of R7/R8 without withoutScrollAnchoring (never committed), measuring the target's offset from the viewport centre after scroll settles: bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-scratch-mermaid.e2e.ts --project <p> --workers=1",
-      "observed": "R7/R8 pass as committed (anchoring off) in all four. With default anchoring, held block link (1 and 3 diagrams), unheld block link, held and unheld highlighted mark: target centred after the draw in all four projects (offCentre 0..1 px desktop; -40 px iphone, equal to its value before the release). A reader who wheel-scrolled after the link landed keeps their place (top -553 -> -552 chromium). With anchoring off, a reader who used the wheel or PageUp is not re-centred (offCentre 500 -> 9418, the diagram pushing the target down).",
-      "headSha": "24d38807",
-      "negativeControl": "refocusAfterDiagrams made a no-op and rebuilt: R7 and R8 fail toBeInViewport 'viewport ratio 0' in chromium and webkit, while the default-anchoring copies still land centred (the browser's own anchoring holds the target); base product code from 349f14eb: R7/R8 fail on a diagram already drawn before the release."
+      "criterion": "Review finding 2 (condition 4): an edited diagram whose worker fails after a first drawing shows its source; the renderer recovers on online",
+      "surface": "Dispatch document editor, Worker wrapped to fail after a first drawing, four projects",
+      "command": "the same mermaid.e2e.ts run (\"worker fails after its first drawing\"); scratch: fail the worker, type 'Line', then stop the failure, fire 'online', type 'Again'",
+      "observed": "The failing-worker row passed in all four projects. In the scratch run the block shows its source with no diagram and no status line. After 'online' the next edit draws a diagram holding FinishLineAgain, with no pageerror (chromium, webkit, firefox).",
+      "headSha": "fc3cadb9",
+      "negativeControl": "The view's show() ignores the unavailable answer: the failing-worker row fails at toHaveCount(0) with 1 received (the old diagram) in chromium and webkit. Round-1 product code: the same failure in chromium."
     },
     {
-      "criterion": "Architect's decision and conditions 1, 2, 4: worker drawing, 5 s refusal with source, 300 ms edit redraw keeping the last drawing, source shown with no worker",
-      "surface": "Document editor, four projects; plus scratch edits in chromium, webkit, firefox",
-      "command": "same mermaid.e2e.ts run (R5, R6, R9); scratch: type 'zz' before 'graph TD' then Backspace twice; delete a block while its drawing is held, then release; a second user types into the diagram source",
-      "observed": "R5, R6, R9 pass in all four. Invalid edit shows 'Unable to render Mermaid diagram: Invalid mermaid header: \"zzgraph TD\"…' with no diagram, and the fix redraws with the status hidden; a block deleted while held leaves no diagram and no pageerror; bob's edit redraws alice's diagram to FinishRemote; no pageerror in any.",
-      "headSha": "24d38807",
-      "negativeControl": "Base product code from 349f14eb: R5 fails on __mermaidSent, R9 on a diagram drawn with no worker (chromium)."
+      "criterion": "Architect's round-2 instruction: a past-version comment link with no diagram, --repeat-each=20, lands on its quote",
+      "surface": "Past version /issues/<KEY>/artifact/spec?v=1&comment=<id>, quote below the fold, no mermaid block (and, separately, a mermaid block with no Worker), chromium/iphone/webkit/firefox",
+      "command": "row 'a version deep link to a quote below the fold scrolls the quote into view @phone', in doc.e2e.ts (chromium x20, iphone x20) and as scratch shapes no-mermaid/no-worker (chromium, webkit and firefox, x20 each): bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts <file> --project <p> --workers=1 --repeat-each=20",
+      "observed": "0 misses in 160 runs: chromium 40/40 no diagram + 20/20 no worker, iphone 20/20, webkit 40/40, firefox 40/40. Not a failure under the architect's rule. The miss does occur with a mermaid block whose worker is held (2 misses in 45 chromium runs, the first landing only). The scroll timeline shows the cause, which is not new in this PR. On load, VersionView mounts its editor 2-3 times in every shape, the no-diagram one included. Each mount calls focusMark, and the page collapses to 720 px between mounts. In a miss, the last scrollIntoView ran before the final editor's content was laid out, so the page stayed at its top. With a diagram waiting, the re-run after the diagrams draw repairs it.",
+      "headSha": "fc3cadb9",
+      "negativeControl": "The same scratch file with a held worker missed: toBeInViewport 'viewport ratio 0' for 15 s (1 of 20, then 1 of 25, in chromium). So the row can detect a miss."
     },
     {
-      "criterion": "INFRA-528/INFRA-612 cleanup and the round-5 Firefox flake fix; the code-block view's DOM contract for neighbour specs",
-      "surface": "Firefox comment-thread rows; text-typed-blocks, doc, code-line-replace, collab-cursor specs in chromium",
-      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project firefox --workers=1 --repeat-each 10 -g \"a comment holding|a reply to a comment|renderer refuses|label holding markup|another language stays code|in a comment runs nothing\"; bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/text-typed-blocks.e2e.ts e2e/doc.e2e.ts e2e/code-line-replace.e2e.ts e2e/collab-cursor.e2e.ts --project chromium --workers=1",
-      "observed": "60 passed in Firefox; 24 passed in chromium.",
-      "headSha": "24d38807",
-      "negativeControl": "Sanitizer bypassed: the comment hostile row R2 fails on window.__hostile entries (chromium), so the comment path is the sanitized one."
+      "criterion": "Round-2 change to every live-document focus (focusInEditor) breaks no other focus path",
+      "surface": "margin, block-references, deep-links, doc specs in chromium",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/margin.e2e.ts e2e/block-references.e2e.ts e2e/deep-links.e2e.ts e2e/doc.e2e.ts --project chromium --workers=1",
+      "observed": "47 passed, 2 skipped.",
+      "headSha": "fc3cadb9",
+      "negativeControl": "With refocusAfterDiagrams a no-op, the focus rows of mermaid.e2e.ts fail (see above). So these specs ran on a build in which the re-run was active."
     }
   ],
   "notes": [
-    "R7 and R8 turn scroll anchoring off in the test only (withoutScrollAnchoring adds '* { overflow-anchor: none !important; }'); the page's CSS sets none on the document. Run with the browser default, both land the target centred in all four projects, so no failure. Anchoring off is the stricter case: only the page's re-run can land the target there, and R7/R8 fail without it.",
-    "Not run in the pod: the comment too-large row (draws 800 nodes for real); CI's browser job runs it.",
-    "CI at the code head ef163c71 was queued (every check) when read at 18:40Z; no lane result to record yet."
+    "The no-diagram landing row was a scratch probe. I did not commit it: it passed, and a tester commits only red tests.",
+    "R8 no longer checks the first landing. With the re-run removed it still fails in chromium and webkit, so it still proves the re-run.",
+    "Not run in the pod: the comment too-large row (it draws 800 nodes). CI's browser job runs it.",
+    "CI at the code head d4201ff0, read at 21:20Z: lint, typecheck, build and changes success; test, dispatch, dispatch-browser-multiprocess and the Go suites queued or in progress. I recorded no lane result."
   ]
 }
