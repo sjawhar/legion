@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -207,15 +207,14 @@
 
 ### Changed
 
-- `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayloadSchema` mean the build every
-  live Dispatch server process serves, announced once each time that build changes, rather than one
-  process's start: a rolling update is announced once its last process of the earlier build has
-  gone, a restart on the announced build is not announced, and a rollback is announced again.
-  `started_at` is the database's time of the announcement, and the event id is
-  `dispatch-server-started-<commit>-<seq>`. The subject and the payload's two fields are unchanged,
-  so the schema still parses every envelope; a shared fixture
-  (`packages/daemon/internal/intake/testdata/dispatch/server-started.json`) holds the Dispatch
-  writer, the daemon's intake and this schema to one envelope (INFRA-555).
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
