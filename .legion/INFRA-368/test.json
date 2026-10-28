@@ -2,21 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T19:20:00Z",
-  "headTested": "3c0071f345ac9e10fde0065d2fb3074ae041bb01",
-  "codeHead": "b2d4017a1bc6",
-  "round": "6: the architect narrowed round 5 to the skills word guard and the forward merge over main's #2324, keeping behaviours 2a, 2b and 2c. The merge changed the code (fingerprint fefd6bc7 → 04c51982, posted on the pull request), so this was a full test round on a fresh database.",
+  "completed": "2026-10-28T19:55:00Z",
+  "headTested": "d9be59ee417006f2f9eec31cd4a686f9d37bbeb0",
+  "codeHead": "95336ce647ab",
+  "round": "7: the fix for round 6's 2b failure. 7fbf45cc changes useReferenceData in reference-target.ts: a block read that answers 404 NOT_FOUND reads as no block, while any other failure keeps the last data. It also adds a spec-block twin of my red row, and 95336ce6 adds a changelog fragment. My red row is unchanged. The code changed, so this was a full round on a fresh database.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "On a harness built from b2d4017a (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts e2e/deep-links.e2e.ts` gave 53 passed, 4 skipped, 1 failed. The passes include the implementer's 2b row ('a link to a block of a comment shows the block's new text once its author edits it, with no reload') and the three passage rows. The one failure is my new red row (failure below)."
+    "how": "On a harness built from 95336ce6 (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts e2e/deep-links.e2e.ts` gave 55 passed and 4 skipped. The passes include my round-6 red row 'a link to a block of a comment stops showing the block's text once its author deletes it, with no reload', unmodified; the implementer's spec-block twin; the 2b reword row; and the three passage rows."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Architect's round-5 item 2b: the comment.edited rule in api/event-refresh.ts refreshes a comment's item-block reads, so a link or hover card to a comment block does not keep its pre-edit text. An edit that deletes the cited paragraph is such an edit.",
-      "evidence": "In Chromium on the harness, alice's comment 'Alpha first.\\n\\nBeta soon deleted.' is cited as dispatch://CORE-1/comment/<id>#b-b2 by a second comment. The Conversation tab is open with the events stream subscribed and the block's hover card open. alice's edit to 'Alpha first.' leaves the open card reading 'CORE-1 · Comment · aliceBeta soon deleted.' after 5 s, and the link keeps the name 'Beta soon deleted.'. A freshly loaded page reads the same link as 'CORE-1 comment block' with a card of 'CORE-1 comment block', with no text. So the live page keeps the deleted paragraph's pre-edit text until a reload. The refresh runs, but the block read now answers 404 and the card keeps the last text it had. The same thing happens on main for a document block: with the card of a spec block open, editArtifact deleting that block left the card reading 'CORE-1 · spec.md Spec paragraph soon deleted.', and after a reload it read 'CORE-1 spec block'. A fix in the shared card or query code would cover both. Red test: 'a link to a block of a comment stops showing the block's text once its author deletes it, with no reload' in packages/dispatch/e2e/block-references.e2e.ts (commit 82f0b73e). `cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 DATABASE_URL=… FAKE_ENVOY_PORT=9121 FAKE_GITHUB_PORT=9122 FAKE_BROKER_PORT=9124 DISPATCH_E2E_PORT=8877 PLAIN_HTTP_PORT=31820 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts` fails: expect(locator).not.toContainText('Beta soon deleted.'), Received 'CORE-1 · Comment · aliceBeta soon deleted.'."
+      "criterion": "Round 6's 2b failure, and A13's deletion and restore: a link or card to a comment block shows no pre-edit text once its author deletes the cited paragraph, and cites it again once the text is restored, all without a reload",
+      "surface": "The Conversation tab in Chromium on the local harness, with the events stream subscribed",
+      "command": "cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_tester?sslmode=disable' FAKE_ENVOY_PORT=9121 FAKE_GITHUB_PORT=9122 FAKE_BROKER_PORT=9124 DISPATCH_E2E_PORT=8877 PLAIN_HTTP_PORT=31820 PLAYWRIGHT_BROWSERS_PATH=/legion/scratch/tmp/ms-playwright bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts. Then a throwaway spec (removed). D1: a comment on CORE-1 is cited from a comment on CORE-2 and CORE-2's page is open with the card showing; the author deletes the paragraph, then writes it back. D2: a link pinned to revision 1; the author deletes the paragraph",
+      "observed": "The red row passes. D1: after the deletion the open card reads 'CORE-1 comment block' within 5 s, as a fresh page reads it. After the restore, the link reads 'Beta the cited one.' again and its card reads 'CORE-1 · Comment · alice Beta the cited one.'. The main frame does not navigate at any point. D2: the pinned card goes from the revision-1 text to 'Revision 1 Removed in revision 2 Beta pinned text.' with no reload. That 200 answer keeps the pinned text, as the fix intends.",
+      "headSha": "95336ce647ab",
+      "negativeControl": "At 3c0071f3 the same red row failed: the card still contained 'CORE-1 · Comment · aliceBeta soon deleted.' after the deletion"
+    },
+    {
+      "criterion": "A7, A10 comment half, A11, A13, A15 comment half and R14 (the driver's sections), plus 2a, 2b and 2c, at this head",
+      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0138 on a fresh database, the real dispatch CLI, Chromium",
+      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; the five Playwright files above",
+      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 55 passed, 4 skipped. Round 6 found 2a and 2c holding at b2d4017a, and this round changes neither: it touches only reference-target.ts in the web app, its tests and a changelog fragment.",
+      "headSha": "95336ce647ab",
+      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
     }
   ],
-  "failed": 1,
   "heldUp": [
     "2b for a reword, independently and across issues: a link on issue B's page to a block of a comment on issue A follows A's edit ('Beta original words.' → 'Beta words after the edit.') in the open card and the link's name, with no navigation of the page.",
     "2b for a pinned link (#b-b2@v1): the open card goes from 'Revision 1 Unchanged since revision 1 Beta at revision one.' to 'Revision 1 Changed in revision 2 Beta at revision one.' with no reload. It keeps the pinned text, as a pinned document block does.",
@@ -25,6 +38,6 @@
     "The migrations sit above main's highest: main@origin ends at 0135_server_processes, and this head adds 0136-0138. The fingerprint comment for a19325c4 → b2d4017a (fefd6bc7 → 04c51982, changed) is on the pull request.",
     "The round-1 HTTP probe at this head: 42 of 43 checks hold. The one failure is the probe's own reply call, which omits attempt."
   ],
-  "ci": "At code head b2d4017a GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. The pi-envoy skills word guard (item 1) has no result there yet. I did not wait for CI and did not run it locally.",
-  "migrations": "main@origin ends at 0135_server_processes; this head adds 0136-0138; #2394 is still open."
+  "ci": "At head d9be59ee GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. 95336ce6 shows no runs. The pi-envoy run at b2d4017a, where the skills word guard runs, was cancelled when the next commit was pushed, so the guard (round-5 item 1) has no result yet. I did not wait for CI.",
+  "migrations": "main@origin ends at 0135_server_processes; this head adds 0136-0138."
 }
