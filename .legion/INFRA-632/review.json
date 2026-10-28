@@ -2,30 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T20:17:10Z",
-  "round": 4,
-  "reviewedCodeHead": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T20:31:43Z",
+  "round": 5,
+  "reviewedCodeHead": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/AGENTS.md",
-      "description": "No code finding stands at bb0690b9. GitHub reports #2474 CONFLICTING again at 20:16Z: main af1ff09c (#2331) edits packages/envoy/AGENTS.md, which this branch carries from sjawhar/legion#2422 (also CONFLICTING). git merge-tree of origin/main and the head conflicts only on that file. The architect's queued-CI rule allows approval only with no conflict. Resolve it as before: take #2422's resolution, or run #2422's recipe on main's file, never by hand."
-    }
-  ],
-  "fingerprint": "Unchanged-diff fingerprint against main: afaa9c18 529eb132... -> 48ae49dd 3e74ab78..., changed. The per-file diffs of every file this PR owns (the three guides, the checker and its two tests) are identical. Only packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md differ, the two guides carried from sjawhar/legion#2422, which merge bb0690b9 takes from #2422's head 1b2ea974 as they are. A changed fingerprint makes this a new round, so I reviewed that change: docs only, no runtime code, so no thermonuclear pass.",
+  "keyFindings": [],
+  "fingerprint": "Unchanged-diff fingerprint against main: d598951e 3e74ab78... -> ec248c4a dbfd73b8..., changed, but only in packages/envoy/AGENTS.md, the guide carried from sjawhar/legion#2422. Every file this PR owns (AGENTS.md, scripts/e2e/README.md, docs/kubernetes.md, scripts/semantic-line-breaks.ts and its two tests) is byte-identical to bb0690b9 (git diff --stat empty). Docs-only change, so no thermonuclear pass.",
   "verified": [
-    "the three guides and the checker files at 48ae49dd are identical to 7cf8f4e4 (git diff --stat empty), and main did not change the three guides between a409c128 and 8b6ea377, so the round-3 regeneration check (restructure.ts --strict, cmp identical) still holds",
-    "packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md at 48ae49dd equal #2422's head 1b2ea974; #2422's own .legion/INFRA-631/restructure.ts --strict, run with #2422's checker on main 8b6ea377's two guides, reproduces both byte for byte",
-    "head vs main 8b6ea377 outside .legion: only #2422's paths and the three guides; head vs 1b2ea974 outside .legion and the three guides: only the checker and its two test files",
-    "bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 107 pass, 0 fail; checker on the five guides: exit 0, nothing printed",
-    "local CI commands at 48ae49dd: bunx biome check . exit 0; check-private-names.sh exit 0; go vet -tags e2e ./... exit 0; reclaim, census and config Go tests ok",
-    "GitHub: CI head bb0690b9 with lint, typecheck, test and pr-title queued and none red; compare bb0690b9...48ae49dd is .legion/ only; the PR is MERGEABLE (mergeStateStatus BLOCKED, waiting on review)"
+    "git merge-tree of origin/main af1ff09c and the head: no conflict; GitHub reports MERGEABLE (mergeStateStatus BLOCKED, waiting on review)",
+    "head vs #2422's head bed3ec1d, outside .legion and the three guides: only the checker and its two test files; head vs main, outside .legion: only #2422's paths and the three guides",
+    "#2422's .legion/INFRA-631/restructure.ts --strict at bed3ec1d, with #2422's checker, on main af1ff09c's two Envoy guides reproduces the head's two Envoy guides byte for byte",
+    "main has not changed the three guides since a409c128, so restructure.ts --strict output on main's files is still cmp-identical to the head's guides (checked at 7cf8f4e4, files unchanged since)",
+    "bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: exit 0, 107 pass, 0 fail; checker on the five guides: exit 0, nothing printed",
+    "local CI commands at the head: bunx biome check . exit 0; check-private-names.sh exit 0; go vet -tags e2e ./... exit 0; reclaim, census and config Go tests ok",
+    "GitHub at CI head 746077c0: lint, typecheck, test and pr-title queued, none red; compare 746077c0...ec248c4a is .legion/ only"
   ],
-  "ciRule": "Approved on local runs with CI queued, under the architect's queued-CI decision (dispatch://INFRA-631/comment/e220a5fd-f4e2-4e72-ab5a-47c86c00c32e, applied to this tree at dispatch://INFRA-632/comment/8e4f01b8-79f9-4fbd-81c3-b139fac7100e): local runs pass, no required check red, no conflict. GitHub's ruleset still needs the four checks green before the merge.",
+  "ciRule": "Approved on local runs with CI queued, under the architect's queued-CI decision (dispatch://INFRA-631/comment/e220a5fd-f4e2-4e72-ab5a-47c86c00c32e, applied to this tree at dispatch://INFRA-632/comment/8e4f01b8-79f9-4fbd-81c3-b139fac7100e) and its 20:18Z answer (a) on conflicts carried from #2422. No conflict stands at this head. GitHub's ruleset still needs the four checks green before the merge.",
   "threads": "All four threads carry my answer and are resolved (PRRT_kwDORFy7ds6xRwLM, PRRT_kwDORFy7ds6xRwLS, PRRT_kwDORFy7ds6xRwLa, PRRT_kwDORFy7ds6xSQ5H).",
-  "openForArchitect": "sjawhar/legion#2422 has not merged (head 1b2ea974, MERGEABLE). The architect's acceptance condition still applies: once #2422 merges, this branch merges main and keeps only the three named checker changes on #2422's paths."
+  "openForArchitect": "sjawhar/legion#2422 has not merged (head bed3ec1d, MERGEABLE). The architect accepts INFRA-632 only after it merges, then sends it back for the round that merges main, takes main's version of #2422's paths and re-applies the three checker changes."
 }
