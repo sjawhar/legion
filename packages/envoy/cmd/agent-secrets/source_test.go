@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -214,6 +215,61 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 				t.Fatalf("stdout %q, stderr %q; want them to name %q", stdout, stderr, row.want)
 			}
 		})
+	}
+}
+
+// TestAMistypedIDIsNamedAndNotBlamedOnTheBroker: with a clean AGENT_SECRETS_URL, an id the
+// person typed is path-escaped into the call, so a '%' in it neither breaks the request nor is
+// reported as a bad broker address: the broker receives the id as typed, and an unreached broker's
+// message names the escaped call.
+func TestAMistypedIDIsNamedAndNotBlamedOnTheBroker(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	got := make(chan string, 1)
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/requests/"); ok {
+			select {
+			case got <- id:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer broker.Close()
+	_, stderr, _ := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", "req%zz")
+	if strings.Contains(stderr, "not a valid URL") {
+		t.Fatalf("stderr %q blames the address", stderr)
+	}
+	select {
+	case id := <-got:
+		if id != "req%zz" {
+			t.Fatalf("the broker received id %q, want %q", id, "req%zz")
+		}
+	default:
+		t.Fatalf("the broker received no GET /v1/requests/{id}; stderr %q", stderr)
+	}
+	_, stderr, _ = runAgentSecrets(t, binary, "http://127.0.0.1:1", keyDir, nil, "status", "req%zz")
+	if want := "GET http://127.0.0.1:1/v1/requests/req%25zz (AGENT_SECRETS_URL names http://127.0.0.1:1): dial tcp"; !strings.Contains(stderr, want) || strings.Contains(stderr, "not a valid URL") {
+		t.Fatalf("stderr %q, want it to name %q and not blame the address", stderr, want)
+	}
+}
+
+// TestARedirectsQueryIsNotPrinted: a clean broker URL that redirects to a URL with a query (a
+// proxy's sign-in, say) that then fails prints the failure's class alone: net/http's error names
+// the redirect's target, whose query can carry a credential.
+func TestARedirectsQueryIsNotPrinted(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/signin?state=qtok77SECRET", http.StatusFound)
+	}))
+	defer redirector.Close()
+	_, stderr, _ := runAgentSecrets(t, binary, redirector.URL, keyDir, nil, "self")
+	if strings.Contains(stderr, "qtok77SECRET") || strings.Contains(stderr, "/signin") {
+		t.Fatalf("stderr %q names the redirect's target", stderr)
+	}
+	if want := "(AGENT_SECRETS_URL names " + redirector.URL + "): connection refused"; !strings.Contains(stderr, want) {
+		t.Fatalf("stderr %q, want it to name %q", stderr, want)
 	}
 }
 

@@ -47,6 +47,9 @@ func URL(raw string) string {
 	return NotPrinted
 }
 
+// Clean reports whether raw is not empty and URL prints it unchanged.
+func Clean(raw string) bool { return raw != "" && clean(raw) }
+
 // clean reports whether raw passes URL's allow-list.
 func clean(raw string) bool {
 	for i := range len(raw) {
@@ -137,24 +140,99 @@ func plainPath(path string) bool {
 	return true
 }
 
+// Call is callURL, a request URL a program built as base followed by a path, as a message may
+// print it: unchanged when base is clean and the rest of callURL is a path of the characters
+// plainPath allows and well-formed %XX escapes (an id the program path-escaped into it), and
+// URL(callURL) otherwise. The escapes come from the program's own escaping, never from the
+// configured value, which clean refuses any '%' in.
+func Call(base, callURL string) string {
+	if callClean(base, callURL) {
+		return callURL
+	}
+	return URL(callURL)
+}
+
+// callClean reports whether Call prints callURL unchanged.
+func callClean(base, callURL string) bool {
+	if !clean(base) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(callURL, base)
+	if !ok || rest != "" && rest[0] != '/' && !strings.HasSuffix(base, "/") {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if c == '%' {
+			if i+2 >= len(rest) || !isHex(rest[i+1]) || !isHex(rest[i+2]) {
+				return false
+			}
+			i += 2
+			continue
+		}
+		if !plainPath(rest[i : i+1]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
 // Error is err as a message may print it, given raw, the configured URL err's request was built
-// from. For a clean raw (one URL prints unchanged) it is err itself, so every message reads as
-// before. For any other raw, no text of err is printed, since net/http's and net/url's errors
-// quote the URL and a cause can repeat any part of it: the error's text names only the class of
-// the failure (a URL that did not parse, failed name resolution, a refused connection, a
-// timeout, a TLS failure, an HTTP status, or a request that failed otherwise), found on err
-// itself, and the *url.Error's operation with its URL through URL. It unwraps to err, so
-// errors.Is and errors.As still classify the failure.
+// from. When raw is clean and the URL the *url.Error in err names (if any) is too - raw itself
+// followed by an escaped path (Call), or another clean URL - it is err itself, so every message
+// reads as before. Otherwise no text of err is printed, since net/http's and net/url's errors
+// quote the URL and a cause can repeat any part of it: a configured URL can carry a credential,
+// and the URL of a call that followed a redirect is the redirect's target, which can carry a
+// query the broker or a proxy put there. The error's text then names only the class of the
+// failure (a URL that did not parse, failed name resolution, a refused connection, a timeout,
+// a TLS failure, an HTTP status, or a request that failed otherwise), found on err itself, and
+// the *url.Error's operation with its URL through Call. It unwraps to err, so errors.Is and
+// errors.As still classify the failure.
 func Error(err error, raw string) error {
-	if err == nil || raw == "" || clean(raw) {
+	if err == nil {
+		return nil
+	}
+	ue, printable := printable(err, raw)
+	if printable {
 		return err
 	}
 	text := class(err)
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		text = ue.Op + " " + strconv.Quote(URL(ue.URL)) + ": " + text
+	if ue != nil {
+		text = ue.Op + " " + strconv.Quote(Call(raw, ue.URL)) + ": " + text
 	}
 	return &classified{text, err}
+}
+
+// Cause is Error without the *url.Error's own wrapper, for a message that names the call itself:
+// the error the *url.Error wraps when Error would return err unchanged, and the class alone,
+// unwrapping to err, when it would not.
+func Cause(err error, raw string) error {
+	if err == nil {
+		return nil
+	}
+	ue, printable := printable(err, raw)
+	switch {
+	case !printable:
+		return &classified{class(err), err}
+	case ue != nil:
+		return ue.Err
+	default:
+		return err
+	}
+}
+
+// printable reports whether err's text may print, given raw (Error), with the *url.Error it
+// holds, if any.
+func printable(err error, raw string) (*url.Error, bool) {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		ue = nil
+	}
+	return ue, raw != "" && clean(raw) && (ue == nil || callClean(raw, ue.URL) || clean(ue.URL))
 }
 
 // classified is an error whose text is its class alone.

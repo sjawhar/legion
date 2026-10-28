@@ -104,14 +104,16 @@ type unreachableError struct {
 	// none of those names.
 	what string
 	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried;
-	// Error prints both through redact.URL, so a credential the variable carries never prints.
+	// Error prints base through redact.URL and url through redact.Call, so a credential the
+	// variable carries never prints, while an id the call path-escaped still does.
 	base, method, url string
-	// cause is the transport's own error, with net/http's repetition of the URL unwrapped away.
+	// cause is the transport's own error through redact.Cause: without net/http's *url.Error
+	// wrapper, which repeats the URL, or its class alone where its text may not print.
 	cause error
 }
 
 func (e *unreachableError) Error() string {
-	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, redact.URL(e.url), brokerURLVar, redact.URL(e.base), e.cause)
+	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, redact.Call(e.base, e.url), brokerURLVar, redact.URL(e.base), e.cause)
 }
 
 func (e *unreachableError) Unwrap() error { return e.cause }
@@ -124,7 +126,7 @@ func (e *unreachableError) Unwrap() error { return e.cause }
 // which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
 // rather than name a layer it cannot prove.
 func unreachable(base, method, callURL string, err error) error {
-	cause := redact.Error(withoutURL(err), base)
+	cause := redact.Cause(err, base)
 	host := brokerHost(base)
 	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
 	var dns *net.DNSError
@@ -147,17 +149,6 @@ func unreachable(base, method, callURL string, err error) error {
 	default:
 		return failed("the request to the broker at " + host + " failed")
 	}
-}
-
-// withoutURL is err without net/http's *url.Error wrapper, which repeats the URL the call was
-// made to, so every message that prints a URL prints it once, through redact.URL. redact.Error
-// then prints the cause as it is for a clean AGENT_SECRETS_URL, and as its class alone otherwise.
-func withoutURL(err error) error {
-	var wrapped *url.Error
-	if errors.As(err, &wrapped) {
-		return wrapped.Err
-	}
-	return err
 }
 
 // peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
@@ -185,8 +176,13 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		// The parser's own text quotes the part it could not read, a bad escape in a password
-		// among them, so the message says only that the URL is not valid.
+		// With a base redact.URL prints, the part that did not parse is the path this client
+		// built, so the error says so (through redact.Error, which prints it as net/url wrote it
+		// only where that is clean). With any other base, the parser's own text could quote a bad
+		// escape in a password, so the message says only that the address is not valid.
+		if redact.Clean(c.baseURL) {
+			return nil, fmt.Errorf("the request could not be built: %w", redact.Error(err, c.baseURL))
+		}
 		return nil, &unreachableError{"the broker's address is not a valid URL", c.baseURL, method, url, errNothingSent}
 	}
 	if body != nil {
@@ -202,7 +198,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.URL(url), redact.Error(err, c.baseURL))
+		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.Call(c.baseURL, url), redact.Error(err, c.baseURL))
 	}
 	if resp.StatusCode/100 != 2 {
 		var envelope struct {
@@ -308,7 +304,7 @@ type RequestStatus struct {
 }
 
 func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (RequestStatus, []byte, error) {
-	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/requests/"+id, nil)
+	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/requests/"+url.PathEscape(id), nil)
 	if err != nil {
 		return RequestStatus{}, nil, err
 	}
@@ -320,7 +316,7 @@ func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (Requ
 }
 
 func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/requests/"+id+"/cancel", nil)
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/requests/"+url.PathEscape(id)+"/cancel", nil)
 	return err
 }
 
@@ -355,7 +351,7 @@ func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string,
 		}
 		body = encoded
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/values", body)
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/values", body)
 	if err != nil {
 		return GrantValues{}, err
 	}
@@ -367,7 +363,7 @@ func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string,
 }
 
 func (c *client) RevokeGrant(ctx context.Context, signer Signer, grantID string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/revoke", nil)
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/revoke", nil)
 	return err
 }
 
@@ -414,7 +410,7 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 			return time.Time{}, err
 		}
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+url.PathEscape(enrollmentID)+"/renew", body)
 	if err != nil {
 		return time.Time{}, err
 	}

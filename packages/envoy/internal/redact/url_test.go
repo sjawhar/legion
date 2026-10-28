@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"syscall"
@@ -220,5 +221,57 @@ func TestErrorLeavesACleanURLsErrorAsItIs(t *testing.T) {
 	}
 	if Error(nil, "http://tokuser9f3:hunter2pw@127.0.0.1:1") != nil {
 		t.Fatal("a nil error must stay nil")
+	}
+}
+
+// TestCallPrintsAnEscapedPathOnACleanBase: a call URL a program built on a clean base prints
+// unchanged when its path holds plain characters and well-formed escapes, and through URL
+// otherwise (a bad escape, a query, a base that is not clean, a URL not on the base).
+func TestCallPrintsAnEscapedPathOnACleanBase(t *testing.T) {
+	const base = "http://127.0.0.1:1"
+	for _, row := range []struct{ base, call, want string }{
+		{base, base + "/v1/requests/req%25zz", base + "/v1/requests/req%25zz"},
+		{base, base + "/v1/enrollments//renew", base + "/v1/enrollments//renew"},
+		{base + "/", base + "/v1/x", base + "/v1/x"},
+		{base, base + "/v1/requests/req%zz", NotPrinted},
+		{base, base + "/v1/requests/req%4", NotPrinted},
+		{base, base + "/v1/requests?state=qtok77", NotPrinted},
+		{base, base + "0/v1/x%41", NotPrinted},
+		{base, "http://other.example/v1/x", "http://other.example/v1/x"},
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", "http://tokuser9f3:hunter2pw@127.0.0.1:1/v1/x", NotPrinted},
+		{"http://127.0.0.1:1%0A", "http://127.0.0.1:1%0A/v1/x", NotPrinted},
+	} {
+		if got := Call(row.base, row.call); got != row.want {
+			t.Errorf("Call(%q, %q) = %q, want %q", row.base, row.call, got, row.want)
+		}
+	}
+}
+
+// TestErrorPrintsOnlyTheClassAfterARedirectToAQuery: with a clean base, net/http's error for a
+// request that followed a redirect names the redirect's target; one with a query (a broker's or
+// a proxy's, which can carry a credential) prints the class alone, through Error and Cause.
+func TestErrorPrintsOnlyTheClassAfterARedirectToAQuery(t *testing.T) {
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/signin?state=qtok77SECRET", http.StatusFound)
+	}))
+	defer redirector.Close()
+	_, err := http.Get(redirector.URL + "/v1/enrollments/self")
+	if err == nil || !strings.Contains(err.Error(), "qtok77SECRET") {
+		t.Fatalf("the fixture's error %v does not name the redirect's query", err)
+	}
+	if got := Error(err, redirector.URL); got.Error() != `Get "`+NotPrinted+`": connection refused` || !errors.Is(got, syscall.ECONNREFUSED) {
+		t.Fatalf("Error = %q, want the class alone, still unwrapping to ECONNREFUSED", got)
+	}
+	if got := Cause(err, redirector.URL); got.Error() != "connection refused" || !errors.Is(got, syscall.ECONNREFUSED) {
+		t.Fatalf("Cause = %q, want the class alone", got)
+	}
+	// The same call that never redirected keeps its text.
+	_, err = http.Get("http://127.0.0.1:1/v1/enrollments/self")
+	if got := Error(err, "http://127.0.0.1:1"); got != err {
+		t.Fatalf("Error = %v, want the clean call's error as it is", got)
+	}
+	var ue *url.Error
+	if got := Cause(err, "http://127.0.0.1:1"); !errors.As(err, &ue) || got != ue.Err {
+		t.Fatalf("Cause = %v, want the error the *url.Error wraps", got)
 	}
 }

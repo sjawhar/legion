@@ -2689,10 +2689,14 @@ name, IPv4 or bracketed zone-less IPv6 host with an optional port of one to five
 path of `[A-Za-z0-9._~/-]`), and as `redact.NotPrinted` otherwise, printing no part of it. A URL
 with user info prints as `NotPrinted` too, not as `xxxxx@host`: a host-less value whose password
 holds an `@` would print the password's tail as the host. An error net/http or net/url makes
-passes through `redact.Error(err, base)`: for a clean base it is err itself; otherwise its text is
-the class alone (`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the
-broker answered HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and
-errors.As on err, and it unwraps to err so callers classify as before. Extend the allow-list
+passes through `redact.Error(err, base)` (or `redact.Cause`, the same without net/http's
+`*url.Error` wrapper): it is err itself when base is clean and so is the URL that error names,
+which is base followed by a path the program escaped (`redact.Call`) or another clean URL; a
+redirect's target with a query is not. Otherwise its text is the class alone (`name resolution
+failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`, `not a
+valid URL`, `the request failed`), found with errors.Is and errors.As on err, and it unwraps to
+err so callers classify as before. `agent-secrets` path-escapes every id it puts in a call.
+Extend the allow-list
 only with a check a test proves, never a parser that prints part of a value it rejects.
 `agent-secrets-helper install` writes its unit `0600`, since its `Environment=` line holds the
 URL.
