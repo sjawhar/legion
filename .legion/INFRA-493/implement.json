@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-493",
+  "completed": "2026-10-28T21:35:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
+  "proof": [
+    {
+      "criterion": "1.4 A consumer the daemon finds missing at boot starts after the last event the daemon applied; 3 legion state shows each consumer's waiting events, the oldest one's age and a stall",
+      "surface": "the branch's real `legion start` binary and the `legion state` / `legion state --json` CLI, against a real Postgres (fresh database) and a real nats-server 2.10.22 of its own, with a Dispatch/Envoy/GitHub stand-in (GitHub reached through an HTTPS CONNECT proxy, so the binary's own App token mint and reads ran)",
+      "command": "go build -o legion ./cmd/legion (packages/daemon at 55eb11c8); legion start; publish pull_request opened #101 on legion/PROOF-1 (applied, consumer_positions legion-go-PROOF-github seq 1); stop the daemon; delete the consumer legion-go-PROOF-github; publish #102-#104; legion start; legion state; legion state --json | jq .consumers; psql processed_events / consumer_positions",
+      "observed": "restart logged {\"level\":\"INFO\",\"msg\":\"intake: a missing durable consumer is created at the last message it applied\",\"consumer\":\"legion-go-PROOF-github\",\"start\":\"2026-10-28T20:26:03.752822Z\"}; consumer info deliver_policy=by_start_time ack_floor_stream=4; processed_events holds github.<guid> 0002, 0003, 0004 applied after the restart and 0001 untouched (count 6, distinct 6 at the end); consumer_positions seq 4; pull requests #101-#104 open; legion state printed `consumer legion-go-PROOF-dispatch: 0 waiting`, `consumer legion-go-PROOF-dispatch-server: 0 waiting`, `consumer legion-go-PROOF-github: 0 waiting`",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the GitHub stand-in answered the reviewer-permission read 503, so a review was nak'd on every delivery: legion state showed `consumer legion-go-PROOF-github: 1 waiting, oldest 23s`, then `1 waiting, oldest 1m1s; STALLED: none handled for 1m11s, the last at 2026-10-28T20:26:18Z` (\"stalled\": true), and back to `0 waiting` once the read answered; a daemon NATS user refused $JS.API.STREAM.MSG.GET showed `1 waiting, oldest unknown; unavailable: read the oldest waiting message: context deadline exceeded` and the daemon logged the refused permission at ERROR"
+    },
+    {
+      "criterion": "1.3 legion state names each served repository Dispatch's GitHub App is not installed on, and the daemon keeps serving it",
+      "surface": "the branch's real `legion start` and `legion state` / `--json`, Dispatch stand-in answering GET /api/v1/github/app-installation/{owner}/{repo}",
+      "command": "legion start with the stand-in answering {\"installed\": false}, then 404, then {\"installed\": true}; legion state; legion state --json | jq .repositories",
+      "observed": "installed false: `webhook App missing on acme/widgets: Dispatch's GitHub App is not installed on acme/widgets: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes`, repositories.mapped still lists acme/widgets and the boot's repositories stage line carries withoutWebhookApp; 404: `webhook App missing on acme/widgets: this Dispatch does not answer the webhook App check`",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the stand-in answering {\"installed\": true} gives `webhook App missing: none` and withoutWebhookApp []"
+    },
+    {
+      "criterion": "1.1 and 1.5 a delivery NATS refused is redelivered by the sweep and applied by the daemon once",
+      "surface": "the real Envoy listener binary and the real `dispatch redeliver-webhooks` binary (built from packages/envoy), a real nats-server, a fake GitHub (deliveries log and redelivery request, App JWT checked), and the daemon's real consumer and workflow on Postgres",
+      "command": "cd packages/daemon && go test -count=1 ./internal/intake/ -run Redelivered -v",
+      "observed": "the stream without notifications.github.>: the listener answered GitHub's pull_request.opened 503 (`github publish failed: nats: no response from stream`), GitHub's log lists status_code 503; subjects restored; the sweep asked GitHub once (POST /app/hook/deliveries/3844000000000000017/attempts), the listener answered the redelivery 200; the daemon applied github.8a4f2c10-b5e6-11f0-9d3e-0c7f1e2a4b6d once and recorded acme/widgets#7 open on ACME-7",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "with the sweep step removed the event is never applied and the test fails (the processed_events row is absent)"
+    },
+    {
+      "criterion": "3.2 and 3.3 an event the daemon cannot act on takes no transaction, and 5,000 other pull requests' events mixed with 50 Legion events drain in under 60 s at 3 ms per round trip with every Legion event applied",
+      "surface": "the daemon's real consumer (intake.OpenConsumers/Run) with the real workflow, admission and blockers mirror, real NATS, Postgres through a 3 ms per-round-trip proxy, 350 slots and 10,000 issue records",
+      "command": "cd packages/daemon && LEGION_TEST_DRAIN_MEASURE=1 go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v (three runs)",
+      "observed": "drained in 17.791s, 17.511s, 17.369s; exactly 50 transactions, processed_events holds exactly the 50 Legion fact ids, each Legion pull request recorded at its last head, settled and reviewed",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "with decodePullRequest's head-ref filter disabled the test fails at once: `51 transactions begun with 4928 messages still waiting`"
+    },
+    {
+      "criterion": "2 a lost pull-request event heals within one pass; a missed push is rebuilt from GitHub's repository activity with the pusher's login",
+      "surface": "GitHub's REST repository activity API, read live as the implement App on sjawhar/legion; the pass's tests on the daemon's real workflow",
+      "command": "gh api 'repos/sjawhar/legion/activity?ref=refs/heads/legion/INFRA-493&per_page=5'; cd packages/daemon && go test -count=1 ./internal/daemon/ -run 'Pass|Push|Budget|Settlement|Missing' -v",
+      "observed": "live read: {\"activity_type\":\"push\",\"actor\":\"legion-implementer[bot]\",\"after\":\"23dee11f…\",\"before\":\"aa738cd8…\"}, the same <slug>[bot] form as the webhook's pusher.name the workflow compares with the review App's login; the pass tests heal a lost opened in planning, testing and done, a reopen in reviewing, a close (one pr-closed-unmerged), a merge in awaiting_merge (issue closes) and in implementing (pr-merged), lost pushes (PlannedRed set and cleared as the webhook would), a lost CI settlement (red sends back from testing), and a late webhook of each changes nothing",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "with the activity path disabled the push tests fail (head run left open, PlannedRed false); an activity page that does not reach the recorded head applies no push and logs the WARN"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/intake: decode filters (non-legion pull requests, non-deploy runs), lock-free drop of reviews/checks of unrecorded pull requests, consumer positions, consumer lag, GitHub fact id = envelope dedupe_key",
+    "packages/daemon/internal/admit, record, blockers, projection, workflow: live-record reads (LiveIssues, IssuesOf, DispatchIssuesOf, TreeIssues), migrations 0062-0064",
+    "packages/daemon/internal/daemon: the pass (open pull request listing per repository, close/merge, activity-rebuilt pushes, check-run settlement, pull-request-missing, stable event ids), webhook App check in repositories.go",
+    "packages/daemon/internal/api: handoff reads the branch's open pull request (HANDOFF_NO_PULL_REQUEST), state consumers and repositories.withoutWebhookApp, contract 42",
+    "packages/daemon/internal/classify: pass settlement at generation -1 merged check by check; a push redelivered with its paths cut short keeps the known paths",
+    "packages/daemon/internal/githubrest: OpenPullRequestOn, OpenPullRequests, BranchActivity, CheckRuns",
+    "packages/daemon/cmd/legion: state text lines for consumers and the webhook App",
+    "packages/envoy/internal/dispatch/redeliver: the sweep retries any non-OK attempt until delivered or 72 h, 404 expires, 72 h first lookback",
+    "packages/envoy/internal/dispatch/api and githubapp: GET /api/v1/github/app-installation/{owner}/{repo}",
+    "packages/envoy/daemonpermissions: $JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS",
+    "packages/contracts: push subject cut at 4,032 bytes (gen-go.ts, subject.ts, sha256.ts, generated.go), strict state schema for contract 42",
+    "packages/pi-shared, pi-legion, claude-envoy package.json: contract 42, handoff_complete description",
+    "skills/legion-worker/SKILL.md, skills/legion-architect/references/wake-routing.md, packages/daemon/internal/prompts/go: HANDOFF_NO_PULL_REQUEST and pull-request-missing",
+    "docs/site legion running-legion.md, concepts.md, troubleshooting.md; docs/kubernetes.md; dispatch/envoy.md; scripts/e2e/README.md",
+    "changelog fragments pr2478-Changed-20261028-200000.yaml in pi-legion, claude-envoy, contracts, envoy"
+  ],
+  "trickyParts": [
+    "GitHub fact dedupe keys on the envelope's dedupe_key alone (github.<delivery guid>), not dedupe_key plus topic: the listener copies one comment event that mentions the trigger onto several topics with one dedupe_key; checks settlements keep their event_id because their dedupe_key can repeat after the CI store's 7-day TTL (architect accepted 16:49Z)",
+    "The pass's CI settlement is recorded at generation -1 (migration 0064 relaxes the check constraint) and the listener's later settlement merges check by check, so a late settlement never undoes what the pass learned and a newer run is never lost to a conflict",
+    "Main's #2436 records a late push of a known move as a repeat, so the late-push tests assert the judgement, waiting pushes, head run, phases, checks and outbox unchanged rather than the whole record",
+    "Two fences found missing and fixed: a synchronize of a pull request recorded merged, and a push redelivered with its paths cut short replacing the pass's known handoff push"
+  ],
+  "deviations": [
+    "W1 written on main's sweep (architect 16:49Z) instead of on sjawhar/legion#2387; it leaves the database-backed rate-limit backoff and InFlight state to #2387",
+    "W2's ErrNotStored step is carried by sjawhar/legion#2362 (architect 15:27Z on 10-27)",
+    "Daemon API contract is 42, since main took 41 for the controller start command",
+    "A sweep with a saved cursor still lists back to its cursor (or the last hour); only a cursorless sweep looks back 72 h; open records older than the listing window are decided from the bucket",
+    "The local legion start proof uses its own stand-in rather than scripts/e2e/lib/live-daemon-proof.sh, which runs an in-process driver rather than the `legion start` binary"
+  ],
+  "openQuestions": [
+    "Environment-only failures in this pod, not touched by this change: packages/daemon launcher session_store tests (the pod's OMP_SESSION_* variables), runtime/tmux TestNewRefusesLaunchersItCannotRun (no tmux), natsauth (Docker); packages/envoy agent-secrets CLI tests and dispatch/api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation); check-bun-version, check-image-trigger-paths and check-release-credentials need python's yaml module"
+  ],
+  "discoveredComplexity": [
+    "The redelivery sweep reads every open record from its bucket each sweep (10,000 records about 4.5 s/op); reading only due records is INFRA-627's index, which can key on NextAttemptAt"
+  ]
+}
