@@ -2,33 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T11:25:00Z",
-  "round": 6,
-  "headTested": "34ae3fe4b4c7c7f22261cf48b4d3b2fdcb5d0d72",
+  "completed": "2026-10-28T11:45:00Z",
+  "round": 7,
+  "headTested": "4ff8c3c090ed7a30c27fca05302ceef82cfaee82",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 34ae3fe4 (code head 52b2223e): checker exit 0 on both guides; `restructure.ts --strict` on main aeeee6c0's files byte-identical to head (guides unchanged since d7e9799c); `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 28 pass, my tests unchanged; the three review findings reproduced fixed (below); --write over all 1,188 tracked .md files as in round 5."
+    "how": "Re-ran at 4ff8c3c0 (code head 4732cf44): checker exit 0 on both guides; `restructure.ts --strict` on main aeeee6c0's files byte-identical to head; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 29 pass, my tests unchanged; the recipe's restructure.ts pin (4732cf44) equals head's."
   },
-  "reviewFindings": {
-    "quoted attribute holding >": "fixed: `See <abbr title=\"a>b. Second one\">x</abbr> here. Next.` is cut only after 'here.'; `title=\"x>y\\nz\"` is not joined; single-quoted and unquoted attributes and a prose `<b and c = \"d. E\" then f>` (a valid CommonMark open tag) render the same under cmark-gfm",
-    "multi-line setext heading": "fixed: `Setup. Then run\\nthe tool\\n===` is left byte for byte and not R1-checked; the body after it is still re-laid out; `---` underlines likewise",
-    "two front matter definitions": "fixed: an opener `--- ` with trailing spaces is front matter to both check and --write (YAML untouched, body re-laid out); an unclosed `---` is a rule, as GitHub reads it",
-    "recipe step 4 refusal and step 7 headings": "NOT fixed as written (failure below)"
-  },
+  "roundSixFailure": "fixed: recipe step 4's refusal branch driven literally (base.md = main aeeee6c0's README, ours.md = it plus `- a\\n  - -`): `restructure.ts --lenient` exits 2, writes base.new (equal to main's README) and ours.new (structural text), and names line 1955 of ours.new, which is the refused `- a` block; escaping it (`  - \\-`) and `bun \"$S\" --write ours.new` exits 0 folded-equal; step 5 merges with no conflict and step 7 exits 0. Step 8 now excepts the heading findings step 7 says to leave. `---` … `...` front matter is left as it is.",
   "failures": [
     {
-      "criterion": "Spec: 'say in the pull request body how an open pull request moves its edit onto the new layout' (the reviewer's minor finding on step 4, which this round's step 4 text answers).",
-      "evidence": "Step 4 now says: 'If it stops with `semantic-line-breaks.ts --write exited 2` for `ours.md`, the refusal names the file and a block (`the block at line N would render differently`): write the step-4 command's other outputs, put the line breaks of that block into `ours.new` by hand … and continue at step 5.' Driven: base.md = main aeeee6c0's README, ours.md = the same plus `\\n- a\\n  - -\\n`; `bun .legion/INFRA-631/restructure.ts --lenient --line-breaks scripts/semantic-line-breaks.ts base.md base.new ours.md ours.new` exits 2 and writes NEITHER base.new NOR ours.new (`ls *.new` -> none). The refusal names `/legion/scratch/tmp/infra-631-restructure-SPC16u/1-readme.md … the block at line 1955`, a temporary file that is already deleted when the command returns, while ours.md has 1,580 lines; so there is no ours.new to edit, line N points into no file the porter has, and 'write the step-4 command's other outputs' names no command. Also step 7 says for R1 in a heading the branch did not write 'otherwise leave it', while step 8 says 'Run step 7 again until it exits 0', which then never happens. Repro dir: $TMPDIR/infra631-test5/rs/. No open PR hit the refusal in the round-3 sweep (73 runs), so this is the rare path, but the instruction cannot be followed. Fix shape: on a refusal under --lenient, restructure.ts writes the other pair and writes ours.new as the structural, not-yet-re-laid-out text (or keeps the intermediate and names its path), with N a line of that file; and step 8 excepts heading findings step 7 says to leave."
+      "criterion": "Tool contract (plan step 1: '--write … is idempotent (a second run changes nothing)'; the file-head instruction: '`--write` fixes it'); the recipe's steps 7-8 run --write repeatedly.",
+      "evidence": "A paragraph holding an HTML tag alone on its line is re-laid out differently by each run. `printf 'Intro line:\\n<tag>\\nvalue\\n</tag>\\nMore text here.\\n' > m.md; bun scripts/semantic-line-breaks.ts --write m.md` gives `Intro line:\\n<tag> value\\n</tag> More text here.` (exit 0, and check mode then exits 0), and a second --write gives `Intro line: <tag> value </tag> More text here.`: the first run keeps each lone tag line apart (startsBlock: kind-7 tag alone on the line) but joins the next line onto it, so the tag is no longer alone and the next run joins it. A real repository file has this shape: packages/pi-envoy/extensions/askgate/askgate-request.md (the `<primary-system-prompt>` and `<transcript>` blocks) changes on the first and again on the second --write; the full sweep's second run changes it and nothing else. Regression from round 5: the round-4 checker (1fe06cd7) is idempotent on this input, the round-5 (6d73808a) and later ones are not. Rendering is unchanged under cmark-gfm on every pass, so the guard does not catch it. Red test (commit 005f38b4): 'a second --write changes nothing when a paragraph holds a tag alone on its line'; `bun test scripts/semantic-line-breaks.test.ts` -> 28 pass, 1 fail. Repro: $TMPDIR/infra631-test5/idem/."
     }
   ],
   "failed": 1,
   "verified": [
-    "Full sweep at 34ae3fe4: --write on all 1,188 tracked .md files writes 1,115 and refuses the same 4 pmdoc corpus files; 0 of 824 front matter blocks change (6 unparseable before and after); cmark-gfm rendering equal for all but docs/kubernetes.md, whose only difference is the </p> a loose list adds before the <dir> HTML block main already has; a second --write changes nothing (diff -rq: 0).",
-    "Round 4-5 probes (34 inputs) still left as they are or rendered the same; round-6 probes (abbr/attr/single-quote/unquoted/prose-tag, setext = and -, front matter with trailing spaces, unclosed) the same.",
-    "CI: no check run or workflow run exists yet for 34ae3fe4 at 11:12Z; at d7e9799c the runs were cancelled when the next push landed (build, changes, typecheck success)."
+    "Full sweep at 4ff8c3c0: --write on all 1,188 tracked .md files writes 1,115 and refuses the same 4 pmdoc corpus files; 0 of 824 front matter blocks change (6 unparseable before and after); cmark-gfm rendering equal but for docs/kubernetes.md's loose-list </p> before the <dir> block main already has; a second run changes one file (failure above).",
+    "Front matter probes: `---`…`...` left as is with the body re-laid out; `--- ` opener; an unclosed `---` is a rule; a `---` … `...` span with prose inside is now left as is too (conservative). Round 4-6 probes (abbr/attribute/setext/inline tags/verbatim elements) unchanged or render the same.",
+    "CI: no check run exists yet for 4ff8c3c0 at 11:30Z."
   ],
   "notes": [
-    "Per the architect's round-6 decision, front matter now follows micromark: `---` … `...` is not front matter, so --write joins its YAML lines (`title: Foo description: Bar.\\nBaz ...`). Jekyll accepts `...` as a closer; no tracked .md file uses it (0 of 824).",
+    "packages/pi-envoy/extensions/askgate/askgate-request.md is imported as a text template (askgate-core.ts:181), not rendered; the idempotence failure is the tool's, whatever file shows it.",
     "Not counted, as before: README Identity list split halves (disclosed deviation)."
   ]
 }
