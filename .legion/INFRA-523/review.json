@@ -2,19 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T13:41:49Z",
-  "round": 2,
-  "reviewedHead": "621cf3e59315",
-  "scope": "Narrowed by the architect to review 5682630000's six findings and CI at the new code head.",
-  "decision": "changes_requested",
-  "critical": 1,
+  "completed": "2026-10-28T18:16:58Z",
+  "round": 3,
+  "reviewedHead": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
+  "scope": "Narrowed by the architect to review 5683606386's conflict fix, its six Fast-follow cleanups, and CI at the new code head.",
+  "decision": "approved",
+  "critical": 0,
   "important": 0,
   "minor": 0,
-  "ci": "Code head 621cf3e5 (compare 621cf3e5...7fb2e587 is .legion/ only). Required checks read at 13:40Z: lint, typecheck and pr-title succeeded. test (run 40689830074, job 122821769457) failed: four scratch-Dispatch tests in packages/daemon/internal/daemon could not build Dispatch from the pull request's merge ref, because main's #2233 (2d872499b6, merged 12:18Z) added packages/envoy/internal/dispatch/api/issue_ask_repair.go:121, which calls duty.Exclusive with the old signature (no due time).",
-  "roundOneFindings": "All six checked at 621cf3e5. 1: session-title.test.ts is main's strict test again (stub sleeps 5 s, bound < 3 s); 10/10 green on the pinned Bun 1.4.4 in this pod. 2: kept by the architect's decision; the layout shift is INFRA-662's. 3: the census is in the body; five hits of its own second search were missing, all of them set Lifetime or never reach Register; the reviewer added them. 4: sweep.go reads due before NewTicker. 5: beforeNextBoundary uses periodBoundary on the process's clock; comments corrected. 6: fragments added for envoy (two), claude-envoy and pi-legion.",
-  "keyFindings": [
-    {"severity": "critical", "file": "packages/envoy/internal/dispatch/api/issue_ask_repair.go:121 (main)", "description": "The required test check is red at the code head: the merge with main does not compile, because main's new leased loop RunIssueAskRepair calls duty.Exclusive without a due time. Bring main into the branch (GitHub reports no textual conflict, but the merge ref fails the build, so this is a real conflict), pass the ticker's value as the due time (case due := <-ticker.C), grep main for any other caller of duty.Exclusive or duty.RunJittered, add the loop to the envoy fragment's list, and get CI green."}
-  ],
-  "threads": "Replied on all five round-1 threads (PRRT_kwDORFy7ds6xHnSP, SV, SY, Se, Sj), each accepted; the implementer had already resolved them.",
-  "fastFollow": "Test and helper cleanup from round 1: one lock-wait helper on storetest.QueuedBehind; the four leased loops' due plumbing in one duty helper; waitOutABucketBoundary's unused parameter; machine_logins_test.go:397 through logtest.Swap; tmux launch's credential mint and write in one helper; Deps.Lifetime as a Register parameter."
+  "ci": "Code head f0259648 (compare f0259648...a4449473 is .legion/ only, 2 files). Required checks read at 18:16Z: lint, typecheck, test (Tests run 40730686837) and pr-title success; Docs and Worker Image success; the non-required Legion Envoy and Contracts run 40730687005 still queued.",
+  "conflictFix": "Main merged twice (9b9f10ff, ec4448fb). RunIssueAskRepair now runs through duty.RunLeased with a due time; a grep of the tree finds no ticker loop left calling duty.Exclusive (the remaining callers are architecture and delivery reconcile through RunJittered, intake with period 0, and tests). Merge ec4448fb taking main's packages/claude-envoy/dist and legion/ copies is right: main's #2423 stopped pull requests committing them. The envoy fragment names the issue-ask repair.",
+  "cleanups": "All six done with no copy left: storetest.WaitForQueuedBehind used by ask_turn_test.go and suggestions_test.go; duty.RunLeased / RunLeasedAfterEachPass run every self-ticking leased loop; waitOutABucketBoundary's parameter dropped; machine_logins_test.go through logtest.Swap; tmux launch's mint and write as one helper pair, behaviour identical (deep review); api.Register takes the lifetime as a parameter, every caller passing one that ends. The tester's round-5 red test (93b29d34) caught the helper's after-pass schedule losing periods; 6afef8ce restored the fixed schedule and the test passes unmodified.",
+  "thermonuclear": "Pair run once on the round-3 delta at f0259648: deep review found no Medium or High finding (one Minor: the fixed schedule keeps the wall-clock reading from loop start, recorded in Not proven / risk); code quality found the six cleanups done and raised cleanup-only API and comment points, put on the Fast-follow line.",
+  "keyFindings": [],
+  "threads": "Five threads, all answered by the reviewer in round 2 and resolved; no new thread since.",
+  "fastFollow": "duty.RunLeased's pass returns a wait every caller sets to its interval: take pass func(context.Context); correct the comments 6afef8ce left (exclusive.go:51, :147, suggestion_outcomes_lease_test.go:119-125); storetest.WaitForQueuedBehind's 0-means-no-deadline case."
 }
