@@ -2,17 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T17:42:30Z",
-  "round": 2,
-  "head": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+  "completed": "2026-10-28T08:47:00Z",
+  "round": 3,
+  "head": "9a4755c2aee076da6867b65cc179e0f6f5830c1a",
   "codeHead": "5cfd1080069831382a886cc5e72666f5a1274275",
+  "roundNote": "Round 3 answers the red pr-title check by changing the pull request title. No commit changed code: jj diff 5cfd10800698..9a4755c2 names only .legion/INFRA-588/implement.json and test.json. So the round-2 proofs below, all taken at code 5cfd10800698, still apply. This round adds the title proof and a smoke run in the recreated workspace.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the round-2 finding myself on one clone with this head and with ebeda2541e7f's scripts (extracted with jj file show): 61 against 19 PRs read, with gh pr list --state open giving 61 open legion/ PRs created by the window's end, 41 not updated since its start (the implementer saw 61/22/41 at 17:22Z). Re-ran P1-P4 in a fresh workdir of my own and checked each figure another way (cmp against my round-0 output, jq recount of the PRs read, my own ancestry loop, the union of both windows' files). The figures hold."
+    "how": "Round 3: ran pr-title.yaml's own regex (^[a-z]+(\\([^)]+\\))?!?: .+) on the live title: exit 0. Ran it on the old title: exit 1. Read PR Title run 40658794266 (pull_request_review event, head c156b68bd6f6): every step success, the conventional-title step included. Read the failed run 40551347938: it is the conventional-title step's error. Re-fetched the before records into the recreated scratch volume and ran P1 at 9a4755c2: 126/80/253, tiers 89/108, the implementer's figures. Round 2 (same code): drove the open-PR finding myself on one clone, this head against ebeda2541e7f's scripts, and read 61 against 19 PRs, where gh pr list --state open gave 61 open legion/ PRs created by the window's end, 41 not updated since its start; re-ran P1-P4 in a fresh workdir and checked each figure another way."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "The pull request title passes the required pr-title check (round 3, the red check)",
+      "surface": "the pull request title on GitHub, as .github/workflows/pr-title.yaml's 'Require a conventional PR title' step reads it",
+      "command": "gh pr view 2411 --repo sjawhar/legion --json title --jq .title | grep -qE '^[a-z]+(\\([^)]+\\))?!?: .+'; gh run view 40658794266 --repo sjawhar/legion --json event,headSha,conclusion,jobs; gh api repos/sjawhar/legion/commits/<sha>/check-runs for 5cfd10800698, c156b68bd6f6 and 9a4755c2",
+      "observed": "the title 'feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)' matches (exit 0); run 40658794266 (event pull_request_review, head c156b68bd6f6) is success at every step, the conventional-title step included; at code head 5cfd10800698 lint, typecheck and test are success (completed 18:45-19:01Z on 2026-10-27)",
+      "headSha": "9a4755c2aee076da6867b65cc179e0f6f5830c1a",
+      "negativeControl": "the old title 'Measure Legion pull requests' merge conflicts before and after a fix (scripts/conflicts, INFRA-588)' fails the same regex (exit 1); run 40551347938 at 5cfd10800698 failed on it with the step's '::error::PR title must be a conventional commit subject'"
+    },
+    {
+      "criterion": "Smoke in the recreated workspace (round 3; code unchanged since 5cfd10800698)",
+      "surface": "the CLI on the before records, re-fetched from dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json",
+      "command": "dispatch doc-read --issue INFRA-588 --artifact conflict-baseline-2026-10-20-to-27-json | tail -n +3 > $TMPDIR/t588/before.json && bun scripts/conflicts/measure.ts --from-json $TMPDIR/t588/before.json --branch-prefix legion/",
+      "observed": "285 records; 126 PRs read (68 merged, 58 other), 80 carrying, 253 conflicting, clean 29, tiers 89 and 108, the same as rounds 0-2",
+      "headSha": "9a4755c2aee076da6867b65cc179e0f6f5830c1a",
+      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> '--since 2026-10-28 is after --until 2026-10-27', exit 2, no workdir created"
+    },
     {
       "criterion": "The port reproduces the before measurement (P1, unchanged by round 2)",
       "surface": "the CLI on the Python run's raw records (dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json)",
@@ -55,7 +72,7 @@
     }
   ],
   "observations": [
-    "CI at code head 5cfd10800698: lint, typecheck and test queued when I read them; at the previous code head ebeda2541e7f they completed as cancelled, not run. The newest head 06db6c23 changes only .legion/INFRA-588/implement.json.",
-    "Round 1's note stands: no test pins a PR merged exactly at `since` (counting it as before the window passes the suite); the CLI keeps it (round-1 crafted records)."
+    "CI: at code head 5cfd10800698 lint, typecheck and test are success. The pr-title check: failure there (old title, run 40551347938), success at c156b68bd6f6 (run 40658794266). At 9a4755c2 there are no check runs, because the head is handoff-only with skip-checks. Retro's push carries no trailer, so it runs pr-title again on the final head.",
+    "The round-1 note still applies: no test pins a PR merged exactly at `since` (a mutation that counts it as before the window passes the suite), and the CLI keeps it (round-1 crafted records)."
   ]
 }
