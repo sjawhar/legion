@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T16:05:12Z",
+  "completed": "2026-10-28T16:56:23Z",
   "proof": [
     {
       "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
@@ -163,6 +163,22 @@
       "observed": "broker/api, routes, listener, cmd/dispatch ok; api ok 744.4 s, docs ok 562.1 s; tmux 86 pass 1 skip, only the two known pod failures (TestNewRefusesLaunchersItCannotRun, TestNewRefusesAnOperatorPaneVariableTheRuntimeOwns); runtime ok; claude-envoy 222 pass 0 fail, verify-build accepts the build",
       "headSha": "ec4448fbab0d9890d70d75b4b78494869d7e4f48",
       "negativeControl": "api.Register given a nil lifetime panics naming 'the lifetime parameter'; the census grep (PR body) finds every caller passing one; before the merge resolution main's agents.go (s.lifetime()) and RunPrune (old duty.Exclusive) failed to build against the branch, which is what the resolution fixed"
+    },
+    {
+      "criterion": "Round 3, tester's finding 1: a lone fixed-cadence leased loop (redelivery, suggestion outcomes, compaction, issue-ask repair, prune) serves every period even when its passes take time: duty.RunLeased ticks on a fixed schedule from each tick's due time; the three paced loops keep main's wait after each pass (duty.RunLeasedAfterEachPass)",
+      "surface": "packages/envoy go test against Postgres 17 + pgvector in the issue pod",
+      "command": "go test -count=3 -run '^TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime$' ./internal/dispatch/duty/; go test -count=2 ./internal/dispatch/duty/; go test -count=1 ./internal/dispatch/redeliver/ ./internal/dispatch/outbox/ ./internal/dispatch/processes/; go test -count=1 -run 'ReferenceExcerpt|BlockIndex|EditNotice' ./internal/dispatch/docs/; CGO_ENABLED=1 go test -race -count=3 -run '^(TestALoneRunnerMakesAPassOnEveryTick|TestTwoSweepRunnersRunThePassOnceAndSkipOnce)$' ./internal/dispatch/api/",
+      "observed": "the tester's red test ok 3/3 unmodified (20.9 s); duty ok x2; redeliver, outbox, processes, docs paced-loop tests ok; lone-runner and two-runner race ok x3",
+      "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
+      "negativeControl": "round 2's ticker.go by -overlay: the red test fails 'pass 3 served the period at 16:41:09.000 and the pass after it the period at 16:41:11.000, 2s later: 1 period(s) between them got no pass'; a nextDue with no catch-up fails TestRunLeasedTicksAtOnceAtTheLatestMomentDueWhenAPassOverruns ('... was followed by one due 1s in; want 3s')"
+    },
+    {
+      "criterion": "Round 3, tester's finding 2: a refused tmux spawn or resume rewrites none of the live pane's per-claim files, the gh bundle included, and the test can see it",
+      "surface": "packages/daemon go test with a real tmux 3.5a in the issue pod",
+      "command": "PATH=<tmux 3.5a>:$PATH go test -count=5 -run '^TestRealTmuxSplitsIntoTheIssueWindow$' ./internal/runtime/tmux/",
+      "observed": "ok 5/5; the full tmux package fails only the two known pod-only tests",
+      "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
+      "negativeControl": "by -overlay, writeGitHubCredential moved above refuseLiveIncarnation: FAIL 'the refused second spawn rewrote the live tester's secret files' (acme/hosts.yml ghs_mint_2 -> ghs_mint_4); a Resume that mints and writes before awaitGone: FAIL 'the refused resume rewrote the live tester's secret files'"
     }
   ],
   "filesChanged": [
