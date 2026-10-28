@@ -378,6 +378,7 @@ jobs:
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'

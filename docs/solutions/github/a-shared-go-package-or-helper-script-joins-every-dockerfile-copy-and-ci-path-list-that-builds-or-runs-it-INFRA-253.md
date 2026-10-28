@@ -30,6 +30,8 @@ Extends docs/solutions/github/a-worker-image-path-filter-covers-the-code-the-ini
   the module files to a scratch directory and run `GOWORK=off go build ./cmd/listener` there.
 - A CI job's path filter lists the packages its binary compiles in. Derive the list from
   `go list -deps ./cmd/<binary>` and add every repository package it names, not just the new one.
+  Check every Go job's filter, not only those whose binary reaches the new package: an import
+  another pull request added earlier can be missing from any of them.
 - A package `go list -deps ./cmd/legion` in `packages/daemon` names is source of the `legion`
   binary too: it goes into `LEGION_VERSION_ARGS` in `release.yaml`, or a change to it releases no
   `legion`. When `go list -deps` of the daemon-pane.go program names it too, it goes into the
@@ -61,4 +63,6 @@ Extends docs/solutions/github/a-worker-image-path-filter-covers-the-code-the-ini
   check found `pi_legion` lacked it and `LEGION_VERSION_ARGS` lacked it and `listenfd`, and that
   `go list -deps` of `./cmd/dispatch` named `internal/redact` (#2441) and
   `internal/dispatch/processes` (#2390), and its untagged tests `internal/testnats` (#2390), which
-  the Dispatch filters lacked.
+  the Dispatch filters lacked. A review then matched each compiled file, test files included,
+  against every Go job's filter and found `broker_multiprocess` lacked `internal/redact` too
+  (#2441: `cmd/broker` and `internal/broker/config` import it).
