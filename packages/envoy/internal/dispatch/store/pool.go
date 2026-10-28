@@ -310,9 +310,10 @@ const registryPoolSize = 1
 const permanentListeners = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
-// every pool's size, the registry's own pool (processes.Register) among them, and one connection
-// per permanent listener, which the listener pool dials and hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
+// every pool's size - the shared, rooms, health, lease, outbox and compaction pools, and the
+// registry's own pool (processes.Register) - and one connection per permanent listener, which the
+// listener pool dials and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + compactionPoolSize + registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

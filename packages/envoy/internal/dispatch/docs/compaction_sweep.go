@@ -70,13 +70,14 @@ func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
 	duty.Exclusive(ctx, leases, compactionSweepLease, compactionSweepPeriod, s.compactionSweepPass)
 }
 
-// compactionSweepPass lists the documents with rows to fold (compactionCandidates) and compacts each
-// one due (checkCompaction), under the tail rule and without waiting for its lock, one at a time on
-// the compaction pool. The list is read whole before the first compaction, so no cursor holds a
-// connection while one runs. A listed document with no row after its first - one a prune or an
-// artifact's deletion left, or one another process compacted - is taken off the list
-// (forgetCompactionCandidate). A compaction that found the room's lock held or another writer
-// changing its rows (compactBusy, compactDropped), or that failed, is handed to this service's
+// compactionSweepPass lists the documents with rows to fold (compactionCandidates) and tries each
+// one's compaction as the queue's check does (tryCompaction): compacted when due, under the tail
+// rule and without waiting for its lock, one at a time on the compaction pool. The list is read
+// whole before the first compaction, so no cursor holds a connection while one runs. A listed
+// document with no row after its first - one a prune or an artifact's deletion left, or one another
+// process compacted - is taken off the list (forgetCompactionCandidate). A try that should be made
+// again later - a compaction that found the room's lock held or another writer changing its rows
+// (compactBusy, compactDropped), or a check or compaction that failed - is handed to this service's
 // compaction queue rather than retried here: the queue retries it with backoff, and the pass goes
 // on to the next document. It ends at the document it is on once ctx ends.
 func (s *Service) compactionSweepPass(ctx context.Context) {
@@ -101,34 +102,23 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		check, err := s.checkCompaction(ctx, room)
-		if err != nil {
-			warnCompaction(ctx, warnCompactionCheck, room, err)
+		attempt := s.tryCompaction(ctx, room, false)
+		switch attempt.try {
+		case tryCompacted:
+			compacted++
+			deleted += attempt.deleted
+		case tryLater:
 			leave(room)
-			continue
-		}
-		if check.later == 0 {
+		case tryNotDue:
+			if attempt.check.later > 0 {
+				continue
+			}
 			removed, err := forgetCompactionCandidate(ctx, pool, room)
 			if err != nil {
-				warnCompaction(ctx, warnCompactionCheck, room, err)
+				warnCompaction(ctx, warnCompactionForget, room, err)
 			} else if removed {
 				forgotten++
 			}
-			continue
-		}
-		if !check.due {
-			continue
-		}
-		result, err := s.persistence.compactRoom(ctx, room, tailRule, false)
-		switch {
-		case err != nil:
-			warnCompaction(ctx, warnCompactionCompact, room, err)
-			leave(room)
-		case result.outcome == compactCompacted:
-			compacted++
-			deleted += result.deleted
-		case result.outcome == compactBusy || result.outcome == compactDropped:
-			leave(room)
 		}
 	}
 	if ctx.Err() != nil {
@@ -154,6 +144,9 @@ func compactionCandidates(ctx context.Context, pool *pgxpool.Pool) ([]string, er
 	}
 	return rooms, nil
 }
+
+// warnCompactionForget is the message a failed forgetCompactionCandidate logs.
+const warnCompactionForget = "dispatch: take a document with nothing to fold off the compaction sweep's list"
 
 // forgetCompactionCandidate takes room off the sweep's list when it holds no row after its first,
 // and reports whether it did. It deletes in one transaction on pool under the document's lock

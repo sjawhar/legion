@@ -51,10 +51,14 @@ type PgVersioned struct {
 	// foldBufferLimit is the most stored update bytes a fold reads into memory (foldBuffer), zero
 	// for foldBufferBytes. Zero outside tests; tests lower it to fold a small log while it streams.
 	foldBufferLimit int64
+	// foldSlots holds a token for each buffered fold under way (foldRead), so at most its capacity,
+	// bufferedFolds, hold their rows in memory at once across every load and compaction of the
+	// process. NewPgVersioned sizes it; tests replace it with a smaller one before any fold.
+	foldSlots chan struct{}
 	// noteStored is the note of the Service that took this store last (New), which each append
-	// gives the version it committed and each load the versions it read (noteStoredUpdates), so
-	// the Service's compaction queue checks the room. Nil for a store no Service took.
-	noteStored atomic.Pointer[func(room string, head, oldest int64)]
+	// gives the version it committed and each load the head it read (noteStoredUpdates), so the
+	// Service's compaction queue checks the room. Nil for a store no Service took.
+	noteStored atomic.Pointer[func(room string, head int64)]
 }
 
 // pgVersioned is p itself, the PgVersioned the Service notes appends and loads through.
@@ -62,11 +66,11 @@ func (p *PgVersioned) pgVersioned() *PgVersioned {
 	return p
 }
 
-// noted gives the Service that took p the versions from oldest to head of the room's rows an
-// append committed or a load read (noteStored).
-func (p *PgVersioned) noted(room string, head, oldest int64) {
+// noted gives the Service that took p the head of the room's rows an append committed or a load
+// read (noteStored).
+func (p *PgVersioned) noted(room string, head int64) {
 	if note := p.noteStored.Load(); note != nil {
-		(*note)(room, head, oldest)
+		(*note)(room, head)
 	}
 }
 
@@ -78,49 +82,69 @@ type roomLock struct {
 
 // NewPgVersioned creates the versioned store for a Dispatch database.
 func NewPgVersioned(database *store.Store) *PgVersioned {
-	return &PgVersioned{store: database}
+	return &PgVersioned{store: database, foldSlots: make(chan struct{}, bufferedFolds)}
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
-// checkpoint when one exists, and notes the rows it read once its transaction ends (noted) when it
-// read more than one: one row has nothing to fold, and any later append notes the room itself. It
-// reads in one repeatable-read transaction on the rooms pool: the head and the count and bytes of
-// the rows at or below it, then those rows, which it folds once the transaction has committed
-// when they total at most foldBufferBytes, so a fold holds no connection a room load waits for,
-// and folds inside the transaction while it streams them when they total more (foldRead). A room's
-// load decodes the state it returns once more, in the room's load hook (onLoadDocument).
+// checkpoint when one exists, read as every document load reads (loadStored): in one
+// repeatable-read transaction on the rooms pool, folded once that transaction has committed when
+// the rows total at most foldBufferBytes, so a fold holds no connection a room load waits for, and
+// inside it while it streams them when they total more; and noted once it has read more than one
+// row. A room's load decodes the state it returns once more, in the room's load hook
+// (onLoadDocument).
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
-	if err := ctx.Err(); err != nil {
+	var update []byte
+	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
+		update, err = stateThrough(room, head, updates)
+		return err
+	})
+	if err != nil {
 		return persistence.LoadResult{}, err
+	}
+	return persistence.LoadResult{Update: update, Version: persistence.Version(stamp.Version)}, nil
+}
+
+// loadStored is the read every document load (Load, LoadDocument) makes of the room's stored
+// updates: in one repeatable-read read-only transaction on the rooms pool, the stamp of the state
+// at their head and the count and bytes of the rows at or below it (readStoredLog), then those
+// rows, which it hands use with the head to fold (foldRead): once the transaction has committed
+// when they total at most foldBufferBytes, while it streams them inside it when they total more. A
+// room with no stored update commits and hands use nothing. It returns the stamp it read, and once
+// its transaction has ended it notes the room (noted) when it read more than one row: one row has
+// nothing to fold, and any later append notes the room itself.
+func (p *PgVersioned) loadStored(ctx context.Context, room string, use func(head persistence.Version, updates updateSource) error) (DocumentStamp, error) {
+	if err := ctx.Err(); err != nil {
+		return DocumentStamp{}, err
 	}
 	rooms, err := p.store.Pool.Rooms()
 	if err != nil {
-		return persistence.LoadResult{}, err
+		return DocumentStamp{}, err
 	}
 	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return persistence.LoadResult{}, fmt.Errorf("begin document load: %w", err)
+		return DocumentStamp{}, fmt.Errorf("begin document load: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	stored, err := readStoredLog(ctx, tx, room)
 	if err != nil {
-		return persistence.LoadResult{}, err
+		return DocumentStamp{}, err
 	}
 	head := persistence.Version(stored.stamp.Version)
 	if head == 0 {
-		return persistence.LoadResult{}, tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return DocumentStamp{}, fmt.Errorf("commit document load: %w", err)
+		}
+		return stored.stamp, nil
 	}
-	var update []byte
-	if err := p.foldRead(ctx, tx, room, head, stored.rows, stored.bytes, "document load", func(updates updateSource) (err error) {
-		update, err = stateThrough(room, head, updates)
-		return err
+	if err := p.foldRead(ctx, tx, room, head, stored.rows, stored.bytes, "document load", func(updates updateSource) error {
+		return use(head, updates)
 	}); err != nil {
-		return persistence.LoadResult{}, err
+		return DocumentStamp{}, err
 	}
 	if stored.rows > 1 {
-		p.noted(room, int64(head), stored.oldest)
+		p.noted(room, int64(head))
 	}
-	return persistence.LoadResult{Update: update, Version: head}, nil
+	return stored.stamp, nil
 }
 
 // Head is the version Load folds the room up to now, read through the pool that owns loads, as
@@ -196,7 +220,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 	}
 	// The committed row is noted once the document's locks are gone: the note waits on nothing
 	// the append holds.
-	p.noted(room, int64(version), int64(version))
+	p.noted(room, int64(version))
 	return version, nil
 }
 

@@ -296,7 +296,10 @@ type Service struct {
 	reads *documentReads
 	// compactions is the queue of the documents this service compacts, whose worker New starts,
 	// Shutdown stops and Quiesce pauses (compactionQueue). Every committed append and every load
-	// notes its room there (noteStoredUpdates).
+	// notes its room there (noteStoredUpdates): an append on its own transaction (appendUpdate), a
+	// joined write's at its ledger's commit (Ledger.Commit), a settlement's repair and the block-id
+	// backfill's once their transactions commit (settleRoomWithin, backfillBlockIDs), and a load
+	// once its read ends (PgVersioned.loadStored).
 	compactions *compactionQueue
 }
 
@@ -1637,6 +1640,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if err := tx.Commit(ctx); err != nil {
 			return abandon(fmt.Errorf("commit superseded document identity update: %w", err))
 		}
+		s.noteStoredUpdates(room, int64(repaired))
 		finishSlots()
 		return settleOutcome{}
 	}
@@ -1663,6 +1667,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 
 	versioned := reconciled
+	// repaired is the version the settlement's repair appended, noted once the settlement commits;
+	// zero when it wrote none.
+	var repaired persistence.Version
 	if len(slots) > 0 {
 		update, err := mergeUpdates(updates)
 		if err != nil {
@@ -1672,7 +1679,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return abandon(fmt.Errorf("broadcast document closure update: %w", err))
 		}
 		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
-		repaired, err := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged)
+		repaired, err = s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged)
 		if err != nil {
 			return abandon(err)
 		}
@@ -1848,6 +1855,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return abandon(fmt.Errorf("commit document settlement: %w", err))
 	}
 	credit.consumeAskAuthors(reconciliation.indexedAskBlocks)
+	if repaired > 0 {
+		s.noteStoredUpdates(room, int64(repaired))
+	}
 	finishSlots()
 	for _, event := range published {
 		s.events.Publish(event)
@@ -2304,6 +2314,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	if err := tx.Commit(ctx); err != nil {
 		return abandon(fmt.Errorf("commit identity update: %w", err))
 	}
+	s.noteStoredUpdates(artifactID, int64(stamped))
 	s.finishSuppressedPersistence(slot, update)
 	return report
 }

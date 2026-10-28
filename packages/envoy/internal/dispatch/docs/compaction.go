@@ -364,9 +364,9 @@ func (p *PgVersioned) forgetUnfoldable(room string) {
 
 // Compact is ygo's VersionedPersistence compaction, under the keep-N rule: it folds the room's rows
 // at or below the head into the keep-th newest of them (compactRoom), waiting for the room's lock.
-// Dispatch schedules none of these; every compaction it runs is the tail rule's. This stays for
-// ygo's interface, for tests that ask for a fixed keep, and as the keep-1 compaction an older build
-// sharing the database runs.
+// Dispatch schedules none of these; every compaction it runs is the tail rule's. An older build
+// sharing the database runs its own binary's Compact, never this one. This stays for ygo's
+// VersionedPersistence interface and for tests that ask for a fixed keep.
 func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

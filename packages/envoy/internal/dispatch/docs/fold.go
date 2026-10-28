@@ -112,12 +112,26 @@ func mergedThrough(updates updateSource) ([]byte, error) {
 // rows first adds to it.
 const foldBufferBytes = 32 << 20
 
+// bufferedFolds is how many folds of rows read into memory (foldRead) run at once in a process,
+// across its room loads, cold reads and compactions (PgVersioned.foldSlots): each holds up to
+// foldBufferBytes of rows beside its fold's document and the read-back's. It equals the rooms
+// pool's size (store's roomsPoolSize, which the store does not export): a load used to fold inside
+// its transaction on that pool, whose connections bounded how many folds ran at once, and a
+// buffered fold that has ended its transaction holds no connection to bound it.
+const bufferedFolds = 4
+
 // foldRead hands use the room's stored updates through version, the rows of them tx reads, which
 // number rows and total bytes, and ends tx, committing it as what names. Rows within foldBuffer
 // are read into memory and tx commits before use runs, so a fold of them holds no connection while
 // it works; past it use streams them inside tx (storedUpdates), which commits once use returns, so
 // a fold of a log however large holds one row at once beside its document. Either source replays
 // the rows as often as use asks (updateSource), from one snapshot.
+//
+// A buffered fold first takes one of the process's foldSlots, waiting within ctx, and gives it back
+// once use returns, so at most bufferedFolds hold their rows at once. The wait cannot close a
+// cycle: a waiter holds tx's connection, of the rooms pool or the compaction pool, but a holder of
+// a slot waits for nothing - it holds only its own transaction's connection while it reads the rows
+// and no connection at all while it folds them - so every holder gives its slot back.
 func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, rows int, bytes int64, what string, use func(updateSource) error) error {
 	commit := func() error {
 		if err := tx.Commit(ctx); err != nil {
@@ -134,6 +148,12 @@ func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, vers
 		}
 		return commit()
 	}
+	select {
+	case p.foldSlots <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.foldSlots }()
 	updates := make([][]byte, 0, rows)
 	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
 		updates = append(updates, update)
@@ -147,7 +167,7 @@ func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, vers
 	if p.beforeFold != nil {
 		p.beforeFold(room)
 	}
-	return use(memoryUpdates(updates))
+	return use(memoryUpdates(ctx, updates))
 }
 
 // foldBuffer is the most stored update bytes foldRead reads into memory: foldBufferBytes, or the
@@ -161,29 +181,26 @@ func (p *PgVersioned) foldBuffer() int64 {
 
 // storedLog is what a load reads of a room's stored updates before it reads the updates
 // themselves, in one statement of its transaction: the stamp of the state at their head
-// (readDocumentStamp), the head included, how many rows stand at or below the head and their total
-// bytes, which decide where the fold reads them from (foldRead), and the version of the oldest
-// row, which the load notes with the head (noted).
+// (readDocumentStamp), the head included, and how many rows stand at or below the head and their
+// total bytes, which decide where the fold reads them from (foldRead).
 type storedLog struct {
-	stamp  DocumentStamp
-	rows   int
-	bytes  int64
-	oldest int64
+	stamp DocumentStamp
+	rows  int
+	bytes int64
 }
 
 // readStoredLog is the room's storedLog as tx reads it.
 func readStoredLog(ctx context.Context, tx pgx.Tx, room string) (storedLog, error) {
 	var stored storedLog
 	if err := tx.QueryRow(ctx, `
-		select s.version, s.row_xmin, r.updates, r.bytes, o.oldest
+		select s.version, s.row_xmin, r.updates, r.bytes
 		from (`+documentStampSQL+`
 		) s
 		cross join lateral (
 			select count(*) as updates, coalesce(sum(octet_length(d.update)), 0)::bigint as bytes
 			from doc_updates d where d.artifact_id = $1 and d.version <= s.version
 		) r
-		cross join (select coalesce(min(version), 0) as oldest from doc_updates where artifact_id = $1) o
-	`, room).Scan(&stored.stamp.Version, &stored.stamp.Row, &stored.rows, &stored.bytes, &stored.oldest); err != nil {
+	`, room).Scan(&stored.stamp.Version, &stored.stamp.Row, &stored.rows, &stored.bytes); err != nil {
 		return storedLog{}, fmt.Errorf("read the document's stored updates: %w", err)
 	}
 	return stored, nil
@@ -206,10 +223,15 @@ func storedUpdates(ctx context.Context, tx pgx.Tx, room string, version persiste
 	}
 }
 
-// memoryUpdates replays updates, a log's rows already read, holding no connection.
-func memoryUpdates(updates [][]byte) updateSource {
+// memoryUpdates replays updates, a log's rows already read, holding no connection. It stops with
+// ctx's error before any update once ctx has ended, so a cold read's bound (coldReadTimeout) and
+// Shutdown's deadline end a fold of rows in memory as they end one that streams them.
+func memoryUpdates(ctx context.Context, updates [][]byte) updateSource {
 	return func(use func([]byte) error) error {
 		for _, update := range updates {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := use(update); err != nil {
 				return err
 			}
@@ -341,46 +363,20 @@ type LoadedDocument struct {
 }
 
 // LoadDocument is the room's document at its head, decoded once, and the stamp of the state it was
-// decoded from, both read in one repeatable-read transaction on the rooms pool, as Load reads.
-// Its document is the one Load's state decodes into (documentThrough), so a read of it shows what
-// a room load would. Like Load it reads the rows at or below the head into memory and folds them
-// once its transaction has ended when they total at most foldBufferBytes, and folds a larger log
-// while it streams it inside the transaction (foldRead). A history that does not decode is
-// ErrDocumentUnloadable. Like Load, it notes the rows it read once its transaction ends (noted)
-// when it read more than one.
+// decoded from, read as Load reads (loadStored): in one repeatable-read transaction on the rooms
+// pool, folded once that transaction has ended when the rows at or below the head total at most
+// foldBufferBytes and while it streams them inside it otherwise (foldRead), and noted once it has
+// read more than one row. Its document is the one Load's state decodes into (documentThrough), so
+// a read of it shows what a room load would. A history that does not decode is
+// ErrDocumentUnloadable.
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
-	if err := ctx.Err(); err != nil {
-		return LoadedDocument{}, err
-	}
-	rooms, err := p.store.Pool.Rooms()
+	var doc *crdt.Doc
+	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
+		doc, err = documentThrough(room, head, updates)
+		return err
+	})
 	if err != nil {
 		return LoadedDocument{}, err
 	}
-	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return LoadedDocument{}, fmt.Errorf("begin document load: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	stored, err := readStoredLog(ctx, tx, room)
-	if err != nil {
-		return LoadedDocument{}, err
-	}
-	loaded := LoadedDocument{Stamp: stored.stamp}
-	if stored.stamp.Version == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return LoadedDocument{}, fmt.Errorf("commit document load: %w", err)
-		}
-	} else {
-		head := persistence.Version(stored.stamp.Version)
-		if err := p.foldRead(ctx, tx, room, head, stored.rows, stored.bytes, "document load", func(updates updateSource) (err error) {
-			loaded.Doc, err = documentThrough(room, head, updates)
-			return err
-		}); err != nil {
-			return LoadedDocument{}, err
-		}
-	}
-	if stored.rows > 1 {
-		p.noted(room, stored.stamp.Version, stored.oldest)
-	}
-	return loaded, nil
+	return LoadedDocument{Doc: doc, Stamp: stamp}, nil
 }

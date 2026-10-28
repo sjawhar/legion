@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -113,6 +115,185 @@ func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) 
 			})
 		})
 	}
+}
+
+// Buffered folds are bounded across the process (foldSlots): with one slot, a second load whose
+// rows it reads into memory waits for the slot, holding its read transaction, while the first is
+// inside its fold, and folds once the first gives the slot back; a waiter whose context ends
+// returns that context's error without folding.
+func TestABufferedFoldWaitsForASlotWithinItsContext(t *testing.T) {
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	versioned.foldSlots = make(chan struct{}, 1)
+	writer := newProofHistory(t, 101)
+	rows := [][]byte{writer.write("First.\n"), writer.write("First.\n\nSecond.\n")}
+	holding, waiting := createDocument(t, database, "holding"), createDocument(t, database, "waiting")
+	appendUpdates(t, versioned, holding, rows...)
+	appendUpdates(t, versioned, waiting, rows...)
+	held, released := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(released) })
+	t.Cleanup(release)
+	var waitedFolds atomic.Int32
+	versioned.beforeFold = func(room string) {
+		switch room {
+		case holding:
+			close(held)
+			<-released
+		case waiting:
+			waitedFolds.Add(1)
+		}
+	}
+	ctx := context.Background()
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := versioned.Load(ctx, holding)
+		first <- err
+	}()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first load never reached its fold")
+	}
+	type coldRead struct {
+		loaded LoadedDocument
+		err    error
+	}
+	second := make(chan coldRead, 1)
+	go func() {
+		loaded, err := versioned.LoadDocument(ctx, waiting)
+		second <- coldRead{loaded, err}
+	}()
+	cancelled, cancel := context.WithCancel(ctx)
+	defer cancel()
+	third := make(chan error, 1)
+	go func() {
+		_, err := versioned.Load(cancelled, waiting)
+		third <- err
+	}()
+	// The holder committed its read before its fold, so the two transactions left open are the
+	// waiters', each past its read of the stored log and waiting for the slot.
+	waitFor(t, 30*time.Second, "both later loads to wait for the slot inside their read transactions", func() bool {
+		return idleInTransaction(t, database) == 2
+	})
+	select {
+	case read := <-second:
+		t.Fatalf("the second load returned (%v) while the only slot was held", read.err)
+	case err := <-third:
+		t.Fatalf("the third load returned (%v) while the only slot was held and its context was live", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-third:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the waiter whose context ended returned %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the waiter whose context ended is still waiting for the slot")
+	}
+	select {
+	case read := <-second:
+		t.Fatalf("the second load returned (%v) while the only slot was held", read.err)
+	default:
+	}
+	if folds := waitedFolds.Load(); folds != 0 {
+		t.Fatalf("the waiting document folded %d times while the only slot was held, want none", folds)
+	}
+
+	release()
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Fatalf("the first load: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first load did not return once released")
+	}
+	select {
+	case read := <-second:
+		if read.err != nil {
+			t.Fatalf("the second load: %v", read.err)
+		}
+		if got := docMarkdown(read.loaded.Doc); got != "First.\n\nSecond.\n" {
+			t.Fatalf("the second load reads %q, want the stored document", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the second load did not proceed once the slot was given back")
+	}
+	if folds := waitedFolds.Load(); folds != 1 {
+		t.Fatalf("the waiting document folded %d times, want the second load's one fold", folds)
+	}
+}
+
+// idleInTransaction counts the sessions of the test's database that hold a transaction open
+// without running a statement in it.
+func idleInTransaction(t *testing.T, database *store.Store) int {
+	t.Helper()
+	var sessions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from pg_stat_activity
+		where datname = current_database() and state = 'idle in transaction'
+	`).Scan(&sessions); err != nil {
+		t.Fatalf("count the sessions idle in a transaction: %v", err)
+	}
+	return sessions
+}
+
+// A fold of rows read into memory ends with its context, as a fold that streams them does: a load
+// or a cold read whose context ends once its read transaction has committed, before its fold
+// starts, returns the context's error and no state, and a fold whose context ends between two
+// updates applies none after it and returns that error.
+func TestABufferedFoldEndsWithItsContext(t *testing.T) {
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	writer := newProofHistory(t, 101)
+	rows := [][]byte{
+		writer.write("First.\n"),
+		writer.write("First.\n\nSecond.\n"),
+		writer.write("First.\n\nSecond.\n\nThird.\n"),
+	}
+	artifactID := createDocument(t, database, "cancelled")
+	appendUpdates(t, versioned, artifactID, rows...)
+
+	t.Run("before the fold starts", func(t *testing.T) {
+		loadCtx, cancelLoad := context.WithCancel(context.Background())
+		defer cancelLoad()
+		versioned.beforeFold = func(string) { cancelLoad() }
+		loaded, err := versioned.Load(loadCtx, artifactID)
+		if !errors.Is(err, context.Canceled) || loaded.Update != nil || loaded.Version != 0 {
+			t.Fatalf("the load whose context ended before its fold returned %d bytes at version %d (%v), want none and %v",
+				len(loaded.Update), loaded.Version, err, context.Canceled)
+		}
+		readCtx, cancelRead := context.WithCancel(context.Background())
+		defer cancelRead()
+		versioned.beforeFold = func(string) { cancelRead() }
+		document, err := versioned.LoadDocument(readCtx, artifactID)
+		if !errors.Is(err, context.Canceled) || document.Doc != nil || document.Stamp != (DocumentStamp{}) {
+			t.Fatalf("the cold read whose context ended before its fold returned %+v (%v), want no document and %v",
+				document.Stamp, err, context.Canceled)
+		}
+	})
+	t.Run("between updates", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		replay := memoryUpdates(ctx, rows)
+		applied := 0
+		state, err := stateThrough(artifactID, 3, func(use func([]byte) error) error {
+			return replay(func(update []byte) error {
+				applied++
+				if applied == 2 {
+					cancel()
+				}
+				return use(update)
+			})
+		})
+		if !errors.Is(err, context.Canceled) || state != nil || applied != 2 {
+			t.Fatalf("the fold whose context ended after its second update returned %d bytes (%v) after %d updates, want none, %v and two",
+				len(state), err, applied, context.Canceled)
+		}
+	})
 }
 
 // roomLoadService is a service on a database of its own whose room loads record each stored state

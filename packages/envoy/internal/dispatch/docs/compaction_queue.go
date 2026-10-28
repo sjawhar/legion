@@ -40,16 +40,19 @@ type compactionTiming struct {
 
 var defaultCompactionTiming = compactionTiming{firstCheck: compactTail, backoff: time.Second, backoffCap: time.Minute}
 
-// noteStoredUpdates tells the document's compaction queue that the room's rows from oldest to head
-// are stored: an append's commit wrote them (appendUpdate, Ledger.Commit), or a load read them
-// (PgVersioned.Load, LoadDocument). It queues the room for a check unless the queue already holds
-// it, takes the queue's lock only for that, and never waits for a check or a compaction: every
-// caller is a write or a read some request or room is waiting on.
+// noteStoredUpdates tells the document's compaction queue that the room's rows through head are
+// stored: an append's commit wrote the row at head - an append on its own transaction
+// (appendUpdate), a joined write's at its ledger's commit (Ledger.Commit), a settlement's repair or
+// the block-id backfill once its transaction commits (settleRoomWithin, backfillBlockIDs) - or a
+// load read the rows through head (PgVersioned.loadStored). It queues the room for a check unless
+// the queue already holds it, and has a room whose step is in flight queued again once that step
+// ends (compactionQueue.note); it takes the queue's lock only for that, and never waits for a check
+// or a compaction: every caller is a write or a read some request or room is waiting on.
 //
 // A room whose head is version 1 holds one row at most and has nothing to fold. The check reads the
-// room's rows itself, since one commit or read sees only part of them - an append none below its
-// own - so the range says nothing more to the queue.
-func (s *Service) noteStoredUpdates(room string, head, oldest int64) {
+// room's rows itself, since one commit or read sees only part of them, so the head says nothing
+// more to the queue.
+func (s *Service) noteStoredUpdates(room string, head int64) {
 	if head <= 1 {
 		return
 	}
@@ -131,44 +134,87 @@ type compactionNext struct {
 	after time.Duration
 }
 
-// compactionStep is one step of the compaction queue's worker for a room: one check
-// (checkCompaction) and, when it says so, one compaction under the tail rule that does not wait for
-// the room's lock. A check compacts a room that is due; a retry, after a compaction that did not
-// finish, compacts while the room still has a row older than compactTail after its first, and
-// otherwise ends. A compaction that compacted is checked again; one another writer dropped, one that
-// found the room's lock held, and an error are retried; one that found nothing to fold or rows that
-// do not fold ends, the negative cache holding the latter (compactRoom).
-func (s *Service) compactionStep(ctx context.Context, room string, retrying bool) compactionNext {
+// compactionTry is what one try at a room's compaction came to (tryCompaction), from which the
+// queue's step and the sweep's pass each decide what they do with the room.
+type compactionTry int
+
+const (
+	// tryNotDue: the check said not to compact the room, and no compaction ran; the check says
+	// whether the room has rows after its first and when it will be due.
+	tryNotDue compactionTry = iota
+	// tryCompacted: the compaction folded the rows below its fold point into it.
+	tryCompacted
+	// tryLater: the check or the compaction failed, or the compaction found the room's lock held
+	// (compactBusy) or its rows changed by another writer (compactDropped): the room is tried again
+	// later.
+	tryLater
+	// tryDone: the compaction found nothing to fold, or rows that do not fold, which the negative
+	// cache then holds (compactRoom).
+	tryDone
+)
+
+// compactionAttempt is one try at a room's compaction: what it came to, the check it made, and how
+// many rows its compaction deleted.
+type compactionAttempt struct {
+	try     compactionTry
+	check   compactionCheck
+	deleted int
+}
+
+// tryCompaction checks the room (checkCompaction) and, when the check says so, compacts it once
+// under the tail rule without waiting for its lock (compactRoom), logging a failure of either. A
+// try compacts a room that is due; a retry, after a compaction that did not finish, compacts while
+// the room still has a row older than compactTail after its first.
+func (s *Service) tryCompaction(ctx context.Context, room string, retrying bool) compactionAttempt {
 	check, err := s.checkCompaction(ctx, room)
 	if err != nil {
 		warnCompaction(ctx, warnCompactionCheck, room, err)
-		return compactionNext{kind: compactionRetry}
+		return compactionAttempt{try: tryLater}
 	}
-	switch {
-	case retrying && !check.aged:
-		return compactionNext{kind: compactionDone}
-	case !retrying && !check.due && check.later == 0:
-		return compactionNext{kind: compactionDone}
-	case !retrying && !check.due:
-		return compactionNext{kind: compactionLater, after: check.untilDue}
+	if (retrying && !check.aged) || (!retrying && !check.due) {
+		return compactionAttempt{try: tryNotDue, check: check}
 	}
 	result, err := s.persistence.compactRoom(ctx, room, tailRule, false)
 	if err != nil {
 		warnCompaction(ctx, warnCompactionCompact, room, err)
-		return compactionNext{kind: compactionRetry}
+		return compactionAttempt{try: tryLater, check: check}
 	}
 	switch result.outcome {
 	case compactCompacted:
-		return compactionNext{kind: compactionAgain}
+		return compactionAttempt{try: tryCompacted, check: check, deleted: result.deleted}
 	case compactDropped, compactBusy:
-		return compactionNext{kind: compactionRetry}
+		return compactionAttempt{try: tryLater, check: check}
 	default:
-		return compactionNext{kind: compactionDone}
+		return compactionAttempt{try: tryDone, check: check}
 	}
 }
 
+// compactionStep is one step of the compaction queue's worker for a room: one try at its compaction
+// (tryCompaction), a retry when the step before it did not finish. A compaction that compacted is
+// checked again; one another writer dropped, one that found the room's lock held, and a failure are
+// retried; one that found nothing to fold or rows that do not fold ends, the negative cache holding
+// the latter (compactRoom). A room the try did not compact - not due, or for a retry no row after
+// its first older than compactTail - ends when it has no row after its first and is checked again
+// once it will be due otherwise, so a retry that comes too soon still comes back to rows that will
+// come due.
+func (s *Service) compactionStep(ctx context.Context, room string, retrying bool) compactionNext {
+	attempt := s.tryCompaction(ctx, room, retrying)
+	switch attempt.try {
+	case tryCompacted:
+		return compactionNext{kind: compactionAgain}
+	case tryLater:
+		return compactionNext{kind: compactionRetry}
+	case tryDone:
+		return compactionNext{kind: compactionDone}
+	}
+	if attempt.check.later == 0 {
+		return compactionNext{kind: compactionDone}
+	}
+	return compactionNext{kind: compactionLater, after: attempt.check.untilDue}
+}
+
 // warnCompactionCheck and warnCompactionCompact are the messages a failed check and a failed
-// compaction log, from the queue's steps and the sweep's pass alike.
+// compaction log, from the queue's steps and the sweep's pass alike (tryCompaction).
 const (
 	warnCompactionCheck   = "dispatch: check whether a document is due a compaction"
 	warnCompactionCompact = "dispatch: compact a document"
@@ -217,6 +263,9 @@ type compactionEntry struct {
 	room  string
 	at    time.Time
 	retry time.Duration
+	// renoted says a note of the room came while its step was in flight: the step may have read the
+	// room before the noted rows were stored, so its end queues the room again (settle).
+	renoted bool
 }
 
 // startCompactionQueue creates a compaction queue whose worker runs step, and starts the worker.
@@ -234,10 +283,19 @@ func startCompactionQueue(step func(ctx context.Context, room string, retrying b
 	return q
 }
 
-// note queues room for its first check, unless the queue holds it already or takes no notes.
+// note queues room for its first check, unless the queue holds it already or takes no notes. A
+// note of the room in flight marks it (renoted), so its step's end queues it again however the step
+// ended; a note of a room waiting in the queue changes nothing.
 func (q *compactionQueue) note(room string) {
 	q.mu.Lock()
-	if q.shut || q.paused || q.rooms[room] != nil {
+	if q.shut || q.paused {
+		q.mu.Unlock()
+		return
+	}
+	if held := q.rooms[room]; held != nil {
+		if held == q.current {
+			held.renoted = true
+		}
 		q.mu.Unlock()
 		return
 	}
@@ -307,19 +365,26 @@ func (q *compactionQueue) take() (*compactionEntry, time.Duration, bool) {
 }
 
 // settle ends the step of entry, the room in flight: it queues the room again as next says, unless
-// the queue has shut or paused since, which drops it.
+// the queue has shut or paused since, which drops it. A room noted while its step ran (renoted) is
+// not dropped, whatever the step decided: it is queued for a check no later than firstCheck from
+// now, the wait a first note gives it, or sooner as the step decided.
 func (q *compactionQueue) settle(entry *compactionEntry, next compactionNext) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	close(q.idle)
 	q.current, q.idle = nil, nil
-	if next.kind == compactionDone || q.shut || q.paused {
+	renoted := entry.renoted
+	entry.renoted = false
+	if q.shut || q.paused || (next.kind == compactionDone && !renoted) {
 		if q.rooms[entry.room] == entry {
 			delete(q.rooms, entry.room)
 		}
 		return
 	}
 	timing := q.timing
+	if next.kind == compactionDone {
+		next = compactionNext{kind: compactionLater, after: timing.firstCheck}
+	}
 	var after time.Duration
 	switch next.kind {
 	case compactionAgain:
@@ -334,6 +399,9 @@ func (q *compactionQueue) settle(entry *compactionEntry, next compactionNext) {
 			entry.retry = min(2*entry.retry, timing.backoffCap)
 		}
 		after = entry.retry
+	}
+	if renoted {
+		after = min(after, timing.firstCheck)
 	}
 	entry.at = time.Now().Add(after)
 	heap.Push(&q.due, entry)

@@ -1929,7 +1929,8 @@
   after start and only with NATS configured; and a compaction folded while it held the
   document's lock, so a browser's append waited for the whole fold. A load now reads the compacted
   row and the rows since, buffers them up to 32 MiB and folds them after its transaction ends
-  (past that it folds them as it streams them), and a room's load decodes the stored state once,
+  (past that it folds them as it streams them; at most four such buffered folds, loads and
+  compactions together, run at once in a server), and a room's load decodes the stored state once,
   in the room's own load hook under the server's pending cap (a folded log is also decoded by the
   fold's read-back), and a history that does not load fails the room from that decode.
   Compaction runs on any process from the log's length and age: a per-process queue, fed by every
