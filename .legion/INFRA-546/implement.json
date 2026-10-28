@@ -2,38 +2,29 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-546",
-  "completed": "2026-10-28T09:35:29Z",
-  "round": 6,
+  "completed": "2026-10-28T10:14:56Z",
+  "round": 7,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
   "answers": {
-    "acceptanceCheck": "Review round 4 approved at 165a8266; #2228 merged to main as 85713740 and the PR's base became main, CONFLICTING. main@origin b295a3fbcb42 merged forward at 9bcba1ee4dab, keeping main's #2228 code (envoy-client, pi-envoy, claude-envoy, contracts identical to main); d5e72a6a2e1a sets packages/envoy/infra/go.work.sum to main's copy. Fingerprint without that file is unchanged (985dfa6ddf12ac73 at both heads; comment 6465521397). No other change; the Minor doc items stay on the Fast-follow line."
+    "testRound6": "Per the architect's narrowing: a full stream's /v1/messages/send and /v1/messages/publish answer 503 with Retry-After: 1 under streamFullPrefix and record outcome stream_full (859993f7f6cd); the tester's red test TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer (3ceb0bead0af) passes unchanged. The census row, packages/envoy/AGENTS.md, deploy/README.md and the changelog entries say so (81cf8c12ad43). Per the controller's changelog ruling, the seven entries moved to packages/envoy/.changes/unreleased/pr-2362-*.yaml (changie, Issue=pr2362, no key in the text) and CHANGELOG.md is as on the merged base."
   },
   "proof": [
     {
-      "criterion": "The stream and buckets reach the deployment's replica count, keep the byte limit, DiscardNew and envoy_stream_id across listener and Dispatch starts; an operator's raise stands; a full stream refuses and keeps what it holds - on the tree merged with main",
-      "surface": "Real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes and one standalone v2.15.1 server, read with natscli v0.5.1",
-      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log https://github.com/sjawhar/legion/pull/2362#issuecomment-6465521397)",
-      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one id over two reads, buckets and durable at 3; P2 unchanged at setting 1; P5 a 50 GiB operator raise stood 40 s, a lowering to 1000000 was raised back ('max_bytes 1000000 -> 44023414784'); P3 Dispatch restores subjects 5 -> 8 keeping copies, limit and id; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
-      "headSha": "d5e72a6a2e1acbb805ebfd0fe8a86b37ca2fc736",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 on a 29 GB store -> exit 1 'insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 -> 'invalid ENVOY_NATS_REPLICAS \"0\": want a whole number of copies from 1 to 5'"
-    },
-    {
-      "criterion": "The cluster and keeper tests stay reliable under -race on the merged tree",
-      "surface": "internal/bus keeper/cluster tests (3 processes) and internal/dispatch/delivery built with -race, run at once, GOMAXPROCS=2",
-      "command": "bash /legion/scratch/tmp/race546/race-load.sh",
-      "observed": "850 PASS, 0 FAIL, no data race reported.",
-      "headSha": "d5e72a6a2e1acbb805ebfd0fe8a86b37ca2fc736",
-      "negativeControl": "Before round 5's harness fix the same load left 29 of 1,920 cluster starts stuck (nats-server 2.10.29 start race); the republish test fails with the republish removed (round 5)"
+      "criterion": "On a full stream, /v1/messages/send and /v1/messages/publish answer 503 with a Retry-After and a body naming the full stream (not the bus-did-not-answer text), and the request record's outcome is not bus_unavailable",
+      "surface": "Real envoy-listener built at the head, ENVOY_STREAM_MAX_BYTES=20000, against a standalone nats-server v2.15.1, driven over HTTP",
+      "command": "curl POST /v1/messages/publish (1,500-byte messages) until refused, then publish and send (subscribed ses_target) one more (https://github.com/sjawhar/legion/pull/2362#issuecomment-6466306161)",
+      "observed": "9 x 200 then 503; both routes: 'HTTP/1.1 503', 'Retry-After: 1', body 'envoy: the message bus refused the message because its stream is full: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded'; request records 'listener publish' and 'listener send' with outcome stream_full, status 503.",
+      "headSha": "81cf8c12ad433fa1ec6c0c4cd5ed4e8b19a63e44",
+      "negativeControl": "At 5e2b9517 (without the fix) the tester's red test fails on both routes: 'the refusal reads \"envoy: the message bus did not answer: stream ENVOY_NOTIFICATIONS is full: ...\"' and the real listener recorded outcome bus_unavailable (comment 6465967683)"
     }
   ],
   "filesChanged": [
-    "9bcba1ee4dab (merge of main@origin b295a3fbcb42): conflicts resolved keeping main's #2228 code; INFRA-546's own diff re-applied unchanged",
-    "d5e72a6a2e1a: packages/envoy/infra/go.work.sum set to main's copy"
+    "859993f7f6cd: packages/envoy/cmd/listener/api.go (streamFullPrefix, full-stream branch in writeBusUnavailable), request_record.go (outcomeStreamFull)",
+    "81cf8c12ad43: packages/envoy/AGENTS.md, deploy/README.md, CHANGELOG.md back to the merged base, packages/envoy/.changes/unreleased/pr-2362-*.yaml (seven fragments)"
   ],
   "trickyParts": [
-    "legion/INFRA-439 is deleted; the old head's fingerprint is measured against #2228's last tip d48d71fd3078",
-    "The scratch volume was recreated: proof harness rebuilt at /legion/scratch/tmp/p546b (ports 153xx), Postgres at /legion/scratch/tmp/pg546 (14433), race load at /legion/scratch/tmp/race546",
-    "claude-envoy check-dist refuses this pod's Bun 1.3.14 (pin 1.4.4); claude-envoy is byte-identical to main, so nothing of ours is in its dist"
+    "refuseBusUnavailable classified by status alone; a full stream shares the 503, so it is told apart by errors.Is(err, bus.ErrStreamFull)",
+    "Fragments were generated with changie v1.26.0 against main's packages/envoy/.changie.yaml copied to scratch; .changie.yaml itself is main's file and is not added by this branch"
   ],
   "deviations": [],
   "openQuestions": [
