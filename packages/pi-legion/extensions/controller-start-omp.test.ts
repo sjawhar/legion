@@ -373,10 +373,13 @@ async function serveController(
  * Starts the controller as `legion controller start` does: interactive Oh My Pi with the Envoy and
  * Legion extensions from this checkout (and `STARTUP_HOLD_EXTENSION` after them, for a case that
  * holds the startup), the controller's environment (LEGION_CONTROLLER, its capability file, its
- * start message, the daemon, Envoy and its NATS server) and `CONTROLLER_ARGS`, against the
- * controller's stand-in (`serveController`) with `hooks`.
+ * start message, the daemon, Envoy and its NATS server) and `args` (`CONTROLLER_ARGS` unless a
+ * case drops the start word), against the controller's stand-in (`serveController`) with `hooks`.
  */
-async function startController(hooks: StandinHooks = {}): Promise<ControllerSession> {
+async function startController(
+  hooks: StandinHooks = {},
+  args: readonly string[] = CONTROLLER_ARGS
+): Promise<ControllerSession> {
   const { binary, nats, root, home, workspace, sessions, state, base, turns } =
     await serveController("state.json", hooks);
   const secretFile = path.join(root, "controller-secret");
@@ -407,7 +410,7 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
         ENVOY_NATS_URL: nats,
         LEGION_TEST_STARTUP_HOLD_URL: `${base}${STARTUP_HOLD_ROUTE}`,
       },
-      args: CONTROLLER_ARGS,
+      args,
       cols: COLUMNS,
     },
     cleanup
@@ -1306,3 +1309,96 @@ test.skipIf(skip)(
   },
   CASE_TIMEOUT_MS
 );
+
+// The start-turn mark owes every startup card one wake after the start turn, since the start
+// turn's reply ran the start procedure rather than reading the card. A turn after the start turn
+// that has the card in its context is that one turn: here, the one a card published while the
+// start turn runs gets. A wake after it would start a further turn telling the controller that
+// cards it already read "arrived with no turn to read them".
+test.skipIf(skip)(
+  "a startup card that a turn after the start turn reads gets no second wake",
+  async () => {
+    const startupHold = newHold();
+    let sid: string | undefined;
+    const session = await startController({
+      startupHold,
+      onListener: (listened) => {
+        if (listened !== "") sid ??= listened;
+      },
+    });
+    await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
+    const opened = await session.until("the session's listener registration", () => sid);
+    const inbound = await controllerInbound(setup().nats);
+    const early = inbound.card(opened, "startup");
+    await early.receipt;
+    await inbound.repeat(opened, early.card);
+    startupHold.release();
+
+    const start = await session.nextTurn("the start turn's model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    const during = inbound.card(opened, "during-start");
+    await during.receipt;
+    await inbound.repeat(opened, during.card);
+    start.reply("Start procedure done.");
+
+    const next = await session.nextTurn("the model request that reads the card sent meanwhile");
+    const read = conversation(next.request);
+    expect(read).toContain(early.card.summary);
+    expect(read).toContain(during.card.summary);
+    next.reply("Read both cards.");
+    await settledOn(session, "Read both cards.");
+    // A real clock, as in "the operator sees a claim refusal": a wake that is not sent emits no
+    // signal to await, so only a quiet window with no further Messages request shows its absence.
+    await Bun.sleep(3_000);
+    expect(session.turns.slice(2).map(({ request }) => lastMessage(request))).toEqual([]);
+  },
+  CASE_TIMEOUT_MS
+);
+
+// The operator's controller marks its start unsent at `session_start`, and while the mark holds,
+// a startup card waits for the start turn. Two ways leave that start unsent for good: the start
+// claim's registration that never answers (the daemon unreachable mid-request), and a session
+// launched without the start word on its command line. A card that reached the idle session must
+// still get a turn of its own, without waiting for the operator to type; the bound here is three
+// times pi-envoy's STARTUP_TURN_CAP_MS (30 s).
+for (const variant of ["the start claim never answers", "the start command never runs"] as const) {
+  test.skipIf(skip)(
+    `a startup card held by an unsent start mark gets its turn when ${variant}`,
+    async () => {
+      const startupHold = newHold();
+      const registration = newHold();
+      cleanup.push(async () => registration.release());
+      let sid: string | undefined;
+      const session = await startController(
+        {
+          startupHold,
+          onListener: (listened) => {
+            if (listened !== "") sid ??= listened;
+          },
+          register: async () => {
+            await registration.wait();
+            return Response.json({ error: "case over" }, { status: 503 });
+          },
+        },
+        variant === "the start command never runs" ? CONTROLLER_ARGS.slice(0, -1) : CONTROLLER_ARGS
+      );
+      await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
+      const opened = await session.until("the session's listener registration", () => sid);
+      const inbound = await controllerInbound(setup().nats);
+      const { card, receipt } = inbound.card(opened, "held");
+      await receipt;
+      await inbound.repeat(opened, card);
+      startupHold.release();
+
+      // A real clock: the bound is the property under test.
+      const deadline = Date.now() + 90_000;
+      while (session.turns.length === 0 && Date.now() < deadline) await Bun.sleep(100);
+      const first = session.turns[0];
+      expect(first === undefined ? "no model request within 90 s" : "a model request").toBe(
+        "a model request"
+      );
+      expect(conversation(first?.request ?? { path: "", body: {} })).toContain(card.summary);
+    },
+    CASE_TIMEOUT_MS
+  );
+}
