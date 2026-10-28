@@ -2,54 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-555",
-  "completed": "2026-10-27T16:15:52Z",
-  "round": 2,
-  "reviewedCodeHead": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T09:32:37Z",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-63 architect at the review-round cap: the census migration number and counts, publishWithin, the four round-2 minors, the two infra/gcp NATS comments; the skill-split finding was withdrawn by the architect at 16:34Z.",
+  "reviewedCodeHead": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+  "decision": "approved",
   "critical": 0,
-  "important": 3,
-  "minor": 4,
-  "ci": "At code head 76483b14 (CI head of the newest pull_request runs; compare to PR head 6bbf48f8 shows only .legion/ changed): required lint, typecheck, test and pr-title all queued at 15:50Z. Not read as a pass; this round requests changes on other grounds.",
-  "roundOneThreads": "All ten round-1 threads verified fixed at 76483b14 and answered with a reply each (the implementer had already resolved them).",
+  "important": 0,
+  "minor": 0,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At code head 62a8f2d1 (the CI head; compare to PR head shows only .legion/ changed): lint, typecheck, test success, pr-title success (read 2026-10-27 18:25Z). Non-required Legion Envoy and Contracts run 40542568381: attempt 1 failed only the dispatch lane on one webkit Playwright timeout (collab-cursor.e2e.ts:43 'a new line at the end of a code block'; the same case passed in chromium and iphone, the sibling webkit case passed, the diff touches no editor code); rerun once, attempt 2 dispatch job 122712982640 success at 2026-10-28 09:32Z.",
+  "threads": "All 16 threads resolved; each round-2 thread carries the reviewer's reply naming 62a8f2d1; the skill thread was withdrawn and settled.",
   "thermonuclear": {
-    "deepReview": "APPROVE at 76483b14; minor: PR-body census and brief stale, migration comment names a reader that does not exist, stop signal during the admission wait exits 1, refresh failures retried per request with no pause (recorded as risk)",
-    "codeQuality": "CHANGES at 76483b14: publishWithin re-implements bus.Client.PublishReportingDuplicateWithin, PR body stale, joinRegistry lives in shutdown.go, duplicated healthz wait loop in verifiers-staging-token.sh"
+    "deepReview": "APPROVE at 62a8f2d1 (fast-follow: the admission-stop INFO line also fires for a signal during the DB probe)",
+    "codeQuality": "APPROVE at 62a8f2d1 (fast-follow: publishTimeout 10 s never binds with the real bus, whose publish caps at 5 s)"
   },
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "PR body (## Contract change census)",
-      "description": "C2 and C5 name migration 0130, which at the head is 0130_comments_written_version; this PR's is 0135_server_processes, and the C5 rollout note tells an operator to check for the wrong one. The header says every other search has 0 hits in agent-infra; a re-run gives 4 for the NATS-down search, 381 for the replicas search and 102 (not 94) for refuses/exits."
-    },
-    {
-      "severity": "important",
-      "file": "skills/legion-worker/references/merge-gate.md",
-      "description": "Skill edit (and its packages/claude-envoy/legion copy, with the CHANGELOG lines that describe it) must leave #2390 for a skill-only pull request that merges after it, once the human approves it on a dispatch ask: the human's 15:49Z rule, which the INFRA-63 architect passed to this review."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/startup/started.go",
-      "description": "Line 302: publishWithin re-implements bus.Client.PublishReportingDuplicateWithin with a goroutine that keeps publishing after the pass gives up and its transaction rolls back."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/main.go",
-      "description": "Line 518: a SIGTERM during the up-to-20 s admission wait ends as 'register this server process: context canceled', ERROR and exit 1, not a clean stop."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0135_server_processes.up.sql",
-      "description": "Lines 13-15: says the dashboard's new-version notice reads commit and dashboard_build; nothing at the head reads dashboard_build (INFRA-559 will)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/shutdown.go",
-      "description": "Line 84: joinRegistry starts the prune loop and the announcer, boot wiring in the shutdown file."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/verifiers-staging-token.sh",
-      "description": "Lines 230-237: the new /healthz wait loop copies the one at 300-304."
-    }
-  ]
+  "fastFollow": "publishTimeout's comment or value against the bus's 5 s cap; the admission-stop INFO wording.",
+  "keyFindings": []
 }
