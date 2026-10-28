@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T15:31:48Z",
+  "completed": "2026-10-28T16:00:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
@@ -122,11 +122,9 @@
     "Main's #2287 (an approval stands across handoff-only commits) extended the machinery this issue removes. In the merge, its classification and carry code, its approval-carry pass and its fixtures were dropped. Kept: its CI flag change, and its round-ends-on-the-approved-head case as an adapted test."
   ],
   "openQuestions": [],
-  "round": 9,
+  "round": 10,
   "mergeRound": [
-    "Approved at ababb04b; GitHub reported #2354 CONFLICTING. Forward merge e99901ae with main 78d5f6b6 (11 commits). Dispatch migration renumbered 0135 -> 0136_handoffs (main took 0135_server_processes); daemon 0062 and contract 41 unchanged; the envoy pr2354 fragment names 0136.",
-    "Main's #2423: pull requests do not commit the built plugin, so packages/claude-envoy/dist/** and legion/** are restored to main's version; bun run verify-build accepts the build from source. Main's rebuild after the merge brings the new skill copies (until then the old copies under claude-envoy/legion/ still mention skip-checks).",
-    "Other conflicts (contracts dispatch-api types and test, daemon dispatch client, envoy docs, pi-legion skills-guard test, e2e README) keep both sides.",
-    "gh: #2354 MERGEABLE at e99901ae. Fingerprint f121987b… → 1856225f… (changed), posted on the PR."
+    "Review round 7's one finding is fixed in abdef8d9: packages/claude-envoy/.changes/unreleased/pr2354-Changed-20261028-103904.yaml no longer says dist/ and legion/ were regenerated or to install with a legion built from the same commit. It now says main's Rebuild Claude Envoy plugin workflow builds them from this commit's source after the merge, that until then the committed contract-40 build is refused at registration by a contract-41 daemon, and to install from main once the rebuild commit is there. changie batch --dry-run renders it; no Dispatch key. Thread PRRT_kwDORFy7ds6xNFYH answered and resolved.",
+    "abdef8d9 differs from code head e99901ae only by that fragment (jj diff --from e99901ae --to abdef8d9 lists .legion/ files and the fragment), so the proofs at e99901ae stand for it. gh: #2354 MERGEABLE at abdef8d9."
   ]
 }
