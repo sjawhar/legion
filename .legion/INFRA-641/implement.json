@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-641",
-  "completed": "2026-10-28T11:32:00Z",
+  "completed": "2026-10-28T13:11:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2455",
   "proof": [
+    {
+      "criterion": "Conflict resolved with the code unchanged, so the earlier real-surface proofs stand at the new head; CI can run",
+      "surface": "GitHub pull request state; the Dispatch server built at 914ac117 on a copy of the replay seed (Postgres 17.11 + pgvector, NATS, fake listener) driven through its HTTP API",
+      "command": "fingerprint per conflicts-and-rewrites.md at 4549b2ef and 914ac117 (with and without the changelog paths); gh pr view 2455 --json mergeable; boot dispatch-merged on dispatch_smoke, POST /api/v1/artifacts/{id}/edits insert, POST /api/v1/issues/{key}/comments anchored, GET /api/v1/artifacts/{id}/text on the largest seeded spec (667 KB)",
+      "observed": "Fingerprint 21368ea8... -> d8e266ea... (changed only by the changelog move); excluding packages/envoy/CHANGELOG.md and packages/envoy/.changes it is 94d4b9f2b164... at both heads. mergeable MERGEABLE (was CONFLICTING). Merged server boots at schema 134; insert 200, anchored comment 201 with a block id, read-back text holds the insertion. go test ./internal/dispatch/pmdoc passes except four timing tests that fail identically on main adee0aba in this pod.",
+      "headSha": "914ac117300e",
+      "negativeControl": "An anchored comment whose quote is not in the spec -> 404 TARGET_NOT_FOUND."
+    },
     {
       "criterion": "A1: merge rule on the replay of production's writes (every head run below every base run)",
       "surface": "Local Dispatch server built from base b2ac1c41 and from head (runtime code of efb63bc6 = 64a0d984; head binary sha256 fdc01114...26d57 rebuilt after the simplify pass and identical) on Postgres 17.11 + pgvector 0.8.7, NATS 2.12.1 JetStream, fake Envoy listener (762 sessions), driven by the INFRA-512 architect's replay (tools/load.py from dispatch://INFRA-512/artifact/infra512-replay-tools-tgz, inputs dispatch://INFRA-512/artifact/replay-inputs-tar-gz-part00..part10, sha256 4299570e...f42949 checked), F=0.3, rho=1, window minutes 27-35, 2 SSE streams, GOMAXPROCS=2, fresh copy of the settled seed and fresh NATS store per run",
@@ -44,7 +52,7 @@
     "packages/envoy/internal/dispatch/pmdoc/walk.go",
     "packages/envoy/internal/dispatch/pmdoc/walk_test.go",
     "packages/envoy/internal/dispatch/pmdoc/splice.go",
-    "packages/envoy/CHANGELOG.md"
+    "packages/envoy/.changes/unreleased/pr2455-Changed-20261028-125858.yaml"
   ],
   "trickyParts": [
     "measure reserves a node's pre-order slot before measuring its children and fills it after, so the sizes slice is in visit order; walkedCount follows the same descent (text, leaf and nil not descended) and sizes the slice exactly.",
@@ -56,7 +64,10 @@
     "Postgres 17.11 + pgvector 0.8.7 from .debs (the spec's and the architect's replay's setup), not the load test's pgserver 16.2; the same for both sides.",
     "The insertAt all-positions throwaway comparison (84 testdata docs at every position; 1,168 real specs at 2,337,098 positions; 134,510 insertAt calls; 0 differences) ran on the identical splice.go change before the pod was recreated on 2026-10-28; its logs were lost with the pod. Real-spec coverage was sampled above about 4,470 positions per document (2 CPUs).",
     "Kept walkedCount pre-sizing: it halves the bytes per walk against growing the slice (generated 1.54 MB -> 0.88 MB per walk), as the plan let the benchmark decide.",
-    "Three timing tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail in this gVisor pod at base too; skipped locally. TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a byte-order-collation database; it passes on an ICU en-US cluster."
+    "Three timing tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail in this gVisor pod at base too; skipped locally. TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a byte-order-collation database; it passes on an ICU en-US cluster.",
+    "The changelog entry is a changie fragment named pr2455 with no Dispatch key in its name or text, per the architect's 2026-10-28T12:57Z message relaying the controller's ruling, rather than main's AGENTS.md line naming the issue key."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round": 2,
+  "roundSummary": "Answers the tester's fail (no CI: PR conflicting on packages/envoy/CHANGELOG.md). Forward-merged main adee0aba into the branch (merge 6075f457), took main's CHANGELOG.md unchanged, and moved the entry to the changie fragment packages/envoy/.changes/unreleased/pr2455-Changed-20261028-125858.yaml (commit 914ac117), as the architect directed. GitHub now reports the PR MERGEABLE, so CI runs at 914ac117."
 }
