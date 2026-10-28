@@ -2,33 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T19:23:35Z",
-  "round": 2,
-  "reviewedCodeHead": "362ba0e923e969ca2294835e54b405baed217e4e",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T19:55:41Z",
+  "round": 3,
+  "reviewedCodeHead": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts",
-      "description": "Round 1's finding is fixed: at 362ba0e9 a nested item gets the same R3 verdict whatever follows it. But the span-based owner (:1125-1126) now counts toward the parent every blank line that R2 requires between its nested items, so a parent with one line of its own fails R3 once it has 50 nested children ('- Parent item.' followed by 50 blocks of a blank line and '  - Child N.' -> ':1: R3: 51 screen rows: - Parent item.', exit 1; exit 0 at 45697ce0; 50 top-level items exit 0). --write cannot fix it, because R2 needs those blank lines. This contradicts the header comment (:3-4, 'counts a nested item's lines toward that item, not toward its parent') and the test at scripts/semantic-line-breaks.test.ts:134, and nested enumerations are the layout this PR uses (AGENTS.md:213 has 26 nested children). The reviewer's round-1 suggestion led to it. Fix: a blank line before an item marker counts toward no item."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/semantic-line-breaks.ts",
-      "description": ":1121 'unless a nested item, which starts later, claims it' is wrong for '- - x', where the inner item starts on the same line and wins because it comes later in blocks.items. Fix it when the comment is rewritten for the finding above. The header comment at :5-6 (thread PRRT_kwDORFy7ds6xRwLa) is on the Fast-follow line."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": [
-    "the round-1 repro at 362ba0e9: the 50-row nested item with a sibling after it exits 0, the 51-row one fails at the nested item, and the last-child and top-level cases exit 0",
-    "bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 106 pass, 0 fail",
+    "round-2 finding fixed: a one-line parent with 50 nested children exits 0 (test at scripts/semantic-line-breaks.test.ts:144); 50 top-level items exit 0",
+    "round-1 repros still hold: a 50-row nested item passes and a 51-row one fails at the nested item, whatever follows it; '- - x' passes",
+    "header comment (:4-6) names the guides the guides test checks; GUIDES const in the guides test; VERBATIM_OPEN captures the tag name; relayout takes blocks in every caller; PR body Fast-follow: none",
+    "bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 107 pass, 0 fail",
     "checker on the five guides: exit 0, nothing printed",
-    "restructure.ts --strict on main a409c128's three guides: all three outputs cmp-identical to the head's guides",
-    "git diff 1feb1dc4 362ba0e9 outside the three guides and .legion: only the checker and its two test files",
-    "CI at 362ba0e9: every required check queued at 19:17Z, behind about 148 queued runs; c3539293's runs were cancelled"
+    "restructure.ts --strict on main a409c128's three guides: exit 0, all three outputs cmp-identical to the head's guides",
+    "local CI commands at 7cf8f4e4: bunx biome check . exit 0 (one warning and five infos, all in files this PR does not touch); check-private-names.sh exit 0; go vet -tags e2e ./... in packages/daemon exit 0; reclaim, census and config Go tests ok; pi-legion skills-guard 13 pass",
+    "GitHub at 7cf8f4e4: no required check red (lint, typecheck, test, pr-title queued; one older pr-title run cancelled); the PR is MERGEABLE; compare 7cf8f4e4...9f1039b8 is .legion/ only",
+    "the diff from #2422's head 1feb1dc4, outside the three guides and .legion: only the checker and its two test files"
   ],
-  "threads": "Answered all three round-1 threads: PRRT_kwDORFy7ds6xRwLM and PRRT_kwDORFy7ds6xRwLS fixed in 362ba0e9; PRRT_kwDORFy7ds6xRwLa a Minor carried on the Fast-follow line. I told the implementer to resolve those three.",
-  "thermonuclear": "Deep review run once on the corrective delta (git diff 45697ce0 362ba0e9 -- scripts/): one important finding (the parent count above, with a prototype fix that keeps the five guides passing and changes only the :153 test count to 52) and one minor (the :1121 wording); no security finding."
+  "ciRule": "Approved on local runs with CI queued, under the architect's 16:42Z decision (dispatch://INFRA-631/comment/e220a5fd-f4e2-4e72-ab5a-47c86c00c32e), applied to this tree at 19:26Z (dispatch://INFRA-632/comment/8e4f01b8-79f9-4fbd-81c3-b139fac7100e). GitHub's ruleset still needs the four checks green before the merge.",
+  "threads": "All four threads carry my answer: PRRT_kwDORFy7ds6xRwLM and PRRT_kwDORFy7ds6xRwLS fixed in 362ba0e9; PRRT_kwDORFy7ds6xRwLa and PRRT_kwDORFy7ds6xSQ5H fixed in 7cf8f4e4. All four are resolved.",
+  "thermonuclear": "Deep review run once on the corrective delta 9979cb83..7cf8f4e4: no findings. Property tests over random nested lists showed no nested item's count changes with what follows it and no parent's count grows with its children; no security finding."
 }
