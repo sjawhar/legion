@@ -527,6 +527,27 @@ a {
   text-decoration: underline;
 }
 
+/* A body's drawn Mermaid diagram (features/refs/mermaid-diagrams.ts). The SVG's inline style reads
+   `--bg:var(--bg-color);--fg:var(--text-color)`, and custom properties inherit into the preview's
+   shadow root, so these give it the values documents use: no fill behind it, and the card's own
+   text colour, which follows dark mode. They sit on the figure, never on `.dispatch-markdown`,
+   which also sits inside documents (the ask block's footer), where the editor's own values rule.
+   The preview scrolls sideways when the diagram is wider than the body. */
+.dispatch-mermaid {
+  --bg-color: transparent;
+  --text-color: currentColor;
+  margin-block: 1em;
+  margin-inline: 0;
+}
+
+.dispatch-mermaid-preview {
+  overflow-x: auto;
+}
+
+.dispatch-mermaid-source > summary {
+  cursor: pointer;
+}
+
 /* A task item in a `MarkdownBody` (`- [x] done`) shows the disabled checkbox
    `features/refs/task-checkboxes.ts` draws in place of its bullet; a plain item in the same list
    keeps its bullet. The box is sized in `em` of the surrounding text (`font-size: inherit` undoes

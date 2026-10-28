@@ -170,6 +170,8 @@ ygo's persistence worker is handed each update on its own), and every path relea
 A repair reports whether its transaction wrote anything;
 one that wrote nothing still committed that transaction, and ygo hands the worker an update for it too (the document's delete set), so its slot is finished with that update and the worker takes it rather than storing it.
 A settlement that wrote into the room renders its version from the document as it stands after the repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version too.
+A settlement that wrote nothing into the room and repaired nothing in the tree it read versions the rendering it made of that read, offsets included, and renders no second time;
+it renders again when a stamp's tree replaced the read, when it read the document again after a write, or when `reconcileAskBlocks` repaired the read in place (`changedTree`), so nothing but `reconcileAskBlocks` may change that read.
 A document's pending authors are in one of two places:
 F, the room's local in-flight credits (`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F.
@@ -2372,13 +2374,13 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   it is a compare-and-swap at the revision it read, so it never overwrites a write since, and a redelivery of its observations writes nothing.
 
 - Every write of a CI record stamps it `schema: 1` (`encodeRecord`), so a record without the field was last written by a listener that settled only its pull request's head and left every other terminal commit unsettled.
-  Such a record settles only in `[debounce, debounce + 5 min)` after its `last_event_at` (`handoverGrace`), which covers the time between the old listener's last tick and this one's first:
-  a compose deploy of a listener that receives GitHub webhooks is stop-then-start, and its slow path to the first tick takes at least the startup floor in the table in `docs/solutions/architecture-patterns/envoy-ci-summary.md`, which lists the terms and their bounds.
+  Such a record settles only in `[debounce, debounce + 5 min)` after its `last_event_at` (`handoverGrace`), which covers the time between the old listener's summary loop stopping and this one's first pass, one tick after it starts:
+  a compose deploy of a listener that receives GitHub webhooks is stop-then-start, and its slow path to the first pass takes at least the startup floor in the table in `docs/solutions/architecture-patterns/envoy-ci-summary.md`, which lists the terms and their bounds.
   So a head that finished just before the old listener was replaced still settles, and the commits that listener declined to settle hours or days earlier never do.
   Every admitted record is at most debounce plus grace old (5 min 5 s at the 5 s debounce), by construction.
   Five minutes is the smallest round figure above that startup floor, and a wider grace would only make admitted settlements later:
   any width admits the non-head records the head-gated listener left in its last debounce plus grace, which this listener settles as it settles every commit, so the width bounds how late such a settlement arrives, not whether one does, while the aged backlog is held back by its age at any width shorter than its records' ages (5 minutes against the 7-day TTL, about 1 in 2,000).
-  One predicate, `due`, decides it for the summary tick (before it reclaims a claim) and for `ClaimSettlement`, and the gauge `envoy_ci_legacy_records_held` on `/metrics` carries how many records the last tick held back, with one INFO line, `checks held back a head-gated listener's unsettled records, at least`, the first time a process holds any (a floor, since the loop does not wait for the CI cache to load).
+  One predicate, `due`, decides it for the summary pass (before it reclaims a claim) and for `ClaimSettlement`, and the gauge `envoy_ci_legacy_records_held` on `/metrics` carries how many records the last pass held back, with one INFO line, `checks held back a head-gated listener's unsettled records, at least`, the first time a process holds any (a floor, since the loop does not wait for the CI cache to load).
   That is a decision, not an accident: an operator who finds a terminal record with `settled_emitted: false` and no `schema` is looking at that history, which the bucket's seven-day TTL expires.
   An observation that changes the record (a new check run, a re-run, a suite) stamps it and the commit settles as any other, and a stamped record of any schema is never held back, so a settlement pending across a restart of this listener still publishes.
   A record without a schema whose `last_event_at` is ahead of the listener's clock publishes once wall time reaches its band, and raising `ENVOY_CI_DEBOUNCE` moves the band's far edge, so a restart with a larger debounce admits the records in the added slice.
@@ -2847,7 +2849,7 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   a failing check's `"` costs three times as much there), since GitHub allows 50,000 check runs in a suite:
   a check past either is refused the same way, and the record is marked `overflowed` and never settles again.
   A commit that had already settled keeps its last settlement, which nothing supersedes, so a consumer holding it learns about the refused checks only from GitHub's own read.
-  A settlement NATS refuses anyway (a server whose max payload is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather than being published again every tick.
+  A settlement NATS refuses anyway (a server whose max payload is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather than being published again at every attempt.
 
 - The listener's HTTP server gives every route 10 s from the request's start to read its header and body, and 10 s from the end of its header to write its answer (`newHTTPServer`, `cmd/listener/main.go`).
   The GitHub webhook route alone moves its own connection's deadlines (`extendDeadlines`):
