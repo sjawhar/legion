@@ -16,6 +16,7 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
+  ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
   DISPATCH_HANDOFF_BODY_MAX,
   HANDOFF_PHASE_PATTERN,
@@ -167,6 +168,12 @@ const IssueTitleMax = ${ISSUE_TITLE_MAX}
 // accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = ${DISPATCH_BODY_MAX}
+
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = ${ASK_QUESTION_MAX}
 
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in

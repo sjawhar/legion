@@ -206,6 +206,12 @@ const IssueTitleMax = 1000
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = 32000
 
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = 2000
+
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
 // packages/contracts so the server's 413 and the `dispatch handoff-write` command's pre-send

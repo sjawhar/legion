@@ -233,8 +233,9 @@ func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
 // toSecondReviewRound takes LEGION-208, seeded in its first review round (seedReviewOf at head),
 // through that round by record — its reviewer's request for changes and completion — and through
 // implementing and testing, each completed by record, into its second review round, whose reviewer
-// has not completed. The reviewer's row then holds no handoff record, and keeps the first round's
-// as the record it last named.
+// has not completed. The implementer's push to head-2 arrives with its synchronize, so no head run
+// holds a red at head-2. The reviewer's row then holds no handoff record, and keeps the first
+// round's as the record it last named.
 func toSecondReviewRound(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
 	t.Helper()
 	applyRefusingNothing(t, pool, engine,
@@ -242,6 +243,7 @@ func toSecondReviewRound(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1})
 	assertPhase(t, pool, phase.Implementing)
 	applyRefusingNothing(t, pool, engine,
+		pushedFromTo("head", "head-2", "legion-implementer[bot]"),
 		intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "renamed", Commit: "head-2", HandoffRecord: "implement-2", HandoffVersion: 2})
 	assertPhase(t, pool, phase.Testing)

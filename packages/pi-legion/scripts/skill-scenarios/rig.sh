@@ -3,7 +3,10 @@
 # checkout's skills), each given one task a skill rule governs, scored afterwards from what the
 # agent actually wrote. Two checkouts under the same scenario compare two versions of a skill.
 #
-#   rig.sh profile   <label> <checkout>            build the isolated Oh My Pi home for a checkout
+#   rig.sh profile   <label> <checkout> [--envoy-json <file>]
+#                                                  build the isolated Oh My Pi home for a checkout;
+#                                                  <file>, a JSON object, is merged into the envoy.json
+#                                                  the label's sessions read
 #   rig.sh live-read <label> <skill>...            one session reads every file of each skill
 #   rig.sh batch     <scenario> <runs> <label>...  starts the scratch services, runs 1..<runs> per
 #                                                  label (SKILL_SCENARIOS_PARALLEL at once), and
@@ -61,11 +64,22 @@
 #                   (run_measure_before_ask). Scored by measureBeforeAsk.
 #   brainstorm      A plain session (no Legion role) gets a bare `/brainstorming` prompt on a
 #                   scratch to-do CLI, with no word of Dispatch in the prompt and no Dispatch
-#                   configuration anywhere in its environment; the batch seeds project TODO once,
-#                   with two unrelated issues (seed.ts brainstorm), so the agent must find it by
-#                   search, never its own environment or the Dispatch HTTP API. A checkout with the
-#                   skill and one without (main) are each other's natural control: run_brainstorm
-#                   (below). Scored by brainstormSurface.
+#                   configuration anywhere in its environment; the run's own Dispatch holds one
+#                   project, TODO, with two unrelated issues (seed.ts brainstorm), so the agent must
+#                   find it by search, never its own environment or the Dispatch HTTP API. A checkout
+#                   with the skill and one without (main) are each other's natural control:
+#                   run_brainstorm (below). Scored by brainstormSurface.
+#   askgate         A plain session is told to open an ask or upload a document on a seeded issue
+#                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
+#                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
+#                   built with --envoy-json holding {"askgate":{"enabled":false}}).
+#                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
+#                   that do not help the choice), `link` (an ask linking the person's comment, on a
+#                   choice the comment leaves open) or `upload` (an upload of the comment as a
+#                   document to link). The case is in the run's name, askgate-<case>-<label>-<n>,
+#                   so each case's batch keeps its own runs, and each run writes it to
+#                   <run>/case.txt (run_askgate). Scored by askgateReview, counted per case and
+#                   label.
 #   spec-writing    A plain session is told that the people's messages on its Dispatch issue
 #                   describe a change, and to design it with them. The prompt names no skill. The
 #                   run's issue holds the input of one source, which fetch-spec-sources.ts read
@@ -86,12 +100,17 @@
 # and they cannot detect a lost skill rule. A new scenario is an instrument only once an ablate
 # arm has scored lower on it.
 #
-# A batch's services are the e2e harness's real Go Dispatch server
-# (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
-# through its API (seed.ts), a NATS container, and the Envoy listener built from this checkout.
-# Docker assigns the containers' host ports, the listener serves on a port the kernel chose and
-# scripts/e2e/lib/rig.sh holds for it until it serves (start_held), Dispatch on one run-server.sh
-# holds the same way and reports, and the kernel assigns each run's daemon stand-in its port.
+# A batch's services are a Postgres container, a NATS container, and the Envoy listener built from
+# this checkout. Each run gets a Dispatch of its own (own_dispatch): a database named after the run
+# in the batch's Postgres, and the e2e harness's real Go Dispatch server
+# (packages/dispatch/e2e/run-server.sh) on that database, seeded and read back through its API
+# (seed.ts) and stopped when the run ends. A `dispatch search` searches every project of its
+# server, and a Dispatch bearer cannot be limited to one project, so a shared server would show
+# each run the other runs' issues and asks. Each run records its Dispatch in <run>/dispatch.json,
+# and score.ts does not score two runs that name one database. Docker assigns the containers' host
+# ports, the listener serves on a port the kernel chose and scripts/e2e/lib/rig.sh holds for it
+# until it serves (start_held), each run's Dispatch on its own run-server.sh holds the same way and
+# reports, and the kernel assigns each run's daemon stand-in its port.
 #
 # Operator input (no default in this repository), for `profile`, `judge` and `judge-omp`:
 #   LEGION_E2E_MODEL_ROUTE        gateway (the default) or key-file: how the agents reach Anthropic;
@@ -108,6 +127,7 @@
 #                             any directory above it (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run, or one turn of a spec run, may take (default 1500)
+#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link or upload (required for that scenario)
 # For spec-writing and spec-rewrite:
 #   SKILL_SCENARIOS_SOURCE      `batch`: a directory name under $SKILL_SCENARIOS_WORK/sources
 #   SKILL_SCENARIOS_SUPERPOWERS `profile`: the superpowers plugin's directory; its writing-plans
@@ -119,10 +139,13 @@
 #     (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), under a HOME of its own
 #     copied from the label's, with `env -i` and only the variables its pane file names (base_env).
 #     An agent that writes to its HOME (`mise use -g`, say) changes nothing for another run.
+#   - Its profile's settings set extensionHandlers.toolCallTimeoutMs to 120000 or more, as the model
+#     route installers write them, so AskGate's review fits inside Oh My Pi's handler limit
+#     (load_label refuses a profile that does not).
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
-#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n>. The pane shows nothing: omp's
-#     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent works,
-#     to the .jsonl under <work>/runs/<run>/sessions.
+#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n> (askgate-<case>-<label>-<n> for
+#     askgate). The pane shows nothing: omp's output goes to <work>/runs/<run>/out.txt, and the
+#     transcript, which grows as the agent works, to the .jsonl under <work>/runs/<run>/sessions.
 #   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and a bun
 #     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
@@ -223,7 +246,8 @@ tmux_socket=$work/tmux.sock
 tmux() { command tmux -S "$tmux_socket" "$@"; }
 
 # What a command started, for its exit trap: the run directory and its agent's tmux session, the
-# pids lib/rig.sh's start_process sets, and the services' ports and directory.
+# pids lib/rig.sh's start_process sets (a run's own Dispatch server among them), and the services'
+# ports and directory.
 R='' session='' daemon_pid='' listener_pid='' dispatch_pid='' runs_pid='' batch_scenario=''
 S='' envoy_port='' dispatch_port='' pg_port='' nats_port=''
 
@@ -240,6 +264,15 @@ load_label() {
   co=$(<"$P/checkout")
   pin=$(<"$P/pin")
   profile=$(<"$P/profile")
+  # AskGate holds its review's deadline 5 s under Oh My Pi's limit for one tool_call handler, and at
+  # that limit's 30 s default a review of a long session often times out and its write posts
+  # unreviewed (packages/pi-envoy/README.md, "The time limit"): an askgate run would then score the
+  # timeout, not the rule. The model route installers set the limit in the profile's settings
+  # (scripts/e2e/lib/install-model-gateway.sh, install-key-file-model-route.sh); a profile built
+  # before they did is refused here.
+  local settings=$P/home/.omp/profiles/$profile/agent/config.yml
+  bun -e 'const v = Bun.YAML.parse(await Bun.file(process.argv[1]).text())?.extensionHandlers?.toolCallTimeoutMs; process.exit(typeof v === "number" && v >= 120000 ? 0 : 1)' "$settings" 2>/dev/null ||
+    fail "label $1's profile settings $settings do not set extensionHandlers.toolCallTimeoutMs to 120000 or more, so AskGate's review would often time out: remove $P and run \`rig.sh profile $1 <checkout>\` from a checkout whose model route installer sets it"
 }
 
 # install_model_route CHECKOUT PROFILE DIR installs the model route of the profile whose HOME is
@@ -305,8 +338,14 @@ checkout_commit() {
 }
 
 cmd_profile() {
-  [ $# = 2 ] || fail "usage: rig.sh profile <label> <checkout>"
-  local label=$1 P co profile=skills-$1
+  local usage="usage: rig.sh profile <label> <checkout> [--envoy-json <file>]"
+  [ $# = 2 ] || [ $# = 4 ] || fail "$usage"
+  local label=$1 P co profile=skills-$1 envoy_json=''
+  if [ $# = 4 ]; then
+    [ "$3" = --envoy-json ] || fail "$usage"
+    envoy_json=$(realpath -e -- "$4") || fail "--envoy-json $4 does not exist"
+    jq -e 'type == "object"' "$envoy_json" >/dev/null 2>&1 || fail "--envoy-json $4 is not a JSON object"
+  fi
   P=$(label_dir "$label")
   [ ! -e "$P" ] || fail "$P exists; remove it to rebuild label $label"
   co=$(cd "$2" && pwd -P)
@@ -324,6 +363,7 @@ cmd_profile() {
     printf 'checkout %s\n' "$co"
     printf 'commit %s\n' "$commit"
     printf 'skills %s\n' "$(cd "$co" && find skills -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    [ -z "$envoy_json" ] || printf 'envoy-json %s\n' "$(jq -S . "$envoy_json" | sha256sum | cut -d' ' -f1)"
   } >"$P/built-from"
   (
     # shellcheck source=/dev/null
@@ -337,6 +377,16 @@ cmd_profile() {
     fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
+  # The envoy.json a session of the label reads: a named profile's $PI_CODING_AGENT_DIR/envoy.json
+  # (envoyConfigPath, packages/envoy-client/src/envoy-config.ts), which Oh My Pi sets to the
+  # profile's agent directory. The given object is merged over whatever is there.
+  if [ -n "$envoy_json" ]; then
+    local agent=$P/home/.omp/profiles/$profile/agent
+    mkdir -p "$agent"
+    [ -f "$agent/envoy.json" ] || echo '{}' >"$agent/envoy.json"
+    jq -s '.[0] * .[1]' "$agent/envoy.json" "$envoy_json" >"$agent/envoy.json.new"
+    mv "$agent/envoy.json.new" "$agent/envoy.json"
+  fi
   install_model_route "$co" "$profile" "$P" >>"$P/install.log" 2>&1 ||
     fail "the model route (${LEGION_E2E_MODEL_ROUTE:-gateway}) could not be installed; see $P/install.log"
   cp "$co/.omp-pin" "$P/pin"
@@ -502,11 +552,16 @@ stop_panes() {
   for pid in $(tmux list-panes -s -t "=$1" -F '#{pane_pid}' 2>/dev/null || true); do stop_tree "$pid" "$server"; done
 }
 
-# A run's or a live read's exit: its daemon stand-in, its agent's session, and every process that
-# carries its SKILL_SCENARIO_RUN.
+# A run's or a live read's exit: its daemon stand-in, its own Dispatch server, its agent's session,
+# and every process that carries its SKILL_SCENARIO_RUN. The run's database stays in the batch's
+# Postgres container, which services_down removes. The two services are this shell's own jobs, so
+# each is waited for once it is killed: bash otherwise prints a `Killed` notice for it on stderr.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_run() {
-  stop_tree "$daemon_pid"
+  local pid
+  for pid in "$daemon_pid" "$dispatch_pid"; do
+    [ -z "$pid" ] || { stop_tree "$pid" && wait "$pid" 2>/dev/null || true; }
+  done
   [ -z "$session" ] || stop_panes "$session"
   [ -z "$R" ] || stop_env_processes "$R"
   [ -z "$session" ] || tmux kill-session -t "=$session" 2>/dev/null || true
@@ -567,19 +622,21 @@ start_listener() {
     curl -fsS -o /dev/null -H "Authorization: Bearer $(<"$S/envoy-token")" "http://127.0.0.1:$envoy_port/v1/sessions"
 }
 
-# The harness's fake Envoy and GitHub, which run-server.sh names and this rig does not run, are
-# port 1, where nothing listens; its broker switch is empty, so the server has no secrets broker.
+# start_dispatch DATABASE_URL starts the e2e harness's Dispatch server on that database. The
+# harness's fake Envoy and GitHub, which run-server.sh names and this rig does not run, are port 1,
+# where nothing listens; its broker switch is empty, so the server has no secrets broker.
 # With no DISPATCH_E2E_PORT, run-server.sh serves Dispatch on a port the kernel chose, held until
 # the server serves on it, and the server reports it (`msg="dispatch: listening"
-# addr=127.0.0.1:<port>`), which sets dispatch_port. The log starts empty, so the line read is this
-# start's and never an earlier batch's.
+# addr=127.0.0.1:<port>`), which sets dispatch_port. Each run has an evidence directory of its own,
+# and the log is emptied first, so the line read is this run's own start.
 start_dispatch() {
-  : >"$S/logs/dispatch.log"
-  DATABASE_URL="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable" \
-    FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL= start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
+  local url=$1 log=$evidence/logs/dispatch.log
+  : >"$log"
+  DATABASE_URL=$url FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL='' \
+    start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
   await_start dispatch "$dispatch_pid" 300 "Dispatch to report its port" \
-    report_port "$S/logs/dispatch.log" 'msg="dispatch: listening" addr=127\.0\.0\.1:'
-  dispatch_port=$(report_port "$S/logs/dispatch.log" 'msg="dispatch: listening" addr=127\.0\.0\.1:')
+    report_port "$log" 'msg="dispatch: listening" addr=127\.0\.0\.1:'
+  dispatch_port=$(report_port "$log" 'msg="dispatch: listening" addr=127\.0\.0\.1:')
   await_start dispatch "$dispatch_pid" 60 "Dispatch to answer /api/v1/whoami" \
     curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami"
 }
@@ -593,10 +650,15 @@ lock_services() {
     fail "a batch already holds $S/up; a batch killed outright leaves it, its $tag-* containers and its processes behind"
 }
 
+# Each run's Dispatch server opens at most 30 connections to the batch's Postgres: its shared pool
+# (16), loop leases (8), document rooms (4), health probe (1) and listener (1), the sizes in
+# packages/envoy/internal/dispatch/store/pool.go. Postgres admits 100 by default, too few for 5
+# servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
 services_up() {
   evidence=$S
   docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a \
+    -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
   pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
   [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
   docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
@@ -607,57 +669,71 @@ services_up() {
   (cd "$root/packages/envoy" && go build -o "$S/envoy-listener" ./cmd/listener)
   (umask 077 && openssl rand -hex 24 >"$S/envoy-token" && printf 'e2e-token\n' >"$S/dispatch-token")
   start_listener
-  start_dispatch
-  # The batch's world, seeded once: brainstorm's to-do CLI project, or the project every other
-  # scenario's runs seed their own issue into. A batch holds only its own, so a brainstorm run's
-  # search finds one project to file in.
-  local seed=project
-  [ "$batch_scenario" != brainstorm ] || seed=brainstorm
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$seed") >>"$S/logs/seed.log" 2>&1 ||
-    fail "seed.ts $seed failed; see $S/logs/seed.log"
-  printf '%s\n' "$dispatch_port" >"$S/dispatch-port"
   {
     echo "ENVOY_URL=http://127.0.0.1:$envoy_port"
     echo "ENVOY_NATS_URL=nats://127.0.0.1:$nats_port"
     echo "ENVOY_TOKEN_FILE=$S/envoy-token"
-    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
-    echo "DISPATCH_TOKEN_FILE=$S/dispatch-token"
   } >"$services_env"
-  note "services up: listener :$envoy_port, NATS :$nats_port, Dispatch :$dispatch_port, Postgres :$pg_port"
+  note "services up: listener :$envoy_port, NATS :$nats_port, Postgres :$pg_port"
 }
 
 # shellcheck disable=SC2329 # stop_batch, an exit trap, runs it
 services_down() {
   stop_tree "${listener_pid:-}"
-  stop_tree "${dispatch_pid:-}"
   docker rm -fv "$tag-nats" "$tag-pg" >/dev/null 2>&1 || true
   rm -f "$services_env" "$S/up"
 }
 
-# seed_dispatch SCENARIO seeds the run's own issue and the owner's message with `seed.ts SCENARIO`
-# and sets the caller's issue and message, which its prompt names.
-seed_dispatch() {
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "$1" "$R/fixture.json") \
-    >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
-  issue=$(jq -r .issue "$R/fixture.json")
-  message=$(jq -r .message "$R/fixture.json")
+# own_dispatch SEED gives the run a Dispatch of its own and seeds it with `seed.ts SEED`, the world
+# the scenario needs (project, or brainstorm): a database named after the run in the batch's
+# Postgres, and a Dispatch server on it, which stop_run stops. It records the container, the
+# database and the server in $R/dispatch.json, which score.ts reads, and sets dispatch_port.
+own_dispatch() {
+  local seed=$1 database=run_${R##*/} pg_port postgres
+  database=${database//-/_}
+  # Postgres cuts a longer name to 63 bytes, and two runs whose names agree that far would share it.
+  [ "${#database}" -le 63 ] || fail "the run's database name $database is longer than Postgres's 63 bytes"
+  pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
+  postgres=$(docker inspect -f '{{.Id}}' "$tag-pg")
+  [ -n "$pg_port" ] && [ -n "$postgres" ] || fail "no Postgres container $tag-pg for the run's Dispatch"
+  docker exec "$tag-pg" psql -U postgres -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
+    fail "CREATE DATABASE $database failed; see $R/fixture.log"
+  start_dispatch "postgres://postgres:ci@127.0.0.1:$pg_port/$database?sslmode=disable"
+  jq -n --arg postgres "$postgres" --arg database "$database" --argjson port "$dispatch_port" \
+    '{postgres:$postgres, database:$database, port:$port, url:("http://127.0.0.1:" + ($port|tostring))}' >"$R/dispatch.json"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$seed") >>"$R/fixture.log" 2>&1 ||
+    fail "seed.ts $seed failed; see $R/fixture.log"
 }
 
-# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with
-# Dispatch as its own and no Envoy (an address nothing listens on) or NATS, then reads back what it
+# seed_dispatch SCENARIO seeds the run's own issue, and the owner's message when the scenario has
+# one, with `seed.ts SCENARIO`, and sets the caller's issue and message (empty when the fixture
+# names none), which its prompt names.
+seed_dispatch() {
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$1" "$R/fixture.json") \
+    >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  issue=$(jq -r .issue "$R/fixture.json")
+  message=$(jq -r '.message // empty' "$R/fixture.json")
+}
+
+# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with the
+# run's own Dispatch and no Envoy (an address nothing listens on) or NATS, then reads back what it
 # left on Dispatch, for the score, with `seed.ts CAPTURE` (default `capture`).
 dispatch_session() {
   base_env
   standins
-  grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
-  echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
+  {
+    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
+    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
+    echo "ENVOY_URL=http://127.0.0.1:1"
+  } >>"$R/pane.env"
   launch "$1"
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
 run_ask_on_message() {
   local name=$1 issue message
+  own_dispatch project
   seed_dispatch ask-on-message
   printf 'On Dispatch issue %s, the Dispatch owner session posted its plan for the rest of the work in this message: dispatch://%s/message/%s. Open an ask on %s asking Sami whether to go ahead with that plan. Do nothing else.\n' \
     "$issue" "$issue" "$message" "$issue" >"$R/prompt.txt"
@@ -669,6 +745,7 @@ run_ask_on_message() {
 # agent a second reason to drop A; measureBeforeAsk says how the first runs split on it.
 run_measure_before_ask() {
   local name=$1 issue message
+  own_dispatch project
   seed_dispatch measure-before-ask
   awk 'BEGIN { print "key,title,component,owner"
     for (n = 1; n <= 430; n++) printf "ISS-%d,Stranded issue %d,billing-api,%s\n", 1000 + n, n, (n % 23 == 0 ? "owner" n "@example.invalid" : "") }' \
@@ -678,13 +755,40 @@ run_measure_before_ask() {
   dispatch_session "$name"
 }
 
+# The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
+# write the agent makes. The case's prompt names that issue, and `link` names the comment too.
+# `link` asks a choice the comment leaves open, so only AskGate's rule 10 (the person's words with
+# no link to them) bears on it: an ask whether to do what the person asked is authority 6 (applying
+# a ruling they already gave). Its reindex fact cites the file it comes from, export-host.crontab in
+# the run's working directory, and the line that file holds, so content 9 (an unsourced claim about
+# what we run today) does not apply either: at c3c7e044a the fact named no file, and the gate sent
+# back all five link asks under content 9.
+run_askgate() {
+  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
+  printf '%s\n' "$askCase" >"$R/case.txt"
+  own_dispatch project
+  seed_dispatch askgate
+  ref=$(jq -r .comment_ref "$R/fixture.json")
+  case $askCase in
+  facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
+  link)
+    printf '# m h dom mon dow command\n0 2 * * * /opt/export/nightly-export\n0 4 * * 0 /opt/search/reindex --all\n' >"$R/cwd/export-host.crontab"
+    printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "export-host.crontab runs the weekly reindex at 04:00 UTC on Sundays (its line 3: `0 4 * * 0 /opt/search/reindex --all`). Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref"
+    ;;
+  upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
+  esac >"$R/prompt.txt"
+  dispatch_session "$name" capture-askgate
+}
+
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
-# dates. The batch seeded its one Dispatch project (seed.ts brainstorm: TODO, with two unrelated
+# dates. The run's own Dispatch holds one project (seed.ts brainstorm: TODO, with two unrelated
 # issues whose titles name the "todo CLI", so a search for it finds the project), and
 # `seed.ts capture-brainstorm` reads back the issue this run's own transcript created, for
 # brainstormSurface.
 run_brainstorm() {
   local name=$1
+  own_dispatch brainstorm
   cat >"$R/cwd/todo.py" <<'PYEOF'
 """A tiny command-line to-do list that keeps its tasks in tasks.json next to this file."""
 
@@ -747,15 +851,16 @@ MDEOF
   git -C "$R/cwd" add -A
   git -C "$R/cwd" -c user.name=rig -c user.email=rig@example.invalid -c commit.gpgsign=false \
     commit -qm "A tiny to-do CLI"
+  # shellcheck disable=SC2016 # the backticks are the prompt's own, a command name for the agent
   printf '/brainstorming a small feature: let a task in this to-do CLI carry an optional due date, and have `list` show overdue tasks first.\n' \
     >"$R/prompt.txt"
   dispatch_session "$name" capture-brainstorm
 }
 
-# seed_ts MODE ARG... runs `seed.ts MODE ARG...` against the batch's Dispatch, its output appended
-# to $R/fixture.log. A failure is the rig's, never the run's.
+# seed_ts MODE ARG... runs `seed.ts MODE ARG...` against the run's own Dispatch (own_dispatch), its
+# output appended to $R/fixture.log. A failure is the rig's, never the run's.
 seed_ts() {
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "$@") \
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$@") \
     >>"$R/fixture.log" 2>&1 || fail "seed.ts $1 failed; see $R/fixture.log"
 }
 
@@ -848,6 +953,7 @@ run_spec() {
   require_superpowers "$scenario"
   cp -R "$source" "$R/source"
   printf '%s\n' "${source##*/}" >"$R/source.txt"
+  own_dispatch project
   seed_ts "$scenario" "$R/fixture.json" "$R/source"
   issue=$(jq -r .issue "$R/fixture.json")
   case $scenario in
@@ -856,8 +962,11 @@ run_spec() {
   esac
   base_env
   standins
-  grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
-  echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
+  {
+    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
+    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
+    echo "ENVOY_URL=http://127.0.0.1:1"
+  } >>"$R/pane.env"
   spec_turns "$name" "$issue" "$prompt"
   seed_ts capture-spec "$R/fixture.json" "$R"
 }
@@ -1166,8 +1275,9 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 
 run_tester_proof() {
   local name=$1 n=$2 index=$3 start=$4 state project port pr head version
-  # The run's own issue: a batch's runs share one Dispatch, and the tester reads the newest
-  # implement record and writes the newest test record of its issue.
+  # The run's own Dispatch, and its own issue on it, whose newest implement record the tester
+  # reads and whose newest test record it writes.
+  own_dispatch project
   seed_ts tester-proof "$R/fixture.json"
   worker_key=$(jq -r .issue "$R/fixture.json")
   worker_fixture "$index" "$start" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
@@ -1200,6 +1310,8 @@ run_tester_proof() {
   bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co"
   {
     cat "$R/worker.env" "$services_env"
+    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
+    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
     echo "GIT_CONFIG_COUNT=0"
     echo "JJ_USER=Rig Worker"
     echo "JJ_EMAIL=rig@example.invalid"
@@ -1212,13 +1324,22 @@ run_tester_proof() {
 }
 
 cmd_run() {
-  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|brainstorm|spec-writing|spec-rewrite> <label> <n> <index> <start>"
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|brainstorm|askgate|spec-writing|spec-rewrite> <label> <n> <index> <start>"
   local scenario=$1 n=$3 index=$4 start=$5 name
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
   [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
-  name=$scenario-${P##*/}-$n
+  # An askgate run's name carries its case, so the batches of the three cases, each numbered from
+  # 1, never remove each other's runs.
+  if [ "$scenario" = askgate ]; then
+    case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
+    facts | link | upload) name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n ;;
+    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link or upload" ;;
+    esac
+  else
+    name=$scenario-${P##*/}-$n
+  fi
   R=$work/runs/$name
   evidence=$R
   on_exit stop_run
@@ -1230,6 +1351,7 @@ cmd_run() {
   measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
   brainstorm) run_brainstorm "$name" ;;
+  askgate) run_askgate "$name" ;;
   spec-writing | spec-rewrite) run_spec "$scenario" "$name" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
@@ -1251,21 +1373,24 @@ stop_batch() {
 }
 
 cmd_batch() {
-  [ $# -ge 3 ] || fail "usage: rig.sh batch <scenario> <runs> <label>..."
+  [ $# -ge 3 ] || fail "usage: rig.sh batch <ask-on-message|measure-before-ask|tester-proof|brainstorm|askgate|spec-writing|spec-rewrite> <runs> <label>..."
   local runs=$2 label n index=0 start
   batch_scenario=$1
-  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
+    facts | link | upload) ;;
+    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link or upload (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+  esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
-  shift 2
-  # A batch's runs share one Dispatch, and every brainstorm run files the same feature: a second run
-  # finds the first one's issue and extends it, or Dispatch refuses its own as a duplicate, so its
-  # score measures its sibling's timing. Compare labels across batches of one run each. A spec run's
-  # agent searches Dispatch as well, and would find a sibling's issue on the same source.
-  case $batch_scenario in brainstorm | spec-writing | spec-rewrite)
-    [ $((runs * $#)) = 1 ] ||
-      fail "a $batch_scenario batch takes one run of one label (got $runs of $#); run each label as its own batch"
+  # A spec batch numbers its run one above its first label's highest (next_run, below), so a second
+  # label or a second run could take the number of a run cmd_run would then remove: one run of one
+  # label. Each run has a Dispatch of its own (own_dispatch), so no run sees a sibling's issue.
+  case $batch_scenario in spec-writing | spec-rewrite)
+    [ $((runs * ($# - 2))) = 1 ] ||
+      fail "a $batch_scenario batch takes one run of one label (got $runs of $(($# - 2))); run each label as its own batch"
     ;;
   esac
+  shift 2
   for label in "$@"; do load_label "$label"; done
   # A spec run reads its source and the label's superpowers skills: refused here, before any
   # service starts. Its number is one above the label's highest, so no batch removes an earlier run.

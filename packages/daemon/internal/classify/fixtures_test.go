@@ -274,14 +274,22 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		}
 	case "push":
 		login := decoded.Config.ReviewAppLogin
-		// The shipped state marks the counted head, not the head its count moved from: the shipped
-		// daemon read one push per head, the one that made the move its synchronize counted, so the
-		// replay names that push's before as the head the count moved from.
-		if pr.HeadCounted != "" && pr.HeadCounted == stringValue(payload, "after") {
-			pr.HeadCountedFrom = stringValue(payload, "before")
+		push := record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
+			ByReviewApp: login != "" && stringValue(payload, "pusher") == login}
+		// The shipped state marks a head its synchronize counted before its push arrived
+		// (headCounted), not the run the Go record keeps for it: the replay opens that run, its
+		// anchor the red the shipped daemon counted the head on, at the head the push replaced (one
+		// of its own when the push names none, since the shipped daemon read one push per head).
+		if pr.HeadCounted != "" && pr.HeadCounted == push.SHA {
+			if push.Before == "" {
+				push.Before = "replay-before"
+			}
+			const red = "shipped-red"
+			pr.Run = &record.HeadRun{Pushes: append([]record.ClassifiedPush{}, pr.Pushes...), Steps: []record.RunStep{{Head: push.SHA}},
+				Anchor: record.Judgement{HeadSHA: push.Before, FixAttempts: pr.FixAttempts - 1, PlannedRed: pr.PlannedRed, CheckedHead: push.Before,
+					Failing: []string{red}, CheckRuns: []record.AttemptRun{{Name: red, ID: 1}}, Required: []string{red}, Workflows: []record.RequiredWorkflow{}}}
 		}
-		pr = ApplyPush(pr, record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
-			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
+		pr = ApplyPush(pr, push)
 	case "checks":
 		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Failing: stringSlice(payload, "failing")}
 		if settled, applied := ApplySettlement(pr, candidate); applied {

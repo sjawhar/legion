@@ -1,21 +1,18 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- Phase handoff records on a Dispatch issue (INFRA-177): `HandoffSummary` (`id`, `issue_key`,
-  `phase`, `version`, `author`, `created_at`), what `GET /api/v1/issues/{key}/handoffs` lists and
-  `POST /api/v1/issues/{key}/handoffs/{phase}` answers, and `Handoff`, the same with `body`, the
-  exact text the session wrote, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
-  `GET /api/v1/handoffs/{id}` answer it. The `handoff.recorded` event joins `DispatchEvent`, its
-  payload `HandoffRecordedPayload` (`handoff_id`, `phase`, `version`, strict, never the body).
-  `DISPATCH_HANDOFF_BODY_MAX` (262144) is the longest handoff body in UTF-8 bytes, generated into
-  Go as `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED`. Two
-  specs join `dispatch-tools.ts`: `dispatch_handoff_write` (`issue`, `phase`, `body`), which
-  refuses before sending a phase that is not a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`) and a body
-  over the cap or not one JSON object, and `dispatch_handoff_read`, the newest handoff of a phase or
-  the version named.
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
+
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
   `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
@@ -219,12 +216,14 @@
 
 ### Changed
 
-- The `legion-api.ts` mirror and the daemon API fixtures are at contract 41 (INFRA-177).
-  `LegionHandoffCompleteRequest` takes `handoffId` and `handoffVersion`, the Dispatch handoff
-  record a planning, implementing, testing or reviewing completion names, and `commit` is
-  documented as the implementer's and the merger's alone. `PhaseView` carries `handoffRecord`
-  (`{id, version}`), the record its current phase's completion named, which `state.json` shows
-  in place of `handoffCommit`.
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
@@ -447,8 +446,6 @@
 
 ### Removed
 
-- The `classifyPush` classification fixtures are removed with the daemon's handoff-only push
-  classifier, and no `reduceGithubEvent` fixture carries `handoffOnly` (INFRA-177).
 - Removed `LegionGitHubTokenResponse`, `LegionGitCredentialResponse`, `LegionGrantRequest.push` and
   `LegionGrantCredentialRequest`, with the `github-token.json`, `git-credential.json` and
   `provisioning-credential.json` fixtures: the Legion daemon's `POST /legion/v1/gh-token`,

@@ -1,7 +1,8 @@
 /**
- * A fragment the server cut out of a Markdown body before the client saw it: a search hit's
- * `ts_headline` snippet, the 24 words around the match. A cut can land inside a mark, and the
- * half it leaves renders as its characters. The balancer below drops exactly the delimiters
+ * A fragment cut out of a Markdown body: one the server cut before the client saw it (a search
+ * hit's `ts_headline` snippet, the 24 words around the match), or one `markdownHead` cuts here on
+ * the client at its end (an ask hit's answer in the palette). A cut can land inside a mark, and
+ * the half it leaves renders as its characters. The balancer below drops exactly the delimiters
  * that CommonMark would have paired had the cut not happened and nothing else: a run the parser
  * would read as literal text anyway (`Use ** for bold`, `2 * 3`, `snake_case`) is the author's
  * and stays, and nothing inside a code span is ever a delimiter.
@@ -21,6 +22,27 @@ export function searchSnippetMarkdown(snippet: string): string {
   return snippet.split(/\s+/u).filter((word) => word !== "").length >= SEARCH_SNIPPET_WORDS
     ? balanceCutMarkdown(snippet)
     : snippet;
+}
+
+/**
+ * The start of a Markdown body, for a place that shows only its start: whole when it is at most
+ * `max` characters (UTF-16 units); otherwise cut at the last whitespace within `max`, balanced as
+ * a fragment cut at its end (`balanceCutMarkdown`) and closed with an ellipsis. Where the limit's
+ * second half holds no whitespace - one long URL or path - the cut falls at the limit itself, never
+ * inside a surrogate pair, so the head still shows what it can. The cut happens on the source, so
+ * nothing past it reaches the parse or the page.
+ */
+export function markdownHead(markdown: string, max: number): string {
+  if (markdown.length <= max) {
+    return markdown;
+  }
+  const space = /\s\S*$/u.exec(markdown.slice(0, max + 1))?.index ?? -1;
+  let end = space >= max / 2 ? space : max;
+  const last = markdown.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  return `${balanceCutMarkdown(markdown.slice(0, end).trimEnd())}…`;
 }
 
 interface DelimiterRun {

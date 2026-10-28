@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+    The skills this plugin ships teach the handoff record: a worker writes its phase's handoff with
+    `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <file>` and reads the previous
+    role's with `dispatch handoff-read`, at the version its task's `Handoff:` line names
+    (`--version <n>`), rather than committing and pushing `.legion/<issue>/<phase>.json`. The
+    `LEGION_WORKSPACE_RECREATED` notice tells a worker whose workspace was recreated to re-read the
+    last handoff recorded on its issue with `dispatch handoff-read --issue <KEY> --phase <phase>`,
+    since Dispatch keeps it whatever the workspace lost.
+time: 2026-10-28T10:40:25.506621151Z
+custom:
+    Issue: pr2354

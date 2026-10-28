@@ -39,7 +39,7 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | You review or approve, build READY, or run the production check | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
-| You need a tool the image may not carry, before you install anything | `skill://legion-worker/references/tools.md` |
+| You need a tool the image may not carry, before you install anything; before you measure Oh My Pi's binary; or a test fails in your pod | `skill://legion-worker/references/tools.md` |
 | A problem outside your issue, or a failed production check | `skill://legion-worker/references/findings.md` |
 
 ## Every role pushes its own commits

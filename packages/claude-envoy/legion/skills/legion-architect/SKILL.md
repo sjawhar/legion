@@ -61,7 +61,7 @@ The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `acc
 - the tester's handoff, `dispatch handoff-read --issue <issue> --phase test`, whose proof names the approved head;
 - the pull request body's `E2E (implementer)` and `E2E (tester)` lines;
 - the reviewer's approval of that head by SHA (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`);
-- each of the reviewer's prose findings, checked against the code at that head and command output, not against the reviewer's own verdict: no other agent has read that prose.
+- each claim the reviewer's prose commits to, checked against the code at that head and command output, never against the finding it ruled on or its own verdict: no other agent has read that prose.
 
 Accept only when each acceptance line of the issue's own pull request has passing evidence at the approved head and no criterion left the tree; a criterion only the tree as a whole meets is the integration child's (section 4), not a reason to hold the root's own pull request. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
 

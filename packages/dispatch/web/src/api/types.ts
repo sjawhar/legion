@@ -174,6 +174,7 @@ export type {
   ProjectDefaultAssigneeInput,
   RepoProject,
   SearchArtifactRef,
+  SearchAsk,
   SearchOwner,
   SearchResponse,
   SearchResult,

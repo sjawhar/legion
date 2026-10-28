@@ -1,0 +1,7 @@
+kind: Removed
+body: |-
+    The fixtures of the daemon's push classification are removed with its classifier of pushes
+    that change handoffs alone, and no `reduceGithubEvent` fixture marks a push as one.
+time: 2026-10-28T10:39:22.721777324Z
+custom:
+    Issue: pr2354

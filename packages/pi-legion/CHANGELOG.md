@@ -3,7 +3,7 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -23,30 +23,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
   task, not a notice, names the changes request. The `legion-controller` skill reads the
   `awaiting-person` wake and a waiting root as no reason to label or admit anything.
-- **Breaking:** daemon API contract 41 (INFRA-177): a phase handoff is a record on the issue's
-  Dispatch issue, no longer a file committed under `.legion/<issue>/` on its branch. The `legion`
-  tool's `handoff_complete` for a planning, implementing, testing or reviewing phase reports the
-  phase's Dispatch handoff record, `handoffId` and `handoffVersion`: the newest record of the
-  phase's word (`plan`, `implement`, `test`, `review`), read from the Dispatch the pane's
-  `dispatch` command reaches, which the daemon reads back and holds to the issue, the phase, the
-  version and the claim's session. A phase with no record is refused naming
-  `dispatch handoff-write`, and a Dispatch that does not answer is refused with its answer. The
-  implementer also reports its pushed tip, the commit `legion/<issue>@origin` names, and is refused,
-  naming the push, when `@-` is not on that branch yet; retro and the merger's READY report `@-`.
-  No committed `.legion/` handoff file is looked up. Install this release with a `legion` built
-  from the same commit, in this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch
-  issues"): deploy the Dispatch server that carries the handoff routes first, then run
-  `legion handoffs import` while the old daemon still runs, then roll out the daemon and the
-  plugins, then run the import again, which catches a file an old worker pushed in between, until
-  it prints `deferred 0` and no `kept` line.
-- The skills this plugin ships teach the handoff record (INFRA-177): a worker writes its phase's
-  handoff with `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <file>` and reads
-  the previous role's with `dispatch handoff-read`, at the version its task's `Handoff:` line names
-  (`--version <n>`), rather than committing and pushing
-  `.legion/<issue>/<phase>.json`. The `LEGION_WORKSPACE_RECREATED` notice tells a worker whose
-  workspace was recreated to re-read the last handoff recorded on its issue with
-  `dispatch handoff-read --issue <KEY> --phase <phase>`, since Dispatch keeps it whatever the
-  workspace lost.
 
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
@@ -77,9 +53,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
   is a spec, for each factual claim. The architect verifies with a command, or removes, each claim
   either review marks unverified, and the request's `--summary` ends with one sentence that gives
-  both reviews' results. The root and sub-architect role prompts say the same. Self-review alone
-  did not stop false claims: an architect requested approval, then again minutes later because a
-  claim was false.
+  both reviews' results. The root and sub-architect role prompts say the same. `legion-architect`'s
+  template and example of that sentence also say what the reviews do not show, as
+  `dispatch-writing-specs` requires of a sentence that cites a gate: no open gap, every claim
+  verified, and neither shows that the design works once built. Self-review alone did not stop
+  false claims: an architect requested approval, then again minutes later because a claim was
+  false.
 - `plan-reviewer` reviews a spec as well as a plan. In its spec mode it checks each factual claim
   against the code, the docs or a read-only command, and marks each claim verified, false or
   unverified, with the file and line or the command and its output. It also checks that the spec
@@ -164,6 +143,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   takes its own next issue, but it changes no admission; the reference used to have the controller
   set priority and rank together so that "highest priority, then board rank" produced the plan's
   order (INFRA-188).
+
+- The skill-scenario rig has an `askgate` scenario. It seeds an issue whose one
+  comment is the person's and gives a plain session one of three prompts, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names (`facts`, `link` or `upload`). An askgate run's directory is
+  `askgate-<case>-<label>-<n>`, so the batches of the three cases keep their own runs, and
+  `rig.sh score askgate` counts each case and label on its own. `score.ts` reads AskGate's
+  verdicts from the transcript. `rig.sh profile` takes `--envoy-json <file>` and merges that object
+  into the envoy.json the label's sessions read, so a label can turn AskGate off. A `dispatch`
+  call with `--help` or `--dry-run` sends nothing, and AskGate does not review it. A call that
+  AskGate refused as unreadable got no model review. The score reads neither of these calls as a
+  verdict of the gate. A `link` run passes only when AskGate allowed its ask on a verdict: a
+  timeout, an error, a skip, an override or no entry is no review, so it fails. A `facts` run reads
+  the refused call's own gate entry, and its reason must name failure 12 (`Content 12`) and both
+  facts. The refusal text is not read for them, because it quotes the question for every failure.
+  The `link` prompt asks a choice that the person's comment leaves open, with a
+  link to that comment, because an ask whether to do what the person asked fails AskGate's rule
+  authority 6. The seeded issue's title, "Release and nightly job settings", fits the write of
+  each case.
 - Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
   container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
   generation in Linux namespaces of its own (`legion launcher role-init`), and
@@ -231,6 +228,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- `legion-worker/references/findings.md`: a finding ask names what went wrong, where and to whom,
+  with the numbers, and what each option does to whom, in up to 2,000 characters; only evidence
+  the decision does not need goes to the cited comment.
+
+- `legion-architect/references/decomposition.md`: a child issue's spec is written as
+  `dispatch-writing-specs` says, scaled to the child (its outline, a proposed answer to each point,
+  terms explained, no item number from another document, no root text that does not apply to the
+  child), in place of the bare `<acceptance criteria, scope, and context>` placeholder, which never
+  pointed to that skill. Before `dispatch issue` creates each child, the architect has a fresh
+  `plan-gap-analyst` check its spec against `dispatch-writing-specs` and fixes what it flags.
 
 - The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
   accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
@@ -866,12 +874,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Removed
 
-- The handoff commit checks go with the committed handoff (INFRA-177): `handoff_complete` no
-  longer requires that the commit carrying the handoff was authored by the identity the daemon
-  put on the pane, `JJ_USER`/`JJ_EMAIL` (the App-identity check). The skills drop the
-  `skip-checks: true` trailer a handoff-only commit carried, and retro's removal of
-  `.legion/<issue>/` from the branch; the `legion-worker` reference `skip-checks-trailer.md` is
-  deleted.
 - The extension's role gate — the architect's bash restriction to a single `legion` command, and
   the architect's, reviewer's and merger's refusal of `edit`, `write` and `apply_patch` — and the
   shell refusal of `legion handoff complete` are removed (LEGION-630). No role is refused a tool:
@@ -898,6 +900,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
+- Each skill-scenario run has a Dispatch of its own: a database named after the run in the batch's
+  Postgres, and a Dispatch server on it, which the run seeds, captures from and stops when it
+  ends. Before, the runs of a batch shared one Dispatch server. `dispatch search` searches every
+  project of its server, so in one askgate `facts`/`off` batch a run found the four other runs'
+  identical asks and did not post its own. Each run records its Dispatch in `dispatch.json`, and
+  `rig.sh score` does not score a run that records none or that names one database in one Postgres
+  with another run. A brainstorm batch now takes any number of runs.
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It

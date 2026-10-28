@@ -55,6 +55,11 @@ type Config struct {
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
 	Repositories Repositories
+	// NoteUnread is told, inside the fact's transaction, of each issue the workflow did not record
+	// because its repository resolved Unread (left out for now, GitHub not answering its
+	// installation read): the daemon takes it into that repository's recovery whatever it resolves
+	// to by then. It keeps no state of the issue's own. Nil notes none.
+	NoteUnread func(key, resolved string)
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.

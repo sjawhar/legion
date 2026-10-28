@@ -64,6 +64,7 @@ import {
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
+import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
@@ -155,6 +156,11 @@ export interface ExecuteDispatchToolInput {
   readonly tool: string;
   readonly args: ToolArguments;
   readonly cwd: string;
+  /**
+   * The bytes of an upload's `--path` file as the CLI already read them for AskGate's check, sent
+   * in place of a fresh read, so the upload sends exactly the bytes that check digested.
+   */
+  readonly uploadBytes?: Uint8Array;
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
@@ -2093,19 +2099,6 @@ function eventHead(event: Event): string | undefined {
   }
 }
 
-/** How an event, comment, message or ask author reads in the tools: `<kind> <id>`, plus
- *  ` (as <namespace>/<name>)` — the verified service token's subject through
- *  `serviceSubjectLabel`, which keeps the namespace because every namespace has a `default`
- *  service account — when a service token authenticated the write. A claim's holder is named by
- *  `claimText` instead, which follows the dashboard's session label. */
-function actorText(actor: Actor): string {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
-}
-
 /** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log
  *  line names what `dispatch read --ref` reads and a spec links: the log shows no other id. */
 function eventRef(event: Event): string | undefined {
@@ -3949,7 +3942,14 @@ export async function executeDispatchTool(
         content === undefined
           ? {
               name,
-              file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
+              // The bytes AskGate's check read, when it read them, typed as Bun types the path.
+              file:
+                input.uploadBytes === undefined
+                  ? Bun.file(resolvePath(input.cwd, stringArg(args, "path")))
+                  : // The copy gives the bytes a plain buffer of their own, which a Blob takes.
+                    new Blob([new Uint8Array(input.uploadBytes)], {
+                      type: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))).type,
+                    }),
               ...(summary === undefined ? {} : { summary }),
               actor,
             }

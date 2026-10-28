@@ -158,11 +158,47 @@ func TestFollowHeadComparesWithTheRecordAsItStandsNow(t *testing.T) {
 }
 
 // A pull request GitHub shows open on an issue's branch that the workflow does not record - here an
-// opened older than the closed record's clock - is looked up again every pass, and the warning that
-// the daemon applies it is logged once an hour for it, not every two minutes.
-func TestTheWarningForAnOpenedTheWorkflowDoesNotRecordComesOnceAnHour(t *testing.T) {
+// opened older than the closed record's clock - is found again every pass. The pass applies it, and
+// warns, once while nothing it decides by changes, so it writes no processed_events row every two
+// minutes; once the record changes (a new generation removes the closed pull request), it applies
+// it again, and the workflow records it.
+func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedOnceWhileNothingChanges(t *testing.T) {
 	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
+	seedDeclinedOpened(t, pool, opened)
+	var logs syncBuffer
+	var listed atomic.Int32
+	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
+	warnings := func() int {
+		return strings.Count(logs.String(), "GitHub holds an open pull request for an issue whose implementer completed")
+	}
+	for range 3 {
+		w.readRequiredChecks(context.Background())
+	}
+	if listed.Load() != 3 || warnings() != 1 || headReads(t, pool, "opened-read") != 1 {
+		t.Fatalf("three passes listed the branch %d times, warned %d times and applied %d opened facts, want 3, 1 and 1",
+			listed.Load(), warnings(), headReads(t, pool, "opened-read"))
+	}
+	if got, _ := capturePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("the issue is in %s, want implementing: the workflow records no late opened", got)
+	}
+	if _, err := pool.Exec(context.Background(), "delete from pull_requests where issue = 'CAPTURE-1'"); err != nil {
+		t.Fatalf("remove the closed pull request as a new generation would: %v", err)
+	}
+	w.readRequiredChecks(context.Background())
+	if got, pr := capturePhase(t, pool); got != phase.Testing || pr == nil || pr.Number != 86 {
+		t.Fatalf("after the record changed the issue is in %s with %+v, want testing on #86", got, pr)
+	}
+	if got := headReads(t, pool, "opened-read"); got != 2 {
+		t.Fatalf("the pass applied %d opened facts in all, want 2", got)
+	}
+}
+
+// seedDeclinedOpened records CAPTURE-1 in implementing with its implementer's handoff and its pull
+// request 86 closed at a clock an hour after opened, so an opened of 86 at opened is late and the
+// workflow declines it.
+func seedDeclinedOpened(t *testing.T, pool *pgxpool.Pool, opened time.Time) {
+	t.Helper()
 	seedUnrecorded(t, pool, "handoff")
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestClosed, Issue: "CAPTURE-1", Repo: "acme/widgets",
@@ -170,26 +206,102 @@ func TestTheWarningForAnOpenedTheWorkflowDoesNotRecordComesOnceAnHour(t *testing
 	}); err != nil {
 		t.Fatalf("seed the closed pull request: %v", err)
 	}
-	var logs syncBuffer
-	var listed atomic.Int32
-	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
-	warnings := func() int {
-		return strings.Count(logs.String(), "GitHub holds an open pull request for an issue whose implementer completed")
+}
+
+// A pass that does not read an issue's branch learns nothing about its declined opened, so it keeps
+// what the pass before it learned: a list GitHub fails for that issue, and a pass GitHub's rate
+// limit cuts short before it reaches the issue, leave the next pass skipping the same opened.
+func TestAPassThatDoesNotReadTheBranchKeepsTheDeclinedOpened(t *testing.T) {
+	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"a list GitHub fails", http.StatusBadGateway},
+		{"a pass the rate limit cuts short", http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedDeclinedOpened(t, pool, opened)
+			var listed, lists atomic.Int32
+			github := pullRequestStandIn(t, "handoff", opened, &listed)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/repos/acme/widgets/pulls" && lists.Add(1) == 2 {
+					http.Error(w, `{"message":"failed"}`, tc.status)
+					return
+				}
+				github.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(server.Close)
+			w := requiredRuntime(pool, server.URL, quietLogger())
+			for range 3 {
+				w.readRequiredChecks(context.Background())
+			}
+			if lists.Load() != 3 || headReads(t, pool, "opened-read") != 1 {
+				t.Fatalf("three passes, the second's list failed, listed %d times and applied %d opened facts, want 3 and 1",
+					lists.Load(), headReads(t, pool, "opened-read"))
+			}
+		})
 	}
-	w.readRequiredChecks(context.Background())
-	w.readRequiredChecks(context.Background())
-	if listed.Load() != 2 || warnings() != 1 {
-		t.Fatalf("two passes listed the branch %d times and warned %d times, want 2 and 1", listed.Load(), warnings())
+}
+
+// The pass does not take the list's head filter on trust: a filter GitHub did not apply as meant
+// would list other pull requests, so it takes one only when its head is the issue's branch, and one
+// on another branch records nothing.
+func TestThePassTakesOnlyAPullRequestOnTheIssuesBranch(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedUnrecorded(t, pool, "handoff")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/widgets/pulls" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`[{"number":91,"state":"open","base":{"ref":"main"},"head":{"ref":"it/IT-1","sha":"other"},"updated_at":"2026-10-26T19:30:00Z"}]`))
+	}))
+	t.Cleanup(server.Close)
+	requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
+	if got, pr := capturePhase(t, pool); got != phase.Implementing || pr != nil {
+		t.Fatalf("after the pass the issue is in %s with %+v, want implementing with no pull request", got, pr)
 	}
-	if got, _ := capturePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("the issue is in %s, want implementing: the workflow records no late opened", got)
+	if got := headReads(t, pool, "opened-read"); got != 0 {
+		t.Fatalf("the pass applied %d opened facts, want none", got)
 	}
-	for key := range w.openedWarned {
-		w.openedWarned[key] = w.openedWarned[key].Add(-openedWarnEvery)
-	}
-	w.readRequiredChecks(context.Background())
-	if warnings() != 2 {
-		t.Fatalf("a pass an hour later warned %d times in all, want 2", warnings())
+}
+
+// LateLifecycle lets a clock equal to the record's through, so a read can be no newer than a
+// webhook that moved the record after the pass listed it. followHead then keeps the record: the
+// read is no newer than what moved it, and following it could move the head back. A read newer
+// than the record's clock is followed.
+func TestFollowHeadKeepsARecordMovedSinceTheListByWhatItReadNoLater(t *testing.T) {
+	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		read time.Time
+		want string
+	}{
+		{"a read of the same second", at, "pushed"},
+		{"a read after the record's clock", at.Add(time.Second), "older"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+			_, listed := capturePhase(t, pool)
+			if _, err := pool.Exec(context.Background(), "update pull_requests set head_sha = 'pushed', head_updated_at = $1 where issue = 'CAPTURE-1'", at); err != nil {
+				t.Fatalf("move the record as the webhook would: %v", err)
+			}
+			w := requiredRuntime(pool, pullRequestStandIn(t, "older", tc.read, &atomic.Int32{}).URL, quietLogger())
+			_, pull, err := w.readPullRequest(context.Background(), *listed)
+			if err != nil {
+				t.Fatalf("read the pull request: %v", err)
+			}
+			got, err := w.followHead(context.Background(), *listed, pull)
+			if err != nil || got.HeadSHA != tc.want {
+				t.Fatalf("followHead = %q, %v; want the record at %s", got.HeadSHA, err, tc.want)
+			}
+			if _, pr := capturePhase(t, pool); pr.HeadSHA != tc.want {
+				t.Fatalf("the stored record is at %q, want %s", pr.HeadSHA, tc.want)
+			}
+		})
 	}
 }
 
