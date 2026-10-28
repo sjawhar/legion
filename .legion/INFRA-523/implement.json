@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T20:18:42Z",
+  "completed": "2026-10-28T20:26:44Z",
   "proof": [
     {
       "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
@@ -195,6 +195,14 @@
       "observed": "no changed line outside a // comment; build, vet and gofmt clean; 'overruns dropped' and 'return their interval' no longer appear in packages/envoy",
       "headSha": "a95753b12e6adcb0030477c759e70a1131a811f2",
       "negativeControl": "grep -rn 'overruns dropped\\|return their interval' packages/envoy --include=*.go found the seven stale sentences at 0a38d434 and finds none at a95753b1"
+    },
+    {
+      "criterion": "Round 6: main af1ff09c merged forward, the conflict resolved with no other change; the merged tree builds and the touched packages pass",
+      "surface": "packages/envoy and packages/daemon build, vet and go test in the issue pod; claude-envoy bun test with the pinned Bun 1.4.4",
+      "command": "go build ./... && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && gofmt -l .; go test -count=1 ./internal/dispatch/deliveryaudit/ ./internal/dispatch/routes/; bun run typecheck && bun test --timeout=60000",
+      "observed": "envoy and daemon build and vet clean; deliveryaudit ok, routes ok; claude-envoy 223 pass 0 fail; GitHub reports MERGEABLE; fingerprint comment issuecomment-6479894470",
+      "headSha": "fa7c2a72bb1d3e5a5dea6add1881e4e816adb4f6",
+      "negativeControl": "before the one-line deliveryaudit_test.go change, go vet ./... failed: 'unknown field Lifetime in struct literal of type api.DepsInput' (main's new test against this branch's Register parameter)"
     }
   ],
   "filesChanged": [
