@@ -110,16 +110,7 @@ func (op *liveOperation) abandon() {
 // change runs mutate, which writes the operation's fork, and captures every update it makes, for
 // the record to append, and the margin records it changes (watchMargin), for the growth weigh. A
 // panic in mutate is its error (recoverMutation).
-//
-// What says the change moved the fork is the fork itself, read on either side of mutate: its state
-// vector and its delete set, since a deletion advances no clock (forkHeld). The updates the fork
-// emits cannot say it, for they include one for a transaction that changes nothing. A change whose
-// transactions changed nothing writes nothing: appended, its empty update would refresh the anchors
-// and mark the document owing a settlement again (markUpdateOwed), which every repair pass over a
-// closed issue would then sweep. Its updates are dropped, so the caller answers
-// websocket.ErrNoChanges and the fork, which it left as it was, is kept.
 func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
-	wasClocks, wasDeletes := op.fork.StateVector(), crdt.DeleteSetFromDoc(op.fork)
 	unsubscribe := op.fork.OnUpdate(func(update []byte, _ any) {
 		op.updates = append(op.updates, append([]byte(nil), update...))
 	})
@@ -130,9 +121,6 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 	}()
 	stopMargin()
 	unsubscribe()
-	if err == nil && len(op.updates) > 0 && forkHeld(wasClocks, wasDeletes, op.fork) {
-		op.updates = nil
-	}
 	return margin, err
 }
 
@@ -245,11 +233,24 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		}
 		return startErr
 	}
+	// What says the write changed the fork is the fork itself, read on either side of mutate: its
+	// state vector and its delete set, since a deletion advances no clock (forkHeld). The updates
+	// the fork emits cannot say it, for they include one for a transaction that changes nothing.
+	// applyMargin reads neither: a marks-map Set always adds an item, so its write always moves the
+	// fork, and the two whole-store walks would buy it nothing.
+	wasClocks, wasDeletes := fork.StateVector(), crdt.DeleteSetFromDoc(fork)
 	margin, mutateErr := op.change(func() error {
 		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	})
 	if mutateErr != nil {
 		return joinedSchemaError(mutateErr, start)
+	}
+	// A write whose transactions changed nothing writes nothing. Appended, its empty update would
+	// refresh the anchors and mark the document owing a settlement again (markUpdateOwed), which
+	// every repair pass over a closed issue would then sweep. Its updates are dropped, so the fork,
+	// which it left as it was, is kept.
+	if len(op.updates) > 0 && forkHeld(wasClocks, wasDeletes, fork) {
+		op.updates = nil
 	}
 	if len(op.updates) == 0 {
 		return websocket.ErrNoChanges

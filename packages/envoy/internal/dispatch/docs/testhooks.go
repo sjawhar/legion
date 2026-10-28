@@ -1,15 +1,13 @@
 package docs
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/encoding"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -141,76 +139,12 @@ func appendNestedLink(ctx context.Context, database *store.Store, artifactID str
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		return fmt.Errorf("decode document before crafted link: %w", err)
 	}
-	var nested any = "x"
-	for range 100 {
-		nested = []any{nested}
-	}
-	update, err := nestedLinkUpdate(doc, nested)
+	update, err := crafted.NestedLinkUpdate(doc, crafted.NestedValue(100))
 	if err != nil {
 		return err
 	}
 	if _, err := versioned.AppendUpdate(ctx, artifactID, update); err != nil {
 		return fmt.Errorf("append crafted link: %w", err)
-	}
-	return nil
-}
-
-// nestedLinkUpdate marks every character of the first text in doc's fragment with a link whose
-// "nested" attribute is nested, and returns the update a crafted client sends for that change.
-// ygo's own writers refuse a mark nested past the 100 levels YText takes, so the change is made
-// with a placeholder and the update rewritten: a V1 update carries a mark's attributes as JSON
-// text, which ygo reads back as deep as encoding/json does. doc keeps the placeholder, so it is a
-// copy the caller throws away. It is docstest.NestedLinkUpdate returning its failure: this file is
-// built into the server, which must not import package testing, and docstest cannot import this
-// package, whose own tests and pmdoc's import docstest.
-func nestedLinkUpdate(doc *crdt.Doc, nested any) ([]byte, error) {
-	text := firstTextNode(doc.GetXmlFragment(fragmentName))
-	if text == nil {
-		return nil, errors.New("the document holds no text to link")
-	}
-	link := func(nested any) map[string]any {
-		return map[string]any{"href": "https://example.com", "nested": nested}
-	}
-	before := doc.StateVector()
-	doc.Transact(func(txn *crdt.Transaction) {
-		text.Format(txn, 0, text.Len(), crdt.Attributes{"link": link("placeholder")})
-	})
-	update := crdt.EncodeStateAsUpdateV1(doc, before)
-	// ygo writes the JSON with sorted keys and, depending on its release, with or without escaping
-	// <, > and &, none of which the link holds, so json.Marshal spells it as ygo wrote it.
-	written := func(v any) ([]byte, error) {
-		text, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("encode %T as JSON: %w", v, err)
-		}
-		return encoding.EncodeBytes(func(encoder *encoding.Encoder) { encoder.WriteVarString(string(text)) }), nil
-	}
-	placeholder, err := written(link("placeholder"))
-	if err != nil {
-		return nil, err
-	}
-	if count := bytes.Count(update, placeholder); count != 1 {
-		return nil, fmt.Errorf("the link's update holds its placeholder %d times, want once", count)
-	}
-	replacement, err := written(link(nested))
-	if err != nil {
-		return nil, err
-	}
-	return bytes.Replace(update, placeholder, replacement, 1), nil
-}
-
-// firstTextNode is the first text node in document order under fragment, or nil for a fragment
-// without one.
-func firstTextNode(fragment *crdt.YXmlFragment) *crdt.YXmlText {
-	for _, child := range fragment.Children() {
-		switch node := child.(type) {
-		case *crdt.YXmlText:
-			return node
-		case *crdt.YXmlElement:
-			if text := firstTextNode(&node.YXmlFragment); text != nil {
-				return text
-			}
-		}
 	}
 	return nil
 }
