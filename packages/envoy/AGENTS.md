@@ -2647,6 +2647,9 @@ Each item below names an endpoint and its method, then its contract, and an item
   Persists session topics, route metadata, optional delivery `capabilities`, and `host` (where the session process actually runs, as the client's `machineID()` reports it
   — distinct from `machine_id`, always the registering listener's own machine);
   registrations without capabilities persist `[]`, and one without `host` (an older plugin) falls back to `machine_id` on every read.
+  It also stores `plugin` and `plugin_version` on the session entry, trimmed of surrounding space and otherwise as sent:
+  the npm package the session registers through and that plugin's build (`@legion/envoy-client`'s `subscribe()` sends both on every registration);
+  a registration from an older plugin sends neither, and the entry keeps neither.
   A topic reaching a private stream subject (`bus.privateStreamSubjects`:
   each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
   `bus.ReachesPrivateStreamSubject`) — is not stored, since `/v1/replay` answers the stored topics and the stored topics drive the fan-out to serve-port sessions, and such a topic would hand the session messages meant for another session or for the controller's role holder:
@@ -2690,8 +2693,9 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   Lists live sessions; optional case-sensitive substring filters are `dir` and `title`.
   Rows include `roles`, `capabilities`, `last_seen`, `machine_id` (the listener the session last registered through;
-  which listener fans a topic out to the session and owns it is the one its stored subscription names, as `/v1/interests/subscribe` above says, and this one only when none is stored) and `host` (the session's real machine, and where its owning listener reaches a serve-port session;
-  falling back to `machine_id` for a session whose plugin predates the field).
+  which listener fans a topic out to the session and owns it is the one its stored subscription names, as `/v1/interests/subscribe` above says, and this one only when none is stored), `host` (the session's real machine, and where its owning listener reaches a serve-port session;
+  falling back to `machine_id` for a session whose plugin predates the field), and `plugin` and `plugin_version` (the plugin the session registered through and its build;
+  neither key is present for a session whose plugin predates them).
   A row's `roles` are the roles whose claims in `envoy_roles` name the session, read from the registry's watched view of that bucket (`store.Registry.RolesHeldBy`), whatever role topics its interest record carries and with no record at all;
   a view that is not complete (`store.ErrRoleViewNotReady`:
   its watcher's first scan has not delivered every claim, nats.go's idle timer ended that scan and the rescan has not completed, a recreated bucket's refill is still running, or the watcher has ended) ends the list with the 503 below, never a row missing a role its holder has.
@@ -2722,7 +2726,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   The authoritative answer for one session: is it live, and how is it named?
   The read goes through this listener's cache to the session bucket, so a session the cache does not hold yet
   — the bucket was recreated and the watcher is still refilling it, or another listener registered the session — is still found.
-  A 200 carries the same body a row of `GET /v1/sessions` does (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`, `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`), its `roles` read from the claims as that row's are.
+  A 200 carries the same body a row of `GET /v1/sessions` does (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`, `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`, and `plugin` and `plugin_version` when the session's registration sent them), its `roles` read from the claims as that row's are.
   A live session whose id only the interest bucket refuses as a key (an earlier listener's id past `envoy_interests`' get bound that `envoy_sessions` still serves, or one outside nats.go's key alphabet) is a 200 with no `topics`, as `GET /v1/sessions` lists it, logged `session answered with no topics: its interest record could not be read` at WARN with its `session_id` and `error`:
   Dispatch's envoy client reads a 413 or 400 here as a session that cannot exist.
   It refuses four ways: a 413 naming its size or a 400 naming the key for an id the session bucket would refuse as a KV key, `404 {"error":"no live session <id>"}` only when the bucket holds no key for it, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for an interest record this build cannot decode (`store.ErrMalformedInterest`), and `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` for a read that did not answer
