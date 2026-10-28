@@ -400,7 +400,13 @@ write identity errors with `identity.WriteError`.
   only switch `New` reads, so no caller can mount the route without that check.
   The signing key is then
   `auth.NewSigningKey`, generated per process and never the data-dir file, so a
-  cookie it mints dies with the process. While it is on, the whole router
+  cookie it mints dies with the process, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY`
+  is set (refused without the flag): every process given one value then signs
+  with the base64url of HMAC-SHA256 keyed by it over the label
+  `dispatch dev sign-in` (`devSignInSharedSigningKey`), never the value itself,
+  so the browser suite's two-process mode keeps a person signed in across its
+  two servers and a production key pasted there mints nothing production
+  accepts. While it is on, the whole router
   answers a request whose `Host` is not the dashboard origin's
   `421 HOST_MISMATCH` (`requireHost`), and the route serves only a loopback peer
   with no forwarding header and logs every mint at WARN.
@@ -488,19 +494,30 @@ to the SPA shell. Every page the static handler serves (`index.html` and that fa
 server holds, and gets this server's page in place of any other, since the servers behind one load
 balancer can hold different builds whose pages' file times say nothing about which is newer (a
 rollback serves the older file). A file under `/assets`, Vite's content-hashed output, carries
-`public, max-age=31536000, immutable`. With `DISPATCH_ASSET_STORE_BUCKET` set, a local miss below an
-asset root (`isRetainedAssetPath`) asks the bucket for the same key through the AWS SDK default
-credential chain (`routes/assets.go`). `AssetStore.GetAsset` returns the whole object as bytes, read
-within three seconds and refused over 8 MiB or when its body is not the length S3 declared; only
-then does `serveRetainedAsset` set the immutable header and write it through `http.ServeContent`,
-so a failed or short read is a 502 with no cache header, and the browser's download is not held to
-the three seconds. A `NoSuchKey` is a 404 without caching. S3 answers one only to a role that also
-holds `s3:ListBucket` on the bucket and otherwise answers 403, a 502 like any other store failure.
-Every 502 logs `dispatch: retained asset store failed` at ERROR with the key and the error, and the
-SDK's own log lines go through slog, its debug lines below the default level. An object is read
-into one buffer of its declared size, and it stays in memory until its client has read it while the
-server sets no write timeout, so the router's `retainedHeld` semaphore caps the bytes held at once
-at `maxRetainedBytesHeld` (64 MiB). A request reserves 8 MiB before it asks the store, waiting
+`public, max-age=31536000, immutable`. Every server process publishes its web dist's assets into
+Postgres at boot, before it listens (`publishDashboard` in `main.go`, `internal/dispatch/dashboard`,
+migration `0136`): one transaction under a shared advisory lock stores each file not yet stored
+under its key (`assets/<relative path>`), the build's row and its links, so a restart on a stored
+build writes no bytes. A publish that fails, a file over `routes.MaxRetainedAssetSize` (8 MiB)
+among them, exits the boot before the process is ready; a dist with no `index.html` (the Go test
+rigs) publishes nothing and serves no dashboard. The prune that follows, under the same lock held
+exclusive, keeps every build a live server process serves (`processes.Live`) and the
+`dashboard.KeepNewest` (20) started most recently, then deletes every asset no build links; a failed
+prune is logged and the boot goes on. A local miss below an asset root (`isRetainedAssetPath`) — a
+chunk of another build, asked for by a page another process served while a rolling update or a
+rollback runs two builds — is answered from the database (`dashboard.Store`, the router's
+`AssetStore`). `serveRetainedAsset` first looks in the process's `assetCache` (`routes/assets.go`),
+which keeps up to `maxCachedAssetBytes` (64 MiB) of what the store answered, least recently used
+evicted first, an object larger than the whole cache not kept; a cached object is served at once.
+On a miss, concurrent requests for one key share one store read (singleflight), bounded by three
+seconds from its start and not by the first request's context, so that client going away fails
+none of the others; a failed read caches nothing. Only once the whole object is read does it set
+the immutable header and write it through `http.ServeContent`, so a failed read is a 502 with no
+cache header, and the browser's download is not held to the three seconds. A path no build
+published is a 404 without caching. Every 502 logs `dispatch: retained asset store failed` at
+ERROR with the key and the error. An object stays in memory until its client has read it while the
+server sets no write timeout, so the router's `retainedHeld` semaphore caps the bytes misses hold
+at once at `maxRetainedBytesHeld` (64 MiB). A miss reserves 8 MiB before it asks the store, waiting
 within its three seconds for earlier requests to give theirs back, so a stale tab's burst of chunks
 is served in turn; it keeps only its object's size once it is read, and gives that back when its
 response is written, its client goes away or the read fails. A request that cannot reserve room, or
@@ -509,10 +526,11 @@ because most of the bound was already spent waiting for room), is a 503 with `Ca
 no-store` and `Retry-After: 1`, logs `dispatch: retained asset refused at the memory cap` at WARN
 with its key, and — for the room refusal — asks the store nothing: the shared bound expiring is
 never presented as a store failure, since the store was only asked too late to answer in time. A
-request whose own client disconnects while still queued for room is a different case: the cap was
-never the reason, there is nobody left to answer, and the handler logs nothing above a debug line
-and writes no response at all. It never reads a page or another path from the bucket. Unset, the
-setting leaves every local asset miss a 404. Any other file (the favicon) carries no cache header.
+request whose own client disconnects while still queued for room or while the store reads is a
+different case: the cap was never the reason, there is nobody left to answer, and the handler logs
+nothing above a debug line and writes no response at all. It never asks the store for a page or
+another path. A router with no `AssetStore` leaves every local asset miss a 404. Any other file
+(the favicon) carries no cache header.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.
@@ -545,11 +563,13 @@ the table says human only.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | Everyone who has signed in (`people`), as `{users: [{login}]}` sorted by email: the assignee picker's options. |
 | `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/dashboard/builds` | GET | user or bearer | Which dashboard builds are served (`api/dashboard_builds.go`): `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (`processes.Live` joined to `dashboard_builds` on the build id), sorted. The dashboard's "A new version is available" notice offers itself only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match; a repeated, blank, non-integer or out-of-range value, or `cursor`, is `400 INVALID_QUERY` naming the parameter. Each listing row carries `blocked_by`, the sorted keys the issue waits on, `primary_artifact_id`, and `repo` and `resolved_repo` as the issue read below describes them. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation takes the issue's own `repo` (`owner/name`, canonicalised as a mapping's is): one that is not `owner/name` is `400 INVALID_ISSUE`, and one not mapped to the issue's project `400 REPO_NOT_MAPPED`. A `parent` that would put the new issue more than 32 links (`parentDepthCap`) below its root is `409 PARENT_INPUT`. A title over `contracts.IssueTitleMax` (1,000) UTF-16 units, counted after trimming, is `400 CAP_EXCEEDED` before the duplicate check reads the project's titles. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. A spec whose markdown makes more than 65,536 elements, or whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements, is `413 CAP_EXCEEDED`. `blocked_by` names at most `contracts.MaxIssueBlockers` same-project issue keys before deduplication: an over-limit list or unknown key is `400 BLOCKED_BY_INPUT`, another project's issue `400 BLOCKED_BY_OUTSIDE_PROJECT`, and a wait cycle through `blocked_by` and parent links `409 DEPENDENCY_CYCLE`. Non-empty blocker lists and a `parent` take a per-project dependency advisory lock before allocating the number or rank; creation with neither takes no dependency lock, and no creation takes an explicit parent-row lock. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind is ranked on its own list and the lists are merged by reciprocal rank fusion (`README.md`, "Search"), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` is 1–50 (default 20) and `offset` 0 or more (default 0); `total` counts every match and `reachable` the hits the pages can return, each kind's best `contracts.SearchKindDepth` (100). An under-two-character query returns `400 INVALID_QUERY`, while a stop-word-only query returns `200` with no results; a query over `contracts.SearchQueryMax` (1,000) UTF-16 units, counted after trimming, returns `400 CAP_EXCEEDED` before anything runs, a project that is not a project key returns `400 INVALID_PROJECT` (an empty one searches every project), a repeated, blank, non-integer, or out-of-range limit returns `400 INVALID_LIMIT`, and the same for offset returns `400 INVALID_OFFSET`. They ride in the URL; `packages/contracts/AGENTS.md` "Search limits" owns what keeps it under the load balancer's limit. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only (`README.md` "Search"). |
 | `/api/v1/search/coverage` | GET | user or bearer | Meaning search's coverage (`api/search_coverage.go`, `embedqueue.Coverage`, one statement over `coverageSources`): `{identity, place, model, total, kinds}`, the embedder search embeds its queries with (all three null with none), then in total and per kind `items`, `current`, `lacking`, `failed` and `oldest_lacking_seconds`, as `model.SearchCoverageCounts` defines them. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. A `title` is trimmed, and one over `contracts.IssueTitleMax` (1,000) UTF-16 units is `400 CAP_EXCEEDED`, as on creation. `assignee` (the email of a person who has signed in, lowercased; `null` clears; absent leaves it) may be set by any caller; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is one of two fields besides `rank` a closed issue accepts without reopening, the other being an `external_links` write that adds no URL the issue does not already have (so a link can move to the issue that replaced it). Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. `repo` is the issue's own repository, `owner/name`, which must be mapped to its project (`400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped; `null` clears it; absent leaves it; a closed issue refuses it, `409 ISSUE_CLOSED`). Every issue read and `issue.*` payload carries `repo` and `resolved_repo`, the repository the issue targets: its own `repo`, else its nearest ancestor's, else its project's default mapping, else `null`, resolved in the same query. Every issue read and `issue.*` payload carries `blocked_by`, sorted. A PATCH `blocked_by` replaces the complete list (`[]` clears it) with the creation count limit and refusals, and naming the issue itself is `400 BLOCKED_BY_INPUT`; a parent change that would leave an issue waiting on itself through `blocked_by` and parent links is `409 DEPENDENCY_CYCLE`, and one that would put the deepest issue under it more than 32 links (`parentDepthCap`) below its root is `409 PARENT_INPUT`. Blocker-list and parent writes serialize on a per-project advisory lock acquired before row or rank locks, and read the graph without locking its rows. Every PATCH then locks every issue row it names together in one key order: the issue, its current parent when a `status` or `parent` write appends to it, the proposed parent and the `rank` neighbours; a parent a concurrent reparent moves at both attempts is `409 PARENT_CONTENDED`, with nothing applied. Other PATCH fields take no dependency lock or new refusal. A close (`status: done`) first settles the issue's documents that owe a settlement, then, in its own transaction, withdraws every open ask of the issue, whoever's turn it is - decision blocks, plain asks and approval requests (`withdrawIssueAsksTx`): each is recorded `resolved` with resolution `{kind: "withdrawn", actor: <the closer>, reason: "Withdrawn by the close of <KEY>.", at}` and gets one `ask.resolved` before `issue.closed`, and each withdrawn block, and each copy of it in another document of the issue, is written `state="resolved"` in the live document with no version; an ask block still without an ask row is written `state="resolved"` with no record, logged. An ask answered or resolved before the close is left as it was, and the close records no answer, review or approval. A reopening `status` opens again exactly the asks the close withdrew (kind `withdrawn`), with `state: open`, no answer and no resolution and everything else kept, each with one `ask.opened` before `issue.updated`, and their blocks read `state="open"` again. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
+| `/api/v1/issues/{key}/summary` | GET | user or bearer | What a reference to an issue shows, read without the full issue (`api/issue_summary.go`): `{key, project, title, status, documents}`, each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read lists its artifacts (`primary` marks the spec, which a reference to a block of the spec names); `404 NOT_FOUND` for no such issue. |
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
 | `/api/v1/issues/{key}/references` | GET | user or bearer | Read the eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block (`refs.Closure`). Matching `If-None-Match` returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | user or bearer | Edges of one node in the reference graph, newest first, cross-project. Exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference read whatever its length (`text.ParseRef`; the text bounds decide only what the graph indexes); `kind` is a csv of `mentions`, `child_of`, `blocked_by`, `attached_to`, `anchored_to`, `owned_by`, `replies_to`, `followed_by`, `part_of`, `depends_on`, `affects`; `since=<events.id>` keeps mentions introduced after it and excludes structural edges. The answer is `{node, edges}` (`model.GraphReferences`). Each edge carries the other `node` (`kind`, `id`, `issue_key`, `project`, `ref`; no `ref` for sessions; a `component` node is `<project>/<id>` with ref `dispatch://<PROJECT>/component/<id>`, and one a re-import retired is omitted with its edges; a `block` node is `<document ref_key>#<block id>` with `block_id`, `document` and `changed_version`, and one no current version holds is omitted with its edges), an `excerpt` (the containing block, with `block_id`, for a document mention; the node's text head otherwise), `created_at`, and `source_seq`. Every node, the one read, each edge's `node` and each edge's `block`, also carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` (`model.NodeParent`: `kind`, `id`, and `ref` unless the parent has none) and `parent_version`, always present: an actor list Dispatch never recorded is `[]`, any other fact `null` (`packages/envoy/AGENTS.md`, "References form one graph", gives each kind's sources). A document's mention that one of its blocks holds is listed from that block alone (`heldByABlock`); a document's own read also lists the edges at its current blocks, each naming the block as `block`, and leaves out `part_of` unless `kind` names it. A block reference (`#b-<id>`, the id as `encodeBlockId` writes it) names a node carrying `text`, the block's whole current text; pinned (`#b-<id>@v<N>`) it also carries `pin` (`model.BlockPin`: `version`, `ref`, `text` at that version, `state` `unchanged`, `changed` or `removed`, `removed_version`), and a removed block answers `edges: []` (`blockReferenceNode`), its node a removed block's (`refs.RemovedBlockNode`). `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` when the node does not exist, for an unpinned block no current version holds or whose id is past `text.MaxBlockIDBytes` (no node), and for a pin to a version the document lacks, has no record of the blocks of, or that did not hold the block. |
@@ -597,6 +617,7 @@ the table says human only.
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named issue-document version. |
 | `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply issue-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/projects/{key}/artifacts/{slug}` | GET | user or bearer | Read an unlinked project artifact and its incoming references. `{slug}` is resolved within `{key}`. |
+| `/api/v1/projects/{key}/artifacts/{slug}/summary` | GET | user or bearer | What a reference to a project document shows, read without its versions: `{id, project, slug, name, kind, latest_version}`, `{slug}` resolved as the project document read resolves it (`404 ARTIFACT_NOT_FOUND`, `400 ARTIFACT_REFERENCE_AMBIGUOUS`). |
 | `/api/v1/projects/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an unlinked project document's live markdown. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
@@ -608,7 +629,7 @@ the table says human only.
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark and not read by id. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`), mark it read (`read_through`, which only moves forward and covers every reply up to it), and/or mark some of its replies read by id (`read_replies`, messages the path's session wrote, covering those alone, each in any form `uuid.Parse` reads) for this user: at least one; 400 `INVALID_STATE` when none is given, a cutoff is malformed or more than a minute ahead of the server clock, or a `read_replies` id is not a uuid or not a message that session wrote (nothing is written then); an accepted cutoff is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices, except for a request naming only replies already read by id or passed by the read mark, which changes nothing (a reply the Clear hides but the read mark has not passed is neither: the first request naming it writes its row and appends the event), and answers the session's state. |
-| `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. A resuming connection (`since`, or `Last-Event-ID`) whose `since` is at or below the log's head is replayed every event after it and answered `X-Dispatch-Event-Replay: complete`; a cold connect and a `since` above the head get no header. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
@@ -661,12 +682,14 @@ conventions) says what keeps it current.
 The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-555) start two real Dispatch servers on one
 Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
 across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, a live event stream fed from the other process, a document room closed when
-the other process writes it, a sign-in started on one process completed on the other, people
-kept signed in across a key rotation, a process whose key set a live peer does not share refused
-at boot, and `server.started` published once per fleet-wide build. They build only under the `multiprocess` tag and run in their own CI
-job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
-and their NATS take minutes rather than seconds:
+published once, a live event stream fed from the other process, a document room closed when the
+other process writes it, a sign-in started on one process completed on the other, people kept
+signed in across a key rotation, a process whose key set a live peer does not share refused at
+boot, `server.started` published once per fleet-wide build, every dashboard asset of either of two
+builds served by both processes, and the builds `GET /api/v1/dashboard/builds` names as live. They
+build only under the `multiprocess` tag and run in their own CI job (`dispatch-multiprocess` in
+`.github/workflows/envoy-and-contracts.yaml`), because two servers and their NATS take minutes
+rather than seconds:
 
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch

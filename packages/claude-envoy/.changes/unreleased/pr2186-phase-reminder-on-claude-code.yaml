@@ -19,6 +19,6 @@ body: |-
   `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
   four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
   plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
-  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 41.
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 42.
 custom:
   Issue: pr2186

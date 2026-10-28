@@ -34,6 +34,7 @@ import {
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
 import { stallLimits } from "@legion/pi-shared/stall-limits";
+import { clearStartupTurn } from "@legion/pi-shared/startup-turn";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -315,8 +316,14 @@ export default function legionExtension(pi: PiApi): void {
     resentNoticeId = recreatedNotice.id;
     return { message: workspaceRecreatedMessage(recreatedNotice) };
   });
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, context) => {
     recreatedNotice = undefined;
+    clearStartupTurn(context.sessionManager.getSessionId());
+    // The operator moved on: a session change's re-claim outcome left in its widget comes down.
+    controllerSession.handleAgentStart(context);
+  });
+  pi.on("session_shutdown", async (_event, context) => {
+    clearStartupTurn(context.sessionManager.getSessionId());
   });
   // The recovery kept the saved copy in the process's live context, so once it is sent again
   // every later request of this process would carry it twice: the first copy, where the history
@@ -462,6 +469,15 @@ export default function legionExtension(pi: PiApi): void {
       await controllerSession.claim(context);
       registerLegionTool();
       await activateLegionTool();
+    },
+  });
+
+  pi.registerCommand("legion-controller-start", {
+    description:
+      "Claim the Legion controller and send its start message as the session's first turn; `legion controller start` passes this command on Oh My Pi's command line",
+    // Why a command and not a claim from session_start: `controllerSession.startCommand`.
+    handler: async (_args, context) => {
+      await controllerSession.startCommand(context);
     },
   });
 }
