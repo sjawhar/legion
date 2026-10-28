@@ -2,26 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T13:57:30Z",
-  "round": 2,
-  "reviewedCodeHead": "83dd924b2e06f96a54a9b35d26b1831e028972aa",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T16:40:00Z",
+  "round": 3,
+  "reviewedCodeHead": "46d1a34527ef71289796bd8a5fbd9ec5ab17069f",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "ci": "Required set (lint, typecheck, test, pr-title) still queued or in progress at CI head 83dd924b when read; compare 83dd924b...a8ee3f11 is handoffs only. The non-required Worker Image build failed on a registry rate limit (toomanyrequests) at docker/setup-buildx-action; re-run requested (run 40694698101). A request for changes does not wait on CI.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 83dd924b, plus a verification of the ten round-1 fixes, the CI path filters, the census and stale text.",
-  "roundOneThreads": "All ten round-1 threads answered with an acceptance at 83dd924b (replies 4401452364-4401455888); the implementer had already resolved each, and every fix holds.",
-  "keyFindings": [
-    {"severity": "main", "file": "packages/envoy/infra/gcp/dispatch.go:91", "description": "Recorded as main's, not a finding of this round (the INFRA controller's ruling relayed by the INFRA-514 architect at 13:57Z): TestDispatchConnectionsPerPodIsTheServers fails on main since #2233 (expects 84, gets 83), and here (expects 86, gets 85) because this PR adds its +2 to main's stale 83. When the implementer merges main's one-line fix, the result must be 86, with running-dispatch.md:277-282 saying 'up to 11' and '86', and the changelog fragment :33 '86 ... from 84'."},
-    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml:343-346", "description": "dispatch_memory does not name internal/testnats, which this PR's untagged cmd/dispatch/main_test.go now imports (`go list -deps -test -tags memory ./cmd/dispatch` lists it); a later testnats-only change would skip dispatch-memory."},
-    {"severity": "minor", "file": "PR body", "description": "The Contract change census was written at ab5984da before three main merges: re-run at the head it hits lines it does not list (internal/bus/stored.go:80, pi-envoy scripts/README.md:120 and smoke-replay.sh, the ported publisher_mentions_test.go lines, store/pool.go:305, the pr2225 docs/solutions note, the changelog fragment; 20 of 75 pi-envoy envoy.test.ts hits), and it and item 2 still name CHANGELOG.md, which is no longer in the diff."}
+  "minor": 0,
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title) completed success at CI head 46d1a345; compare 46d1a345...42680824 is handoffs only (2 files). The envoy Go jobs, which are not required, were still queued when read.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 46d1a345 over the refactor 2c1dd35c and the merge of main 46d1a345; both found no correctness defect.",
+  "roundTwoItems": [
+    "dispatch_memory names packages/envoy/internal/testnats/* (40ca6c2f).",
+    "Contract change census re-run at 7a86169c in two comments, each hit with its disposition.",
+    "dispatchConnectionsPerPod is 88, store.ConnectionsPerProcess after main's #2390 registry pool; `cd packages/envoy/infra && go test ./gcp/ -run TestDispatchConnectionsPerPod -count=1` passes; running-dispatch.md and the changelog fragment say 88, from 86."
   ],
-  "fastFollow": "One fence: drop fencedSender and errFenced now that WindowUntil fences every send, and check the deadline before checkSubject/StreamCaptures/Marshal in window.send and window.request so async.go:116 is true.",
+  "keyFindings": [],
+  "notes": [
+    "PR body census item 4 still says 0136/0135 for the migrations, which are now 0137_outbox_claim and 0136_duty_holds; text only, for retro's body pass.",
+    "No test pins shutdown's order outbox, then deregister, then pool close (shutdown.go:137-139); the code reads correctly."
+  ],
   "verifiedCorrect": [
-    "Port of main's #2225 into the batch model: addClaimantRoute, leftToMention, the batched mention query and settleEvent's deferral keep main's rules; publisher_claimant_test.go is identical to main's and publisher_mentions_test.go keeps every assertion; a deferred write is hold-guarded, touches no attempt, and blocks no later event.",
-    "WindowUntil: deadline before the pin, pin wait capped at it, re-checked before the write; ErrWindowDeadline read as fenced.",
-    "All ten round-1 fixes, each with a test that fails against 3d0b23c8.",
-    "CI path filters cover go list -deps of ./cmd/dispatch, ./cmd/listener and -tags multiprocess ./cmd/dispatch."
+    "WindowUntil is the one fence: window.send and window.request check the deadline first, pinToSend caps the wait and checks again before the write; ErrWindowDeadline makes the batch unrecorded.",
+    "Mention deferral as blocked writes now() + mentionPendingDelay (or the earlier blocker due), counts no attempt, and is hold-guarded.",
+    "The listener chooses the forward's MsgId only when DedupeKeyNamesTheUpstreamEvent holds of the original envelope; for a Dispatch event it equals the outbox's MsgId.",
+    "Merge with #2390: migrations 0135_server_processes, 0136_duty_holds, 0137_outbox_claim unique and contiguous with census files; shutdown waits for the outbox, then deregisters, then closes the pool, within the stop budget."
   ]
 }
