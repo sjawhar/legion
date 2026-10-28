@@ -4,36 +4,6 @@
 
 ### Added
 
-- Dispatch answers what a rendered `dispatch://` reference shows without the full read:
-  `GET /api/v1/issues/{key}/summary` is the issue's `{key, project, title, status, documents}`,
-  each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read
-  lists them (`primary` marks the spec, which a reference to a block of the spec names), and
-  `GET /api/v1/projects/{key}/artifacts/{slug}/summary` a project document's
-  `{id, project, slug, name, kind, latest_version}`, resolved as the project document read
-  resolves its slug. Neither reads a version body, an approval, a child or an open ask; both are
-  open to every signed-in caller, as the full reads are (INFRA-492).
-- Dispatch events say what their write moved, read in the write's own transaction (INFRA-492):
-  `issue.created`, `issue.updated` and `issue.closed` carry `changed`, the fields whose value moved
-  (`closed_at` among them on a close or a reopen), and `ancestors`, the issue's parent chain;
-  `comment.created`, `comment.answered`, an issue message's `message.created` and
-  `message.answered`, `ask.opened`, `ask.answered`, `ask.resolved`, and an issue event that moved
-  the status carry `thread_logins`, whose Replies count the write can move; `user_state.updated`
-  carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` moved. Each is absent from
-  an event written before this release. A snooze or an un-snooze of an Inbox row
-  (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`), which appended no event, now appends the writer's
-  `user_state.updated` when it moves the row, so the writer's other tabs and devices refetch their
-  Inbox; its payload is exactly `{login, changed: ["snoozed"]}`, since every signed-in stream
-  replays it, so it names no ask, no issue state and nobody else, and wakes no one.
-  `GET /api/v1/events` answers `X-Dispatch-Event-Replay: complete` on a resuming connection whose
-  `since` is at or below the log's head, which it replays in full (`cmd/dispatch/README.md`,
-  "Routes"). `references_changed` names a cited block of a document as
-  `{kind: "block", id, ref, artifact_id}` when a write adds or removes a citation of it, and when a
-  version of its document changes or deletes it; a document version also names the target of each
-  mention it kept in a block whose text it changed. `references_changed` is capped at 100 targets
-  of each kind (issue, ask, artifact, block) on its own, where 20 targets of every kind together
-  were: past the cap of a kind the event names none of that kind and lists it in the new
-  `references_changed_truncated_kinds`, still names the targets of the other kinds, and still sets
-  `references_changed_truncated: true` for a reader that predates the kinds.
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
@@ -1010,45 +980,6 @@
 
 ### Changed
 
-- A Dispatch tab fetches again only what an event can change (INFRA-492). The dashboard's rules
-  (`packages/dispatch/web/src/api/event-refresh.ts`) read the events' new fields, so a title change
-  on an issue no page shows sends no read of it, a message on another issue sends no Inbox or
-  pinned-list read, and a reply in a thread the viewer never wrote in sends no Replies read; an
-  event from an older server, without the fields, refreshes what any value could have moved. Every
-  refresh goes through one scheduler (`api/query-refresh.ts`): events are batched for 100 ms, and
-  each read is fetched at most once a second, never twice at once and never by cancelling the
-  request in flight, so a first load's response is kept; an inactive read is only marked stale.
-  A test of a read's data waits, while a fetch of it is out, for the response that lands, and a
-  read left while it owes a refresh stays stale once that fetch lands, so it fetches when it
-  mounts again. An ancestor's detail refreshes on any write of a descendant, whose activity its
-  Children tab shows; the Replies page on a retitle of an issue it lists; the Architecture tab on
-  any write of an issue its tree lists; a document's `Referenced by` panel when the event's
-  `references_changed` names the document, and when an ask or comment that document owns or
-  holds the anchor of is written, re-anchored or edited; and the whole Inbox on the viewer's own
-  snooze in another tab. An event whose `references_changed_truncated_kinds` names the kinds it
-  cut refreshes every read of those kinds alone (every issue detail and issue panel, every ask
-  read, ask list, ask panel and the Inbox, every document panel, every block read), beside the
-  targets of the other kinds it still names; only a truncated event without the kinds refreshes
-  every count and panel. A read the server refuses with a 503 carrying `Retry-After` is retried
-  after that many seconds, at most 30, plus a random share of them again, so tabs refused together
-  do not all come back at once and a proxy's day-long `Retry-After` still retries within a
-  minute; any other failure is still retried after 500 ms.
-  The app's query client (`api/query-client.ts`) gives every mutation's invalidation the same
-  never-cancel rule. A reconnect whose replay the server calls complete refreshes nothing beyond
-  what its events change, where every reconnect, a tab regaining focus among them, refetched every
-  read. A `dispatch://` reference reads the new summary routes in place of the full issue, and an
-  inline link reads no document text. A reference's summary or block read is fetched again on a
-  window focus only after it failed, so a 503 past its retries recovers on the open page.
-- Dispatch's `references_changed` also names a cited document or file, as
-  `{kind: "artifact", id, ref}` (its uuid and the `dispatch://` address its `Referenced by` panel
-  is opened on), so that panel follows a citation made elsewhere. It also names a target whose
-  edge the write kept but whose excerpt it moved, which the target's `Referenced by` panel shows:
-  an edit of an ask's question or a comment's body that changes the head of its text names every
-  target the text still cites, a document version names each target whose stored excerpt it
-  changed, and an issue retitle names the issue's parent and the issues it is blocked by. An issue
-  write that adds or removes a `blocked_by` entry names each blocker it added or removed, and an
-  `issue.created` every blocker it holds, so the blocker's open page keeps its `Referenced by`
-  count current (INFRA-492).
 - Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
   `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
   request's `summary` gets what its question leaves of the same limit.
