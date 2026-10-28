@@ -2,52 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T12:34:00Z",
-  "round": 7,
-  "headTested": "dc3539017afd95fdf3ef04e9900fd12fd1ebfd12 (code head f508510f50df; dc353901 adds only .legion/INFRA-177/implement.json)",
-  "workspace": "Recreated before this round; it holds legion/INFRA-177 as pushed, my round-6 handoff (78ff7c3e) among it. Nothing of mine was unpushed.",
-  "fingerprint": "changed by the forward merges b72bb4a3 (main 460facf5) and f508510f (main 8dfaf3a7), so a full round",
-  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main eb21e78d with dc353901 -> no conflict; contract 41, daemon 0062_handoff_records, Dispatch 0135_handoffs free on main (40, 0061_pull_request_head_run, 0134).",
-  "ci": "Read 12:33Z at code head f508510f: every lane queued (build x2, changes, lint, pr-title, test, typecheck). Read as running, not waited for.",
-  "reshapedMainChanges": {
-    "pr2379 (head-run replay)": "Kept at the head: the head run, replayRun, redundantSettlement, maxRunSteps, unchainedPlan, the moves, redHold and the pass's lapse decision (same symbol counts as main). Chain links are review App pushes only (sparesAttempt = Before != \"\" && ByReviewApp). Its handoff examples become: two review App pushes (spared, planned) or an implement-App push (counted). The three protections that still matter under the records' daemon hold through the engine: a red that settles before its head's review App push is held and ends planned in testing, as push-first does; two heads ahead of their pushes are judged as pushes-first (its test passes); a branch returning to a commit is its own move (its test passes).",
-    "pr2385 (the pass)": "Kept: followHead's no-move-back fence (pull.UpdatedAt.After), openPullRequestOn's branch check, the declined-opened memo, githubrest.Compare shared by READY and the production-check compare. Dropped: handoffPush and its compare in the pass, with TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged, TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands, TestAFailedComparisonStillReadsThePullRequest and TestARateLimitOnTheCompareEndsThePass: each protected the pass's compare of a handoff push, which no longer exists; the pass now follows any push above an approval as a new head (TestThePassFollowsAPushAboveAnApprovalAsANewHead passes).",
-    "pr2440 (push bound)": "Kept: the drop-the-oldest checks of TestPushesWaitingForALinkAreBounded and the WARN-by-name test. TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay became TestTheBoundKeepsPushesOnTheirWay: no push carries an approval any more, so only pushes on their way are outside the bound.",
-    "approvalCarry": "Main's carry (carriesApproval = !MayChangeCode && Before != \"\") applied only to unforced handoff-only pushes; a review App push of code never carried an approval on main either. After the cutover the reviewer pushes nothing, so no review App push follows an approval in reviewing. The import's removal is the one handoff-only push left: the import defers it in reviewing and held, and an approval matters only in reviewing (reviewRound returns early in every other phase); in accepting the round is over and READY lets the removal of .legion/ above the approved head through (api ready scope tests). Driven through the engine: an issue in accepting with an approval of h2 and the import's removal h2..h3 stays in accepting on green in both push orders, and goes to implementing on red, as docs/kubernetes.md step 4 says. No dropped carry is needed.",
-    "testsRun": "Every test of #2379, #2385 and #2440's test files that survives at the head, by name: classify 30, githubrest 1, record 37, store 2, workflow 62, daemon 41 -> all ok (go test -run '^(...)$')."
+  "completed": "2026-10-28T14:09:30Z",
+  "round": 8,
+  "headTested": "366909b630d0ccd88a5d37a817c7df9fa47c79e8 (code head d0a5a0cafa83; 366909b6 adds only .legion/INFRA-177/implement.json)",
+  "fingerprint": "changed by the forward merge d0a5a0ca with main adee0aba (#2436 among it) and the two envoy-client fragments, so a full round",
+  "mergeability": "git merge-tree of main 139c61b3 with 366909b6 -> no conflict (GitHub's mergeable read UNKNOWN while it computed); contract 41, daemon 0062_handoff_records, Dispatch 0135_handoffs free on main (40, 0061, 0134).",
+  "ci": "Read 14:09Z at code head d0a5a0ca: every lane queued (build x2, changes, lint, pr-title, test, typecheck). Read as running, not waited for. The two reds the controller named as main's (recipients-claim.e2e.ts, TestDispatchConnectionsPerPodIsTheServers) were not seen here.",
+  "pr2436": {
+    "what": "fix(daemon): a synchronize's sender names its move's push, and late synchronizes name the moves they skipped (merge c27469629a9b). Kept at the head: Sender on record.ClassifiedPush, intake.Push and intake.PullRequestSynchronized, the synchronize's Before, NameMove and the head run's names, gapPath and the one-second windows, maxCopies and the copy warning, the run closing at its bound.",
+    "survivingTests": "175 tests of #2436's test files exist at the head by name; run by name: classify 61, intake 47, record 38, workflow 29 -> all ok.",
+    "dropped": [
+      "TestAPushReplacesAnApprovalCarrierOfItsTwoHeads: a push replacing an earlier approval-carrying push of the same two heads; a carrier is an unforced handoff-only push, which no role makes after the cutover and the record no longer has.",
+      "TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder: its forced-marker half goes with the forced field the head no longer decodes (a push is judged by its pusher); its review-order half is kept as TestDecodingCarriesTheReviewOrder (intake_test.go:1793, same cases: review_id, submitted_at, unreadable times, body_truncated).",
+      "The remaining dropped names (TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification, TestApplyPushTakesBackACountItsLatePushSpares, TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound, TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay, TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound, TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff, TestTheArrivalOfTheApprovedHeadEndsTheRoundWithoutItsPush) were judged in round 7: each covered a handoff-only push or its approval carry, and the head keeps renamed equivalents where the case still exists (TestPlannedRedIsSetAndClearedAcrossATesterRound, TestTheBoundKeepsPushesOnTheirWay, TestTheArrivalOfTheApprovedHeadEndsTheRound)."
+    ],
+    "protectionsUnderTheNewDaemon": "#2436's headline cases are review App and implementer pushes, which still happen; driven through the engine below, both are judged by the sender of the repeated move in either delivery order, with the run closed. Its approval-carrier fixes covered only handoff-only pushes."
   },
-  "migration0062": "0062_handoff_records applied in a transaction on top of main's daemon migrations 0001-0061 (each with psql -1): handoff_record default '' and handoff_version default 0; a negative handoff_version is refused by its check. docs/kubernetes.md's rollback SQL run twice: 'ALTER TABLE', 'DELETE 1', then two NOTICEs, 'ALTER TABLE', 'DELETE 0', store back at 61; 0062 applies again. recordsSchema is 62, so main's daemon at 61 reads as the release before.",
-  "changieFragments": "Ten pr2354 fragments in claude-envoy (3), contracts (3), envoy (1), pi-envoy (1), pi-legion (3 incl. the Breaking cutover order): each has kind and body, custom Issue pr2354, no Dispatch key (grep '(INFRA|LEGION|LEGSMOKE|SMOKE)-[0-9]+' finds none), no CHANGELOG.md is edited, and `changie batch v9.9.9 --dry-run` (v1.26.0) folds each package's fragments into well-formed kind sections. Gap: packages/envoy-client changes (DispatchClient handoff methods, the handoff-write/handoff-read cases in dispatch-execute.ts, the Claude session resolution in dispatch-cli.ts) and has its own .changie.yaml and CHANGELOG.md, but no pr2354 fragment; told to the architect, documentation only.",
+  "fragments": "envoy-client now has pr2354 Added and Changed fragments. All thirteen pr2354 fragments (envoy-client 2, claude-envoy 3, contracts 3, envoy 1, pi-envoy 1, pi-legion 3) carry no Dispatch key (grep '(INFRA|LEGION|LEGSMOKE|SMOKE)-[0-9]+' -> 0 files) and `changie batch v9.9.9 --dry-run` (v1.26.0) folds every package, exit 0. The envoy-client Changed fragment's claims hold on the CLI (proof below). Wording only: the two envoy-client bodies are single long lines, so they fold to one unwrapped bullet each, where the other packages' fragments wrap at 100 in a |- block.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "P1 on a fresh database: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t7?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s. A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t7?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. handoffimport ok; pi-legion daemon-pane.test.ts 5 pass. P7 and P4 not re-run (implement App, model route)."
+    "how": "P1 on a fresh database: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t8?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s. A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t8?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. handoffimport ok. P7 and P4 not re-run (implement App, model route)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Merged #2379: a red that settles before its head's review App push is held and ends as the push-first order leaves it; an implement-App push counts; the import's removal in accepting keeps the phase on green",
-      "surface": "the workflow engine on a real Postgres, facts as the daemon applies them; a throwaway test, deleted afterwards",
-      "command": "cd packages/daemon && go test ./internal/workflow/ -run TestZZTesterR7 -v",
-      "observed": "testing, red h2 at 1 attempt: the review App's h2..h3 with h3 and its red before the push -> testing, 1 attempt, planned, nothing told (push first: the same); accepting with h2 approved, the implement App's removal h2..h3: green -> accepting, 0 attempts, nothing told, push first or last",
-      "headSha": "dc3539017afd95fdf3ef04e9900fd12fd1ebfd12",
-      "negativeControl": "the implementer's push h2..h3 in the same setup -> implementing, 2 attempts, unplanned, checks-red, in both orders; the removal with a red at h3 -> implementing with checks-red"
+      "criterion": "#2436 under the records' daemon: a move made again is judged by its own sender in every delivery order",
+      "surface": "the workflow engine on a real Postgres with synchronizes carrying before and sender and pushes carrying sender, as the listener now sends them; a throwaway test, deleted afterwards",
+      "command": "cd packages/daemon && go test ./internal/workflow/ -run TestZZTesterR8 -v (red h0 counted at 1; synchronizes a minute apart)",
+      "observed": "the review App's h0..h1, the implementer's forced return h1..h0, the review App's h0..h1 again: head h1, 1 attempt, planned, run closed, whether the last push arrives before or after its synchronize; the implementer's h0..h1, the review App's return, the implementer's h0..h1 again: head h1, 2 attempts, unplanned, run closed, in both orders",
+      "headSha": "366909b630d0ccd88a5d37a817c7df9fa47c79e8",
+      "negativeControl": "the same two histories differ only in who pushed the repeated move, and the plan and the count follow the sender: planned and uncounted for the review App, unplanned and counted for the implementer"
     },
     {
-      "criterion": "Handoff writes skip AskGate (the spec's decision on INFRA-157), now that main ships AskGate",
-      "surface": "the real dispatch CLI against a scratch Dispatch built from the head, with a live AskGate owner in block mode in the session's state directory",
-      "command": "dispatch handoff-write --issue TST-2 --phase test --body-file h.json; dispatch message --issue TST-2 --body 'hello' (DISPATCH_SESSION_ID=ses_cli, record sessions/ses_cli/askgate/<pid>-<start>.json mode block)",
-      "observed": "'Recorded the test handoff of TST-2, version 1 (id …)', exit 0",
-      "headSha": "dc3539017afd95fdf3ef04e9900fd12fd1ebfd12",
-      "negativeControl": "dispatch message under the same gate: 'dispatch message was not called: AskGate is on for this session, and this call carries no AskGate marker…', exit 1"
+      "criterion": "envoy-client's Changed fragment: under Claude Code the dispatch command acts as ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID, and refuses with neither, naming both",
+      "surface": "the real dispatch CLI (packages/envoy-client/bin/dispatch.ts) with DISPATCH_HOST=claude against a scratch Dispatch",
+      "command": "dispatch handoff-write --issue TST-2 --phase plan --body-file h.json with ENVOY_SESSION_ID=ses_envoy CLAUDE_CODE_SESSION_ID=ses_claude; then CLAUDE_CODE_SESSION_ID alone; then neither",
+      "observed": "versions 1 and 2 recorded with authors ses_envoy and ses_claude",
+      "headSha": "366909b630d0ccd88a5d37a817c7df9fa47c79e8",
+      "negativeControl": "neither set: 'dispatch: ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID is not set, so this call has no session to act as.', exit 2, nothing written"
     },
     {
-      "criterion": "A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon; A1 in the dashboard; Dispatch routes hold their limits and migration 0135 rolls from main",
-      "surface": "scripts/e2e/handoff-records.sh; the Dispatch browser suite; raw HTTP against scratch Dispatch servers built from the head and from main eb21e78d",
-      "command": "handoff-records.sh (legion_t7); dispatch-e2e.sh … e2e/handoffs.e2e.ts; 3 x 30 concurrent POSTs; a 262,144-byte body sent \\u003c-escaped; main's Dispatch then the head's on one database",
-      "observed": "9 checks ok; 2 passed; 3 x 30 x 201 with versions 1..90, no gap or duplicate; the 262,144-byte body (1,572,881-byte request) 201; main migrates to 134 and answers the handoff route 404, the head migrates to 135, keeps UPG-1 and records plan v1, main then serves the 135 database (200)",
-      "headSha": "dc3539017afd95fdf3ef04e9900fd12fd1ebfd12",
-      "negativeControl": "262,145 bytes -> 413 'body is 1 bytes over the 262144-byte limit'; a human X-Dispatch-User caller -> 403 HANDOFF_FORBIDDEN; an array body -> refused by the CLI before sending"
+      "criterion": "A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon; A1 in the dashboard",
+      "surface": "scripts/e2e/handoff-records.sh; the Dispatch browser suite",
+      "command": "handoff-records.sh (legion_t8); dispatch-e2e.sh … e2e/handoffs.e2e.ts",
+      "observed": "9 checks ok; 2 passed",
+      "headSha": "366909b630d0ccd88a5d37a817c7df9fa47c79e8",
+      "negativeControl": "a 262,145-byte body -> 413 CAP_EXCEEDED (a6-control); another session's record -> 403 HANDOFF_SESSION_MISMATCH (a3)"
     }
   ]
 }
