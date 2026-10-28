@@ -2,55 +2,43 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-591",
-  "completed": "2026-10-27T14:55:20Z",
+  "completed": "2026-10-28T11:09:41Z",
   "decision": "changes_requested",
-  "reviewedHead": "401b5db6a448187dfb9e8efa578dcada21a0e2d1",
-  "ciHead": "26a15dcf333e",
+  "round": 2,
+  "reviewedHead": "35afd068835aca88ce42a5fc71a784d7c3005f97",
+  "codeHead": "b923561bb2fa",
   "critical": 0,
-  "important": 4,
+  "important": 1,
   "minor": 4,
+  "previousRound": "All nine findings of round 1 are verified fixed in 66e8d5c3, 8c2e6451, eadaba02 and 3bcb24a5. I accept the cold-stream rationale: the browser refreshes every query when the stream opens (web/src/api/sse.ts:762-780), and a cold reconnect carries no since (sse.ts:872). The round-1 fast-follow (shared reset predicate, reseed and gap timer) is done in eadaba02.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/events.go:122; packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go:82",
-      "description": "The relay's first start (Horizon.Await) runs before the SSE headers are written, and the hub's readCursors awaits the horizon before close(h.ready). So a fresh process sends no headers to the first SSE client, computes no Delivery view and drains no delivery-change intake until every transaction that holds an xid anywhere on the instance has ended. There is no bound. CI evidence: envoy-go at 26a15dcf333e (run 40497171591, job 122194201037) timed out in internal/dispatch/api after 10 min. TestSSEReplaysThenStreamsCommittedEvent missed its 2 s connect deadline at server_test.go:1289, and httptest.Server.Close then blocked on the handler. Reproduced locally on Postgres 16.2: one xid held in database postgres gives the same failure and the same 45 s hang; without the held xid the test passes in 2.01 s."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:190",
-      "description": "Safe joins an observation already in flight, and that observation can have taken its snapshot before the caller's commit. Its A is at or below H, so Pending() is false: the relay and the hub arm no gap re-read, and an event that committed above H waits for the next unrelated commit. Await already refuses such a flight; Safe needs the same rule."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/references.go:90",
-      "description": "GET /references?since= uses Safe. On a process where nothing else observes, the first since read after boot or after a Reset gets H=0 and returns no mentions. Every later read stops at the previous read's observation, however old. The route docs promise 'typically milliseconds'."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:373",
-      "description": "When the pending list is full (64), each new observation overwrites the newest slot. Under transactions that overlap without a break, the kept observations bunch up, and H can trail by up to about 2x the open-transaction length. Raise the cap or thin the list by time."
+      "file": "packages/envoy/internal/dispatch/events/horizon.go:235",
+      "description": "Await keeps an observation error in `failed` and reports it only when ctx ends. Its long-lived callers therefore wait forever, with nothing logged, while every observation fails: the hub seed (delivery_live_hub_intake.go:123, on the hub's lifetime, so the retry log at :135 never fires), the relay's first start (event_stream_relay.go:210, where a resuming stream heartbeats but carries no events), and the relay reseed after a reset. Main logged a failed cursor read (readCursors) and returned start's error to the SSE handler. A plausible trigger: the horizon pool's 2 connections cannot dial while the shared pool's existing connections keep working. This hides an error, so it is fixed in this pull request: log observation failures the caller's ctx did not cause, rate-limited like the stall warning."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/server.go:349",
-      "description": "Any Pool.Horizon error makes the Horizon fall back to the shared pool, with nothing logged, and sync.Once keeps that choice for the process lifetime. The comment justifies the fallback only for a closed store."
+      "file": "packages/envoy/internal/dispatch/api/events.go:211",
+      "description": "A cold stream that has not opened sends no bytes. The browser's 45 s watchdog (sse.ts:80-86) then aborts and reconnects it cold, with backoff up to 30 s, for as long as a stall holds on a newly started process. No event is lost. Name this interaction and its bound in the handler comment."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:306",
-      "description": "warnStall runs on the runner's goroutine after close(done), which is the relay, the hub or a references handler. During a stall it adds up to 2 s once every 30 s."
+      "file": "packages/envoy/internal/dispatch/events/horizon.go:445",
+      "description": "The stall diagnosis derives its context with context.WithoutCancel(ctx), so it keeps the caller's store hold mark. In the shared-pool fallback it can be refused (nested acquire), and since it now runs concurrently it can block the caller's next read. Derive it from context.Background()."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go:223",
-      "description": "The hub's gap re-read runs eventCursorCheck's two shared-pool queries at each tick (every 10-250 ms) while a gap is open. The relay skips that check on a gap re-read so that it uses no shared connection."
+      "file": "packages/envoy/internal/dispatch/api/event_stream_relay.go:220",
+      "description": "The subscribe goroutine is detached from the handler (events.go awaitEventSubscription), so a start that finishes after the server's lifetime ends can call r.running.Add(2) concurrently with or after waitBackground's Wait. That Add/Wait ordering is one the race detector reports. Check the lifetime under mu before Add, or track the goroutine."
     },
     {
       "severity": "minor",
-      "file": ".dispatch/architecture/dispatch-events.md:11",
-      "description": "The stated cost names transactions open when the event was written. The proof actually waits for every xid holder at the X of the first observation that sees the event, which can include transactions that began after the commit and non-event xid holders such as SELECT ... FOR UPDATE. The PR body says the same in its Change bullet."
+      "file": "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go:129",
+      "description": "The seed goroutine sends to h.seeds without a select. It cannot block only because no second seed starts while one runs, and that rule is kept in other functions. Make the send select on h.lifetime.Done()."
     }
   ],
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 401b5db6: both CHANGES; findings adjudicated above",
-  "notes": "Required checks (lint, typecheck, test, pr-title) are green at CI head 26a15dcf333e, and 401b5db6 changes only .legion/ since then. Two checks that are not required are red: envoy-go (above) and dispatch. dispatch failed on an unrelated web unit-test timeout ('names mounted at staggered times plus a polled useAgents caller fetch at most once per 15 s'), so the Playwright browser suite did not run at this head. I queued a rerun of both failed jobs."
+  "fastFollow": "streamEvents (events.go:79-325) has two select loops and an `opened` flag shadowing startsAtPublished: one loop with a nil-channel ready, and one immutable opensEarly; move horizon() out of server.go (now 1002 lines) into event_stream_relay.go; rename the changelog fragment to INFRA-591-<slug>.yaml with Issue: INFRA-591 (AGENTS.md 'Changelog entries are fragment files').",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 35afd068 (code b923561b): both CHANGES, adjudicated above (code-quality's three items are cleanup with no behavior change: fast-follow, or minor for the seeds send).",
+  "ci": "At code head b923561b the required checks lint, typecheck and pr-title are green and test is in progress. The envoy jobs (envoy-go, dispatch and the rest) are queued. At the previous code head 312e84c6, envoy-go failed: internal/dispatch/api passed go test's 10 min deadline (600 s, with no test hung). On main 4e55b2e0 it runs 454-482 s. 4d00a61f raises the deadline to 20 m."
 }
