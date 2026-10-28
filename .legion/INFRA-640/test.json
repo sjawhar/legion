@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-640",
+  "completed": "2026-10-28T16:15:00Z",
+  "headTested": "f67fcb4298e9 (merge of main 5fbd8391 into the branch; handoff head 8763144e)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its commands at f67fcb4298e9, the merged head: AC1 with two replay pairs of my own (tools/load.py 0.3 1 27 8, GOMAXPROCS=2, my own Postgres, NATS and ports, Dispatch built at f67fcb42 and at main 5fbd8391): base 341.82 / 337.57 CPU-s, head 236.43 / 227.38 CPU-s, refreshAnchors share 24.7% / 23.5% -> 1.83% / 1.93%. AC2a: the corpus tests on 12 other real LINUX specs (LINUX-71, -127, -160, -162, -180, -181, -183, -55, -355, -389, -453, -656) that are not in the implementer's 30: ok 486s, every test PASS. AC3: BenchmarkAnchoredWrite -count=5 -benchtime=3x head N80/N10 (ns, B, allocs): doc-edit 0.93 / 0.98 / 1.02, anchored comment 0.90 / 1.01 / 1.02, upload 0.88 / 1.02 / 1.03; BenchmarkFindMarks N80/N10 1.15 (150 KB) and 1.10 (400 KB), per-key loop 8.89x and 8.20x. AC4: heap inuse_space at the window's end base 872 / 891 MB, head 904 / 783 MB, inside the base runs' 18 MB spread; the diff adds no field on Service, a room, a replica or liveWrite and no package variable (QuoteFinder and MarkWriter live in one call). Driven independently on the real server: the E2E below. The implementer's conflict-round entry (build, vet, corpus, docs tests at f67fcb42) agrees with these runs."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "AC2a/AC2b/AC2c: anchored rows, their quotes, orphan flags and blocks, the refresh events and their order, and the document versions are the same as before, on a real spec with many anchors, through the surface an agent uses",
+      "surface": "Live Dispatch server (packages/envoy/cmd/dispatch) built at f67fcb4298e9 and at main 5fbd8391, each on a fresh database (Postgres 17.11 + pgvector 0.8.7 on 127.0.0.1:55433) and its own NATS 2.12.1, driven only by the dispatch CLI (DISPATCH_URL=http://127.0.0.1:8767)",
+      "command": "start.sh base1 bin/dispatch-base && python3 e2e.py base1 t640_base1; start.sh head1 bin/dispatch-head && python3 e2e.py head1 t640_head1; python3 compare.py results/base1 results/head1 (scratch scripts under $TMPDIR/t640; 149 KB LINUX-364 spec; 81 open anchored rows: comments, suggestions and asks, overlapping and duplicate quotes, heading, table cell, inline code, emoji, hard break; 10 writes: doc-edit away from the anchors, edit inside a quote, delete a quote, delete the middle of two overlapping quotes, insert, anchored comment, anchored ask, comment on a quote that is not in the document, upload that moves a section and edits, drops and copies anchored text, doc-edit after the upload)",
+      "observed": "11 steps compared, 0 differences: same CLI output, same events in the same order (comment.anchor_refreshed for c02; c20 orphaned; c05, overlap-left, overlap-right; upload orphans c12 and s13), same rows (quote, orphaned, block, state) and same version hashes. Latency at 81 anchors head vs base: doc-edit 0.70 s vs 1.9-2.0 s, anchored comment 0.73 s vs 3.4 s, upload 1.16 s vs 7.2 s",
+      "headSha": "f67fcb4298e9",
+      "negativeControl": "A comment on a quote that is not in the document ('this text is in no document at all') is refused 'target not found; nearest blocks: ...' with the same text on both builds; compare.py found 2 differences on a first run whose upload body still held doc-read's trailer with run-specific ids, which shows the comparison sees a changed version"
+    },
+    {
+      "criterion": "Concurrent writes leave stored anchors equal to what the base's per-row refresh computes",
+      "surface": "The same live head server, then the same database restarted on the base binary",
+      "command": "start.sh conc bin/dispatch-head && python3 e2e.py conc t640_conc && python3 conc.py t640_conc (19 calls at once: 8 anchored comments, 6 doc-edits away from anchors, 4 doc-edits inside anchored quotes, 1 upload); restart.sh conc bin/dispatch-base; dispatch doc-edit (insert at end); count new anchor_refreshed events; restart.sh conc bin/dispatch-head; the same",
+      "observed": "All 19 calls exit 0; the 4 quote edits each refreshed their row (quote now holds CONC). After the restart on the base binary, a doc-edit appended only artifact.version: no anchor_refreshed event, so every anchor the head stored is what base's FindMark per row reads. The same on the head",
+      "headSha": "f67fcb4298e9",
+      "negativeControl": "update comments set anchor = jsonb_set(anchor,'{quote}','\"tampered quote\"') where body='c30', then one doc-edit: the head appended one comment.anchor_refreshed for c30 and restored its 42-character quote"
+    },
+    {
+      "criterion": "AC3: a write's cost no longer grows with the number of open anchored comments (10, 40, 80), on the real server",
+      "surface": "Live Dispatch server at head and at base, fresh databases, dispatch CLI round trip",
+      "command": "start.sh sweephead bin/dispatch-head && python3 sweep.py sweephead; start.sh sweepbase bin/dispatch-base && python3 sweep.py sweepbase (medians of 5 per N: doc-edit away from anchors, anchored comment, upload that changes one word away from anchors)",
+      "observed": "head N=10/40/80: doc-edit 0.687/0.692/0.765 s, anchored comment 0.704/0.715/0.816 s, upload 0.890/0.942/1.051 s (N80/N10 1.11, 1.16, 1.18). base: doc-edit 0.833/1.339/2.147 s, anchored comment 1.006/2.000/3.625 s, upload 1.625/3.937/7.545 s (N80/N10 2.58, 3.60, 4.64)",
+      "headSha": "f67fcb4298e9",
+      "negativeControl": "The base build under the same driver grows 2.6-4.6x from 10 to 80 anchors, so the sweep detects growth"
+    },
+    {
+      "criterion": "FindMarks equals FindMark+MarkAttrs on documents nobody chose",
+      "surface": "pmdoc fuzz target FuzzFindMarks (oracle: unchanged FindMark and MarkAttrs)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run '^$' -fuzz '^FuzzFindMarks$' -fuzztime 6m -parallel 2",
+      "observed": "PASS after 347,648 runs, 171 interesting inputs, no failure",
+      "headSha": "f67fcb4298e9",
+      "negativeControl": "The implementer's recorded mutation (the separator written at an empty marked run that ends a span) fails TestFindMarksMatchesFindMarkOnHandBuiltTrees, the same oracle the fuzz target uses"
+    }
+  ],
+  "ci": "Read on GitHub at f67fcb4298e9 (2026-10-28 ~16:10Z): required checks lint, typecheck, test, pr-title green; dispatch-multiprocess, dispatch-memory, envoy-go-race, envoy-smoke, envoy-e2e-local green. envoy-infra-go red on TestDispatchConnectionsPerPodIsTheServers (expected 84, got 83), a red of main named by the INFRA-512 architect (fixed by #2464). envoy-go red only on cmd/listener TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (503 'role claim view is not complete'), outside this diff; every internal/dispatch package passed in that job and the test passed 30 of 30 locally at this head; reported as dispatch://INFRA-49/ask/371f2e89-5f90-4406-9a08-810819bbce8c, routed by the controller to INFRA-523. dispatch (browser suite) still running at the time of reading.",
+  "testCoverage": "The tests the implementer added catch the ways I tried to break this: FindMarks vs FindMark on hand-built trees, corpus, real-size and fuzzed documents; reused finder and writer vs per-call with bytes-equal CRDT state; yTextRanges vs a frozen copy, refusals included; refresh row order, shared marks, skip across types, orphan and restore transitions; MarkQuote's anchor from the written tree. I found no break that none of them would catch, so I wrote no red test."
+}
