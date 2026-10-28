@@ -17,6 +17,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   block as the provider that served each turn. The rig's Postgres, NATS and judge containers now
   run under CPU and memory limits, and every run and profile probe names its label's pinned omp
   binary by path, so an `omp` wrapper earlier on the caller's PATH never stands in for the pin.
+- The skill-scenario scorer (`score.ts`) reads a `dispatch` call an eval cell makes from Python as a
+  list literal (`subprocess.run(["dispatch", "doc-edit", ...])`) as the command it runs, and the
+  CLI's answer printed after the call's exit code. Such a spec write was invisible to `checked`:
+  a run whose every write came from Python failed with "no spec write", and other runs had writes
+  left out, which made `checked` easier to pass.
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at

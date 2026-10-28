@@ -1595,6 +1595,32 @@ specRun("spec-writing-head-58", {
     finish
   ),
 });
+// A spec write made from Python as a list-literal call, its answer printed after the exit code.
+// The first write is checked; run 91 makes the same write with no check before it.
+const pythonWrite =
+  'import subprocess\nr = subprocess.run(["dispatch", "doc-edit", "--issue", "LWEVAL-7", "--artifact", "spec", "--ops-json-file", "ops.json"], capture_output=True, text=True)\nprint(r.returncode, r.stdout)';
+const pythonApplied = "0 Applied 1 ops (version 2)\nDocument token: sha256:abc\n";
+specRun("spec-writing-head-90", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    evalCell("x20", pythonWrite, pythonApplied),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-91", {
+  transcript: conversation(
+    routedRead,
+    evalCell("x20", pythonWrite, pythonApplied),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
 // counted once, at the command, so the read before it is no read between it and its fix.
@@ -2363,6 +2389,18 @@ test("checked: two spec writes in one call are two writes, the second unchecked"
   expect(row).toContain(
     "  dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file second.json"
   );
+});
+
+test("checked: a spec write made from Python as a list-literal dispatch call is a spec write", () => {
+  // Checked before it: both writes seen, and both checked.
+  expect(scoresOf("spec-writing-head-90")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-90")).toContain(" writes=2 ");
+  // The same write with no check before it: seen, and unchecked.
+  expect(scoresOf("spec-writing-head-91")).toEqual({ ...allPass, checked: "false" });
+  const row = rowOf("spec-writing-head-91");
+  expect(row).toContain(" writes=2 ");
+  expect(row).toContain("unchecked writes: 1 of 2");
+  expect(row).toContain("dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json");
 });
 
 test("refusals: the CLI's ledger holds each refusal, the ones a call's output hides included", () => {

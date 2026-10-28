@@ -1009,6 +1009,36 @@ type ShellCommand =
   | { kind: "closer"; at: number; sep: string }
   | { kind: "other"; at: number; sep: string };
 
+/** An eval cell's code with each Python list-literal `dispatch` invocation, such as
+ * `subprocess.run(["dispatch", "doc-edit", "--issue", "K-1", ...])`, also written out as the
+ * shell command it runs, on a line of its own after the list, so DISPATCH_COMMAND finds it as it
+ * finds a command in a bash call. Each string literal of the list is one shell word; any other
+ * element (a variable, `*args`) is the word `__EXPR__`, so a flag whose value is not a literal
+ * reads as no value the run names. The characters that end a command in COMMAND_REST are dropped
+ * from a word, so a summary holding `)` or `;` does not cut the command short. A call through a
+ * helper of the agent's own (`d("doc-edit", ...)`) is still not seen. */
+function withPythonDispatch(code: string): string {
+  const list = /\[\s*(["'])dispatch\1\s*,([^\]]*)\]/g;
+  let out = "";
+  let last = 0;
+  for (const hit of code.matchAll(list)) {
+    const end = (hit.index ?? 0) + hit[0].length;
+    const words: string[] = [];
+    for (const element of (hit[2] ?? "").split(/,(?=(?:[^"']*["'][^"']*["'])*[^"']*$)/)) {
+      const item = element.trim();
+      if (item === "") continue;
+      const literal = /^(["'])(.*)\1$/s.exec(item);
+      const word = literal ? (literal[2] ?? "").replace(/[\n;&|\x60)]/g, " ").replace(/'/g, "") : "__EXPR__";
+      words.push(/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word}'`);
+    }
+    const [command, ...rest] = words;
+    if (command === undefined) continue;
+    out += `${code.slice(last, end)}\ndispatch ${command} ${rest.join(" ")}\n`;
+    last = end;
+  }
+  return out + code.slice(last);
+}
+
 /**
  * What a tool call did, in order (Operation).
  * - A `task` call does nothing here, and a `read` of a skill:// target or of a file under
@@ -1052,7 +1082,13 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
   }
   const text = outcome?.text ?? "";
   const output = text.replace(/\s*Command exited with code \d+\s*$/, "");
-  const lines = output.split("\n");
+  // An eval cell often prints `r.returncode, r.stdout`, so the CLI's answer follows the exit code
+  // on its line ("0 Applied 1 ops (version 2)"); read it as the answer it is.
+  const lines = output
+    .split("\n")
+    .map((line) =>
+      step.tool === "eval" ? line.replace(/^-?\d+ (?=(?:Applied|Uploaded|Created) )/, "") : line
+    );
   const failed =
     outcome?.failed === true && (step.tool !== "bash" || outcome.exit === 1 || outcome.exit === 2);
   const native = /^dispatch_([a-z_]+)$/.exec(step.tool)?.[1];
@@ -1066,9 +1102,8 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
     const target = new RegExp(SKILL_PATH.source).exec(strings(step.args).join("\n"))?.[0];
     return target === undefined ? [] : [{ kind: "read", step, target }];
   }
-  const source = (step.tool === "bash" ? strings(step.args.command) : strings(step.args)).join(
-    "\n"
-  );
+  const raw = (step.tool === "bash" ? strings(step.args.command) : strings(step.args)).join("\n");
+  const source = step.tool === "eval" ? withPythonDispatch(raw) : raw;
   const { code, bodies } = withoutBodies(source);
   const spans = [...code.matchAll(DISPATCH_COMMAND)].map((hit) => ({
     at: hit.index ?? 0,
@@ -1373,14 +1408,20 @@ function refusalBlocks(
       const call = callOf(op.step);
       return [{ where: op.call.text, text: op.refusal, call, op: place, at: call?.start ?? 0 }];
     }),
-    // An `eval` cell runs `dispatch` through its own language, which no shell parse reads, and Oh
-    // My Pi gives its kernel an environment of allowlisted names alone, with no session id in it,
-    // so the CLI knows no session and logs nothing. Such a cell's refusals are in its output
-    // alone, and each counts once, for the cell.
+    // An `eval` cell runs `dispatch` through its own language, and Oh My Pi gives its kernel an
+    // environment of allowlisted names alone, with no session id in it, so the CLI knows no
+    // session and logs nothing. withPythonDispatch reads a list-literal call as a command, but its
+    // refusal is attributed to that command only when refusalAt finds it; otherwise the cell's
+    // refusals are in its output alone, and each counts once, for the cell.
     ...calls.flatMap((call) => {
       if (call.step.tool !== "eval") return [];
       if (lines.some((entry) => entry.call === call)) return [];
-      if (ops.some((op) => op.kind === "dispatch" && op.step.id === call.step.id)) return [];
+      if (
+        ops.some(
+          (op) => op.kind === "dispatch" && op.step.id === call.step.id && op.refusal !== undefined
+        )
+      )
+        return [];
       return cliRefusals(results.get(call.step.id)?.text ?? "").map((found) => ({
         where: `eval cell ${call.step.id}, which the CLI logged no call of`,
         text: found.line,
