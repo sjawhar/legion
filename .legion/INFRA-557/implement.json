@@ -2,50 +2,66 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-28T19:12:00Z",
-  "round": 5,
+  "completed": "2026-10-29T00:30:00Z",
+  "round": "review round 1",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "256345d7a542da8726a6b8c75f8d9db176631ddf",
-  "answersTest": "a4b72ae31d284ac846eb93e553d912851061a7ba",
+  "codeHead": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
+  "answersReview": "225443a5e8d6311a3a03fa3416c0505112283348",
   "proof": [
     {
-      "criterion": "Tester round-4 failure (architect Q2 as restated 2026-10-28 17:25Z): a SIGKILL with a prompt in flight keeps the session's order and delivers within 15 s; a repeat with the same id is allowed (red row TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s, unchanged from df54bb9a)",
-      "surface": "two real cmd/listener binaries for one machine id against one in-process nats-server 2.10.29; a port session whose first prompt the test holds unanswered when the active pod is SIGKILLed",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=5 -timeout 40m -run '^(TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s|TestTwoPodsPromptWhatAKilledPodOnlyAttempted|TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered|TestTwoPodsSIGKILLHandsOverInOrderWithin15s)$' ./cmd/listener",
-      "observed": "ok 224.543s: all four rows 5 of 5; the in-flight message reached its session first, about 6.2 s after the kill (worker's measured run). Output: https://github.com/sjawhar/legion/pull/2404#issuecomment-6477225696",
-      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
-      "negativeControl": "the red row at 39a73080 (tester): 'ses_mp_midprompt took evt-mp-0002 (published 3ms, prompted 6.19s ...) before evt-mp-0001 (published 0s, prompted 35.008s ...), out of the publish order' in 2 of 2; pod-b logged 'listener delivery deferred to another pod's attempt'"
+      "criterion": "Review finding 1: under the grant this PR renders, a pod holds the lease and delivers; envoy_listener writes are scoped to the machine's own keys",
+      "surface": "real cmd/listener binaries as NATS nkey users holding exactly core.ListenerPermissions (fixture checked byte for byte in infra/core), in-process nats-server; and a real nats-server 2.10.29 process whose only user holds that grant",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; go test -run 'Grant' ./cmd/listener/; bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head r6-term TERM / r6-kill KILL",
+      "observed": "26 rows PASS (ok 536.707s); grant tests pass; smoke SIGTERM 40/40 in order (last 3.64 s), SIGKILL 40/40 in order (last 5.35 s), 0 permission violations. https://github.com/sjawhar/legion/pull/2404#issuecomment-6483359326",
+      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
+      "negativeControl": "fix reverted: 'grant_test.go:35: the listener never became healthy and active ... Permissions Violation for Publish to \"$JS.API.DIRECT.GET.KV_envoy_listener\"'; old grant: 'box-a's user wrote lease.listener-box-b'"
     },
     {
-      "criterion": "All earlier rows still hold",
-      "surface": "real cmd/listener binaries per row against one in-process nats-server, relays that cut, freeze or slow links",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged go test -count=1 -timeout 20m (four Postgres-backed TestDispatch* skipped) ./cmd/listener/",
-      "observed": "24 rows PASS, ok 510.508s; untagged ok 561.902s; internal/dedupe and internal/integration ok; race on lease/ledger tests ok",
-      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
-      "negativeControl": "round-3 red row at 2e592cc8 out of publish order (3 of 3); first 20 rows FAIL on base 819dc283"
+      "criterion": "Review finding 2: a pod's own attempted record never acks a message it did not prompt (failed Clear, lost Create reply)",
+      "surface": "internal/dedupe KV ledger against in-process NATS with fault-injecting KV; cmd/listener delivery handler with a Delete-failing ledger",
+      "command": "cd packages/envoy && go test -count=1 ./internal/dedupe/... && go test -count=1 -run 'Ledger|Redelivery|Duplicate|Unplaceable|Attempt' ./cmd/listener/",
+      "observed": "ok; TestARedeliveryAfterAFailedPromptWhoseClearFailedPromptsTheSession passes; lost-create and failed-clear retries answer Proceed",
+      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
+      "negativeControl": "before the fix: 'kv_test.go:174: Attempt(\"publish.abc\", \"ses_target\") = in_flight, want proceed'"
     },
     {
-      "criterion": "SIGKILL take-over on real binaries keeps every message once and in order",
-      "surface": "two listener processes built at the head against a real nats-server 2.10.29 process, a port session on a local HTTP server, 40 sends through the standby, the active pod SIGKILLed after the 15th",
-      "command": "for i in 1..9: bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head kill5-$i KILL",
-      "observed": "9 of 9 runs: count 40, unique 40, in send order, the last message 4.87-6.13 s after the signal; no pod logged a deferral",
-      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
-      "negativeControl": "the tester's smoke.sh SIGKILL run at 39a73080: 'count: 39', m15 missing at the 25 s deadline, pod-b logged the deferral for m15"
+      "criterion": "Review finding 3: a message in a NAK delay does not hold the settle hold to its cap; graceful within 10 s, hard within 15 s",
+      "surface": "two real listener binaries under the rendered grant, one session whose prompts fail (30 s retry outstanding) during SIGTERM and SIGKILL",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -run '^(TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s|TestTwoPodsSIGKILLWithARetryOutstandingHandsOverInOrderWithin15s)$' ./cmd/listener",
+      "observed": "both rows pass (in the full run 9.87 s and 15.56 s row times); hold caps 7 s after an expired or stale-binding take-over, 3 s after a graceful hand-back, counted from the subscribe",
+      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
+      "negativeControl": "before the fix: 'pod-b delivered \"fresh\" 12.965s after it subscribed, want the fresh message once the 7s cap ended the hold'"
+    },
+    {
+      "criterion": "Review finding 4: a holder stuck preparing its durable alarms and gives the lease up",
+      "surface": "two in-process receivers, one whose NATS user is denied CONSUMER.INFO",
+      "command": "cd packages/envoy && go test -count=1 -run 'CannotPrepare' ./cmd/listener/",
+      "observed": "ERROR 'lease holder cannot deliver from the durable' with reason; the lease passes to the other pod, which delivers; a sole pod takes it back and retries; a pod without a lease answers 503 past the bound",
+      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
+      "negativeControl": "before the fix: 'receive_test.go:1266: timed out waiting for pod-stuck's /healthz to report its failing durable' (only the WARN 'durable consumer read failed; retrying')"
+    },
+    {
+      "criterion": "Review finding 5: the unplaceable deferral expiry covers how long a redelivery can wait in the local queue",
+      "surface": "cmd/listener unplaceable deferral bounds",
+      "command": "cd packages/envoy && go test -count=1 -run 'Unplaceable' ./cmd/listener/",
+      "observed": "TestUnplaceableRetryWindowFitsTheBoundsItDependsOn passes with the fixed 125 s expiry",
+      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
+      "negativeControl": "before the fix: 'a deferral slot expires after 17s, no later than the 51s a deferred message can legitimately stay pending'"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/lease.go: former_boots in the lease record (boots that held it before the current holder, kept 70 s, at most 16), FormerHolder(boot)",
-    "packages/envoy/internal/dedupe/kv.go: KVConfig.GoneBoot; a young attempt by a gone boot is taken over at once",
-    "packages/envoy/cmd/listener/main.go: the ledger's GoneBoot is the lease's FormerHolder",
-    "packages/envoy/cmd/listener/lease_test.go, internal/dedupe/kv_test.go: former_boots and gone-boot tests",
-    "packages/envoy/cmd/listener/multiprocess_test.go: this branch's own TestTwoPodsPromptWhatAKilledPodOnlyAttempted asserted the old deferral; it now asserts the take-over (once, within the 15 s hard bound, no deferral). The tester's red row is unchanged.",
-    "packages/envoy/cmd/listener/README.md and the pr2404 ledger fragment: the deferral names the two cases"
+    "28d478d5: lease.go and session/registry.go read back by key; infra/core/permissions.go per-machine envoy_listener write scope, tests and gcp goldens; internal/testnats grant fixtures and StartGranted; multiprocess and twobuild harness under the rendered grant; cmd/listener/grant_test.go; bus key-name constants",
+    "18779a03: internal/dedupe own-attempt holds (kv.go, memory.go, Ledger.Keep), delivery.go keepAttempt, ledger tests",
+    "21a1dd2b: receive.go per-case settle caps, catcher re-NAKs repeats, mid-hold stop marks stale_binding; lease.go HandedBack; two new multiprocess rows; receive tests",
+    "d19302d3: receive.go failure timing, alarm and lease give-up (lease.GiveUp), /healthz degraded/unhealthy; unplaceableDeferralExpiry 125 s; metricfilters description; tests",
+    "README, AGENTS.md (only the affected lines), infra docs, pr2404 changie fragments"
   ],
   "trickyParts": [
-    "A pod that lost the lease but kept running (a partition) is a former holder too; its role- or live-lane attempts are then taken over at once rather than deferred, which follows the architect's rule (only a pod that still holds or renews a lease defers)."
+    "Fixes run on the grants already deployed (Get by key is granted; the bare DIRECT.GET subject is not), so no hub grant change is needed for them to work; the scoped write grant tightens what is granted."
   ],
   "deviations": [
-    "Round 3 deviations stand."
+    "Finding 2: a prompt still running holds its attempt as in flight for TakeoverAfter (35 s), not only unknown outcomes, so a duplicate during a running prompt is not prompted twice.",
+    "Finding 4: a pod does not re-take the record it gave up for two standby polls; a sole pod then retries."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
