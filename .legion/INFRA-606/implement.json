@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-27T17:27:30Z",
+  "completed": "2026-10-28T10:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -68,6 +68,30 @@
       "observed": "rig: 233 events read from the baseline; the rig session's comment on LGA-31 and its project document artifact.created (issue_key null) are both flagged, exit 1. clean: 1,101 events, control true, no rig event, exit 0.",
       "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
       "negativeControl": "norout (a Dispatch answering 404 on the log route): 'production Dispatch could not be read for the audit', exit 1. Round 1's head: the tester's audit.sh flags only the comment and lets the artifact.created pass."
+    },
+    {
+      "criterion": "Mention delivery off the request path is not lost under a rolling update (review finding 2): attempts the old process refuses after its Lifetime ends, or leaves queued, are sent once by another process.",
+      "surface": "Two real envoy-dispatch processes on one Postgres (cmd/dispatch real-process harness), a fake Envoy listener that records each handover",
+      "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'Rolling|SIGKILL|SIGTERM' -count=1 -v (TestARollingUpdatesSuccessorHandsEachMentionTheOldProcessLeftOnce, TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaimLapses)",
+      "observed": "Rolling update: the old process logs 'comment mention not sent: the mention sender has stopped' for the comment committing during its HTTP drain; each (comment, session) is handed over once, the last 1m27.7s after the old process exited (bound 60 s lease + 30 s pass + margin). SIGKILL: last resend 1m3.8s after the kill, each recipient handed each comment once.",
+      "headSha": "12aada04cc8c3eeeb75f1a61091140bfc398f3b9",
+      "negativeControl": "TestABusySendersPassesDoNotQueueItsOwnUnstartedSendsAgain fails with each attempt sent twice when the held-set check and the SQL exclusion are disabled (checked by the worker, then restored); a pass leaves an attempt younger than a lease alone (TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains asserts it stays unclaimed until aged)."
+    },
+    {
+      "criterion": "An unanswered session:<id> mention does not wake its session twice (review finding 1).",
+      "surface": "POST /api/v1/issues/{key}/comments through the API handler, a fake listener holding the session's lookup past 250 ms, and the real outbox publishing comment.created",
+      "command": "go test ./internal/dispatch/api/ -run 'TestAnUnanswered|TestARoute' -count=1 -v",
+      "observed": "Reply mentioning session:s1 in s1's thread: suppressed_authors == [\"s1\"], one listener send to s1, s1's agent topic not among the outbox destinations. Route session:s1 whose own lookup is held, role:reviewer resolving to s1: route suppressed for s1, one send.",
+      "headSha": "12aada04cc8c3eeeb75f1a61091140bfc398f3b9",
+      "negativeControl": "TestAnUnansweredRoleMentionHeldByTheRootAuthorLeavesTwoCopies: an unanswered role:reviewer held by the root author still gets the author copy on s1's topic (the remaining duplicate, documented)."
+    },
+    {
+      "criterion": "The Stage 3 audit keeps working against a production Dispatch from before GET /api/v1/events/log (review finding 3).",
+      "surface": "production_dispatch_audit (scripts/e2e/lib/operator-dispatch.sh) against a fake production Dispatch serving the log route, answering it 404 with a full SSE replay, or answering 500",
+      "command": "run.sh {new,old,broken} {clean,rig}; raw output in dispatch://INFRA-606/artifact/infra606-round3-proofs-tar-gz",
+      "observed": "new clean exit 0 (5 events), new rig exit 1 (artifact.created with no issue flagged); old: prints 'production Dispatch has no GET /api/v1/events/log ...; reading its event stream since 99 instead', clean exit 0, rig exit 1 with the same event flagged.",
+      "headSha": "12aada04cc8c3eeeb75f1a61091140bfc398f3b9",
+      "negativeControl": "broken (500): 'production Dispatch could not be read for the audit', exit 1."
     }
   ],
   "filesChanged": [
@@ -77,8 +101,10 @@
     "packages/dispatch/AGENTS.md",
     "packages/dispatch/e2e/api.ts",
     "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
     "packages/envoy/cmd/dispatch/AGENTS.md",
     "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/cmd/dispatch/shutdown_mentions_test.go",
     "packages/envoy/cmd/dispatch/shutdown_test.go",
     "packages/envoy/cmd/listener/dispatch_resolution_test.go",
     "packages/envoy/internal/dispatch/api/agent_stream.go",
@@ -101,7 +127,9 @@
     "packages/envoy/internal/dispatch/api/delivery_live_hub_freshness.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_view.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_worker.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_socket_test.go",
     "packages/envoy/internal/dispatch/api/envoy_resolve.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
@@ -141,14 +169,18 @@
     "X-Dispatch-Event-Replay: complete is set by this PR server-side (INFRA-492's client reads it); INFRA-492's architect was told the rule over Envoy.",
     "No partial index for the recovery pass's comment_deliveries query: it runs once per process start (and after a queue overflow drains); a new migration would collide with main's numbering.",
     "New read route GET /api/v1/events/log (not in the plan): the only way the Stage 3 audit can read events that belong to no issue once the stream's replay is bounded.",
-    "Recovery of attempts a killed process held: one extra pass when the newest such claim lapses (architect's ruling; plan Decision 8 dropped this). Order across a crash is not kept: the resumed comment can reach its recipient after later ones."
+    "Mention recovery is one periodic stranded pass per process (start + every 30 s) over attempts at least a claim lease old, replacing the start pass, the lapse timer and the drain-triggered pass; the lease-age rule keeps a pass from taking a live process's queue out of order, at the cost of up to a lease of extra latency for a stopped process's leftovers.",
+    "The Stage 3 audit falls back to the event-stream replay when production answers the log route 404 (warn-first), per the architect's ruling on review finding 3.",
+    "Reviewer's fast-follow done in this round (architect's ruling): hub generations own their views and conns (nine currency guards gone), deliveryHub.feed removed, the relay and the log route share readEventsAfterID, signal(q.wake), mention process tests moved to shutdown_mentions_test.go."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves cannot run on this pod's Postgres (byte-order collation only; the pgserver build has no ICU); CI runs it.",
     "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change.",
-    "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle."
+    "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
+    "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 2,
-  "answersTest": "e51834f2a28ef3a6a8e160e7a3ae19ac1eb613de"
+  "round": 3,
+  "answersTest": "e51834f2a28ef3a6a8e160e7a3ae19ac1eb613de",
+  "answersReview": "536f7f68068042a30ebe7f2719df0f98e1f75ab7"
 }
