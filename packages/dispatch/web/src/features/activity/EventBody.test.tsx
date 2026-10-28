@@ -100,3 +100,53 @@ test("EventBody shows the answer a change replaced, struck through", async () =>
     view.unmount();
   }
 });
+
+// An ask.answered event written before answers stored an empty list holds null where the
+// contract says a list; the body reads it as no option chosen rather than throwing.
+test("EventBody reads a null selected list on an answer and its previous answer as empty", async () => {
+  const stored: Extract<Event, { type: "ask.answered" }> = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-11T00:00:00Z",
+    id: 4,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      answer: {
+        at: "2026-09-11T00:00:00Z",
+        selected: null as unknown as string[],
+        text: "Hold it.",
+        user: "alice",
+      },
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      previous_answer: {
+        at: "2026-09-10T12:00:00Z",
+        selected: null as unknown as string[],
+        text: "Go now.",
+        user: "alice",
+      },
+      question: "Publish?",
+      state: "answered",
+      urgency: "med",
+    },
+    seq: 4,
+    type: "ask.answered",
+  };
+  const view = render(<EventBody event={stored} />);
+
+  try {
+    const was = await screen.findByText("was: Go now.");
+    expect(was.closest("s")).not.toBeNull();
+    expect(screen.getByText("Hold it.")).not.toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
