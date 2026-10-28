@@ -10327,6 +10327,328 @@
     "rendered_by_milkdown": "Unclosed fences ending in a blank line, in a quote or a typed block, before the block after it.\n\n:::callout{#b1 kind=\"note\" title=\"T\"}\n> *\n>   ```\n>   ```\n:::\n\n[^n1]: \n\nNext.\n\n:::callout{#b2 kind=\"note\" title=\"T\"}\n> *\n>   ```\n>   ```\n:::\n\n* b\n\nNext.\n\n> *\n>   ```\n>   ```\n\n[^n2]: \n\nNext.\n\n:::callout{#b3 kind=\"note\" title=\"T\"}\n*\n  ```\n\n\n  ```\n:::\n\npara\n\nNext.\n\n:::callout{#b4 kind=\"note\" title=\"T\"}\n*\n  *\n    ```\n\n\n    ```\n:::\n\npara\n\nNext.\n\n> *\n>   ```\n>\n>\n>   ```\n\n[^n3]: \n\nNext.\n\n> *\n>   ```\n>   ```\n\npara\n\nNext.\n\n:::callout{#b5 kind=\"note\" title=\"T\"}\n*\n  ```\n  ```\n:::\n\npara\n\nNext.\n\n:::callout{#b6 kind=\"note\" title=\"T\"}\n*\n  ```\n\n\n  ```\n:::\n\n* b\n"
   },
   {
+    "name": "fenced-code-whitespace-lines-short-of-the-fence-indent",
+    "markdown": "Fenced code whose opening fence stands past its container's content drops a whitespace-only line holding fewer columns than that past what its containers eat, and keeps what a line of as many columns or more holds past them; a fence at its container's content keeps the whole line.\n\nA line short of the fence's indentation, the code's last:\n\n  ~~~\n \n  ~~~\n\nBefore a line of code:\n\n  ~~~\n \nx\n  ~~~\n\nIn a callout:\n\n:::callout{}\n  ~~~\n \n  x\n  ~~~\n:::\n\nIn a quote:\n\n>   ~~~\n>  \n>   x\n>   ~~~\n\nA fence at the line's start keeps the line:\n\n~~~\n \nx\n~~~\n\nA line past the fence's indentation:\n\n  ~~~\n   \nx\n  ~~~\n\nA fence at the quote's content:\n\n> ~~~\n>  \n> x\n> ~~~\n\nA fence at the item's content:\n\n-   ~~~\n   \n    x\n    ~~~\n\nA fence past a footnote definition's label:\n\nx[^f]\n\n[^f]:   ~~~\n     \n      x\n      ~~~\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Fenced code whose opening fence stands past its container's content drops a whitespace-only line holding fewer columns than that past what its containers eat, and keeps what a line of as many columns or more holds past them; a fence at its container's content keeps the whole line."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A line short of the fence's indentation, the code's last:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000003"
+          }
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Before a line of code:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "\nx"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "In a callout:"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "",
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000008"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "\nx"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "In a quote:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "\nx"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A fence at the line's start keeps the line:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": " \nx"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A line past the fence's indentation:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": " \nx"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A fence at the quote's content:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000018"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": " \nx"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000019"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A fence at the item's content:"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000021"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000022"
+                  }
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000023"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "\nx"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A fence past a footnote definition's label:"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000025"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "f"
+              }
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "f",
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000027"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "     \n  x"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AWUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQGZAkZlbmNlZCBjb2RlIHdob3NlIG9wZW5pbmcgZmVuY2Ugc3RhbmRzIHBhc3QgaXRzIGNvbnRhaW5lcidzIGNvbnRlbnQgZHJvcHMgYSB3aGl0ZXNwYWNlLW9ubHkgbGluZSBob2xkaW5nIGZld2VyIGNvbHVtbnMgdGhhbiB0aGF0IHBhc3Qgd2hhdCBpdHMgY29udGFpbmVycyBlYXQsIGFuZCBrZWVwcyB3aGF0IGEgbGluZSBvZiBhcyBtYW55IGNvbHVtbnMgb3IgbW9yZSBob2xkcyBwYXN0IHRoZW07IGEgZmVuY2UgYXQgaXRzIGNvbnRhaW5lcidzIGNvbnRlbnQga2VlcHMgdGhlIHdob2xlIGxpbmUuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAZwCBgQAAZ0COUEgbGluZSBzaG9ydCBvZiB0aGUgZmVuY2UncyBpbmRlbnRhdGlvbiwgdGhlIGNvZGUncyBsYXN0OigAAZwCB2Jsb2NrSWQBdwhiLTAwMDAwMocBnAIDCmNvZGVfYmxvY2soAAHYAgdibG9ja0lkAXcIYi0wMDAwMDOHAdgCAwlwYXJhZ3JhcGgHAAHaAgYEAAHbAhZCZWZvcmUgYSBsaW5lIG9mIGNvZGU6KAAB2gIHYmxvY2tJZAF3CGItMDAwMDA0hwHaAgMKY29kZV9ibG9jawcAAfMCBgQAAfQCAgp4KAAB8wIHYmxvY2tJZAF3CGItMDAwMDA1hwHzAgMJcGFyYWdyYXBoBwAB+AIGBAAB+QINSW4gYSBjYWxsb3V0OigAAfgCB2Jsb2NrSWQBdwhiLTAwMDAwNocB+AIDB2NhbGxvdXQHAAGIAwMKY29kZV9ibG9jawcAAYkDBgQAAYoDAgp4KAABiQMHYmxvY2tJZAF3CGItMDAwMDA4KAABiAMEa2luZAF3BG5vdGUoAAGIAwV0aXRsZQF3ACgAAYgDB2Jsb2NrSWQBdwhiLTAwMDAwN4cBiAMDCXBhcmFncmFwaAcAAZEDBgQAAZIDC0luIGEgcXVvdGU6KAABkQMHYmxvY2tJZAF3CGItMDAwMDA5hwGRAwMKYmxvY2txdW90ZQcAAZ8DAwpjb2RlX2Jsb2NrBwABoAMGBAABoQMCCngoAAGgAwdibG9ja0lkAXcIYi0wMDAwMTEoAAGfAwdibG9ja0lkAXcIYi0wMDAwMTCHAZ8DAwlwYXJhZ3JhcGgHAAGmAwYEAAGnAytBIGZlbmNlIGF0IHRoZSBsaW5lJ3Mgc3RhcnQga2VlcHMgdGhlIGxpbmU6KAABpgMHYmxvY2tJZAF3CGItMDAwMDEyhwGmAwMKY29kZV9ibG9jawcAAdQDBgQAAdUDAyAKeCgAAdQDB2Jsb2NrSWQBdwhiLTAwMDAxM4cB1AMDCXBhcmFncmFwaAcAAdoDBgQAAdsDJEEgbGluZSBwYXN0IHRoZSBmZW5jZSdzIGluZGVudGF0aW9uOigAAdoDB2Jsb2NrSWQBdwhiLTAwMDAxNIcB2gMDCmNvZGVfYmxvY2sHAAGBBAYEAAGCBAMgCngoAAGBBAdibG9ja0lkAXcIYi0wMDAwMTWHAYEEAwlwYXJhZ3JhcGgHAAGHBAYEAAGIBB9BIGZlbmNlIGF0IHRoZSBxdW90ZSdzIGNvbnRlbnQ6KAABhwQHYmxvY2tJZAF3CGItMDAwMDE2hwGHBAMKYmxvY2txdW90ZQcAAakEAwpjb2RlX2Jsb2NrBwABqgQGBAABqwQDIAp4KAABqgQHYmxvY2tJZAF3CGItMDAwMDE4KAABqQQHYmxvY2tJZAF3CGItMDAwMDE3hwGpBAMJcGFyYWdyYXBoBwABsQQGBAABsgQeQSBmZW5jZSBhdCB0aGUgaXRlbSdzIGNvbnRlbnQ6KAABsQQHYmxvY2tJZAF3CGItMDAwMDE5hwGxBAMLYnVsbGV0X2xpc3QHAAHSBAMJbGlzdF9pdGVtBwAB0wQDCXBhcmFncmFwaCgAAdQEB2Jsb2NrSWQBdwhiLTAwMDAyMocB1AQDCmNvZGVfYmxvY2sHAAHWBAYEAAHXBAIKeCgAAdYEB2Jsb2NrSWQBdwhiLTAwMDAyMygAAdMEBWxhYmVsAXcD4oCiKAAB0wQIbGlzdFR5cGUBdwZidWxsZXQoAAHTBAZzcHJlYWQBeSgAAdMEB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAdIEBnNwcmVhZAF5KAAB0gQHYmxvY2tJZAF3CGItMDAwMDIwhwHSBAMJcGFyYWdyYXBoBwAB4QQGBAAB4gQrQSBmZW5jZSBwYXN0IGEgZm9vdG5vdGUgZGVmaW5pdGlvbidzIGxhYmVsOigAAeEEB2Jsb2NrSWQBdwhiLTAwMDAyNIcB4QQDCXBhcmFncmFwaAcAAY8FBgQAAZAFAXiHAZAFAxJmb290bm90ZV9yZWZlcmVuY2UoAAGSBQVsYWJlbAF3AWYoAAGPBQdibG9ja0lkAXcIYi0wMDAwMjWHAY8FAxNmb290bm90ZV9kZWZpbml0aW9uBwABlQUDCmNvZGVfYmxvY2sHAAGWBQYEAAGXBQkgICAgIAogIHgoAAGWBQdibG9ja0lkAXcIYi0wMDAwMjcoAAGVBQVsYWJlbAF3AWYoAAGVBQdibG9ja0lkAXcIYi0wMDAwMjYA",
+    "rendered_by_milkdown": "Fenced code whose opening fence stands past its container's content drops a whitespace-only line holding fewer columns than that past what its containers eat, and keeps what a line of as many columns or more holds past them; a fence at its container's content keeps the whole line.\n\nA line short of the fence's indentation, the code's last:\n\n```\n```\n\nBefore a line of code:\n\n```\n\nx\n```\n\nIn a callout:\n\n:::callout{#b-000007 kind=\"note\" title}\n```\n\nx\n```\n:::\n\nIn a quote:\n\n> ```\n>\n> x\n> ```\n\nA fence at the line's start keeps the line:\n\n```\n \nx\n```\n\nA line past the fence's indentation:\n\n```\n \nx\n```\n\nA fence at the quote's content:\n\n> ```\n>  \n> x\n> ```\n\nA fence at the item's content:\n\n*\n  ```\n\n  x\n  ```\n\nA fence past a footnote definition's label:\n\nx[^f]\n\n[^f]: ```\n         \n      x\n    ```\n"
+  },
+  {
     "name": "footnote-block-indents",
     "markdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: - a\n      ```\n      x\n      ```\n\n[^3]: - a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n\nA definition[^bl] whose code holds only blank lines:\n\n[^bl]: a\n\n    ```\n\n\n    ```\n\nAnd one[^bm] whose code opens with one:\n\n[^bm]: a\n\n    ```\n\n    c\n    ```\n\nIn a quote, a definition[^bq] whose code holds a blank line:\n\n> [^bq]: ```\n>     c\n>\n>     d\n>     ```\n\nAnd one[^br] in a quoted list item:\n\n> - a\n>   [^br]: ```\n>       c\n>\n>       d\n>       ```\n\nAnd one[^bs] whose blank code line holds spaces:\n\n> [^bs]: ```\n>     c\n>    \n>     d\n>     ```\n",
     "pm_json": {

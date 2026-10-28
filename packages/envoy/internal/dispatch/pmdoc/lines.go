@@ -363,16 +363,48 @@ func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser
 
 // fenceClosure is goldmark's fenced code parser recording on a block whether a closing fence closed
 // it (fenceClosedAttr), which the browser editor's parser reads its trailing blank line by
-// (fencedCodeText).
+// (fencedCodeText), and reading a whitespace-only line as that parser does: it takes up to as many
+// columns from each line of the code as the opening fence stands past its container's content, so
+// a whitespace-only line holding fewer is an empty line of the code. Goldmark keeps all such a line
+// holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`.
 type fenceClosure struct{ parser.BlockParser }
 
-var fenceClosedAttr = []byte("pmdoc-fence-closed")
+var (
+	fenceClosedAttr = []byte("pmdoc-fence-closed")
+	// fenceIndentAttr is how many columns a fenced code block's opening fence stands past its
+	// container's content, as goldmark measures them (fenceClosure.Open).
+	fenceIndentAttr = []byte("pmdoc-fence-indent")
+)
+
+func (p fenceClosure) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	indent := pc.BlockOffset()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil {
+		node.SetAttribute(fenceIndentAttr, indent)
+	}
+	return node, state
+}
 
 func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	line, segment := reader.PeekLine()
+	offset := reader.LineOffset()
 	state := p.BlockParser.Continue(node, reader, pc)
 	if state == parser.Close {
 		node.SetAttribute(fenceClosedAttr, true)
+		return state
 	}
+	indent, _ := node.Attribute(fenceIndentAttr)
+	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); !util.IsBlank(line) || position >= 0 {
+		return state
+	}
+	// Goldmark appended the whole line; the code's line is empty but for its line feed.
+	start := segment.Stop
+	if start > segment.Start && reader.Source()[start-1] == '\n' {
+		start--
+	}
+	empty := gmtext.NewSegment(start, segment.Stop)
+	empty.ForceNewline = true
+	node.Lines().Set(node.Lines().Len()-1, empty)
 	return state
 }
 
