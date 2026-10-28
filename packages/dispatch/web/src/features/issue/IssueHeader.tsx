@@ -67,7 +67,7 @@ import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { RepoControl } from "./RepoControl";
-import { UnreachableRouteMarker } from "./RouteReach";
+import { RouteReachUnknownMarker, UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 import type { IssuePriorityWrite } from "./useIssuePriority";
@@ -479,13 +479,7 @@ export function IssueHeader({
             <>
               <UnreachableRouteMarker issue={issue} showRoute />
               {issue.route !== null && issue.route_status === "unknown" ? (
-                <span
-                  className={`shrink-0 text-xs ${textMutedOnSurface}`}
-                  data-testid="issue-route-unknown"
-                  title="The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
-                >
-                  Route reach unknown
-                </span>
+                <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
               ) : null}
             </>
           ) : null}

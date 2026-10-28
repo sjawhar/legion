@@ -900,7 +900,16 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
       ...openIssueAsk,
       priority: issue.priority,
       snoozed_until: null,
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1");
