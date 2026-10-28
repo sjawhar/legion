@@ -1152,15 +1152,15 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
-  # Production Dispatch runs Postgres 16 until dispatch://INFRA-572's apply moves it to 18, so
-  # until then Dispatch's Go suite also runs here on the pgvector-on-16 image production's database
-  # matches; dispatch://INFRA-573 deletes this job then. The packages are Dispatch's server, its
+  # Production Dispatch runs Postgres 16 until its Cloud SQL instance moves to 18, so until then
+  # Dispatch's Go suite also runs here on the pgvector-on-16 image production's database matches;
+  # delete this job once production runs Postgres 18. The packages are Dispatch's server, its
   # internal packages and the migrations. Their NATS runs in the test process (internal/testnats);
   # the one container they start is internal/dispatch/files' S3 server, tests3.Image, pulled first
   # for the reason .github/actions/pull-test-images gives. pmdoc's tests shell out to the generated
   # TypeScript fixtures, so Bun is set up as in envoy-go.
   dispatch-go-postgres-16:
-    name: Dispatch Go suite on production's Postgres 16 (until INFRA-572)
+    name: Dispatch Go suite on production's Postgres 16 (until production runs Postgres 18)
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
@@ -1445,16 +1445,16 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
 
-  # Production's Cloud SQL instance runs Postgres 16 until dispatch://INFRA-572's apply moves it to
-  # 18, and it also holds the secrets broker's database, so until then the broker's Go suite also
-  # runs here on the pgvector-on-16 image production's database matches; dispatch://INFRA-573
-  # deletes this job then. The packages are every one whose tests reach BROKER_TEST_DATABASE_URL
+  # Production's Cloud SQL instance runs Postgres 16 until it moves to 18, and it also holds the
+  # secrets broker's database, so until then the broker's Go suite also runs here on the
+  # pgvector-on-16 image production's database matches; delete this job once production runs
+  # Postgres 18. The packages are every one whose tests reach BROKER_TEST_DATABASE_URL
   # (through storetest, the rig, or the variable itself) but internal/dispatch/api, which
   # dispatch-go-postgres-16 runs: the broker binary, the agent-secrets CLI and its dev relay, and
   # the broker's internal tree. Then the two-process tests, as broker-multiprocess runs them. None
   # starts a container or runs Bun, so the job sets up Go alone, as broker-multiprocess does.
   broker-go-postgres-16:
-    name: Broker Go suite on production's Postgres 16 (until INFRA-572)
+    name: Broker Go suite on production's Postgres 16 (until production runs Postgres 18)
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04

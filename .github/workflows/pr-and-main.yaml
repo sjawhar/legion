@@ -458,14 +458,14 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
-  # Production's Cloud SQL instance runs Postgres 16 until dispatch://INFRA-572's apply moves it to
-  # 18, and it also holds the Legion daemon's databases, so until then the daemon's Go suite also
-  # runs here on the pgvector-on-16 image production's database matches; dispatch://INFRA-573
-  # deletes this job then. Not a required check. Its steps are the ones the test job's "Test the Go
+  # Production's Cloud SQL instance runs Postgres 16 until it moves to 18, and it also holds the
+  # Legion daemon's databases, so until then the daemon's Go suite also runs here on the
+  # pgvector-on-16 image production's database matches; delete this job once production runs
+  # Postgres 18. Not a required check. Its steps are the ones the test job's "Test the Go
   # daemon" step needs, copied from that job: Bun and the workspace (the plugin-pack and pi-legion
   # transition-table tests run bun), Go, tmux, jj, Oh My Pi, uv, the NATS images and user namespaces.
   daemon-go-postgres-16:
-    name: Daemon Go suite on production's Postgres 16 (until INFRA-572)
+    name: Daemon Go suite on production's Postgres 16 (until production runs Postgres 18)
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     services:
