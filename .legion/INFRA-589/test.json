@@ -2,60 +2,65 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T12:00:00Z",
-  "round": 6,
-  "headTested": "0ad55022016a6eca87857f78b9d37dd06ae8a704 (code head d32d754f, the forward merge of main; meta.json build_commit 0ad55022, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120). I reseeded with the merged build: stack.sh seed --force, migration 134, 1,043 s. box_busy_before was 1.1-3.7%. The stack is stopped; the seed is kept.",
-  "rebaseRecheck": "Unchanged-diff fingerprint 1e673f40 -> d32d754f: 4d6cb22956731f04b09bf349b53bb0638582f381b9be08a7f10b55ed78df85c9 -> 07cabb65e96b47f28252e2a8f4cf77361d83cd9209e5fcfdc8da7e448c2d7fad, changed. A diff of the two branch diffs shows one difference: the packages/envoy/CHANGELOG.md entry moved into packages/envoy/.changes/unreleased/pr2369-Added-20261028-102101.yaml, main's changie format. No code line differs. Because the fingerprint changed, and the merge brought main's Dispatch (migrations 0130-0134, all plain SQL in one migration transaction), which the harness builds and measures, I ran a full real-surface round, not only the bare gates.",
+  "completed": "2026-10-28T13:35:00Z",
+  "round": 7,
+  "headTested": "945d99405cdbb1813991459bdded807435b52ac2 (code head 5edd1f88; meta.json build_commit 945d9940, build_dirty false)",
+  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120). The seed is at migration 134, this build's level, so I did not reseed. box_busy_before was 0.7-1.4%. The stack is stopped.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I confirmed MERGEABLE, recomputed both fingerprints and diffed the two branch diffs: the only difference is the changelog fragment, as the implementer reported. I re-ran its smoke step after reseeding at the merged build, then the rest of A1-A6, the stack-exit failure, the unread-commit fix, the run lock and the negative controls."
+    "how": "I drove the round-3 review fixes live. Two waiters at once on a hidden holder: neither named the other. A record from another PID namespace whose pid runs here: refused as not visible. A foreign run with a random password in the userinfo of all six URLs plus both real tokens: no secret in any of its files. NATS killed mid-step: rates come from the reads that worked, and failed reads are counted. I re-ran smoke, 1x, routes-alt, a 60 s series and the negative controls. The round-4 red test now lives in tables_test.go with its three assertions unchanged and new ones added. run-step.test.sh changed only in a comment that dropped an issue key. Both moves were what the reviewer asked for."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "Text this branch adds outside .legion/ carries no Dispatch issue key, because the squash merge puts it on main (INFRA-514 architect's ruling from the controller: dispatch://INFRA-589/comment/97c87173-c8c1-4150-a2e2-32c210b081b1, dispatch://INFRA-589/comment/f739a13e-098d-4f25-b53f-dfec5e9796cd, and the architect's Envoy message of 12:49:48Z for this round). The changelog fragment's file name and Issue field carry the pull request number (pr2369), never a key. A template placeholder such as '{key_ref}: dispatch://<key>' is code syntax and stays.",
+      "evidence": "cd \"$LEGION_WORKSPACE\" && grep -rnE 'INFRA-[0-9]+|\\bLINUX\\b' packages/envoy/loadtest packages/envoy/.changes/unreleased/ finds 19 lines at head 945d9940. (1) packages/envoy/.changes/unreleased/INFRA-589-load-test-harness.yaml: the file name, and line 5 'Issue: INFRA-589'. Round 6 had it as pr2369-Added-20261028-102101.yaml; commit 5edd1f88 renamed it to the key. It must be pr2369-*, with Issue: pr2369, made with `go run github.com/miniscruff/changie@v1.26.0 new --custom Issue=pr2369`. (2) packages/envoy/loadtest/README.md, 14 lines: 8, 10, 11, 13, 417, 438, 474, 499, 714, 815, 873, 885, 888, 890 (dispatch:// links to INFRA-514, -512, -589, -324, -591, -598, and INFRA-<n> names). Its line 458, '`{key_ref}`: `dispatch://<key>`', is the placeholder and stays. (3) packages/envoy/loadtest/common.test.sh:7 'INFRA-589 review of PR #2369'. (4) packages/envoy/loadtest/events.go:46 and :50 ('INFRA-512 report', 'INFRA-512's counts for LINUX'; LINUX is a Dispatch project key). (5) packages/envoy/loadtest/routes-2026-10-26-1719Z.txt:4 'dispatch://INFRA-324/comment/...'; its line 15 placeholder 'dispatch://<key>' stays. No commit subject since the 10:13Z ruling carries a key (36f305c0, d32d754f, 5edd1f88). No red test in the suite: the repository's test rules exclude tests of document wording, and the deployment instructions forbid checks of committed text. The next round's check is the same grep, expecting no match (the placeholder lines hold no key)."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "Tester round-5 failure: the head merges with main and its own diff is unchanged in code",
-      "surface": "GitHub pull request #2369; jj fingerprint per skill legion-worker/references/conflicts-and-rewrites.md",
-      "command": "gh pr view 2369 -R sjawhar/legion --json mergeable,mergeStateStatus; the unchanged-diff fingerprint at 1e673f40 and d32d754f; diff of the two fingerprinted branch diffs",
-      "observed": "MERGEABLE (merge state BLOCKED, awaiting review and checks); fingerprint 4d6cb229... -> 07cabb65...; the only difference is CHANGELOG.md's entry replaced by .changes/unreleased/pr2369-Added-20261028-102101.yaml. CI at d32d754f when read: changes, lint, typecheck and pr-title success; test in progress; envoy-go, envoy-e2e-local and envoy-smoke queued. CI steps for run-step.test.sh and common.test.sh are still in envoy-and-contracts.yaml after the merge (lines 1118, 1121)",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "at the previous head bdc451d3 GitHub reported CONFLICTING and ran no checks at all"
+      "criterion": "Review round 3, findings 1 and 2: a waiter never names another waiter as the holder; a record from another PID namespace whose pid runs here is refused as not visible, not as that local pid",
+      "surface": "common.sh lock_root, as run-step.sh, run-series.sh and stack.sh call it, on a scratch root",
+      "command": "a helper holds <root>/.run.lock on fd 8 with a record 'pid=999999 pidns=pid:[4026539999]'; two lock_root callers start at once; then a record naming this shell's live pid with a foreign pidns, lock held; then the same after the helper ends",
+      "observed": "both waiters exit 1 with 'is locked by a process that is not visible in this PID namespace ... the lock file names that run as pid=999999 in PID namespace pid:[4026539999] ... Do not remove .../.run.lock'; neither refusal names the other waiter (0 matches for either caller's command). The foreign-pidns record with a live local pid: exit 1, refused as not visible, naming the record's pid only as 'in PID namespace pid:[4026539999]'. After the helper ended, the next caller took the lock",
+      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
+      "negativeControl": "with the lock no longer held, the stale record does not block: lock_root takes the lock"
     },
     {
-      "criterion": "A1/A3 on the merged build: seed through Dispatch, five kinds, N sessions, delivery from arrival and from commit",
+      "criterion": "Review round 3, finding 4: no step file or output holds a URL password or a token",
+      "surface": "stack.sh loadgen run -allow-foreign and loadgen tables on the real stack",
+      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign with 'u:<random pw>@' in -url, -listener, -nats, -nats-mon, -pprof and 'postgres:<pw>@' in -pg, the stack's real -token and --listener-token=, -name foreign-pw ...; loadgen tables; grep -caF the password and both tokens over every step file, stdout, stderr and the tables output; then -pg with user nouser and the password",
+      "observed": "foreign-pw rc 0; 0 of 18 files hold any of the three secrets; meta.json args '-token=<redacted>', '-listener-token=<redacted>', '-url=http://u@127.0.0.1:28777', '-pg=postgres://postgres@127.0.0.1:25432/dispatch?sslmode=disable'; 25 of 31 writes committed, 6 non-2xx (the -url userinfo goes out as Basic auth on person writes, counted as non-2xx). foreign-badpg rc 1: 'the run's commit rows were not read ... failed to connect to `user=nouser database=dispatch` ...', with no password in its output or files",
+      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
+      "negativeControl": "-allow-foreign -url $DISPATCH_URL -listener $ENVOY_URL (production, the party the guard must refuse) with the stack's tokens: rc 1, 'answered 401', events max id 10004 before and after"
+    },
+    {
+      "criterion": "Review round 3, finding 3: no NATS rate comes from a failed read",
+      "surface": "run-step.sh on the real stack",
+      "command": "run-step.sh nats-killed-r7 --events 1 --sessions 20 --requests 5 --duration 60s; kill -KILL <stack.json pids.nats> 50 s into the window",
+      "observed": "EXIT=1 'nats (pid 56195) exited during the step ...'; resources.nats_in_msgs_per_s 4.95 and nats_out_msgs_per_s 8.15 (positive, from the reads that worked), nats_read_errors 8; row 'nats-killed-r7 (nats exited)'; README states that no column shows the NATS reads",
+      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
+      "negativeControl": "smoke-r7 and step-1x-r7: nats_read_errors 0, in/out 10.5/22.1 and 17.9/38.8 msgs/s; every series step nats_read_errors 0"
+    },
+    {
+      "criterion": "A1/A3 and A4 at this head",
       "surface": "packages/envoy/loadtest CLI",
-      "command": "stack.sh setup && stack.sh start && stack.sh seed --force; run-step.sh smoke-r6 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20",
-      "observed": "seed migration 134, 1,043 s, 4 projects / 1,000 issues / 8,000 comments / 10,004 events; smoke-r6 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, 50 registered, delivery p50/p99 from arrival 379/1,560 ms, from commit 33/423, clock_anomalies 0, commits_error null, all read-error counts 0, 179 SSE frames, no mark in TABLES.md",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "--event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1; route mix POST on line 3 -> 'line 3: method \"POST\" is refused', exit 1; events max id 10004 before and after"
+      "command": "run-step.sh smoke-r7 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; run-step.sh step-1x-r7 --events 4 --sessions 400 --requests 60",
+      "observed": "smoke-r7 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34, receipts 865/865, delivery p50/p99 from arrival 398/2,278 ms, from commit 37/497, clock_anomalies 0, all read-error counts 0, no mark. step-1x-r7 exit 0: lock held 100%, waiters p50 45, 1.80 of 3.99 events/s, 1,620/1,620 receipts",
+      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
+      "negativeControl": "route mix POST on line 3 -> refused naming line 3, exit 1; --event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1"
     },
     {
-      "criterion": "A4 on the merged build: the 1x step reproduces the first knee",
-      "surface": "same",
-      "command": "run-step.sh step-1x-r6 --events 4 --sessions 400 --requests 60; run-step.sh step-1x-report-mix-r6 ... --event-mix report-2026-10-27; the series' step-1x",
-      "observed": "step-1x-r6: lock held 100%, waiters p50 45, 1.29 of 3.99 events/s, receipts 1,165/1,165; series 1x: held 100%, waiters 43, 1.19; report mix: held 100%, waiters 48, 2.90 of 3.83 (root report step-1x 2.89 of 4.12)",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "the series' step-0.25x: lock held 8.7%, waiters p50 0, 0.98 of 0.98 committed"
-    },
-    {
-      "criterion": "Earlier fixes on the merged build: a stack exit fails the step, unread commit rows are marked, one run per root, the guard refuses production",
-      "surface": "same",
-      "command": "run-step.sh killed-r6 ... with kill -KILL <pids.dispatch> 45 s into the window, and run-step.sh conc-r6 during it; stack.sh loadgen run -allow-foreign with every flag for the local stack and -pg .../postgres (no trigger); stack.sh loadgen run -allow-foreign with -url $DISPATCH_URL -listener $ENVOY_URL and the stack's tokens",
-      "observed": "killed-r6 EXIT=1 'dispatch (pid 32578) exited during the step ...', row '(dispatch exited)'; conc-r6 refused 'in use by another run (pid 32126 ...: bash packages/envoy/loadtest/run-step.sh killed-r6 ...)'; foreign-notrigger rc=1, rows '(commit rows not read)' with '1.00 / 1.03 / -' and '(- / n)'; production run rc=1 'guard: dispatch check failed ... answered 401'; no token in any step file or output",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "production Dispatch, the party the guard must refuse: refused with 401 before any write; -url $DISPATCH_URL without -allow-foreign refused before any connection"
-    },
-    {
-      "criterion": "A2, A5, A6 on the merged build",
+      "criterion": "A2, A5, A6 at this head",
       "surface": "same; README.md",
-      "command": "run-series.sh; run-step.sh routes-alt-r6 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series, smoke-r6 and foreign-notrigger TABLES.md searched in backticks in README.md",
-      "observed": "series-20261028T112009Z exit 0, one build line, all six steps build 0ad55022, each with summary.json, TABLES.md, cpu.pprof, heap.pprof, 8 tables, lock held 9%, 31%, 100%, 94%, 0%, 69%, no commits_error, no stack exit; routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0; 47 headers, 0 missing",
-      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
-      "negativeControl": "run-step.sh during a running step refused (conc-r6, above)"
+      "command": "run-series.sh --duration 60s; run-step.sh routes-alt-r7 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series and smoke-r7 TABLES.md searched in backticks in README.md",
+      "observed": "series-20261028T131020Z exit 0, six steps on build 945d9940, each with summary.json, TABLES.md, cpu.pprof, heap.pprof, 8 tables, 1x held 100% at 2.05 events/s, no commits_error, nats_read_errors 0; routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0; 47 headers, 0 missing",
+      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
+      "negativeControl": "the series' step-0.25x: 0.67 of 0.67 events/s committed at the 60 s window, lock held 25%"
     }
   ],
   "observations": [
-    "1x committed on the merged build: 1.29 and 1.19 events/s, lock held 100%; within the spread of earlier rounds (0.23-1.95)."
+    "CI at code head 5edd1f88 when read: changes, lint, typecheck success; test in progress; pr-title queued; envoy-go, envoy-e2e-local, envoy-smoke queued. GitHub reports MERGEABLE at 945d9940.",
+    "The lock refusal's prefix is the calling script's name (common.sh die uses ${0##*/}), so my scratch harness's bash -c callers read 'bash:'. run-step.sh, run-series.sh and stack.sh name themselves."
   ]
 }
