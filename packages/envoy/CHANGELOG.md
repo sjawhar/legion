@@ -885,6 +885,13 @@
 
 ### Changed
 
+- A cold read of a Dispatch document now encodes the token representation of its tree once, into
+  one buffer held for that call alone, and takes the document's token and every block's token from
+  that one encoding, where it encoded each block again apart (a nested block once per enclosing
+  block) and then the whole tree once more. It lists the blocks inside each table without
+  measuring every node's position, and reads a mark's name from its Y.Text key without a regular
+  expression. Tokens, block lists, markdown and responses are byte for byte unchanged, errors
+  included.
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
