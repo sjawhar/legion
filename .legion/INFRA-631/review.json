@@ -2,47 +2,47 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T10:57:15Z",
-  "round": 1,
-  "headReviewed": "the handoff commit this file is pushed in (code head 7a05e75c, merge of main aeeee6c0)",
+  "completed": "2026-10-28T11:55:57Z",
+  "round": 2,
+  "headReviewed": "the handoff commit this file is pushed in (code head 74b63566, merge of main 0a921021)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 3,
   "minor": 1,
+  "roundOneFindings": "fixed: the quoted-attribute, setext and front matter reproductions of round 1 are left as they are at this head (re-run); recipe step 4 covers a refused --write and step 7 a heading R1; both E2E lines link their runs",
   "verified": [
-    "restructure.ts --strict on main aeeee6c0's two files: exit 0, byte-identical to the head guides",
-    "bun scripts/semantic-line-breaks.ts on both guides: exit 0; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 23 pass, 0 fail",
-    "required checks (rulesets): lint, typecheck, test, pr-title; CI head d7e9799c, compare to 6d73808a handoffs only; every required check still queued at 10:56Z (runners), not read green",
-    "0 review threads on the pull request"
+    "restructure.ts --strict on main 0a921021's two files: exit 0, byte-identical to the head guides",
+    "checker exit 0 on both guides; bun test of the two test files: 30 pass, 0 fail",
+    "required checks (rulesets: lint, typecheck, test, pr-title) at CI head 74b63566 all queued at 11:43Z (105 runs queued repository-wide); compare 74b63566...fbc585b0 is .legion/ only"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:515",
-      "description": "htmlEnd ends a tag at the first '>' and ignores quoted attribute values, so --write cuts and joins inside an inline tag (`<abbr title=\"a>b. Second…\">` is cut after 'b.'; `title=\"x>y\\nz\"` is joined to 'x>y z'), exit 0; the render guard folds whitespace in inline html values (:796), so it lets the write through. Reproduced. Fix: skip quoted attribute values in htmlEnd; compare inline html values exactly in renderedForm; add a unit test."
+      "file": "scripts/semantic-line-breaks.ts:549",
+      "description": "htmlEnd now treats any '<' plus letter as an open tag and jumps quoted values, so it masks text micromark does not read as a tag. 'See <K, V=\"x > `code\" > here \\nand` then more.' is joined, exit 0: the inline code value changes from 'here \\nand' (two spaces rendered) to 'here and'. 'See <K, V=\"x > <code>a\" > here \\nand</code> then more.' loses a line break inside <code>, which round 5 keeps because GitHub shows it. Fix: accept only a CommonMark open tag (tag name [A-Za-z][A-Za-z0-9-]*, then its attribute grammar)."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:262",
-      "description": "A multi-line setext heading is re-laid out as a paragraph (`Setup. Then run\\nthe tool\\n===` becomes `Setup.\\nThen run the tool`, exit 0); check mode reports R1 on it; the guard folds heading text. Where the soft break falls in a heading changes its GitHub anchor slug [INFERENCE from GitHub's slug rule that drops non-word characters]. Fix: leave a paragraph that ends at a setext underline as it is, in check and --write."
+      "file": "scripts/semantic-line-breaks.ts:845",
+      "description": "The guard folds whitespace in inlineCode values, so any mask misread inside a code span is written with exit 0: 'See [a](b `c d) e \\nf` g.' (destinationEnd) is joined to 'e f'. Compare inlineCode values exactly, as round 6 did for inline html; relayout never changes masked text, so no false refusal."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:314",
-      "description": "Two front matter definitions disagree: scanBlocks accepts only an exact '---' opener and closes on '---' or '...'; CLOSED_FRONT_MATTER (:88) allows trailing whitespace and closes only on '---'. A file opening '--- ' gets R1 findings inside its YAML and --write refuses the whole file (exit 2, 'a yaml became a yaml'), leaving its body's R1 unfixable by the recipe. Fix: one definition."
+      "file": "scripts/semantic-line-breaks.ts:747",
+      "description": "Round 8's idempotence rule covers a tag alone on its line but not the other whole-line block starts in CONTINUATION_BLOCK_START (:81, '[-=*_|: \\t]+$'): 'Intro text\\n:\\nmore text' becomes 'Intro text\\n: more text' on the first --write and 'Intro text : more text' on the second, exit 0 both. One predicate for lines that only stand alone (task box, tag line, whole-line underline/rule/delimiter) on the previous line, named in joinParagraph's doc."
     },
     {
       "severity": "minor",
-      "file": "PR body, 'Moving an open pull request onto the new layout'",
-      "description": "Step 4 has no instruction for restructure.ts --lenient stopping because the checker's --write exits 2 on ours.md (restructure.ts:1084-1090), and step 7 none for an R1 finding in a heading, which --write never fixes. The E2E lines carry no link to their runs (pr-body.md: each E2E line carries a link)."
+      "file": "scripts/semantic-line-breaks.ts:256",
+      "description": "frontMatterEnd's doc says the compared text is the same on both sides for a block '...' closes; with a later '---' line micromark reads the body as YAML and --write refuses ('a yaml became a yaml'). Refusal is safe; the comment is false. Correct it, or pick the parser from the one reading's closer."
     }
   ],
   "notRequested": [
-    "Code-quality pass: the hand-written block scanner (scanBlocks and its regexes, about 310 lines) duplicates micromark, which --write already loads; replacing it with mdast positions is a redesign that makes check mode need bun install, against the architect's round-4 'narrow' decision, so it is the architect's call, not a finding of this round.",
-    "R1 heuristics: no sentence start at '(' or a single '*'/'_', and no 'a.m.'/'p.m.'/'Inc.'/'St.' abbreviations. Minor: check mode is advisory (not in CI), sentence detection is heuristic by design (round 2 narrowed lowercase starts to avoid false splits), and the tester's independent scanner, which does start sentences at '(', finds no two-sentence line in either guide."
+    "File over 1000 lines (code quality): no repository rule; a module split changes no behaviour.",
+    "CRLF input gets mixed line endings: renders the same, no tracked .md file holds a CR, and the whitespace-only guarantee holds."
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 6d73808a (1 Medium: the htmlEnd finding; 4 Minor)",
-    "codeQuality": "Verdict: CHANGES at 6d73808a (two block parsers; two front matter definitions)"
+    "deepReview": "Verdict: CHANGES at fbc585b0 (1 Medium: htmlEnd plus inlineCode fold; 3 Minor)",
+    "codeQuality": "Verdict: CHANGES at fbc585b0 (idempotence predicate; front matter mode flag; file length)"
   }
 }
