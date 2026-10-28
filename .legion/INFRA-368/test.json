@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T16:05:00Z",
-  "headTested": "d5f7c7647910e7968aaa3df7b72e4dec197bb77a",
-  "codeHead": "32c9b9ac14e5",
-  "round": "4: after review round 2. Since my round-3 head 2bc6a743 the only file outside .legion/ that changed is packages/envoy/cmd/dispatch/README.md: two lines now give migrations 0136-0138 and the triggers of 0137 and 0138. The code is the code I tested in round 3, so the round-3 proof below still holds. I re-ran the bare gates only: CI read at the new head, and a smoke run of the driver on a harness built from this head.",
+  "completed": "2026-10-28T16:40:00Z",
+  "headTested": "c6d37c0ea2823a23de30fa8b3c4d968a6f3aa91b",
+  "codeHead": "c64a30a2b7d9",
+  "round": "5: after review round 3. 188066ab restored packages/claude-envoy/dist to main's copy. The forward merge c64a30a2 then brought in main 8b4a862b (#2423, which takes check-dist out of pull requests). The diff fingerprint (fork_point..head, excluding .legion and docs/solutions) is dd98e6f7636a0874 at my round-4 code head 32c9b9ac and fefd6bc71ad399c4 at c64a30a2. Leaving packages/claude-envoy/dist out as well, the fingerprint at 32c9b9ac is also fefd6bc71ad399c4. So the pull request's own diff is unchanged except that the generated dist files are gone; no Dispatch surface runs them, since the driver's CLI is envoy-client/bin/dispatch.ts. I re-ran the bare gates: CI read at the new head, and a smoke run on a harness built from the merged head.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 4: `jj diff --from 2bc6a743 --to 32c9b9ac --name-only` lists only packages/envoy/cmd/dispatch/README.md and two .legion handoffs. The README now names 0136-0138 at lines 1335 and 1361, matching lines 1073-1102. Smoke: a harness built from this head (fresh dispatch_tester, 127.0.0.1:8877) ran `env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh`: exit 0, 133 PASS. Round 3's verification is as follows. Rebuilt my harness from this head on a fresh database (dispatch_tester recreated after the renumber; bun run dispatch:local, Postgres 17, server 127.0.0.1:8877). Re-ran the implementer's commands: block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/references.e2e.ts e2e/block-references.e2e.ts e2e/deep-links.e2e.ts e2e/hover-preview.e2e.ts` gave 52 passed and 4 skipped, the same as the implementer's count. The review fixes hold over HTTP (third proof entry)."
+    "how": "Round 5 smoke on a fresh dispatch_tester, with a harness built from c64a30a2 (main 8b4a862b merged in; migrations 0135_server_processes then 0136-0138): `env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh` exit 0, 133 PASS; `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts -g 'passage'` 3 passed. Round 3's full verification is as follows. Rebuilt my harness from this head on a fresh database (dispatch_tester recreated after the renumber; bun run dispatch:local, Postgres 17, server 127.0.0.1:8877). Re-ran the implementer's commands: block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/references.e2e.ts e2e/block-references.e2e.ts e2e/deep-links.e2e.ts e2e/hover-preview.e2e.ts` gave 52 passed and 4 skipped, the same as the implementer's count. The review fixes hold over HTTP (third proof entry)."
   },
   "failures": [],
   "failed": 0,
@@ -50,5 +50,5 @@
     "A database that already ran this branch's old numbering (0135_item_blocks to 0137) cannot take the renumbered head. The head reads 135-137 as applied and fails on 0138 with 'trigger messages_item_blocks_owed already exists'. I saw this on my own pre-renumber dispatch_tester. Only branch-built databases are exposed: deploys come only from main, which never carried the old numbers. So I recreated my databases rather than recording a failure.",
     "#2394 (also restating graph_edges) is still open, so the architect's 'migrate a database that main migrated, after the first merge' check was run against main's own new 0135_server_processes: the first proof entry."
   ],
-  "ci": "At head d5f7c764 GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. 32c9b9ac shows no runs. I did not wait for CI."
+  "ci": "At code head c64a30a2 GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. c6d37c0e is a handoff-only commit carrying skip-checks. I did not wait for CI."
 }
