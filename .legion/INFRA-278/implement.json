@@ -2,24 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-28T09:51:59Z",
+  "completed": "2026-10-28T09:59:05Z",
   "generation": 3,
-  "round": 8,
-  "scope": "The architect's decision after retro: one sentence in packages/envoy/AGENTS.md:2621-2625 now names the follower route as the exception to 'only through a subscription'. Nothing else changed. The retro's docs/solutions commit 4eb64228 stays.",
+  "round": 9,
+  "answersReview": "review round 8 (5680791549), thread PRRT_kwDORFy7ds6xEQCc, replied to and resolved",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "0e96c0ff",
+  "headSha": "c597c144",
   "proof": [
     {
-      "criterion": "The claimant paragraph of packages/envoy/AGENTS.md matches publishFollowerRoutes",
+      "criterion": "The follower exception in packages/envoy/AGENTS.md matches publishFollowerRoutes",
       "surface": "repository text against packages/envoy/internal/dispatch/outbox/publisher.go",
-      "command": "sed -n 2617,2627p packages/envoy/AGENTS.md; sed -n '/^func publishFollowerRoutes/,/^}/p' packages/envoy/internal/dispatch/outbox/publisher.go",
-      "observed": "The sentence now ends '…takes no route copy either, except that a claimant following the ask gets either's non-quiet `ask.edited` and an agent's reply in that ask as a follower (`publishFollowerRoutes` runs outside the `notify` gate).' publishFollowerRoutes takes a non-quiet ask.edited and comment.* with an ask_id from any actor but the follower itself, and no Notify check guards it in publishDestinations",
-      "headSha": "0e96c0ff",
-      "negativeControl": "At 5b013cb9 the sentence said an agent's events reach a claimant 'only through that subscription'. The tester's live case agent-ask-reply-reaches-asker (generation 3 round 3) disproves that: an agent's ask reply reached a follower with no subscription"
+      "command": "sed -n 2621,2629p packages/envoy/AGENTS.md; sed -n '/^func publishFollowerRoutes/,/^}/p' packages/envoy/internal/dispatch/outbox/publisher.go",
+      "observed": "The sentence now reads '…except that a claimant following the ask gets, as a follower, every event on that ask but its own and a quiet `ask.edited`: an agent's or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs outside the `notify` gate).' That is the reviewer's text word for word. publishFollowerRoutes routes ask.answered, ask.handed_back, ask.resolved, a non-quiet ask.edited, and comment.created/edited/resolved/reopened carrying an ask_id, and skips only the actor and a delivered mention; the paragraph's next sentence states the mention rule",
+      "headSha": "c597c144",
+      "negativeControl": "At 0e96c0ff the exception named only a non-quiet ask.edited and an agent's reply, and left out an agent's answer, hand-back and resolution of the ask (review 5680791549)"
     }
   ],
   "filesChanged": [
-    "0e96c0ff: packages/envoy/AGENTS.md (one sentence)"
+    "c597c144: packages/envoy/AGENTS.md (the one sentence)"
   ],
   "deviations": [],
   "openQuestions": []
