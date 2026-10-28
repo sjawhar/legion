@@ -2,34 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-148",
-  "completed": "2026-10-28T13:15:53Z",
-  "round": 6,
+  "completed": "2026-10-28T14:35:06Z",
+  "round": 7,
   "decision": "approved",
-  "reviewedCodeHead": "42fc570285fd7c6e783ab30f177ac23c5f261f11",
-  "scope": "As the architect narrowed it: the strict carry rule with the failure line when envoy.json cannot be read (each with a test), the timing-file write inside the try, and the required checks; plus the merge of main 5c38603c.",
+  "reviewedCodeHead": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
+  "scope": "What changed since the round-6 approval at 62c29c73: the test-only commit 7cb6847c (the two test minors) and the merge of main 6d96a55f.",
   "critical": 0,
   "important": 0,
-  "minor": 2,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/session_answers_test.go:565",
-      "description": "Acceptance note: after the merge the test comment keeps an old paragraph that contradicts the new one, the test name no longer says what it checks (a mention-delivered reply in an ask's thread), and no test covers the S1+S3 'listed once' merge for one comment id."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/claude-envoy/tests/answers-hook.test.ts:498",
-      "description": "Acceptance note: when the hook printed, `expect(dispatch.requests.length).toBe(... dispatch.requests.length)` compares a value with itself; only the `<= 1` line asserts."
+      "file": "packages/envoy/internal/dispatch/api/session_answers_test.go:618",
+      "description": "Acceptance note: the new test simulates a mention retry by flipping the one delivery row from failed to sent, where a real retry adds a second sent attempt row; the list query only asks whether a sent row exists, so the coverage holds."
     }
   ],
   "verified": [
-    "session-hook.ts:337 carries a refresher outcome only when its targeted URL strictly equals the URL envoy.json names to the hook; :370 starts no refresher when envoy.json names none, so readSessionAnswers carries the failure line naming envoy.json's error.",
-    "The timing-file write is in try/catch (:424-428).",
-    "answers-hook.test.ts: 16 pass in 3 of 3 runs here; the implementer reports both new tests fail with the round-5 rule.",
-    "Merge 5c38603c: the PR's own diff before and after differs only in five files, all following main's new mention rule (attempt.leftToMention); migrations stay 0135-0137 after main's 0134.",
-    "Required checks at 42fc5702: lint, typecheck, test, pr-title all success."
+    "TestSessionAnswersListsACommentBothTheRouteAndAMentionHoldOnce puts one comment in both the route source and the mention source and asserts one item as a mention; removing sessionanswers.go's `group by id` would make it fail (Total = 2).",
+    "answers-hook.test.ts:499-500 now asserts the request count in both branches; 16 pass here.",
+    "Merge 6d96a55f: the PR's own diff before (0a921021..7cb6847c) and after (5fbd8391..6d96a55f) is identical in every file; no conflicts; main's changes in shared files (ask resolution kind `withdrawn`, exported transientStatus) touch nothing the PR depends on; migrations 0135-0137 follow main's 0134.",
+    "Required checks at d52a5e7f: lint, typecheck, test, pr-title all success."
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head 42fc5702; the compare to dc5e2afe is .legion/ only. All four completed success at 13:14Z.",
-  "thermonuclear": "deep-review: APPROVE. code-quality: APPROVE (test-only minors). Both at dc5e2afe.",
-  "threads": "All 17 review threads carry my answer; I accept every one (PRRT_kwDORFy7ds6wzvwa and PRRT_kwDORFy7ds6xF_EE answered this round). All are resolved."
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head d52a5e7f; the compare to c1832496 is .legion/ only. All four completed success at 14:34Z. The two failures the controller named as main's (a dispatch e2e test and an envoy-infra gcp test) are not required checks and are not this PR's.",
+  "thermonuclear": "deep-review: APPROVE. code-quality: APPROVE. Both at c1832496.",
+  "threads": "17 review threads, all carrying my answer, all accepted and resolved; no new thread since round 6."
 }
