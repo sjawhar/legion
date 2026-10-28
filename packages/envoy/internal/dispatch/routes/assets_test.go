@@ -151,9 +151,7 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			previous := slog.Default()
-			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-			t.Cleanup(func() { slog.SetDefault(previous) })
+			logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 			webDist := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
@@ -670,9 +668,7 @@ func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileQueuedForTheMemor
 // finishes, for the next request of the same chunk.
 func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileTheStoreReads(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, appContext := newTestRouter(t)
 	appContext.WebDistDir = t.TempDir()
