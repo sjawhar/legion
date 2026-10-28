@@ -20,8 +20,8 @@ import (
 // in place, and a peer can have written the same attributes into the room first, so the repair
 // writes nothing into the room. The version still holds the repaired block, with the answered
 // state, and its indexed blocks are the room's: reusing the rendering made before the repair would
-// version the block as still open and index the open block's text (INFRA-647). An answer
-// that selects nothing is versioned as the room holds it, an empty list.
+// version the block as still open and index the open block's text. An answer that selects
+// nothing is versioned as the room holds it, an empty list.
 func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -85,7 +85,7 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 // nothing into the room, and the tree it reconciles and versions is still the stamp's, not the
 // read. The version holds the ids the room's document holds, rendered and indexed: reusing the
 // rendering of the read would index no row for the appended paragraph, and version and index the
-// pasted callout under the id of the callout it copies (INFRA-647).
+// pasted callout under the id of the callout it copies.
 func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
