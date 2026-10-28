@@ -2,98 +2,95 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-522",
-  "completed": "2026-10-27T14:05:00Z",
+  "completed": "2026-10-28T09:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2297",
-  "codeHead": "0fb74300a550c1a6176fb00189066b362df1f07d",
+  "codeHead": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+  "round": 2,
+  "answersReview": "review.json at 6594d338 (round 1 at 0fb74300): 5 threads, each replied 'Fixed in 98a887683c00f8ca4de2d514d285e518479a3e3b' and resolved",
   "proof": [
     {
       "criterion": "A1a each platform builds on its own native runner, no QEMU",
       "surface": "GitHub Actions workflow_dispatch of release-envoy-listener.yaml on legion/INFRA-522",
-      "command": "gh run view 40468746977 -R sjawhar/legion --json jobs; gh api --allow-escape-sequences repos/sjawhar/legion/actions/jobs/<122130972102|122130971998>/logs | grep -E 'Image: ubuntu|Architecture|qemu'",
-      "observed": "docker (amd64) on Image: ubuntu-24.04 (x86_64) success 3.58 min; docker (arm64) on Image: ubuntu-24.04-arm (aarch64) success 2.57 min; 0 'qemu' lines in either log; no setup-qemu step",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "the superseded run 40428007482's arm64 log has one 'binfmt' hit, the Dockerfile's apt package binfmt-support, not a QEMU setup; main's pre-change runs carry the docker/setup-qemu-action step this change deletes"
+      "command": "gh run view 40546893651 -R sjawhar/legion --json jobs; gh api --allow-escape-sequences repos/sjawhar/legion/actions/jobs/<122445529645|122445529524>/logs | grep -E 'Image: ubuntu|qemu'",
+      "observed": "docker (amd64) on Image: ubuntu-24.04 success 4.32 min; docker (arm64) on Image: ubuntu-24.04-arm success 4.23 min; 0 'qemu' lines in either log",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "main's pre-change runs carry the docker/setup-qemu-action step this change deletes; the workflow at 99da66ef has no setup-qemu step"
     },
     {
       "criterion": "A1b a manifest list joins them and names linux/amd64 and linux/arm64",
       "surface": "GHCR registry API (anonymous pull token) and image_index's imagetools inspect log",
-      "command": "bash $TMPDIR/infra522/verify.sh 0fb74300a550c1a6176fb00189066b362df1f07d 0fb74300a550c1a6176fb00189066b362df1f07d (curl ghcr token; GET /v2/sjawhar/legion/envoy/manifests/<sha> with OCI index Accept; jq platforms and attestation-manifest entries)",
-      "observed": "OCI image index sha256:79b5d2ce25914b9f43c60ec361ddff6313a3ffaca7da3d476bbbec97b190e49e (sha256 of the bytes equals image_index's pushed digest and attest's subject); platforms [amd64, arm64]; 2 attestation-manifest entries referencing sha256:52f0189c… (amd64) and sha256:34275b97… (arm64)",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "image_index refuses any digest file name that is not 64 lower-case hex characters, and any count other than 2, before it reaches imagetools (script in the workflow); the per-leg push carries no tag, so envoy:<sha> exists only once image_index ran"
+      "command": "bash $TMPDIR/infra522/verify.sh 99da66ef96ec62dad048bb47aee0bf7597b4c353 99da66ef96ec62dad048bb47aee0bf7597b4c353 (ghcr token; GET /v2/sjawhar/legion/envoy/manifests/<sha> with the OCI index Accept header; jq platforms and attestation-manifest entries)",
+      "observed": "OCI image index sha256:acd203bce1a99b00a9882e5138333d69a53fe4bac2cb91b3179e93bbabbd55c5 (sha256 of the bytes equals image_index's pushed digest and attest's subject); platforms [amd64, arm64]; 2 attestation-manifest entries referencing sha256:0e53c75c… (amd64) and sha256:276a0e68… (arm64)",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "image_index refuses any digest file name that is not 64 lower-case hex characters, and any count other than 2, before imagetools runs; the per-leg push has no tag, so envoy:<sha> exists only once image_index ran"
     },
     {
       "criterion": "A1c BuildKit provenance still covers both platforms",
       "surface": "GHCR registry API",
       "command": "verify.sh: for each attestation manifest, GET its application/vnd.in-toto+json layer blob, jq '[.. | objects | .\"vcs:revision\"? // empty]'",
-      "observed": "attestation for amd64: vcs:revision=0fb74300a550c1a6176fb00189066b362df1f07d MATCH; attestation for arm64: vcs:revision=0fb74300a550c1a6176fb00189066b362df1f07d MATCH",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "the same script against the superseded run's index sha256:5030486e… reports vcs:revision=57fff226…, so it reports the revision each run built, not a constant"
+      "observed": "attestation for arm64: vcs:revision=99da66ef96ec62dad048bb47aee0bf7597b4c353 MATCH; attestation for amd64: vcs:revision=99da66ef96ec62dad048bb47aee0bf7597b4c353 MATCH",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "the same script on round 1's index sha256:79b5d2ce… reports 0fb74300…, so it reports each run's own revision"
     },
     {
       "criterion": "A1d GitHub attestation still covers the index",
       "surface": "gh attestation verify against the published index",
-      "command": "gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:79b5d2ce25914b9f43c60ec361ddff6313a3ffaca7da3d476bbbec97b190e49e --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/legion/INFRA-522 --source-ref refs/heads/legion/INFRA-522 --deny-self-hosted-runners --format json",
-      "observed": "exit 0; subject ghcr.io/sjawhar/legion/envoy sha256:79b5d2ce…; SAN …release-envoy-listener.yaml@refs/heads/legion/INFRA-522; sourceRepositoryDigest 0fb74300…; runner github-hosted",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "command": "gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:acd203bce1a99b00a9882e5138333d69a53fe4bac2cb91b3179e93bbabbd55c5 --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/legion/INFRA-522 --source-ref refs/heads/legion/INFRA-522 --deny-self-hosted-runners --format json",
+      "observed": "exit 0; subject sha256:acd203bc…; SAN …release-envoy-listener.yaml@refs/heads/legion/INFRA-522; sourceRepositoryDigest 99da66ef…; runner github-hosted",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
       "negativeControl": "same command with --cert-identity …@refs/heads/main --source-ref refs/heads/main: exit 1, 'Error: verifying with issuer \"sigstore.dev\"'"
     },
     {
       "criterion": "A1e the consumers' reads still hold",
       "surface": "GHCR registry API",
       "command": "verify.sh: linux/amd64 child manifest -> config blob -> .config.Labels[\"org.opencontainers.image.revision\"]",
-      "observed": "amd64 revision label: 0fb74300a550c1a6176fb00189066b362df1f07d MATCH",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "the superseded index sha256:5030486e… returns 57fff226…, not the final head"
+      "observed": "amd64 revision label: 99da66ef96ec62dad048bb47aee0bf7597b4c353 MATCH",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "round 1's index sha256:79b5d2ce… returns 0fb74300…, not this head"
     },
     {
-      "criterion": "Build cache: registry cache per leg, written only on main, no buildkit entry in the Actions cache; time with hit and miss",
-      "surface": "GitHub Actions dispatch runs and their logs",
-      "command": "gh api --allow-escape-sequences repos/sjawhar/legion/actions/jobs/<id>/logs | grep -E 'importing cache manifest|configure registry cache importer|exporting cache|CACHED' for runs 40468746977 (final, hit) and 40453177184 (temporary branch-write head 17fa916a, miss)",
-      "observed": "final head: both legs import ghcr.io/sjawhar/legion/envoy:buildcache-<arch>, 75 CACHED steps each, no cache export (branch does not write): amd64 3.58 / arm64 2.57 min; miss+write run: 'not found' importer error then registry export 92.7 s / 63.5 s: amd64 6.38 / arm64 5.23 min; no type=gha cache-from/cache-to remains in the workflow",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "the final head's cache-to is '' off refs/heads/main, so run 40468746977 shows no 'exporting cache' step; the temporary head 17fa916a with the gate pointed at the branch did export"
+      "criterion": "Spec v4 build cache: Actions cache per leg (scope envoy-<arch>, mode=min), written only on main; minutes with hit and miss; Actions-cache size per main run",
+      "surface": "GitHub Actions dispatch runs, single-job re-runs, their logs, and the Actions cache API",
+      "command": "gh api -X POST repos/sjawhar/legion/actions/jobs/<id>/rerun on run 40521465193 (temporary head d2605357, branch writes its own scope) twice per leg (write, then hit); job logs grep 'importing cache manifest|CACHED|exporting cache'; gh api 'repos/sjawhar/legion/actions/caches?ref=refs/heads/legion/INFRA-522' summed over buildkit/index entries",
+      "observed": "hit (same tree right after the write): amd64 2.00 min (job 122722922008), arm64 1.60 min (job 122716488972), all 41 smoke-build steps CACHED incl. the Go build and bun install; miss then mode=min write: amd64 5.13/6.85, arm64 4.27/4.35; final head 99da66ef (scope evicted, no write): amd64 4.32, arm64 4.23; size written per run 136.8 MB (amd64 71.1 MB, arm64 65.7 MB, 10 entries each) vs about 1.6 GB with mode=max",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "at the final head 99da66ef the legs show no 'exporting cache' step (cache-to is '' off refs/heads/main); only the temporary head d2605357, whose gate names the branch, exported"
     },
     {
       "criterion": "A3 the PR states minutes before and after",
       "surface": "PR #2297 body",
       "command": "gh pr view 2297 -R sjawhar/legion --json body --jq .body",
-      "observed": "before: 39.72 min median over 89 main runs 2026-10-20..2026-10-27 (measure.py), planner's 40.17/94 and step 34.59; after: table of runs 40468746977 (hit, slower 3.58), 40453177184 (miss+write, slower 6.38), 40428007482 (old gha, 8.82) with per-leg and image_index minutes",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "the before figure counts only the old single 'docker' job (measure.py skips runs whose docker legs did not both succeed)"
+      "observed": "before: 39.72 min median over 89 main runs 2026-10-20..2026-10-27, the planner's 40.17/94 and the 34.59 step; after: table with the Actions cache hit 2.00/1.60, miss with write 5.13-6.85 / 4.27-4.35, final head miss 4.32/4.23, per-run cache size 136.8 MB, eviction note",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "the before figure counts only the old single 'docker' job (measure.py skips runs whose docker legs did not all succeed)"
     },
     {
       "criterion": "CI the repository's checks accept the shape",
-      "surface": "local check scripts and the PR's checks",
-      "command": "UV_CACHE_DIR=$TMPDIR/uv-cache uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/<s>.sh for check-image-trigger-paths, check-release-credentials, check-action-pins, check-private-names, and the .test.sh of the first two",
-      "observed": "all exit 0; test suites 808 passed / 227 passed; PR checks lint, test, typecheck, build, pr-title pass",
-      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
-      "negativeControl": "with outputs removed from BUILD_ACTION_INPUTS, check-image-trigger-paths exits 1: 'passes outputs to docker/build-push-action, an input this check has not read'"
+      "surface": "local check scripts",
+      "command": "UV_CACHE_DIR=$TMPDIR/uv-cache uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/<s>.sh for check-image-trigger-paths, check-release-credentials, check-action-pins, check-private-names",
+      "observed": "all exit 0 at 98a88768 (tree equal to 99da66ef); grep -nE 'buildcache|type=registry|retention-days' on the workflow prints nothing",
+      "headSha": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+      "negativeControl": "with outputs removed from BUILD_ACTION_INPUTS (round 1), check-image-trigger-paths exits 1 naming outputs"
     }
   ],
   "filesChanged": [
     ".github/workflows/release-envoy-listener.yaml",
-    ".github/scripts/check-image-trigger-paths.sh",
-    ".github/scripts/check-image-trigger-paths.test.sh",
     "packages/envoy/AGENTS.md",
     "docs/solutions/envoy/ghcr-docker-multiarch-ci.md"
   ],
   "trickyParts": [
-    "outputs: type=image,…,push-by-digest=true replaces push and tags on the per-leg build; push beside outputs would request a second exporter.",
-    "Digests travel as artifacts envoy-image-digest-<arch> (not legion-envoy-*, which release_publish copies into the release assets); matrix job outputs keep only the last leg.",
-    "image_index takes the index digest from imagetools create --metadata-file (containerimage.descriptor.digest), never back through the mutable tag; imagetools keeps both legs' attestation manifests (proven).",
-    "cache-to is '' off refs/heads/main, so a branch dispatch reads the cache and never writes it."
+    "BUILD_CACHE (type=gha,scope=envoy-${{ matrix.arch }}) is declared once in the docker job's env; cache-to is format('{0},mode=min', env.BUILD_CACHE) only on refs/heads/main.",
+    "mode=min keeps no records for intermediate stages: the Go and web stages hit only when none of their inputs changed, otherwise they rerun from their first step; the full no-cache leg is still 4.2-6.9 min.",
+    "The digest artifacts keep the repository's default retention, so a re-run of image_index or one leg still finds both digests."
   ],
   "deviations": [
-    "Spec v3 (2026-10-27) replaced the plan's type=gha,scope=envoy-<arch> cache with a ghcr.io registry cache per leg (buildcache-<arch>), written only on main (commit c6c38f15).",
-    "To measure a cache hit before the merge, two temporary commits (2444de11, 17fa916a) let the branch write buildcache-<arch> once; 0fb74300 reverts them (file identical to c6c38f15). The first temporary head's run was cancelled before any docker leg ran, so no buildcache-<arch>-infra-522-measure tag exists.",
-    "The two cache versions the branch wrote (GHCR versions 1452457314 buildcache-arm64, 1452720428 buildcache-amd64) could not be deleted: the implement App gets 403 'Resource not accessible by integration' on DELETE users/sjawhar/packages/container/legion%2Fenvoy/versions/<id>. main's first run moves both tags to a main-written cache.",
-    "The simplify pass ran at 57fff226, before the cache commit; that commit changes only cache lines, in #2316's pattern."
+    "Temporary commit d2605357 let the branch write its own Actions-cache scope; 99da66ef reverts it (the workflow is identical to 98a88768). The hit was measured by re-running single jobs of run 40521465193 at d2605357 right after the write, because the repository's Actions cache (12.06 GB, over the 10 GB limit) evicted the branch's entries before the final-head run 40546893651 started, which therefore measured a miss.",
+    "The round-1 GHCR tags buildcache-amd64 (version 1452720428) and buildcache-arm64 (version 1452457314) stay: nothing reads them now, and the implement App gets 403 on deleting package versions; reported to the architect."
   ],
   "openQuestions": [
-    "A2 (7-day main median of the slower docker leg < 8 min) is proven in the production check, as the architect accepted; the branch numbers (hit 3.58, miss+write 6.38) predict it."
+    "A2 (7-day main median of the slower docker leg < 8 min) is proven in the production check; branch numbers: hit 2.00, miss 4.3-6.9."
   ],
   "discoveredComplexity": [
-    "The account's x64 runner queue (about 124 queued runs on 2026-10-27) made every x64 job wait 30-70 min; arm64 jobs started within minutes. docker still needs build (the archive matrix), so a release run waits for two x64 queue slots before the amd64 leg."
+    "The repository's Actions cache is over its 10 GB limit (12.06 GB on 2026-10-28, oldest entry under 18 h old), so even main's envoy-<arch> entries may be evicted between runs until the pull-request cache writes stop (INFRA-520)."
   ]
 }
