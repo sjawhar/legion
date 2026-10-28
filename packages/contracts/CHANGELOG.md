@@ -30,6 +30,12 @@
   past them is its document, and one whose document or item is past them names nothing.
   `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
   `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. `GraphNode` gains them,
+  optional because a server older than them omits them (`changed_at` was a block's alone and may
+  now be `null`), and `GraphNodeParent` (`kind`, `id`, `ref?`) is `parent`'s type: `id` is the
+  parent node's own id and `ref` is absent when the parent has no reference. An actor list the
+  server never recorded is `[]`, any other fact `null`.
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
@@ -212,6 +218,14 @@
   `dispatch_resolve_ask`'s says a closed issue's asks were withdrawn by its close, that only
   Dispatch writes `withdrawn`, and that an ask on a closed issue is `409 ISSUE_CLOSED` until the
   issue reopens (INFRA-158).
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

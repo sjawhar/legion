@@ -292,9 +292,23 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		classification := ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
 		}, issue)
-		pr = ApplyPush(pr, record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
+		push := record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
 			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
-			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
+			ByReviewApp: login != "" && stringValue(payload, "pusher") == login}
+		// The shipped state marks a head its synchronize counted before its push arrived
+		// (headCounted), not the run the Go record keeps for it: the replay opens that run, its
+		// anchor the red the shipped daemon counted the head on, at the head the push replaced (one
+		// of its own when the push names none, since the shipped daemon read one push per head).
+		if pr.HeadCounted != "" && pr.HeadCounted == push.SHA {
+			if push.Before == "" {
+				push.Before = "replay-before"
+			}
+			const red = "shipped-red"
+			pr.Run = &record.HeadRun{Pushes: append([]record.ClassifiedPush{}, pr.Pushes...), Steps: []record.RunStep{{Head: push.SHA}},
+				Anchor: record.Judgement{HeadSHA: push.Before, FixAttempts: pr.FixAttempts - 1, PlannedRed: pr.PlannedRed, CheckedHead: push.Before,
+					Failing: []string{red}, CheckRuns: []record.AttemptRun{{Name: red, ID: 1}}, Required: []string{red}, Workflows: []record.RequiredWorkflow{}}}
+		}
+		pr = ApplyPush(pr, push)
 	case "checks":
 		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Failing: stringSlice(payload, "failing")}
 		if settled, applied := ApplySettlement(pr, candidate); applied {
@@ -435,7 +449,15 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	// The shipped state holds one pending push; the Go record keeps every one.
 	var pushes []record.ClassifiedPush
 	if fixture.PendingPush != nil {
-		pushes = []record.ClassifiedPush{*fixture.PendingPush}
+		pending := *fixture.PendingPush
+		// The shipped daemon matched a head's pending push by its sha alone and read it as the push
+		// that replaced the recorded head, whatever before it named (none, from a listener that
+		// predated the field); the Go record judges a move by the chain of pushes from the recorded
+		// head (sparedMove), so the replay places the push there.
+		if pending.SHA != fixture.HeadSHA {
+			pending.Before = fixture.HeadSHA
+		}
+		pushes = []record.ClassifiedPush{pending}
 	}
 	// The shipped state's verdict is always its head's (a new head cleared it), and a state that
 	// records one has settled, so its head is the checked head. The shipped daemon judged every
