@@ -282,11 +282,11 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// So applyDeliveryOutcome writes the counter and the give-up line first, then publishes
 	// the notice, once per message rather than once per attempt. A notice that does not go
 	// out is logged exceptionPublishFailedLine and nothing else: it neither NAKs the message
-	// nor clears its ledger attempt. The attempt is kept rather than cleared because it is
-	// what stops a further delivery of this message pushing again - the redelivery an ACK
-	// lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
-	// durable's AckWait and well inside dedupe.AttemptedAge - and this function ACKs the message once
-	// the give-up is applied.
+	// nor clears its ledger attempt. The attempt is kept (dedupe.Ledger.Keep) rather than cleared
+	// because it is what stops a further delivery of this message pushing again - the redelivery
+	// an ACK lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
+	// durable's AckWait and well inside dedupe.AttemptedAge - and this function ACKs the message
+	// once the give-up is applied.
 	//
 	// What this gives up is the notice itself, when it cannot be published. That is cheaper
 	// than the retry it replaces. For an agent subject nothing in this deployment reads the
@@ -302,11 +302,13 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// with no give-up record at all.
 	applyDeliveryOutcome(cfg, item, deliveryOutcome{
 		sessionID:    sessionID,
+		attempt:      attempt,
 		metricStatus: giveUpStatus,
 		log: func(logger *logging.Logger) {
 			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 		},
 		exceptionReason: "no_holder",
+		keepAttempt:     true,
 	})
 	message.finalize(false)
 }

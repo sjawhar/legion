@@ -29,7 +29,7 @@ func (c *testClock) Advance(d time.Duration) {
 }
 
 func newTestMemory(clock *testClock) *Memory {
-	m := NewMemory()
+	m := NewMemory(testTakeoverAfter)
 	m.now = clock.Now
 	return m
 }
@@ -51,18 +51,32 @@ func TestMemory_FirstAttemptProceeds(t *testing.T) {
 	mustAttempt(t, m, "key-1", "ses-A", Proceed)
 }
 
-func TestMemory_AnUnresolvedAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
+func TestMemory_AnUnsettledAttemptIsInFlightUntilTheTakeoverAge(t *testing.T) {
 	clock := newTestClock()
 	m := newTestMemory(clock)
 	mustAttempt(t, m, "publish.abc123", "ses-target", Proceed)
 
-	// A redelivery of the same pair while the first prompt's answer never came (slow 204, #389).
+	// A repeat of the same pair while the first prompt may still be running.
 	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
 	// Another dedupe key to the same session, and the same key to another session, are their own.
 	mustAttempt(t, m, "publish.different", "ses-target", Proceed)
 	mustAttempt(t, m, "publish.abc123", "ses-other", Proceed)
 
-	clock.Advance(AttemptedAge)
+	clock.Advance(testTakeoverAfter)
+	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
+	clock.Advance(1)
+	mustAttempt(t, m, "publish.abc123", "ses-target", Proceed)
+}
+
+func TestMemory_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
+	clock := newTestClock()
+	m := newTestMemory(clock)
+	// A prompt whose answer never came (slow 204, #389): the delivery keeps its attempt.
+	m.Keep(mustAttempt(t, m, "publish.abc123", "ses-target", Proceed))
+
+	clock.Advance(testTakeoverAfter + time.Second)
+	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
+	clock.Advance(AttemptedAge - testTakeoverAfter - time.Second)
 	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
 	clock.Advance(1)
 	mustAttempt(t, m, "publish.abc123", "ses-target", Proceed)
@@ -124,7 +138,7 @@ func TestMemory_AWriteSweepsRecordsPastTheirAge(t *testing.T) {
 	if err := m.Record(mustAttempt(t, m, "key-2", "ses-A", Proceed)); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	clock.Advance(AttemptedAge + memorySweepEvery)
+	clock.Advance(AttemptedAge + sweepEvery)
 	mustAttempt(t, m, "key-3", "ses-A", Proceed)
 	if _, ok := m.records[Key{DedupeKey: "key-1", SessionID: "ses-A"}]; ok {
 		t.Fatal("the attempt past AttemptedAge was not swept")
@@ -135,10 +149,10 @@ func TestMemory_AWriteSweepsRecordsPastTheirAge(t *testing.T) {
 }
 
 func TestMemory_ConcurrentAccess(t *testing.T) {
-	m := NewMemory()
+	m := NewMemory(testTakeoverAfter)
 	var wg sync.WaitGroup
 	for range 100 {
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
 			attempt, err := m.Attempt("key", "ses")
@@ -151,6 +165,13 @@ func TestMemory_ConcurrentAccess(t *testing.T) {
 			attempt, err := m.Attempt("key", "ses")
 			if err == nil {
 				_ = m.Clear(attempt)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			attempt, err := m.Attempt("key", "ses")
+			if err == nil {
+				m.Keep(attempt)
 			}
 		}()
 	}

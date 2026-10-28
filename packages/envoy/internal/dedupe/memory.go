@@ -5,31 +5,37 @@ import (
 	"time"
 )
 
-// memorySweepEvery is how often a write sweeps out records past their age.
-const memorySweepEvery = time.Minute
+// sweepEvery is how often a write sweeps out records past their age.
+const sweepEvery = time.Minute
 
 type memoryRecord struct {
 	delivered bool
-	at        time.Time
+	// kept marks an attempt Keep settled: it holds for AttemptedAge, an unsettled one for the
+	// takeover age.
+	kept bool
+	at   time.Time
 }
 
 // Memory is the delivery ledger of a listener that cannot open the listener state bucket (its
 // NATS user lacks the grant) and so delivers as the machine's one process: it keeps the records
 // in process, and a restart forgets them. No other process writes to it, so it never defers.
 type Memory struct {
-	mu        sync.Mutex
-	records   map[Key]memoryRecord
-	now       func() time.Time
-	lastSweep time.Time
+	mu            sync.Mutex
+	records       map[Key]memoryRecord
+	takeoverAfter time.Duration
+	now           func() time.Time
+	lastSweep     time.Time
 }
 
-// NewMemory makes an empty in-process ledger.
-func NewMemory() *Memory {
-	return &Memory{records: make(map[Key]memoryRecord), now: time.Now}
+// NewMemory makes an empty in-process ledger. takeoverAfter is how long an attempt nothing has
+// settled holds the pair, as KVConfig.TakeoverAfter: the longest a prompt can take and a margin.
+func NewMemory(takeoverAfter time.Duration) *Memory {
+	return &Memory{records: make(map[Key]memoryRecord), takeoverAfter: takeoverAfter, now: time.Now}
 }
 
-// Attempt is Delivered for a pair delivered within DeliveredAge and InFlight for one attempted
-// within AttemptedAge; otherwise it records the attempt and is Proceed.
+// Attempt is Delivered for a pair delivered within DeliveredAge, and InFlight for one whose attempt
+// nothing has settled within the takeover age or that Keep kept within AttemptedAge; otherwise it
+// records the attempt and is Proceed.
 func (m *Memory) Attempt(dedupeKey, sessionID string) (Attempt, error) {
 	pair := Key{DedupeKey: dedupeKey, SessionID: sessionID}
 	m.mu.Lock()
@@ -70,22 +76,42 @@ func (m *Memory) Clear(attempt Attempt) error {
 	return nil
 }
 
-func (m *Memory) live(record memoryRecord, now time.Time) bool {
-	age := now.Sub(record.at)
-	if record.delivered {
-		return age <= DeliveredAge
+// Keep holds the attempt's pair until the attempt is AttemptedAge old, unless it has since been
+// recorded delivered or dropped.
+func (m *Memory) Keep(attempt Attempt) {
+	if attempt.Verdict != Proceed {
+		return
 	}
-	return age <= AttemptedAge
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if record, ok := m.records[attempt.pair]; ok && !record.delivered {
+		record.kept = true
+		m.records[attempt.pair] = record
+	}
 }
 
-// sweepLocked drops every record past its age, at most once per memorySweepEvery.
+func (m *Memory) live(record memoryRecord, now time.Time) bool {
+	age := now.Sub(record.at)
+	switch {
+	case record.delivered:
+		return age <= DeliveredAge
+	case record.kept:
+		return age <= AttemptedAge
+	default:
+		return age <= m.takeoverAfter
+	}
+}
+
+// sweepLocked drops every record past the longest age it can hold for, at most once per
+// sweepEvery: an attempt Keep may still keep is kept until AttemptedAge.
 func (m *Memory) sweepLocked(now time.Time) {
-	if now.Sub(m.lastSweep) < memorySweepEvery {
+	if now.Sub(m.lastSweep) < sweepEvery {
 		return
 	}
 	m.lastSweep = now
+	attemptLimit := max(AttemptedAge, m.takeoverAfter)
 	for pair, record := range m.records {
-		if !m.live(record, now) {
+		if record.delivered && !m.live(record, now) || !record.delivered && now.Sub(record.at) > attemptLimit {
 			delete(m.records, pair)
 		}
 	}

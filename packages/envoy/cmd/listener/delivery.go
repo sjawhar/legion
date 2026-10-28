@@ -273,8 +273,8 @@ type deliveryOutcome struct {
 	// sessionID is the recipient the outcome is about, named in its exception; "" when there is
 	// none (e.g. a role that was never assigned a holder).
 	sessionID string
-	// attempt is the pair's delivery-ledger attempt that clearAttempt, recordDedupe and
-	// exceptionFailureClearsAttempt settle; the zero Attempt (a pair delivered without the
+	// attempt is the pair's delivery-ledger attempt that clearAttempt, recordDedupe, keepAttempt
+	// and exceptionFailureClearsAttempt settle; the zero Attempt (a pair delivered without the
 	// ledger, or one the listener does not prompt) settles nothing.
 	attempt dedupe.Attempt
 	// metricStatus is the messagesDelivered "delivery_status" label; ""
@@ -300,6 +300,10 @@ type deliveryOutcome struct {
 	clearAttempt bool
 	// recordDedupe records the pair delivered in the ledger (dedupe.Ledger.Record).
 	recordDedupe bool
+	// keepAttempt keeps the ledger attempt (dedupe.Ledger.Keep) when nothing above clears or
+	// records it: a prompt whose outcome is unknown, or a pair this delivery disposed of for good,
+	// so a further delivery of the message within dedupe.AttemptedAge is an attempt-dedupe skip.
+	keepAttempt bool
 	// retry is whether this outcome asks for the attempt to be retried
 	// (NAKed).
 	retry bool
@@ -326,19 +330,22 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 			clearAttempt = clearAttempt || outcome.exceptionFailureClearsAttempt
 		}
 	}
-	if clearAttempt {
+	switch {
+	case clearAttempt:
 		clearLedgerAttempt(cfg, item, outcome.attempt)
-	}
-	if outcome.recordDedupe {
+	case outcome.recordDedupe:
 		if err := cfg.ledger.Record(outcome.attempt); err != nil {
 			cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "record"), slog.String("session_id", outcome.sessionID), slog.String("event_id", item.EventID), slog.String("error", err.Error()))
 		}
+	case outcome.keepAttempt:
+		cfg.ledger.Keep(outcome.attempt)
 	}
 	return outcome.retry
 }
 
 // clearLedgerAttempt gives attempt up so a retry prompts its pair again. A clear the ledger
-// cannot write leaves the attempt to age out (dedupe.AttemptedAge), and logs that.
+// cannot write leaves the attempted record behind, which this process's next attempt for the pair
+// takes over, and logs that.
 func clearLedgerAttempt(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, attempt dedupe.Attempt) {
 	if err := cfg.ledger.Clear(attempt); err != nil {
 		cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "clear"), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("error", err.Error()))
@@ -350,8 +357,8 @@ func clearLedgerAttempt(cfg listenerDeliveryHandlerConfig, item contracts.Envelo
 // returns the attempt the delivery settles and deliver=true when the listener goes on to deliver;
 // otherwise retryIn > 0 asks the durable lane to retry the message after it, and zero to ack it.
 //
-//   - Delivered (already delivered) and InFlight (this process's unresolved attempt) skip the pair,
-//     and the message is acked.
+//   - Delivered (already delivered) and InFlight (this process's attempt whose prompt may still be
+//     running, or one a delivery kept) skip the pair, and the message is acked.
 //   - Deferred (another pod's attempt, which may still be prompting) is retried on the durable lane
 //     once that attempt can be taken over, and skipped on a core lane, which retries nothing.
 //   - A ledger that cannot be read retries the message on the durable lane after durableRetryDelay;
@@ -895,6 +902,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				exceptionReason:               "delivery_failed",
 				fanoutRefusal:                 true,
 				exceptionFailureClearsAttempt: true,
+				keepAttempt:                   true,
 			})
 			continue
 		}
@@ -909,6 +917,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				exceptionReason:               "delivery_failed",
 				fanoutRefusal:                 true,
 				exceptionFailureClearsAttempt: true,
+				keepAttempt:                   true,
 			})
 			continue
 		}

@@ -8,9 +8,9 @@ package dedupe
 
 import "time"
 
-// The ages a record counts for. A delivered record stops repeats for DeliveredAge; an attempted
-// one, which a prompt whose answer never came leaves (a slow server can accept prompt_async and
-// answer 204 after the HTTP client gave up, #389), for AttemptedAge.
+// The ages a record counts for. A delivered record stops repeats for DeliveredAge; an attempt the
+// delivery kept (Keep), which a prompt whose answer never came leaves (a slow server can accept
+// prompt_async and answer 204 after the HTTP client gave up, #389), for AttemptedAge.
 const (
 	DeliveredAge = 10 * time.Minute
 	AttemptedAge = 5 * time.Minute
@@ -27,12 +27,15 @@ type Verdict uint8
 
 const (
 	// Proceed: this process now holds the pair's attempt and prompts or forwards it, then
-	// settles the attempt with Record or Clear.
+	// settles the attempt with Record, Clear or Keep.
 	Proceed Verdict = iota + 1
 	// Delivered: the pair was delivered within DeliveredAge; the message is skipped and acked.
 	Delivered
-	// InFlight: this process attempted the pair within AttemptedAge and has not resolved it (a
-	// prompt whose answer never came); the message is skipped and acked.
+	// InFlight: this process holds the pair's attempt and has not resolved it: the attempt is not
+	// settled yet and younger than the takeover age (its prompt may still be running), or the
+	// delivery kept it (Keep) less than AttemptedAge ago. The message is skipped and acked. An
+	// attempted record of this process that it holds no such attempt for (a clear that could not
+	// be written, a write whose reply was lost) is taken over, which is Proceed.
 	InFlight
 	// Deferred: another process attempted the pair less than its takeover age ago and may still
 	// be prompting. The durable lane retries the message once RetryIn has passed, when the
@@ -55,8 +58,8 @@ func (v Verdict) String() string {
 	}
 }
 
-// Attempt is the ledger's answer for one pair. The zero Attempt holds nothing: Record and Clear
-// of it touch nothing, which is how a lane that delivers without the ledger settles its pairs.
+// Attempt is the ledger's answer for one pair. The zero Attempt holds nothing: Record, Clear and
+// Keep of it touch nothing, which is how a lane that delivers without the ledger settles its pairs.
 type Attempt struct {
 	Verdict Verdict
 	// RetryIn is, for Deferred, how long until the other process's attempt is old enough to
@@ -78,8 +81,13 @@ type Ledger interface {
 	Record(attempt Attempt) error
 	// Clear gives up a Proceed attempt that failed in a way worth retrying, so a retry of the
 	// message, by this process or another, prompts the pair again. An attempt another process
-	// has since taken over or recorded is left as it is.
+	// has since taken over or recorded is left as it is. A clear the ledger cannot write still
+	// gives the attempt up in this process: its next Attempt for the pair proceeds.
 	Clear(attempt Attempt) error
+	// Keep settles a Proceed attempt whose record is to stand: a prompt whose outcome this
+	// process does not know, or a pair the delivery disposed of for good. Attempt answers InFlight
+	// for the pair until the attempt is AttemptedAge old.
+	Keep(attempt Attempt)
 }
 
 var (

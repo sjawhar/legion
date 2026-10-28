@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,17 +112,162 @@ func TestKV_ADeliveredRecordIsSkippedByEveryBootUntilDeliveredAge(t *testing.T) 
 	}
 }
 
-func TestKV_ThisBootsUnresolvedAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
+// This process's attempt that nothing has settled is its prompt still running: InFlight until it is
+// TakeoverAfter old, the longest a prompt takes and a margin, and taken over after that, as another
+// boot's would be.
+func TestKV_ThisProcesssUnsettledAttemptIsInFlightUntilTakeoverAfter(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
 	a := newTestKV(kv, "boot-a", clock)
 
 	mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
 	mustAttempt(t, a, "publish.abc", "ses_target", InFlight)
-	clock.Advance(AttemptedAge - time.Second)
+	clock.Advance(testTakeoverAfter - time.Second)
 	mustAttempt(t, a, "publish.abc", "ses_target", InFlight)
 	clock.Advance(2 * time.Second)
 	mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
+}
+
+// faultyKV passes every call through to the bucket but the faults it names: lostCreateReply stores
+// each Create and then answers it nats.ErrTimeout, as a write whose reply the connection lost does;
+// failPut and failDelete answer nats.ErrTimeout and write nothing.
+type faultyKV struct {
+	nats.KeyValue
+	lostCreateReply, failPut, failDelete bool
+}
+
+func (f faultyKV) Create(key string, value []byte) (uint64, error) {
+	revision, err := f.KeyValue.Create(key, value)
+	if err == nil && f.lostCreateReply {
+		return 0, nats.ErrTimeout
+	}
+	return revision, err
+}
+
+func (f faultyKV) Put(key string, value []byte) (uint64, error) {
+	if f.failPut {
+		return 0, nats.ErrTimeout
+	}
+	return f.KeyValue.Put(key, value)
+}
+
+func (f faultyKV) Delete(key string, opts ...nats.DeleteOpt) error {
+	if f.failDelete {
+		return nats.ErrTimeout
+	}
+	return f.KeyValue.Delete(key, opts...)
+}
+
+// A create the bucket stored but whose reply was lost leaves an attempted record of this boot that
+// no prompt of this process is behind: the retry takes it over and proceeds, rather than skipping as
+// in flight a pair nothing prompted.
+func TestKV_ARetryAfterACreateWhoseReplyWasLostProceeds(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	ledger := newTestKV(bus.KeyValue{KeyValue: faultyKV{KeyValue: kv.KeyValue, lostCreateReply: true}}, "boot-a", clock)
+
+	if _, err := ledger.Attempt("publish.abc", "ses_target"); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("Attempt whose create reply was lost: %v, want nats.ErrTimeout", err)
+	}
+	if record := readRecord(t, kv, ledger.Key("publish.abc", "ses_target")); record.State != stateAttempted || record.Boot != "boot-a" {
+		t.Fatalf("record the lost create stored = %+v, want attempted by boot-a", record)
+	}
+	mustAttempt(t, ledger, "publish.abc", "ses_target", Proceed)
+	mustAttempt(t, ledger, "publish.abc", "ses_target", InFlight)
+}
+
+// A clear the bucket refuses leaves the attempted record of this boot in place, but the attempt is
+// given up all the same: the next attempt for the pair takes the record over and proceeds.
+func TestKV_AnAttemptWhoseClearFailedIsTakenOverByTheNextAttempt(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	ledger := newTestKV(bus.KeyValue{KeyValue: faultyKV{KeyValue: kv.KeyValue, failDelete: true}}, "boot-a", clock)
+
+	first := mustAttempt(t, ledger, "publish.abc", "ses_target", Proceed)
+	if err := ledger.Clear(first); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("Clear on a bucket that refuses deletes: %v, want nats.ErrTimeout", err)
+	}
+	retry := mustAttempt(t, ledger, "publish.abc", "ses_target", Proceed)
+	if retry.revision <= first.revision {
+		t.Fatalf("the retry's revision %d does not replace the uncleared attempt's %d", retry.revision, first.revision)
+	}
+	mustAttempt(t, ledger, "publish.abc", "ses_target", InFlight)
+}
+
+// A prompt whose answer never came (a slow server can take prompt_async and answer 204 after the
+// client gave up, #389) is kept: the pair is InFlight until the attempt is AttemptedAge old, well
+// past the takeover age, and taken over after that.
+func TestKV_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	a := newTestKV(kv, "boot-a", clock)
+
+	a.Keep(mustAttempt(t, a, "publish.abc", "ses_target", Proceed))
+	clock.Advance(testTakeoverAfter + time.Second)
+	mustAttempt(t, a, "publish.abc", "ses_target", InFlight)
+	clock.Advance(AttemptedAge - testTakeoverAfter - 2*time.Second)
+	mustAttempt(t, a, "publish.abc", "ses_target", InFlight)
+	clock.Advance(2 * time.Second)
+	mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
+}
+
+// A delivery whose delivered record the bucket refuses was delivered all the same: the attempt is
+// kept, and a repeat within AttemptedAge is not prompted again.
+func TestKV_ADeliveryWhoseRecordFailedIsKept(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	ledger := newTestKV(bus.KeyValue{KeyValue: faultyKV{KeyValue: kv.KeyValue, failPut: true}}, "boot-a", clock)
+
+	if err := ledger.Record(mustAttempt(t, ledger, "publish.abc", "ses_target", Proceed)); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("Record on a bucket that refuses puts: %v, want nats.ErrTimeout", err)
+	}
+	clock.Advance(testTakeoverAfter + time.Second)
+	mustAttempt(t, ledger, "publish.abc", "ses_target", InFlight)
+}
+
+// What this process holds of its own attempts is swept out once they are past every age they hold
+// for, so it stays as small as the attempts of the last AttemptedAge.
+func TestKV_AWriteSweepsTheAttemptsThisProcessHoldsPastTheirAge(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	a := newTestKV(kv, "boot-a", clock)
+
+	mustAttempt(t, a, "publish.unsettled", "ses_target", Proceed)
+	a.Keep(mustAttempt(t, a, "publish.kept", "ses_target", Proceed))
+	clock.Advance(AttemptedAge + sweepEvery)
+	mustAttempt(t, a, "publish.fresh", "ses_target", Proceed)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.own[Key{DedupeKey: "publish.fresh", SessionID: "ses_target"}]; !ok || len(a.own) != 1 {
+		t.Fatalf("attempts held after the sweep = %v, want only the fresh one", a.own)
+	}
+}
+
+// Attempts of one process for one pair run one after the other: exactly one proceeds, and every
+// other finds that attempt held.
+func TestKV_ConcurrentAttemptsOfOneProcessProceedOnce(t *testing.T) {
+	kv := openTestBucket(t)
+	a := newTestKV(kv, "boot-a", newTestClock())
+	verdicts := make(chan Verdict, 20)
+	var wg sync.WaitGroup
+	for range cap(verdicts) {
+		wg.Go(func() {
+			attempt, err := a.Attempt("publish.abc", "ses_target")
+			if err != nil {
+				t.Errorf("Attempt: %v", err)
+			}
+			verdicts <- attempt.Verdict
+		})
+	}
+	wg.Wait()
+	close(verdicts)
+	counts := map[Verdict]int{}
+	for verdict := range verdicts {
+		counts[verdict]++
+	}
+	if counts[Proceed] != 1 || counts[InFlight] != cap(verdicts)-1 {
+		t.Fatalf("verdicts = %v, want one proceed and the rest in flight", counts)
+	}
 }
 
 func TestKV_AnotherBootsYoungAttemptIsDeferredUntilItCanBeTakenOver(t *testing.T) {

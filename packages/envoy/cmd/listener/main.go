@@ -874,13 +874,14 @@ func ledgerConnected(conn *nats.Conn) func(ctx context.Context) bool {
 // attempted before it is sent and as delivered once it lands, so a slow server that accepts
 // prompt_async but answers 204 after the HTTP client gave up is not prompted again (#389).
 func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time.Duration) dedupe.Ledger {
+	takeoverAfter := requestLimit + ledgerTakeoverMargin
 	if deliveryLease == nil {
-		return dedupe.NewMemory()
+		return dedupe.NewMemory(takeoverAfter)
 	}
 	return dedupe.NewKV(deliveryLease.kv, dedupe.KVConfig{
 		Durable:       bus.ListenerDurable(machineID),
 		Boot:          deliveryLease.boot,
-		TakeoverAfter: requestLimit + ledgerTakeoverMargin,
+		TakeoverAfter: takeoverAfter,
 		GoneBoot:      deliveryLease.FormerHolder,
 	})
 }

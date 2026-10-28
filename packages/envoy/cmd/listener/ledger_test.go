@@ -140,9 +140,11 @@ func (unavailableLedger) Attempt(string, string) (dedupe.Attempt, error) {
 	return dedupe.Attempt{}, errLedgerDown
 }
 
-// Record and Clear of an attempt that holds nothing touch no bucket, as dedupe.KV's do.
+// Record and Clear of an attempt that holds nothing touch no bucket, as dedupe.KV's do; Keep
+// touches no bucket at all.
 func (unavailableLedger) Record(attempt dedupe.Attempt) error { return heldOnly(attempt) }
 func (unavailableLedger) Clear(attempt dedupe.Attempt) error  { return heldOnly(attempt) }
+func (unavailableLedger) Keep(dedupe.Attempt)                 {}
 
 func heldOnly(attempt dedupe.Attempt) error {
 	if attempt.Verdict != dedupe.Proceed {
@@ -238,6 +240,65 @@ func TestALedgerCallThatFailedInAReconnectIsMadeAgainOnceTheConnectionIsBack(t *
 	}
 	if got := prompts.Load(); got != 1 {
 		t.Fatalf("the session was prompted %d times in all, want only the first message's", got)
+	}
+}
+
+// undeletableKV is the listener state bucket with every Delete refused, as a bucket that stops
+// answering between a ledger attempt and its clear does.
+type undeletableKV struct {
+	natsgo.KeyValue
+}
+
+func (undeletableKV) Delete(string, ...natsgo.DeleteOpt) error { return natsgo.ErrTimeout }
+
+// A prompt that failed in a way worth retrying gives its ledger attempt up (Clear) and NAKs the
+// message. When that clear cannot be written, the attempted record stays in the bucket under this
+// process's boot, but no prompt of this process is behind it: the redelivery the NAK asks for takes
+// the record over and prompts the session, rather than acking, as an attempt-dedupe skip, a message
+// nothing delivered.
+func TestARedeliveryAfterAFailedPromptWhoseClearFailedPromptsTheSession(t *testing.T) {
+	var prompts atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		if prompts.Add(1) == 1 {
+			return nil, errors.New("prompt_async unavailable")
+		}
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	const sessionID = "ses_clear_failed"
+	item := listenerTestEnvelope(contracts.AgentSubject(sessionID), "agent.ses_clear_failed.0123456789abcdef0123456789abcdef")
+	harness.registerTarget(t, sessionID, item.Topic)
+	kv, err := openListenerState(harness.client.Conn, 1, listenerStateRequestWait)
+	if err != nil {
+		t.Fatalf("open the listener state bucket: %v", err)
+	}
+	cfg := harness.config
+	cfg.ledger = dedupe.NewKV(bus.KeyValue{KeyValue: undeletableKV{KeyValue: kv.KeyValue}}, dedupe.KVConfig{
+		Durable:       bus.ListenerDurable("test-machine"),
+		Boot:          "boot-clear-failed",
+		TakeoverAfter: 5*time.Second + ledgerTakeoverMargin,
+	})
+	handler := jetStreamDeliveryHandler(cfg)
+	data := marshalListenerEnvelope(t, item)
+
+	msg, settlement := settledMessage(t, harness.client.Conn, data)
+	handler(context.Background(), msg)
+	if delay := nakDelay(t, settlement(t)); delay != durableRetryDelay {
+		t.Fatalf("NAK delay of the failed prompt = %s, want %s", delay, durableRetryDelay)
+	}
+	if logs := harness.logs.String(); !strings.Contains(logs, `"operation":"clear"`) {
+		t.Fatalf("the failed prompt's clear did not fail, as this test needs it to:\n%s", logs)
+	}
+
+	msg, settlement = settledMessage(t, harness.client.Conn, data)
+	handler(context.Background(), msg)
+	if got := settlement(t); got != "+ACK" {
+		t.Fatalf("settlement of the redelivery = %q, want the message delivered and acked", got)
+	}
+	if got := prompts.Load(); got != 2 {
+		t.Fatalf("the session was prompted %d times, want 2: the redelivery of the failed prompt must reach it", got)
+	}
+	if logs := harness.logs.String(); strings.Contains(logs, "listener attempt-dedupe skip") {
+		t.Fatalf("the redelivery was acked as an attempt-dedupe skip, unprompted:\n%s", logs)
 	}
 }
 
