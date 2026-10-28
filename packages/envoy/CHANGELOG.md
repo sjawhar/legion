@@ -57,9 +57,15 @@
   pushed again after 1 s doubling to 30 s otherwise, later messages waiting behind it. Every start
   of a relay restarts the consumer at its ack floor, so a session takes its messages in stream
   order after any break, and a missing consumer starts from the plugin's resume point when that
-  names the stream's current `envoy_stream_id`. The durable path skips a session whose entry
-  records consumer delivery, so a stored message waits in its consumer, for up to 72 hours, while
-  the session restarts, its connection is down, or its owning listener restarts. Without the
+  names the stream's current `envoy_stream_id`. A restart of a consumer with nothing awaiting an
+  ack keeps it, updating its filter in place, since it already goes on at the floor; one with a
+  message awaiting an ack deletes it and creates it again at the floor. A restart whose delete or
+  create fails leaves the consumer to the relay's retry, which creates it at that floor, and a
+  registration meanwhile creates it there too, so a failed restart loses no message. At most 32
+  relays of a listener restart at once, each call's 5 s timeout starting once it holds its turn,
+  so a listener restarting 1,000 sessions times none out. The durable path skips a session whose
+  entry records consumer delivery, so a stored message waits in its consumer, for up to 72 hours,
+  while the session restarts, its connection is down, or its owning listener restarts. Without the
   grant below the listener answers `core` and delivery works as before: the session's own
   subscriptions, the durable's `Skipped`, `/v1/replay`. Any rollout order works: a plugin of an
   earlier release sends no `delivery` and stays on the core path, and a plugin of this release

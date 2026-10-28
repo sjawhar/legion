@@ -2383,6 +2383,21 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   it, so the floor never reads below the consumer's start sequence minus one, and, while nothing
   awaits an ack, never below the last sequence delivered (`ackFloor`;
   `docs/solutions/envoy/a-fresh-jetstream-consumer-reports-ack-floor-0-so-create-it-at-a-start-sequence-INFRA-594.md`).
+  A consumer with nothing awaiting an ack has nothing to deliver again and already goes on at the
+  sequence after its floor, so the restart keeps it: it updates the filter and settings in place
+  and sends no delete or create, which leaves no window without a consumer and writes nothing to
+  the server's store. Once a restart that deletes has read the floor, the start after it stays
+  pending on the listener's session-consumer connection until a create at it is confirmed: a
+  delete or create that failed (a timeout included, and a delete the server applied whose answer
+  was lost) leaves the consumer to the relay's retry, after 1 s doubling to 30 s while the listener
+  owns the session, which creates a consumer it finds missing at that start, and a registration
+  that finds it missing meanwhile creates it there too, not at its resume point or the stream's
+  end. Only a consumer missing with no pending start (never created, removed after its inactive
+  threshold) pauses the relay until the next registration. The rule holds under the listener's
+  per-session lock; a second listener knows nothing of the pending start, nor does a listener
+  killed between the delete and the create. At most 32 relays of one listener restart at once
+  (`relayRestartLimit`); the rest wait their turn, and a restart's 5 s call timeout starts only
+  once it holds its turn and the session's lock. Registrations take no turn.
 - **Relay over NATS:** the owner pulls the consumer and publishes each message, in stream order, as
   a core frame on `notifications.envoy.deliver.<session id>` (`bus.DeliverSubject`; the stream does
   not store it, and the live topics lane skips it). The frame's data is the stored message's bytes,

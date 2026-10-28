@@ -253,8 +253,8 @@ func TestRestartAtFloorNeverDeliversWhatTheStreamHeldBeforeTheConsumer(t *testin
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{Created: true, StartSeq: last + 1, StreamID: streamIDOf(t, consumers)}) {
-		t.Fatalf("RestartAtFloor of a consumer that delivered nothing = %+v, want created at %d with no gap", start, last+1)
+	if start != (SessionConsumerStart{StartSeq: last + 1, StreamID: streamIDOf(t, consumers)}) {
+		t.Fatalf("RestartAtFloor of a consumer that delivered nothing = %+v, want it kept at %d with no gap", start, last+1)
 	}
 
 	held := publishStored(t, owner, agent, "held")
@@ -349,6 +349,112 @@ func TestRestartAtFloorRedeliversTheUnackedInStreamOrder(t *testing.T) {
 	requireNoMessage(t, again, 300*time.Millisecond)
 }
 
+// A restart of a consumer with nothing awaiting an ack keeps it: no delete and no create are sent
+// (the consumer's creation time stays, and a create would fail), its filters change in place, the
+// start is the sequence it examines next, and it delivers the next message once.
+func TestRestartAtFloorWithNothingAwaitingAnAckKeepsTheConsumer(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
+	ctx := context.Background()
+	const session = "ses_kept"
+	agent := contracts.AgentSubject(session)
+	if _, err := consumers.Ensure(ctx, session, []string{agent}, 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	written := publishStored(t, owner, agent, "written")
+	pull := pullSession(t, consumers, session)
+	if msg := next(t, pull); msg.StreamSeq != written {
+		t.Fatalf("first message = %d, want %d", msg.StreamSeq, written)
+	} else if err := msg.Ack(); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	pull.Stop()
+	waitForAckFloor(t, consumers, session, written)
+	before, err := consumers.Info(ctx, session)
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+
+	consumers.SetCreateFault(func(consumer string) error {
+		t.Errorf("the restart created consumer %s", consumer)
+		return errors.New("no create expected")
+	})
+	followed := []string{agent, "notifications.github.o.r.>"}
+	start, err := consumers.RestartAtFloor(ctx, session, followed)
+	consumers.SetCreateFault(nil)
+	if err != nil {
+		t.Fatalf("restart at floor: %v", err)
+	}
+	if start != (SessionConsumerStart{StartSeq: written + 1, StreamID: streamIDOf(t, consumers)}) {
+		t.Fatalf("RestartAtFloor with nothing awaiting an ack = %+v, want the consumer kept at %d", start, written+1)
+	}
+	after, err := consumers.Info(ctx, session)
+	if err != nil {
+		t.Fatalf("info after the restart: %v", err)
+	}
+	if !after.Created.Equal(before.Created) {
+		t.Fatalf("the consumer was created again at %s, want the one created at %s kept", after.Created, before.Created)
+	}
+	if got := slices.Sorted(slices.Values(after.Config.FilterSubjects)); !slices.Equal(got, ReduceFilterSubjects(followed)) {
+		t.Fatalf("the kept consumer filters on %v, want %v", got, ReduceFilterSubjects(followed))
+	}
+
+	nextOne := publishStored(t, owner, "notifications.github.o.r.push", "next")
+	again := pullSession(t, consumers, session)
+	if msg := next(t, again); msg.StreamSeq != nextOne || msg.Delivered != 1 {
+		t.Fatalf("after the restart got seq %d delivery %d, want seq %d delivery 1", msg.StreamSeq, msg.Delivered, nextOne)
+	}
+	requireNoMessage(t, again, 300*time.Millisecond)
+}
+
+// A restart of a consumer with a message awaiting an ack still deletes and creates it at the floor:
+// the consumer is a new one, and it delivers the unacked message again, then the next, in stream
+// order.
+func TestRestartAtFloorWithAMessageAwaitingAnAckCreatesTheConsumerAgain(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
+	ctx := context.Background()
+	const session = "ses_recreated"
+	agent := contracts.AgentSubject(session)
+	if _, err := consumers.Ensure(ctx, session, []string{agent}, 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	held := publishStored(t, owner, agent, "held")
+	pull := pullSession(t, consumers, session)
+	if msg := next(t, pull); msg.StreamSeq != held {
+		t.Fatalf("first message = %d, want %d", msg.StreamSeq, held)
+	}
+	pull.Stop()
+	before, err := consumers.Info(ctx, session)
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if before.NumAckPending != 1 {
+		t.Fatalf("the consumer has %d awaiting an ack, want the held message", before.NumAckPending)
+	}
+
+	start, err := consumers.RestartAtFloor(ctx, session, []string{agent})
+	if err != nil {
+		t.Fatalf("restart at floor: %v", err)
+	}
+	if start != (SessionConsumerStart{Created: true, StartSeq: held, StreamID: streamIDOf(t, consumers)}) {
+		t.Fatalf("RestartAtFloor with a message awaiting an ack = %+v, want the consumer created again at %d", start, held)
+	}
+	after, err := consumers.Info(ctx, session)
+	if err != nil {
+		t.Fatalf("info after the restart: %v", err)
+	}
+	if after.Created.Equal(before.Created) {
+		t.Fatalf("the consumer created at %s was kept, want it created again", before.Created)
+	}
+	later := publishStored(t, owner, agent, "later")
+	again := pullSession(t, consumers, session)
+	for _, want := range []uint64{held, later} {
+		if msg := next(t, again); msg.StreamSeq != want {
+			t.Fatalf("after the restart got seq %d, want %d", msg.StreamSeq, want)
+		}
+	}
+	requireNoMessage(t, again, 300*time.Millisecond)
+}
+
 // waitForAckFloor waits for the server to have taken the acks that bring sessionID's ack floor to
 // floor: an ack is a publish the server answers nothing to.
 func waitForAckFloor(t *testing.T, consumers *SessionConsumers, sessionID string, floor uint64) {
@@ -391,8 +497,8 @@ func TestAStartBelowTheStreamsFirstSequenceIsAGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{Created: true, StartSeq: gone[0], Gap: true, StreamID: streamIDOf(t, consumers)}) {
-		t.Fatalf("RestartAtFloor below the stream's first sequence = %+v, want created at %d with a gap", start, gone[0])
+	if start != (SessionConsumerStart{StartSeq: gone[0], Gap: true, StreamID: streamIDOf(t, consumers)}) {
+		t.Fatalf("RestartAtFloor below the stream's first sequence = %+v, want it kept at %d with a gap", start, gone[0])
 	}
 
 	seeded, err := consumers.Ensure(ctx, "ses_seeded", []string{contracts.AgentSubject("ses_seeded")}, gone[0])

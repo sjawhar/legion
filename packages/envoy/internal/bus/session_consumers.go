@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -137,6 +138,15 @@ type SessionConsumers struct {
 	client *Client
 	// ackWait is SessionConsumerAckWait, shortened by a test that waits out a redelivery.
 	ackWait time.Duration
+	// pendingMu guards pending and createFault.
+	pendingMu sync.Mutex
+	// pending holds, by consumer name, the start of each consumer a restart (RestartAtFloor) read
+	// the floor of and may have deleted, until a create at that start is confirmed: the position
+	// the consumer must come back at, whichever call creates it next.
+	pending map[string]uint64
+	// createFault, when not nil, runs before each consumer create is sent, and an error it returns
+	// fails the create unsent. It is nil outside tests (SetCreateFault).
+	createFault func(consumer string) error
 }
 
 // ConnectSessionConsumers opens SessionConsumers on a Client of its own, named
@@ -154,6 +164,15 @@ func ConnectSessionConsumers(urls []string, options ...ConnectOption) (*SessionC
 
 // Close closes the connection; a pull in progress ends.
 func (s *SessionConsumers) Close() { s.client.Close() }
+
+// SetCreateFault makes every consumer create call fault(consumer name) first and fail, unsent,
+// with the error it returns; nil removes it. It is a seam for tests, which fail the create of a
+// restart after its delete; nothing else sets it.
+func (s *SessionConsumers) SetCreateFault(fault func(consumer string) error) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	s.createFault = fault
+}
 
 // Drain drains the connection, letting acks already sent reach the server, within timeout.
 func (s *SessionConsumers) Drain(timeout time.Duration) error { return s.client.Drain(timeout) }
@@ -207,6 +226,9 @@ type SessionConsumerStart struct {
 // A missing consumer is created starting at stream sequence startSeq, or, when startSeq is 0, at
 // the sequence after the stream's last, which delivers what the stream stores from then on, as
 // DeliverNew does, and gives the consumer a start its ack floor never reads below (RestartAtFloor).
+// A consumer missing because a restart of it (RestartAtFloor) on this SessionConsumers deleted it,
+// or may have, and did not confirm its create, is created at the start that restart read instead,
+// whatever startSeq is, so the session loses nothing it had not acked.
 func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subjects []string, startSeq uint64) (SessionConsumerStart, error) {
 	name, filters, err := sessionConsumerTarget(sessionID, subjects)
 	if err != nil {
@@ -215,16 +237,26 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 	for attempt := 0; ; attempt++ {
 		info, err := s.info(ctx, name)
 		if errors.Is(err, ErrSessionConsumerNotFound) {
-			start, err := s.create(ctx, name, filters, startSeq)
+			start := startSeq
+			if pending, ok := s.pendingStart(name); ok {
+				start = pending
+			}
+			created, err := s.create(ctx, name, filters, start)
 			// A consumer that appeared since the info, created by another call, is updated instead.
 			if errors.Is(err, jetstream.ErrConsumerExists) && attempt == 0 {
 				continue
 			}
-			return start, err
+			if err == nil {
+				s.setPendingStart(name, 0)
+			}
+			return created, err
 		}
 		if err != nil {
 			return SessionConsumerStart{}, err
 		}
+		// The consumer exists, so it holds its own position: the delete of a restart's call that
+		// failed never reached the server, or its create did.
+		s.setPendingStart(name, 0)
 		return SessionConsumerStart{}, s.update(ctx, name, info.Config, filters)
 	}
 }
@@ -249,19 +281,104 @@ func (s *SessionConsumers) UpdateFilter(ctx context.Context, sessionID string, s
 // again, in stream order, every message it delivered and was not acked for, and the ones acked out
 // of order after them. It returns ErrSessionConsumerNotFound when the session has no consumer.
 // nats-server v2.10.29 has no consumer position reset (no CONSUMER.RESET API; an update refuses a changed deliver policy or start sequence), so the restart deletes and creates.
+//
+// A consumer with nothing awaiting an ack has nothing to deliver again, and the sequence it
+// examines next is already the one after its floor (ackFloor reads its last delivery then), so it
+// is kept: its filters and settings are updated in place, as Ensure updates them, and the start
+// returned is that next sequence, with Created unset. No delete and no create are sent, so the
+// session is never without a consumer, and the server writes no consumer to its store. A waiting
+// pull request of a pull that ended is no reason to restart: the server skips one whose reply
+// subject nobody subscribes to any more (nats-server v2.10.29 consumer.nextWaiting).
+//
+// A restart that deletes makes the floor's next sequence the consumer's pending start until a
+// create at it is confirmed. It is recorded before the delete, so a delete that failed, its answer
+// lost while the server applied it, leaves it as surely as a create that failed after a delete that
+// succeeded.
+// The next RestartAtFloor that finds the consumer missing creates it at the pending start rather
+// than returning ErrSessionConsumerNotFound, and so does an Ensure (Ensure). A consumer still there
+// (a delete the server never applied, a create it applied whose answer was lost) restarts at its
+// own floor, which is the pending start or past it. A consumer missing with no pending start (never
+// created, deleted with Delete, or removed after SessionConsumerInactiveThreshold) is
+// ErrSessionConsumerNotFound, as before.
+//
+// The pending start is this SessionConsumers' own, in memory. Its rule holds only while every call
+// for one session through it waits for the one before (the listener holds a lock per session
+// around each): two at once could read and change the consumer between each other's info, delete
+// and create. Another SessionConsumers knows nothing of it, whether a second listener's or the one
+// a listener killed between a delete and its create opens when it starts again: while the consumer
+// is missing its Ensure creates it at the start it is given or the stream's end, its restart reads
+// the consumer as missing, and its calls are not ordered with this one's.
 func (s *SessionConsumers) RestartAtFloor(ctx context.Context, sessionID string, subjects []string) (SessionConsumerStart, error) {
 	name, filters, err := sessionConsumerTarget(sessionID, subjects)
 	if err != nil {
 		return SessionConsumerStart{}, err
 	}
+	var startSeq uint64
 	info, err := s.info(ctx, name)
+	switch {
+	case err == nil && info.NumAckPending == 0:
+		return s.keepAtFloor(ctx, name, info, filters)
+	case err == nil:
+		startSeq = ackFloor(info) + 1
+		s.setPendingStart(name, startSeq)
+		if err := s.delete(ctx, name); err != nil {
+			return SessionConsumerStart{}, err
+		}
+	case errors.Is(err, ErrSessionConsumerNotFound):
+		pending, ok := s.pendingStart(name)
+		if !ok {
+			return SessionConsumerStart{}, err
+		}
+		startSeq = pending
+	default:
+		return SessionConsumerStart{}, err
+	}
+	start, err := s.create(ctx, name, filters, startSeq)
 	if err != nil {
 		return SessionConsumerStart{}, err
 	}
-	if err := s.delete(ctx, name); err != nil {
+	s.setPendingStart(name, 0)
+	return start, nil
+}
+
+// keepAtFloor is RestartAtFloor of consumer name, read as info, when nothing it delivered awaits an
+// ack: it updates the consumer's filters and settings in place, drops any pending start (the
+// consumer exists, so it holds its own position), and returns the sequence the consumer examines
+// next as the start.
+func (s *SessionConsumers) keepAtFloor(ctx context.Context, name string, info *jetstream.ConsumerInfo, filters []string) (SessionConsumerStart, error) {
+	state, err := s.streamState(ctx)
+	if err != nil {
 		return SessionConsumerStart{}, err
 	}
-	return s.create(ctx, name, filters, ackFloor(info)+1)
+	if err := s.update(ctx, name, info.Config, filters); err != nil {
+		return SessionConsumerStart{}, err
+	}
+	s.setPendingStart(name, 0)
+	startSeq := ackFloor(info) + 1
+	return SessionConsumerStart{StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, nil
+}
+
+// pendingStart is consumer name's pending start (RestartAtFloor), and whether it has one.
+func (s *SessionConsumers) pendingStart(name string) (uint64, bool) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	start, ok := s.pending[name]
+	return start, ok
+}
+
+// setPendingStart records start as consumer name's pending start (RestartAtFloor), or drops the
+// one it has when start is 0.
+func (s *SessionConsumers) setPendingStart(name string, start uint64) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if start == 0 {
+		delete(s.pending, name)
+		return
+	}
+	if s.pending == nil {
+		s.pending = map[string]uint64{}
+	}
+	s.pending[name] = start
 }
 
 // ackFloor is the stream sequence up to which consumer info has every message it delivered acked.
@@ -292,13 +409,18 @@ func (s *SessionConsumers) Info(ctx context.Context, sessionID string) (*jetstre
 	return s.info(ctx, name)
 }
 
-// Delete deletes sessionID's consumer; one the stream does not hold is no error.
+// Delete deletes sessionID's consumer, and drops its pending start (RestartAtFloor): the session is
+// meant to have none. One the stream does not hold is no error.
 func (s *SessionConsumers) Delete(ctx context.Context, sessionID string) error {
 	name, err := sessionConsumerNameOf(sessionID)
 	if err != nil {
 		return err
 	}
-	return s.delete(ctx, name)
+	if err := s.delete(ctx, name); err != nil {
+		return err
+	}
+	s.setPendingStart(name, 0)
+	return nil
 }
 
 // StreamID returns the stream's identity, its StreamIDMetadataKey metadata, which a relay frame
@@ -458,6 +580,14 @@ func (s *SessionConsumers) create(ctx context.Context, name string, filters []st
 		OptStartSeq:   startSeq,
 	}
 	s.applySettings(&config, filters)
+	s.pendingMu.Lock()
+	fault := s.createFault
+	s.pendingMu.Unlock()
+	if fault != nil {
+		if err := fault(name); err != nil {
+			return SessionConsumerStart{}, err
+		}
+	}
 	if _, err := s.upsert(ctx, name, config, "create"); err != nil {
 		return SessionConsumerStart{}, err
 	}

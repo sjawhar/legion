@@ -39,7 +39,9 @@ const (
 	deliveryReasonNotRequested = "not_requested"
 )
 
-// sessionConsumerCallTimeout bounds the consumer calls a registration makes before it answers.
+// sessionConsumerCallTimeout bounds the consumer calls a registration makes before it answers, and
+// those of one relay restart, timed from when it holds its turn and the session's lock
+// (sessionRelays.restart).
 const sessionConsumerCallTimeout = 5 * time.Second
 
 // noGrantBackoff is how long, after a consumer call the server refused for want of a grant, every
@@ -107,8 +109,16 @@ type sessionDelivery struct {
 	now func() time.Time
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
 	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
-	// deletes the consumer and creates it again. A create landing between that delete and create
-	// would start the consumer at the stream's end and skip what the session has not acked.
+	// deletes the consumer and creates it again when a message awaits an ack. A create landing
+	// between that delete and create would start the consumer at the stream's end and skip what the
+	// session has not acked. Under the lock a restart that read the floor and failed after its
+	// delete or create leaves that floor pending, and the next call that finds the consumer missing,
+	// a registration's create or the relay's retry, creates it there
+	// (bus.SessionConsumers.RestartAtFloor), so in this process no restart loses the session's
+	// position. The lock and the pending start are this listener's alone: a second
+	// listener (a rolling deploy's other task, or the one a session re-registers through) can still
+	// create the consumer in that window at the session's resume point or the stream's end, or run
+	// its own restart's calls between this one's.
 	locks sessionLocks
 	// grantMu guards the refusal episode below.
 	grantMu sync.Mutex

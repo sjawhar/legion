@@ -71,6 +71,21 @@ const (
 	// (session.SessionRegistry.PruneLapsed), so a session that stopped registering stops being
 	// relayed: a lapse has no watch event.
 	relayPruneInterval = 30 * time.Second
+	// relayRestartLimit is how many relays of one listener may restart their consumer at once
+	// (sessionRelays.restart); the others wait their turn. A listener that starts relays every
+	// session it owns at once, and a thousand restarts sent together made the server answer none
+	// within the call timeout: on the 2-CPU load-test box most of the 1,000 timed out on their info
+	// or delete. Restarting 1,000 consumers on the in-process server of that box, each by a delete
+	// and a create (a message awaiting an ack; a restart with none sends neither), 1,000 at once took
+	// 4.6 s with every call waiting 3.7 s at the median and 4.5 s at worst; 8 at a time took 4.6 s
+	// too, at 33 ms a restart; 32 took 4.0 s, the most restarts a second (250), at 126 ms a restart
+	// (190 ms p99); 64 took 4.2 s at 257 ms. So the server's throughput is reached from about 8 on,
+	// and more only lengthens each call's wait at the server, which a registration's consumer calls
+	// wait behind too. 32 keeps that wait near 200 ms on a saturated server, 25 times under
+	// sessionConsumerCallTimeout, and leaves room for a hub across the network, where a restart is
+	// about ten round trips and the round trip, not the server, bounds a restart: 32 at once still
+	// restart 1,000 sessions in about 10 s at a 30 ms round trip, where 8 would take 40 s.
+	relayRestartLimit = 32
 )
 
 // relayEvent is what the relay loop is told about a session; the flags of the events it has not
@@ -143,6 +158,9 @@ type sessionRelays struct {
 	// relays is each session's current relay; only the loop reads or writes it.
 	relays map[string]*relayRun
 
+	// restarts holds a token for each relay restarting its consumer, relayRestartLimit at most.
+	restarts chan struct{}
+
 	// framesMu guards frames and each relay's outstanding and unanswered frames.
 	framesMu sync.Mutex
 	// frames maps the token of every frame awaiting done or nak to it.
@@ -204,6 +222,7 @@ func startSessionRelays(delivery *sessionDelivery, sessions *session.SessionRegi
 		events:      map[string]relayEvent{},
 		wake:        make(chan struct{}, 1),
 		relays:      map[string]*relayRun{},
+		restarts:    make(chan struct{}, relayRestartLimit),
 		frames:      map[string]*relayFrame{},
 	}
 	if err := delivery.consumers.SubscribeReplies(inbox+".>", m.onReply); err != nil {
@@ -440,6 +459,12 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 // pulling it. A pull of nil comes with the outcome to return: relayEnded when the relay was stopped
 // or pauses (the session has no consumer, which its next registration creates, or the grant does
 // not carry session consumers), relayRetry otherwise.
+//
+// A restart that read the floor and then failed, its delete or its create, leaves the consumer's
+// start pending (bus.SessionConsumers.RestartAtFloor): the retry creates a consumer it finds
+// missing at that start rather than pausing, and so does a registration's create meanwhile, so no
+// restart loses the session's position. Only a consumer missing with no start pending (never
+// created, or removed after its inactive threshold) pauses the relay until the next registration.
 func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.SessionConsumerStart, *bus.SessionPull, relayOutcome) {
 	sessionID := run.sessionID
 	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
@@ -447,9 +472,19 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return bus.SessionConsumerStart{}, nil, relayRetry
 	}
+	// The restart takes a turn (relayRestartLimit) first and its session's lock second, and only
+	// then starts its calls' timeout, so the time it waited in line times nothing out. A
+	// registration takes no turn, only the lock, so its consumer calls never wait behind the
+	// restarts waiting for one.
+	select {
+	case m.restarts <- struct{}{}:
+	case <-ctx.Done():
+		return bus.SessionConsumerStart{}, nil, relayEnded
+	}
+	defer func() { <-m.restarts }()
+	unlock := m.delivery.locks.lock(sessionID)
 	callCtx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
-	unlock := m.delivery.locks.lock(sessionID)
 	start, err := m.delivery.consumers.RestartAtFloor(callCtx, sessionID, sessionConsumerFilter(sessionID, topics))
 	unlock()
 	if err == nil {
