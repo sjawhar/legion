@@ -215,7 +215,7 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw stri
 // which is acknowledged as every handled envelope is: the reconcile records at the end of every
 // pass too, so a row this call could not write gets its event within five minutes.
 func (in *Intake) recordDeployed(ctx context.Context, settings DeliverySettings) {
-	written, err := RecordDeployedEvents(ctx, in.pool, settings, in.events, time.Now())
+	written, err := RecordDeployedEvents(ctx, in.pool, settings, in.events)
 	if err != nil {
 		slog.Error("dispatch delivery: record issue.deployed after an envelope", "error", err)
 	}
@@ -679,7 +679,7 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 	case !handled:
 		return
 	}
-	if err := RecordEventAt(ctx, in.pool, time.Now()); err != nil {
+	if err := RecordEventAt(ctx, in.pool); err != nil {
 		slog.Error("dispatch delivery: record event freshness", "error", err)
 	}
 }

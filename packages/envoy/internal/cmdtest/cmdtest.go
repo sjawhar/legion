@@ -24,14 +24,31 @@ import (
 // without editing the tree.
 func Build(t testing.TB, name string, tags ...string) string {
 	t.Helper()
+	var flags []string
+	if len(tags) > 0 {
+		flags = []string{"-tags", strings.Join(tags, ",")}
+	}
+	return build(t, name, flags...)
+}
+
+// BuildStamped is Build with the binary stamped with commit as the image build stamps it:
+// -ldflags "-X main.buildCommit=<commit>", the variable cmd/dispatch reports on /healthz and
+// registers its process under. A test that needs processes serving different builds builds one
+// binary per commit.
+func BuildStamped(t testing.TB, name, commit string) string {
+	t.Helper()
+	return build(t, name, "-ldflags", "-X main.buildCommit="+commit)
+}
+
+// build is Build with flags passed to go build before the package.
+func build(t testing.TB, name string, flags ...string) string {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), name)
 	args := []string{"build", "-o", binary}
-	if len(tags) > 0 {
-		args = append(args, "-tags", strings.Join(tags, ","))
-	}
 	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
 		args = append(args, "-overlay", overlay)
 	}
+	args = append(args, flags...)
 	args = append(args, ".")
 	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v\n%s", name, err, out)
