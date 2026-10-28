@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T21:55:00Z",
+  "completed": "2026-10-28T21:37:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Tester failure (round 8): the new-option content refusal names a path that applies: delete the whole list the row never held (quoted in full, by block id) with a document edit, then edit the ask with every option",
+      "surface": "the real dispatch CLI against the real Go server and Postgres on decisions two Chromium editors broke; Go document service (the tester's rewritten test, architect-approved)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ ./internal/dispatch/api/ -count=1 -run 'AskBlock|SetAsk|EditAsk|AskEdit|Invalid|Settlement|Idempot' -timeout 40m; plus a throwaway CLI spec (from the tester's r7 probe) at 5a3239b9",
+      "observed": "Go ok (docs 138s, api 66s), TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply (the tester's text, installed unchanged) passes. CLI walk at 5a3239b9, each step quoted on the PR: (a) urgency-only refused -> options sent -> applied; (b) protected item left out refused -> sent exactly -> applied; (c) repeated label refused -> doc-edit delete -> edit-ask with the renamed one -> applied; (d) nested sub-item refused quoting '- Option B\\n\\n  - only if finance agrees' and its block id -> doc-edit delete of that block (with --issue) -> applied -> edit-ask with every option -> applied -> doc-edit replace restores the words as Option B's description, decision valid; (e) paragraph after the options refused -> doc-edit move out of the decision -> applied, paragraph kept -> edit-ask applied. The printed command in (d) lacked --issue, so at 57f8b421 the reason names the op for this document instead of a partial command (Go rows re-run: ok).",
+      "headSha": "57f8b42132c624f9f7f69b82d6760045e85cd6ff",
+      "negativeControl": "At 4c243317 the tester's test fails at the quote check ('does not quote \"Defer\"'), and following the old reason (doc-edit delete of the nested text) is refused by doc-edit with only the content-rule text."
+    },
     {
       "criterion": "Review round 5 item 1: the repeated-label refusal names only the path that works (remove one with doc-edit, then edit-ask), driven through the real dispatch CLI",
       "surface": "the real `dispatch` CLI (packages/envoy-client/bin/dispatch.ts) against the real Go Dispatch server and Postgres, on a decision two real Chromium editors broke (throwaway spec built from the tester's r7 probe, deleted after)",
@@ -104,8 +112,9 @@
     "GitHub reported #2433 CONFLICTING after the daemon outage: main@origin merged forward (merge commit 1c67b209, CHANGELOG conflict only, both sides kept); fingerprint unchanged.",
     "Round 2: two Go api tests (TestEventPayloadsAreServedAsStoredForEveryEventKind, TestIssueRanksStayOrdered…) fail on the pod's SQL_ASCII/C Postgres cluster and pass on a UTF-8 ICU en-US cluster (port 55433); environment only, so the docs suite ran there too.",
     "Round 2: the reviewer's fast-follow (press() key table in tests/marks-editor.ts) is done in this PR.",
-    "Round 4: the reviewer's fast-follow (test setup duplication) is not done in this round, as the architect narrowed the round to the review's must-change list."
+    "Round 4: the reviewer's fast-follow (test setup duplication) is not done in this round, as the architect narrowed the round to the review's must-change list.",
+    "Round 9: the tester's red test TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies (82346586) was replaced by the tester's rewrite TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply, as the INFRA-138 architect approved (21:06Z). No doc-edit op nests the deleted words back under an option; they come back as its description, which the reason says."
   ],
   "openQuestions": [],
-  "round": 8
+  "round": 9
 }
