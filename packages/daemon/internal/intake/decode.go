@@ -624,7 +624,8 @@ func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMess
 		if sha == "" {
 			return nil, nil
 		}
-		return PullRequestSynchronized{Repo: repo, Number: number, Branch: branch, HeadSHA: sha, Body: body, UpdatedAt: updatedAt}, nil
+		before, _ := rawString(raw, "before")
+		return PullRequestSynchronized{Repo: repo, Number: number, Branch: branch, Before: before, HeadSHA: sha, Body: body, UpdatedAt: updatedAt}, nil
 	case "closed":
 		merged, _ := rawString(raw, "merged")
 		if merged == "true" {

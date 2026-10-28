@@ -1356,3 +1356,50 @@ func TestAPushTheBoundLetsGoIsWarnedByName(t *testing.T) {
 		}
 	}
 }
+
+// A move holds at most sixteen later pushes of its two heads (classify's maxRepeats), each the
+// move made again or its push delivered again; the seventeenth lets the oldest go, logged as a
+// warning that names it, once, and no push waiting for a link is let go with it.
+func TestARepeatAMoveLetsGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a move holds the most pushes of its two heads made again; the oldest is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	if result := apply("push-0", pushedFromTo("head", "h1", "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+		t.Fatalf("the first push was refused: %+v", result.Refusal)
+	}
+	if result := apply("sync", intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: "head", HeadSHA: "h1"}); result.Refusal != nil {
+		t.Fatalf("h1's synchronize was refused: %+v", result.Refusal)
+	}
+	for i := 1; i <= 17; i++ {
+		logged.Reset()
+		pusher := "legion-implementer[bot]"
+		if i%2 == 0 {
+			pusher = testReviewApp
+		}
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo("head", "h1", "src/widget.go", pusher)); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, message) || strings.Contains(line, "waiting for a link") {
+				warned = append(warned, line)
+			}
+		}
+		if i < 17 {
+			if len(warned) != 0 {
+				t.Fatalf("repeat %d of 16 warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], message) {
+			t.Fatalf("the repeat past the bound warned %q, want the one repeat let go", warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=head", "after=h1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the repeat let go named", warned[0], want)
+			}
+		}
+	}
+}

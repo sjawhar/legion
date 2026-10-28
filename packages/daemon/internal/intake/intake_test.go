@@ -344,7 +344,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request synchronized",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-synchronized.json",
-			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
+			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: "head-before", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request closed",

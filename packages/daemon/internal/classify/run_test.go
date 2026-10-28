@@ -16,6 +16,7 @@ import (
 // reopen at a head, or a push.
 type runFact struct {
 	head       string
+	before     string
 	settlement *SettlementCandidate
 	required   []string
 	cleared    bool
@@ -43,7 +44,7 @@ func (f runFact) String() string {
 func (f runFact) apply(pr record.PullRequest) record.PullRequest {
 	switch {
 	case f.head != "":
-		return AdvancePullRequestHead(pr, f.head)
+		return AdvancePullRequestHead(pr, f.before, f.head)
 	case f.settlement != nil:
 		pr, _ = ApplyCheckSettlement(pr, *f.settlement)
 		return pr
@@ -60,11 +61,19 @@ func (f runFact) apply(pr record.PullRequest) record.PullRequest {
 
 // stored is pr as the store reads it back (record.PutPullRequest, then scanPullRequest): its
 // failing and cancelled checks and its pushes as lists, never nil; its required set and its check
-// runs as they were, nil apart from empty; its head run through JSON.
+// runs as they were, nil apart from empty; its moves and its head run through JSON.
 func stored(t *testing.T, pr record.PullRequest) record.PullRequest {
 	t.Helper()
 	pr.Failing, pr.Cancelled = append([]string{}, pr.Failing...), append([]string{}, pr.Cancelled...)
 	pr.Pushes, pr.Workflows = append([]record.ClassifiedPush{}, pr.Pushes...), append([]record.RequiredWorkflow{}, pr.Workflows...)
+	moves, err := json.Marshal(append([]record.Move{}, pr.Moves...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.Moves = nil
+	if err := json.Unmarshal(moves, &pr.Moves); err != nil {
+		t.Fatal(err)
+	}
 	if pr.Run != nil {
 		encoded, err := json.Marshal(pr.Run)
 		if err != nil {
@@ -84,6 +93,9 @@ func settles(head string, id int64, failing ...string) runFact {
 }
 
 func arrives(head string) runFact { return runFact{head: head} }
+
+// arrivesFrom is a synchronize that names the head GitHub moved from.
+func arrivesFrom(before, head string) runFact { return runFact{head: head, before: before} }
 
 func pushed(p record.ClassifiedPush) runFact { return runFact{push: &p} }
 
@@ -189,7 +201,7 @@ func TestEveryOrderOfThePushesGivesTheJudgementOfThePushesFirst(t *testing.T) {
 func TestAPushForAHeadNotYetArrivedChangesNoJudgement(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
-	prior := stored(t, AdvancePullRequestHead(red, "h3"))
+	prior := stored(t, AdvancePullRequestHead(red, "", "h3"))
 	prior = stored(t, settles("h3", 2, "ci").apply(prior))
 	if prior.Run == nil || HeadVerdict(prior) != "red" {
 		t.Fatalf("h3 red before its push = %+v, want its run open and red", prior)
@@ -269,7 +281,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 				if tc.pushFirst {
 					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(i), Before: sha(i - 1), HandoffOnly: i%2 == 0})
 				}
-				pr = stampHead(AdvancePullRequestHead(pr, sha(i)), start.Add(time.Duration(i)*time.Minute))
+				pr = stampHead(AdvancePullRequestHead(pr, "", sha(i)), start.Add(time.Duration(i)*time.Minute))
 				settlement := SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
 					Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}}
 				pr, _ = ApplyCheckSettlement(pr, settlement)
@@ -311,9 +323,11 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 // again never delivered - and n1, n2, ... follow, each push on its way before its head. h1 waits
 // for good, so the run holds it and every head after it until the step past maxRunSteps, which cuts
 // h1 off; every head after it was judged with its chain, so the run closes there, and stays closed.
-// The run keeps the pushes of its heads past the waiting-push bound (maxWaitingPushes), which
-// counts from no head of the run but the anchor otherwise, and would let n1..n16 go and leave
-// those heads judged unchained, the run open for good at its bound.
+// The run lets a push go only when the record's own bound does (ApplyPush), which counts from the
+// record's head and so keeps n1, n2, ...: a bound of the run's own, counting from its anchor, would
+// let n1..n16 go and leave those heads judged unchained, the run open for good at its bound. With a
+// settlement after each head, each head is two steps, so the bound cuts h1 off half as many heads
+// in.
 func TestARunOneLostPushOpenedClosesAtItsBound(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
@@ -322,43 +336,52 @@ func TestARunOneLostPushOpenedClosesAtItsBound(t *testing.T) {
 		name  string
 		facts []runFact
 	}{
-		{"h1's push lost", []runFact{arrives("h1")}},
-		{"the push of h1 made again lost", []runFact{pushed(first), arrives("h1"), pushed(back), arrives("h0"), arrives("h1")}},
+		{"h1's push lost", []runFact{arrivesFrom("h0", "h1")}},
+		{"the push of h1 made again lost", []runFact{pushed(first), arrivesFrom("h0", "h1"), pushed(back), arrivesFrom("h1", "h0"), arrivesFrom("h0", "h1")}},
 	} {
-		pr := red
-		for _, f := range tc.facts {
-			pr = stored(t, deliver(f, pr))
-		}
-		if pr.Run == nil {
-			t.Fatalf("%s: no head run waits for h1", tc.name)
-		}
-		// h1 is the run's first step and n_i its step i+1, so n(maxRunSteps) is the step past the
-		// bound: the run is open through n(maxRunSteps-1) and closed from n(maxRunSteps) on.
-		prev, closedAt, reopened := "h1", 0, 0
-		for i := 1; i <= 2*maxRunSteps; i++ {
-			head := fmt.Sprintf("n%d", i)
-			pr = stored(t, deliver(pushed(record.ClassifiedPush{SHA: head, Before: prev}), pr))
-			pr = stored(t, deliver(arrives(head), pr))
-			prev = head
-			switch {
-			case pr.Run == nil && closedAt == 0:
-				closedAt = i
-			case pr.Run != nil && closedAt != 0 && reopened == 0:
-				reopened = i
+		for _, settled := range []bool{false, true} {
+			pr := red
+			for _, f := range tc.facts {
+				pr = stored(t, deliver(f, pr))
 			}
-		}
-		if closedAt != maxRunSteps || reopened != 0 {
-			got := fmt.Sprintf("never closed in %d heads", 2*maxRunSteps)
-			if closedAt != 0 {
-				got = fmt.Sprintf("closed after n%d", closedAt)
+			if pr.Run == nil {
+				t.Fatalf("%s: no head run waits for h1", tc.name)
 			}
-			if reopened != 0 {
-				got += fmt.Sprintf(", opened again after n%d", reopened)
+			// h1 is the run's first step and n_i its step i+1 (2i and 2i+1 when settled), so the
+			// head whose arrival is the step past the bound closes the run.
+			want := maxRunSteps
+			if settled {
+				want = maxRunSteps / 2
 			}
-			if pr.Run != nil {
-				got += fmt.Sprintf(", %d steps open at the end", len(pr.Run.Steps))
+			prev, closedAt, reopened := "h1", 0, 0
+			for i := 1; i <= 2*maxRunSteps; i++ {
+				head := fmt.Sprintf("n%d", i)
+				pr = stored(t, deliver(pushed(record.ClassifiedPush{SHA: head, Before: prev}), pr))
+				pr = stored(t, deliver(arrivesFrom(prev, head), pr))
+				if settled {
+					pr = stored(t, deliver(settles(head, int64(i+1), "ci"), pr))
+				}
+				prev = head
+				switch {
+				case pr.Run == nil && closedAt == 0:
+					closedAt = i
+				case pr.Run != nil && closedAt != 0 && reopened == 0:
+					reopened = i
+				}
 			}
-			t.Errorf("%s: the run %s, want it closed after n%d and never again", tc.name, got, maxRunSteps)
+			if closedAt != want || reopened != 0 {
+				got := fmt.Sprintf("never closed in %d heads", 2*maxRunSteps)
+				if closedAt != 0 {
+					got = fmt.Sprintf("closed after n%d", closedAt)
+				}
+				if reopened != 0 {
+					got += fmt.Sprintf(", opened again after n%d", reopened)
+				}
+				if pr.Run != nil {
+					got += fmt.Sprintf(", %d steps open at the end", len(pr.Run.Steps))
+				}
+				t.Errorf("%s, settled %v: the run %s, want it closed after n%d and never again", tc.name, settled, got, want)
+			}
 		}
 	}
 }
@@ -371,11 +394,11 @@ func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
 	fresh := func() record.PullRequest {
 		return record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{}, Required: []string{"ci"}}
 	}
-	first := AdvancePullRequestHead(ApplyPush(fresh(), push), "h1")
+	first := AdvancePullRequestHead(ApplyPush(fresh(), push), "", "h1")
 	if !reflect.DeepEqual(first.Moves, want) {
 		t.Errorf("the push before its head left moves %+v, want %+v", first.Moves, want)
 	}
-	late := ApplyPush(AdvancePullRequestHead(fresh(), "h1"), push)
+	late := ApplyPush(AdvancePullRequestHead(fresh(), "", "h1"), push)
 	if !reflect.DeepEqual(late.Moves, want) {
 		t.Errorf("the push after its head left moves %+v, want %+v", late.Moves, want)
 	}
@@ -402,7 +425,7 @@ func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 		}
 		return pr
 	}
-	want := deliverAll(pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(again), arrives("h1"), s3)
+	want := deliverAll(pushed(first), arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, pushed(again), arrivesFrom("h0", "h1"), s3)
 	if want.Run != nil || want.FixAttempts != 4 || want.HeadCounted != "h1" || HeadVerdict(want) != "red" {
 		t.Errorf("pushes first: run open %v, fix=%d counted=%q verdict=%q, want no run, 4, \"h1\" and red", want.Run != nil, want.FixAttempts, want.HeadCounted, HeadVerdict(want))
 	}
@@ -410,16 +433,16 @@ func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 		name  string
 		facts []runFact
 	}{
-		{"every push late", []runFact{arrives("h1"), s1, pushed(first), arrives("h0"), s2, pushed(back), arrives("h1"), s3, pushed(again)}},
-		{"the push made again late", []runFact{pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, arrives("h1"), s3, pushed(again)}},
-		{"the first push late, after the branch returned", []runFact{arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(first), pushed(again), arrives("h1"), s3}},
+		{"every push late", []runFact{arrivesFrom("h0", "h1"), s1, pushed(first), arrivesFrom("h1", "h0"), s2, pushed(back), arrivesFrom("h0", "h1"), s3, pushed(again)}},
+		{"the push made again late", []runFact{pushed(first), arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, arrivesFrom("h0", "h1"), s3, pushed(again)}},
+		{"the first push late, after the branch returned", []runFact{arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, pushed(first), pushed(again), arrivesFrom("h0", "h1"), s3}},
 	} {
 		if got := deliverAll(tc.facts...); got.Run != nil || JudgementChanged(want, got) {
 			t.Errorf("%s: run open %v, fix=%d counted=%q verdict=%q, want no run and the pushes-first fix=%d counted=%q verdict=%q",
 				tc.name, got.Run != nil, got.FixAttempts, got.HeadCounted, HeadVerdict(got), want.FixAttempts, want.HeadCounted, HeadVerdict(want))
 		}
 	}
-	if lost := deliverAll(pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, arrives("h1"), s3); lost.Run == nil {
+	if lost := deliverAll(pushed(first), arrivesFrom("h0", "h1"), s1, pushed(back), arrivesFrom("h1", "h0"), s2, arrivesFrom("h0", "h1"), s3); lost.Run == nil {
 		t.Error("the push made again never delivered: the run closed, want it open waiting for that push")
 	}
 	if twice := deliverAll(pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(first)); twice.Run != nil || CodeOnItsWay(twice) || len(twice.Pushes) != 0 {
@@ -433,112 +456,13 @@ func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 	}
 }
 
-// A move made again is judged by the push that made it again, as a move to a fresh commit is: the
-// branch moves h0..h1, returns h1..h0 by a forced push, and h0..h1 is pushed again, a red settling
-// at each head. The control pushes the third push to a fresh commit h1b instead. Without its push
-// the second arrival of h1 would be judged unchained, as if its push were lost: the review App's
-// red tests pushed again after the implementer's forced return would count a fix attempt and leave
-// the red unplanned, so it would send the work back; the implementer's code pushed again after the
-// review App's forced return would keep the review App's red planned. Each holds with the pushes
-// delivered before their heads and after them.
-func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
-	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
-	judged := func(firstByApp, backByApp, againByApp, late bool, again string) record.PullRequest {
-		first := record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: firstByApp}
-		back := record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, ByReviewApp: backByApp}
-		redo := record.ClassifiedPush{SHA: again, Before: "h0", ByReviewApp: againByApp}
-		var facts []runFact
-		for _, step := range []struct {
-			push record.ClassifiedPush
-			head string
-			id   int64
-		}{{first, "h1", 2}, {back, "h0", 3}, {redo, again, 4}} {
-			if late {
-				facts = append(facts, arrives(step.head), settles(step.head, step.id, "ci"), pushed(step.push))
-			} else {
-				facts = append(facts, pushed(step.push), arrives(step.head), settles(step.head, step.id, "ci"))
-			}
-		}
-		pr := red
-		for _, f := range facts {
-			pr = stored(t, deliver(f, pr))
-		}
-		return pr
-	}
-	for _, tc := range []struct {
-		name                              string
-		firstByApp, backByApp, againByApp bool
-		fix                               int
-		counted                           string
-		planned                           bool
-	}{
-		// The review App's pushes spare the count and plan the red; the implementer's forced return
-		// after the first clears the plan, and the red tests pushed again plan it once more.
-		{"the review App's red tests pushed again after the implementer's forced return", true, false, true, 1, "", true},
-		// The implementer's first push counts at h1; the review App's forced return plans the red,
-		// and the implementer's code pushed again onto that planned red counts nothing and clears it.
-		{"the implementer's code pushed again after the review App's forced return", false, true, false, 2, "h1", false},
-	} {
-		for _, late := range []bool{false, true} {
-			fresh := judged(tc.firstByApp, tc.backByApp, tc.againByApp, late, "h1b")
-			again := judged(tc.firstByApp, tc.backByApp, tc.againByApp, late, "h1")
-			for _, got := range []struct {
-				name string
-				pr   record.PullRequest
-			}{{"a fresh commit h1b", fresh}, {"h1 made again", again}} {
-				if got.pr.Run != nil || got.pr.FixAttempts != tc.fix || got.pr.HeadCounted != tc.counted || got.pr.PlannedRed != tc.planned {
-					t.Errorf("%s, pushes late %v, %s: run open %v, fix=%d counted=%q planned=%v, want no run, fix=%d counted=%q planned=%v",
-						tc.name, late, got.name, got.pr.Run != nil, got.pr.FixAttempts, got.pr.HeadCounted, got.pr.PlannedRed, tc.fix, tc.counted, tc.planned)
-				}
-			}
-			if RedSendsBack(again) != RedSendsBack(fresh) {
-				t.Errorf("%s, pushes late %v: h1 made again sends the work back %v, a fresh commit %v", tc.name, late, RedSendsBack(again), RedSendsBack(fresh))
-			}
-		}
-	}
-}
-
-// The limit of a repeat (record.Move.Repeat): it stands for the push of its two heads at the next
-// arrival by that move that no chain of other recorded pushes reaches, and cannot be told from a
-// push not yet delivered by another path. The implementer's h0..h1 is delivered twice, so the
-// second delivery is the move's repeat; the branch returns to h0, and the review App pushes h0..hx
-// and hx..h1, hx never synchronized. Delivered before h1 arrives, those pushes are h1's chain, the
-// review App's planned red. Delivered after, h1 has already been judged by the repeat, the
-// implementer's code, and no run waits for them. Without the repeat both orders are judged alike,
-// through a head run, but every move made again is judged unchained, as if its push were lost
-// (TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain), which takes far less than this case.
-// Pinned so a change to it is deliberate.
-func TestARepeatStandsForAPushNotYetDeliveredByAnotherPath(t *testing.T) {
-	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
-	code, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
-	tests, onto := record.ClassifiedPush{SHA: "hx", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h1", Before: "hx", ByReviewApp: true}
-	deliverAll := func(facts ...runFact) record.PullRequest {
-		pr := red
-		for _, f := range facts {
-			pr = stored(t, deliver(f, pr))
-		}
-		return pr
-	}
-	start := []runFact{pushed(code), arrives("h1"), settles("h1", 2, "ci"), pushed(code), pushed(back), arrives("h0"), settles("h0", 3, "ci")}
-	first := deliverAll(append(append([]runFact{}, start...), pushed(tests), pushed(onto), arrives("h1"))...)
-	if first.Run != nil || first.FixAttempts != 3 || !first.PlannedRed {
-		t.Errorf("the review App's pushes before h1: run open %v, fix=%d planned=%v, want no run, 3 and planned", first.Run != nil, first.FixAttempts, first.PlannedRed)
-	}
-	after := deliverAll(append(append([]runFact{}, start...), arrives("h1"), pushed(tests), pushed(onto))...)
-	if after.Run != nil || after.FixAttempts != 4 || after.PlannedRed {
-		t.Errorf("the review App's pushes after h1: run open %v, fix=%d planned=%v, want no run, 4 and unplanned: h1 judged by the repeat", after.Run != nil, after.FixAttempts, after.PlannedRed)
-	}
-}
-
 // BenchmarkReplayAtTheBound replays a head run of maxRunSteps steps - heads and settlements of ten
 // check runs alternating, every head waiting for its push - which is the most a push replays.
 func BenchmarkReplayAtTheBound(b *testing.B) {
 	pr := record.PullRequest{HeadSHA: sha(0), CheckedHead: sha(0), Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
 	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	for i := 1; pr.Run == nil || len(pr.Run.Steps) < maxRunSteps; i++ {
-		pr = stampHead(AdvancePullRequestHead(pr, sha(i)), start.Add(time.Duration(i)*time.Minute))
+		pr = stampHead(AdvancePullRequestHead(pr, "", sha(i)), start.Add(time.Duration(i)*time.Minute))
 		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i),
 			Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}})
 	}

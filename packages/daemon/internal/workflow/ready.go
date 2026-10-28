@@ -107,7 +107,7 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 		return intake.Result{}, nil
 	}
 	if pr.HeadSHA != fact.Commit {
-		*pr = classify.AdvancePullRequestHead(*pr, fact.Commit)
+		*pr = classify.AdvancePullRequestHead(*pr, "", fact.Commit)
 		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.HeadAt)

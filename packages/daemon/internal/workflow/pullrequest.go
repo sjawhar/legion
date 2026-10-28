@@ -129,7 +129,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	prior := *pr
 	moved := fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA
 	if moved {
-		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
+		*pr = classify.AdvancePullRequestHead(*pr, fact.Before, fact.HeadSHA)
 		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
@@ -177,20 +177,28 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	}
 	prior := *pr
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}, pr.Issue)
-	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
+	push := record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
 		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
 		ByReviewApp: e.byReviewApp(fact.Pusher),
 		// A push that does not say it was not forced - a listener that predates the field - is
 		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
-		Forced: fact.Forced == nil || *fact.Forced != "false"})
+		Forced: fact.Forced == nil || *fact.Forced != "false"}
+	var dropped classify.Dropped
+	*pr, dropped = classify.ApplyPushDropping(*pr, push)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
 	// Past its bound the record lets the oldest push waiting for a link go (classify.ApplyPush): a
 	// webhook behind it never arrived, and the move it would have linked into is judged without it.
-	for _, dropped := range classify.DroppedPushes(prior, *pr) {
+	// A move past its bound on the pushes of its two heads made again lets the oldest go too: the
+	// next arrival by that move takes the oldest kept.
+	for _, gone := range dropped.Waiting {
 		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go",
-			"issue", pr.Issue, "pullRequest", pr.Number, "before", dropped.Before, "after", dropped.SHA)
+			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
+	}
+	if gone := dropped.Repeat; gone != nil {
+		e.warnOnCommit(ctx, "workflow: a move holds the most pushes of its two heads made again; the oldest is let go",
+			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
 	}
 	// A push classified after its head arrived can complete the carry of a code head's red to the
 	// handoff head that replaced it (classify.SettlementFor), which sends the work back as the
@@ -399,7 +407,7 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	}
 	repeated := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
-		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
+		*pr = classify.AdvancePullRequestHead(*pr, "", fact.HeadSHA)
 		e.stampRun(pr)
 	}
 	pr.State = record.PullRequestClosed

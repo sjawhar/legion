@@ -14,12 +14,12 @@ func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *t
 		HeadSHA: "old", CheckedHead: "old", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2,
 		Pushes: []record.ClassifiedPush{{SHA: "next", Before: "old", HandoffOnly: true}},
 	}
-	got := AdvancePullRequestHead(prior, "next")
+	got := AdvancePullRequestHead(prior, "", "next")
 	if got.FixAttempts != 2 || got.HeadCounted != "" {
 		t.Fatalf("handoff-only head = %#v, want unchanged count", got)
 	}
 
-	got = AdvancePullRequestHead(record.PullRequest{HeadSHA: "old", CheckedHead: "old", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2}, "next")
+	got = AdvancePullRequestHead(record.PullRequest{HeadSHA: "old", CheckedHead: "old", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2}, "", "next")
 	if got.FixAttempts != 3 || got.HeadCounted != "next" || HeadVerdict(got) != "" {
 		t.Fatalf("real fix head = %#v, want counted next head", got)
 	}
@@ -30,7 +30,7 @@ func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *t
 func TestApplyPushTakesBackACountItsLatePushSpares(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "prev", CheckedHead: "prev", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, FixAttempts: 2}
-	counted := AdvancePullRequestHead(red, "head")
+	counted := AdvancePullRequestHead(red, "", "head")
 	counted.BlockedAttempts = 3
 	if counted.FixAttempts != 3 || counted.HeadCounted != "head" || counted.Run == nil {
 		t.Fatalf("a head whose push has not arrived = %#v, want counted, its run open", counted)
@@ -57,7 +57,9 @@ func TestApplyPushTakesBackOnlyTheCountedMovesOwnPush(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			counted := AdvancePullRequestHead(record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{"ci"}, Required: []string{"ci"},
-				FixAttempts: 2, HeadCounted: "h2"}, "h4")
+				FixAttempts: 2, HeadCounted: "h2"}, "",
+				"h4")
+
 			if counted.FixAttempts != 3 || counted.HeadCounted != "h4" {
 				t.Fatalf("a push onto red h3 = %#v, want h4 counted", counted)
 			}
@@ -132,7 +134,7 @@ func TestAMoveCountsAndPlansTheSameInEveryOrderOfItsPushesAndItsHead(t *testing.
 						got, steps := red, []string{}
 						for i := 0; i <= len(order); i++ {
 							if i == at {
-								got, steps = AdvancePullRequestHead(got, tc.head), append(steps, "head "+tc.head)
+								got, steps = AdvancePullRequestHead(got, "", tc.head), append(steps, "head "+tc.head)
 							}
 							if i < len(order) {
 								got, steps = ApplyPush(got, order[i]), append(steps, "push "+order[i].Before+".."+order[i].SHA)
@@ -174,10 +176,10 @@ func TestAPushForALaterMoveWaitsForItsChain(t *testing.T) {
 	first := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}
 	link := record.ClassifiedPush{SHA: "h4", Before: "h3", HandoffOnly: true}
 	tests := record.ClassifiedPush{SHA: "h5", Before: "h4", ByReviewApp: true}
-	early := AdvancePullRequestHead(ApplyPush(ApplyPush(ApplyPush(red, first), link), tests), "h3")
-	early = AdvancePullRequestHead(early, "h5")
-	late := AdvancePullRequestHead(ApplyPush(ApplyPush(red, tests), first), "h3")
-	late = AdvancePullRequestHead(late, "h5")
+	early := AdvancePullRequestHead(ApplyPush(ApplyPush(ApplyPush(red, first), link), tests), "", "h3")
+	early = AdvancePullRequestHead(early, "", "h5")
+	late := AdvancePullRequestHead(ApplyPush(ApplyPush(red, tests), first), "", "h3")
+	late = AdvancePullRequestHead(late, "", "h5")
 	if late.FixAttempts != 3 || late.HeadCounted != "h5" {
 		t.Fatalf("h5 arrived before its chain: fixAttempts=%d headCounted=%q, want 3 and \"h5\"", late.FixAttempts, late.HeadCounted)
 	}
@@ -201,9 +203,9 @@ func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
 		for i := 1; i <= 10; i++ {
 			head, push := fmt.Sprintf("c%d", i), record.ClassifiedPush{SHA: fmt.Sprintf("c%d", i), Before: fmt.Sprintf("c%d", i-1)}
 			if pushFirst {
-				pr = AdvancePullRequestHead(ApplyPush(pr, push), head)
+				pr = AdvancePullRequestHead(ApplyPush(pr, push), "", head)
 			} else {
-				pr = ApplyPush(AdvancePullRequestHead(pr, head), push)
+				pr = ApplyPush(AdvancePullRequestHead(pr, "", head), push)
 			}
 			if len(pr.Pushes) > most {
 				t.Fatalf("push first %v: after %d moves %d pushes are kept, want at most %d: %+v", pushFirst, i, len(pr.Pushes), most, pr.Pushes)
@@ -215,17 +217,17 @@ func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
 // A push that links into no move the record makes - one of a line of commits the branch never
 // takes, or one behind a webhook that never arrives - is spent by no move. The pull request keeps
 // at most maxWaitingPushes of them, letting the oldest go first and saying which it let go
-// (DroppedPushes), and not counting there the pushes a move spent.
+// (ApplyPushDropping), and not counting there the pushes a move spent.
 func TestPushesWaitingForALinkAreBounded(t *testing.T) {
 	pr := record.PullRequest{HeadSHA: "c0"}
 	for i := 1; i <= 80; i++ {
-		pr = AdvancePullRequestHead(pr, fmt.Sprintf("c%d", i))
+		pr = AdvancePullRequestHead(pr, "", fmt.Sprintf("c%d", i))
 		if i%2 == 0 {
 			continue // this move's push webhook is lost
 		}
-		prior := pr
-		pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", i-1), Before: fmt.Sprintf("c%d", i-2)})
-		if dropped := DroppedPushes(prior, pr); len(dropped) != 0 {
+		var dropped Dropped
+		pr, dropped = ApplyPushDropping(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", i-1), Before: fmt.Sprintf("c%d", i-2)})
+		if len(dropped.Waiting) != 0 || dropped.Repeat != nil {
 			t.Fatalf("after %d moves the push let go %+v, want none: a move spent it", i, dropped)
 		}
 		if len(pr.Pushes) > maxWaitingPushes {
@@ -236,15 +238,15 @@ func TestPushesWaitingForALinkAreBounded(t *testing.T) {
 	// then wait behind it, and each past the bound lets the oldest go, never the one just recorded.
 	waiting := pushKeys(pr.Pushes)
 	for i := 1; i <= 40; i++ {
-		prior := pr
 		push := record.ClassifiedPush{SHA: fmt.Sprintf("a%d", i), Before: fmt.Sprintf("a%d", i-1)}
-		pr = ApplyPush(pr, push)
+		var dropped Dropped
+		pr, dropped = ApplyPushDropping(pr, push)
 		waiting = append(waiting, pushKey(push))
 		var want [][2]string
 		if len(waiting) > maxWaitingPushes {
 			want, waiting = waiting[:1], waiting[1:]
 		}
-		if got := pushKeys(DroppedPushes(prior, pr)); !slices.Equal(got, want) {
+		if got := pushKeys(dropped.Waiting); !slices.Equal(got, want) {
 			t.Fatalf("after %d pushes of a line the branch never takes the pushes let go are %v, want %v: the oldest waiting goes first", i, got, want)
 		}
 		if got := pushKeys(pr.Pushes); !slices.Equal(got, waiting) {
@@ -270,15 +272,15 @@ func TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay(t *testing.T) {
 	}
 	var waiting [][2]string
 	for i := 1; i <= 3*maxWaitingPushes; i++ {
-		prior := pr
 		push := record.ClassifiedPush{SHA: fmt.Sprintf("w%d", i), Before: fmt.Sprintf("w%d", i-1)}
-		pr = ApplyPush(pr, push)
+		var dropped Dropped
+		pr, dropped = ApplyPushDropping(pr, push)
 		waiting = append(waiting, pushKey(push))
 		var want [][2]string
 		if len(waiting) > maxWaitingPushes {
 			want, waiting = waiting[:1], waiting[1:]
 		}
-		if got := pushKeys(DroppedPushes(prior, pr)); !slices.Equal(got, want) {
+		if got := pushKeys(dropped.Waiting); !slices.Equal(got, want) {
 			t.Fatalf("after %d waiting pushes the pushes let go are %v, want %v", i, got, want)
 		}
 		if got, want := pushKeys(pr.Pushes), append(pushKeys(kept), waiting...); !slices.Equal(got, want) {
@@ -301,11 +303,11 @@ func pushKeys(pushes []record.ClassifiedPush) [][2]string {
 // same attempt, not a new one, so it is neither counted nor clears the mark. A head that was not
 // counted takes nothing back when its late push turns out handoff-only.
 func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
-	counted := AdvancePullRequestHead(record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2}, "h4")
+	counted := AdvancePullRequestHead(record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2}, "", "h4")
 	if counted.FixAttempts != 3 || counted.HeadCounted != "h4" {
 		t.Fatalf("a push onto red = %#v, want counted h4", counted)
 	}
-	unjudged := AdvancePullRequestHead(counted, "h5")
+	unjudged := AdvancePullRequestHead(counted, "", "h5")
 	if unjudged.FixAttempts != 3 || unjudged.HeadCounted != "h4" {
 		t.Fatalf("a push onto unjudged h4 = %#v, want the count and the mark on h4 kept", unjudged)
 	}
@@ -324,7 +326,7 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 			got.FixAttempts, got.HeadCounted)
 	}
 	unjudged, _ = ApplyCheckSettlement(unjudged, SettlementCandidate{Head: "h5", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green", Failing: []string{}})
-	onGreen := AdvancePullRequestHead(unjudged, "h6")
+	onGreen := AdvancePullRequestHead(unjudged, "", "h6")
 	if onGreen.FixAttempts != 3 || onGreen.HeadCounted != "" {
 		t.Fatalf("a push onto green h5 = %#v, want the count kept and the mark cleared", onGreen)
 	}
@@ -362,7 +364,7 @@ func TestAdvancePullRequestHeadLeavesTheAttemptOnAPushOntoABaseThatRequiresNothi
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := AdvancePullRequestHead(tc.pr(marked), "h4")
+			got := AdvancePullRequestHead(tc.pr(marked), "", "h4")
 			wantCounted := "h3"
 			if tc.cleared {
 				wantCounted = ""
@@ -581,9 +583,9 @@ func arrive(pr record.PullRequest, sha, changedPaths string, byReviewApp, pushFi
 	push := record.ClassifiedPush{SHA: sha, Before: pr.HeadSHA, HandoffOnly: classification.HandoffOnly,
 		Unknown: classification.Unknown, ByReviewApp: byReviewApp}
 	if pushFirst {
-		return AdvancePullRequestHead(ApplyPush(pr, push), sha)
+		return AdvancePullRequestHead(ApplyPush(pr, push), "", sha)
 	}
-	return ApplyPush(AdvancePullRequestHead(pr, sha), push)
+	return ApplyPush(AdvancePullRequestHead(pr, "", sha), push)
 }
 
 // One tester round, in both webhook orders, each step reading the pull request the previous one
@@ -618,7 +620,7 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 			check("the implementer's fix", "fix", false, 0, "")
 			pr.Failing, pr.CheckedHead = []string{"ci"}, pr.HeadSHA
 
-			pr = AdvancePullRequestHead(pr, "fix-2")
+			pr = AdvancePullRequestHead(pr, "", "fix-2")
 			check("a later fix whose push webhook is lost", "fix-2", false, 1, "fix-2")
 		})
 	}

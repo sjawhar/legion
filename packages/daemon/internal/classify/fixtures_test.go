@@ -276,7 +276,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		switch stringValue(payload, "action") {
 		case "synchronize":
 			if stringValue(payload, "head_sha") != "" && stringValue(payload, "head_sha") != pr.HeadSHA {
-				pr = AdvancePullRequestHead(pr, stringValue(payload, "head_sha"))
+				pr = AdvancePullRequestHead(pr, "", stringValue(payload, "head_sha"))
 			}
 		case "closed":
 			deleted = true

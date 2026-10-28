@@ -784,14 +784,17 @@ func githubPayload(event string, body map[string]any) string {
 		addCappedBody(data, reviewBody)
 	case "pull_request":
 		data = map[string]string{
-			"kind":             "pr",
-			"action":           action,
-			"repo":             repo,
-			"number":           number,
-			"title":            nestedString(body, "pull_request", "title"),
-			"author":           nestedString(body, "pull_request", "user", "login"),
-			"url":              nestedString(body, "pull_request", "html_url"),
-			"head_sha":         nestedString(body, "pull_request", "head", "sha"),
+			"kind":     "pr",
+			"action":   action,
+			"repo":     repo,
+			"number":   number,
+			"title":    nestedString(body, "pull_request", "title"),
+			"author":   nestedString(body, "pull_request", "user", "login"),
+			"url":      nestedString(body, "pull_request", "html_url"),
+			"head_sha": nestedString(body, "pull_request", "head", "sha"),
+			// before is the head a synchronize moved the branch from (GitHub sends it, with after,
+			// only on synchronize): the Legion daemon reads the move a head arrives by from it.
+			"before":           stringValue(body["before"]),
 			"head_ref":         nestedString(body, "pull_request", "head", "ref"),
 			"base_ref":         nestedString(body, "pull_request", "base", "ref"),
 			"merged":           strconv.FormatBool(boolValue(nested(body, "pull_request", "merged"))),

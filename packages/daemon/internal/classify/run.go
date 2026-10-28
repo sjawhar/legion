@@ -8,8 +8,8 @@ import "github.com/sjawhar/legion/daemon/internal/record"
 // its move, and GitHub sends every push, so a run reaches the bound only when a push webhook is
 // lost for good, or each of more than this many facts arrives before the push it waits for; the
 // heads cut from it keep the judgement the last replay gave them, and no later push replays them.
-// The run keeps every push on the path forward from a head it holds (runHeads), so a head whose
-// push arrived first is never cut loose from it, however many heads follow one lost push.
+// The run lets a push go only when the record's own bound does (ApplyPush), so a head whose push
+// arrived first is never cut loose from it, however many heads follow one lost push.
 const maxRunSteps = 32
 
 // A head run (record.PullRequest.Run) makes the fix-attempt count, its mark, the planned mark and
@@ -44,15 +44,17 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 	return replayRun(pr)
 }
 
-// replayRun replays pr's open run: its steps from its anchor, with the run's pushes and every push
-// the pull request holds that carries an approval across - which no fact drops (unspentPushes), so
-// the run does not keep a copy of them - less every push whose move the anchor had already made: a
-// push redelivered after its move was judged before the run opened is spent there, as it is when
-// it arrives first, and its move keeps it (pushedMoves). The run stays open from its first head
-// judged with no chain of pushes, its anchor the judgement before that head, and closes when there
-// is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request keeps its
-// own pushes. BlockedAttempts is what was reported, so it stays, unless the count it reported is
-// no longer reached, as when a count is taken back.
+// replayRun replays pr's open run: its steps from its anchor, with the run's pushes - every code
+// push recorded since the anchor's, in delivery order, two pushes of the same two heads kept
+// apart - and every push the pull request holds that carries an approval across, which no fact
+// drops (unspentPushes), so the run does not keep a copy of them; less every push whose move the
+// anchor had already made: a push delivered after its move was judged before the run opened is
+// spent there, as it is when it arrives first, and its move keeps it (pushedMoves). A head step
+// arrives by the move its synchronize named (record.RunStep.Before). The run stays open from its
+// first head judged with no chain of pushes, its anchor the judgement before that head, and closes
+// when there is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request
+// keeps its own pushes. BlockedAttempts is what was reported, so it stays, unless the count it
+// reported is no longer reached, as when a count is taken back.
 func replayRun(pr record.PullRequest) record.PullRequest {
 	run, live := pr.Run, pr.Pushes
 	blocked := pr.BlockedAttempts
@@ -64,7 +66,7 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 		}
 	}
 	for _, p := range at.Pushes {
-		at.Moves = pushedMoves(at.Moves, p)
+		at.Moves, _ = pushedMoves(at.Moves, p)
 	}
 	at.Pushes = unspentPushes(at.Pushes, at.Moves, false)
 	type state struct {
@@ -98,19 +100,6 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	return at
 }
 
-// runHeads is the heads run holds: its anchor's head and each head step's. A push on the path
-// forward from any of them is one the replay can chain a head of the run with, so the run's bound
-// on waiting pushes (boundedPushes) never counts it, whichever head's push was lost.
-func runHeads(run record.HeadRun) []string {
-	heads := []string{run.Anchor.HeadSHA}
-	for _, step := range run.Steps {
-		if step.Head != "" {
-			heads = append(heads, step.Head)
-		}
-	}
-	return heads
-}
-
 // withoutApprovalCarriers is pushes without those that carry an approval across.
 func withoutApprovalCarriers(pushes []record.ClassifiedPush) []record.ClassifiedPush {
 	kept := make([]record.ClassifiedPush, 0, len(pushes))
@@ -127,7 +116,7 @@ func withoutApprovalCarriers(pushes []record.ClassifiedPush) []record.Classified
 func applyStep(pr record.PullRequest, step record.RunStep) (record.PullRequest, bool) {
 	switch {
 	case step.Head != "":
-		return advance(pr, step.Head)
+		return advance(pr, step.Before, step.Head)
 	case step.Settlement != nil:
 		pr, _ = settle(pr, candidateOf(*step.Settlement))
 	case step.Required != nil:
@@ -156,7 +145,7 @@ func withStep(pr record.PullRequest, s record.RunStep) record.PullRequest {
 // is a step of it.
 func Reopen(pr record.PullRequest, head string) record.PullRequest {
 	if head != pr.HeadSHA {
-		pr = AdvancePullRequestHead(pr, head)
+		pr = AdvancePullRequestHead(pr, "", head)
 	}
 	return withStep(pr, record.RunStep{Reopened: true})
 }
