@@ -528,13 +528,24 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 // replica (preloadedDocument, LoadDoc), so the admission's decode is the load's own. The preload is
 // nil when this server holds the document. A durable history that does not decode is
 // ErrDocumentUnloadable and fails the room, as ygo's own load of it would.
+//
+// The read's fold, when the history holds several updates, and the decode run under one grant of
+// the copy-heap bound (copyGrant), whose wait ends with ctx, the socket's request: one that ends
+// first answers ctx's error and holds nothing of the bound. The grant is given back once the copy
+// is the preload's, which the admission reserved in the room budget (reserveRoom), and before the
+// room fails, whose eviction can wait.
 func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *preloadedDocument, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
 		return tree, nil, err
 	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	copyCtx, grant, done := withCopyGrant(ctx)
+	loaded, err := s.persistence.Load(copyCtx, artifactID)
+	if err == nil {
+		err = grant.cover(copyCtx, len(loaded.Update))
+	}
 	if err != nil {
+		done()
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
 		}
@@ -542,9 +553,11 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		return nil, nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
 	if len(loaded.Update) == 0 {
+		done()
 		return nil, &preloadedDocument{loaded: loaded}, nil
 	}
 	decoded, err := decodeStoredState(loaded.Update)
+	done()
 	if err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.

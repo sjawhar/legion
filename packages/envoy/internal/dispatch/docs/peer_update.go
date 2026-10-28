@@ -1366,10 +1366,12 @@ const goMemoryLimitBytes = 4 << 30 * 9 / 10
 
 // applyHeapBound is the most heap, by their estimates (peerWeighing.applyHeap), that the pod's
 // weighed applies of browsers' updates hold at once (applyHeaps): half of what the Go memory limit
-// leaves above the room budget and the cold reads' cache, (3,865,470,566 - roomBudgetBytes
-// 2,147,483,648 - documentReadBudget 268,435,456) / 2 = 1,449,551,462 / 2 = 724,775,731 bytes,
-// about 691 MiB. The other half is the request path's and the collector's slack, and it is also
-// where the applies under unweighedApplyHeapBytes run.
+// leaves above the room budget, the cold reads' cache and the pressure reserve the budget's
+// charges may pass its limit by, (3,865,470,566 - roomBudgetBytes 2,147,483,648 -
+// documentReadBudget 268,435,456 - pressureReserveBytes 268,435,456) / 2 = 1,181,116,006 / 2 =
+// 590,558,003 bytes, about 563 MiB. The other half is the copy-heap bound's (copyHeapBound), which
+// holds the full-state decodes of loads, forks and folds; the applies under
+// unweighedApplyHeapBytes run beside both.
 //
 // It is not in the spec: it is the plan's departure 8, large applies taking turns, weighed by each
 // apply's estimate rather than counted in slots. Every browser's first sync hands over its whole
@@ -1383,17 +1385,17 @@ const goMemoryLimitBytes = 4 << 30 * 9 / 10
 // inserted nothing and added no struct. Measured on 2026-10-28
 // (TestEveryApplysTransientHeapIsWithinItsEstimate), the 5,360,879-byte handoff of the heaviest
 // document the server's own writes can leave is estimated at 71,356,658 bytes into the room
-// holding it, against the 33,410,168 it allocates there, so ten such handoffs apply at once, and
+// holding it, against the 33,410,168 it allocates there, so eight such handoffs apply at once, and
 // at 234,999,499 into a fresh room, whose budget gives it the per-frame ceiling
 // (perFrameScanCeiling) for the 49,156 items decoding a whole document into one holding nothing
-// scans, against the 113,178,024 its apply allocates there, so three apply at once. The
+// scans, against the 113,178,024 its apply allocates there, so two apply at once. The
 // 9,577,606-byte handoff of that document grown through the creep allowance (maxMessageBytes,
 // TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor) is estimated at 157,797,184
-// into the room holding it, so four apply at once, and at 482,930,134 into a fresh room, one at a
+// into the room holding it, so three apply at once, and at 482,930,134 into a fresh room, one at a
 // time. A frame of null values at the message floor, 56,623,059 bytes, is estimated at
 // 3,737,127,910 (TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied), past the whole bound,
 // and refused (errApplyTooHeavy).
-const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudget) / 2
+const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes) / 2
 
 // unweighedApplyHeapBytes is the update's own share of its estimate (peerWeighing.ownApplyHeap)
 // at or under which an admitted update applies without waiting on applyHeapBound: 2 MiB, over
@@ -1404,7 +1406,8 @@ const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudge
 // transaction on a room pays for the room's clients and deleted items, the server's own writes
 // included, and ygo runs one transaction at a time in a room (its document lock), so that share is
 // paid at most once a room at any moment. An unweighed apply runs beside the bound, one per
-// browser's read loop at most, in the half the bound leaves to the request path.
+// browser's read loop at most, outside both halves of what the Go memory limit leaves above the
+// room budget, the cold reads' cache and the pressure reserve (copyHeapBound).
 const unweighedApplyHeapBytes = 2 << 20
 
 // applyHeaps is the service's bound on the estimated heap of its weighed applies, applyHeapBound

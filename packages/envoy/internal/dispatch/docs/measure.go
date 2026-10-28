@@ -214,7 +214,11 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 // copy's total after the write less its total before. A write the copy shows taking structs away
 // is credited none of them. The copy is a decode of doc's state into a fresh document with doc's
 // client id, so the write's own items take the clocks they would take in doc; it holds a whole
-// second document while it is counted, and is dropped when this returns.
+// second document while it is counted, and is dropped when this returns. The decode and the count
+// on the copy run under a grant of the copy-heap bound of their own (holdServerCopy), covered once
+// doc's state is encoded, which takes doc's lock, and given back with the copy. Its wait has no
+// deadline, as the turn's has none: no holder of the bound waits for the turn or for anything a
+// waiter holds (copyHeaps).
 func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 {
 	m.turn.Lock()
 	defer m.turn.Unlock()
@@ -228,8 +232,10 @@ func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 
 		return live + write.adds
 	}
 	m.writeMeasured(true)
+	state := crdt.EncodeStateAsUpdateV1(doc, nil)
+	defer holdServerCopy(len(state))()
 	copied := newDocumentCopy(crdt.WithClientID(doc.ClientID()))
-	if err := crdt.ApplyUpdateV1(copied, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+	if err := crdt.ApplyUpdateV1(copied, state, nil); err != nil {
 		// A state whose total is within the cap is within what a decode reads; one that still
 		// does not decode cannot be written to and loaded again.
 		slog.Error("dispatch: copy a room's document to count a server write on it", "error", err)

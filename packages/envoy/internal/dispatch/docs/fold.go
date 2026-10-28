@@ -80,6 +80,11 @@ func documentThrough(ctx context.Context, tx pgx.Tx, room string, version persis
 	if len(state) == 0 {
 		return nil, nil
 	}
+	release, err := holdCopy(ctx, len(state))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
@@ -117,7 +122,29 @@ func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistenc
 // fold is foldThrough with the document its read-back check decoded the state into, readBack, nil
 // unless the state reads back. A log of one update is returned as stored, with no document. The
 // fold holds one document at once: its own, until it has encoded the state, then the read-back's.
+//
+// A log of more than one update is folded under a grant of the copy-heap bound (copyGrant), the
+// grant ctx carries - a room load's, whose fold is its first decode - or one of the fold's own,
+// given back as it returns. It is weighed first by every update the fold reads, which its
+// document and the update being applied hold at most, and then, before the read-back decodes the
+// state, by that state where it is larger: a delete inside an item splits it, so a state can carry
+// more than the updates that made it. The grant is covered inside tx, whose connection a waiter
+// holds while it waits: no holder of the bound waits for a connection (copyHeaps).
 func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, readBack *crdt.Doc, misread error, err error) {
+	ctx, grant, done := withCopyGrant(ctx)
+	defer done()
+	var updates, bytes int
+	if err := tx.QueryRow(ctx, `
+		select count(*), coalesce(sum(octet_length(update)), 0) from doc_updates
+		where artifact_id = $1 and version <= $2
+	`, room, int64(version)).Scan(&updates, &bytes); err != nil {
+		return nil, nil, nil, fmt.Errorf("weigh document updates: %w", err)
+	}
+	if updates > 1 {
+		if err := grant.cover(ctx, bytes); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	var doc *crdt.Doc
 	apply := func(update []byte) error {
 		if doc == nil {
@@ -171,6 +198,9 @@ func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Versi
 		}
 	}
 	doc = nil
+	if err := grant.cover(ctx, len(state)); err != nil {
+		return nil, nil, nil, err
+	}
 	readBack, misread = readsBackOtherwise(state, made)
 	return state, readBack, misread, nil
 }
@@ -237,11 +267,14 @@ type LoadedDocument struct {
 // LoadDocument is the room's document at its head, decoded once, and the stamp of the state it was
 // decoded from, both read in the one repeatable-read transaction Load reads in. Its document is
 // the one Load's state decodes into (documentThrough), so a read of it shows what a room load
-// would. A history that does not decode is ErrDocumentUnloadable.
+// would. A history that does not decode is ErrDocumentUnloadable. Its fold and decode share one
+// grant of the copy-heap bound, given back as it returns the document to its caller.
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
 	if err := ctx.Err(); err != nil {
 		return LoadedDocument{}, err
 	}
+	ctx, _, done := withCopyGrant(ctx)
+	defer done()
 	rooms, err := p.store.Pool.Rooms()
 	if err != nil {
 		return LoadedDocument{}, err

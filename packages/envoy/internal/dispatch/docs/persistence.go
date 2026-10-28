@@ -581,9 +581,17 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
-// the old merged history; this method never makes that destructive decision itself.
+// the old merged history; this method never makes that destructive decision itself. The seed is a
+// whole state, and its validation decodes it under a grant of the copy-heap bound, covered before
+// the room's lock is taken and given back once the decode is done.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
-	if err := validateUpdate(seed); err != nil {
+	release, err := holdCopy(ctx, len(seed))
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	err = validateUpdate(seed)
+	release()
+	if err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {

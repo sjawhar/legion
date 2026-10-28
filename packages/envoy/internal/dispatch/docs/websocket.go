@@ -73,22 +73,22 @@ type servicePersistenceAdapter struct {
 // at its load (roomScans), and its copy the room's replica (keepReplica). So the stored state is
 // decoded twice on a room's load, that copy and ygo's decode of the bytes returned here into the
 // room's own document (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1871-1890).
+// Those decodes, and a fold before them, run under the load's one copy grant (roomLoad.grant).
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	load := a.service.beginRoomLoad(room)
+	grant := newCopyGrant()
 	if preload, ok := a.service.takePreload(room); ok {
-		load.read(preload.loaded.Version, preload.decoded)
+		_ = grant.cover(context.Background(), len(preload.loaded.Update))
+		load.read(preload.loaded.Version, preload.decoded, grant)
 		return preload.loaded.Update, nil
 	}
-	result, err := a.store.Load(context.Background(), room)
-	var decoded decodedState
-	if err == nil {
-		decoded, err = decodeStoredState(result.Update)
-	}
+	result, decoded, err := a.loadDecoded(room, grant)
 	if err != nil {
+		grant.release()
 		a.service.failRoom(room, err)
 		return nil, err
 	}
-	load.read(result.Version, decoded)
+	load.read(result.Version, decoded, grant)
 	return result.Update, nil
 }
 
@@ -463,7 +463,12 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	// The decode of the stored state LoadDoc recorded is taken first, so a load refused below
-	// drops its copy rather than leave it on the load's record (roomLoad.decoded).
+	// drops its copy rather than leave it on the load's record (roomLoad.decoded), and the load's
+	// grant of the copy-heap bound is given back with it: ygo's decode, the last the grant covers,
+	// is done, and the reads below, which wait on the rooms pool, run holding none of the bound
+	// (copyHeaps). The two copies the load made are the room's from here: a socket's admission
+	// reserved them in the room budget before the load (reserveRoom), and the room is charged them
+	// below (chargeLoadedRoom).
 	loaded, recorded := s.takeLoadedState(room)
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
 	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.7,
@@ -575,9 +580,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// the preload and the load's record gave it up as it was taken (takePreload,
 	// takeLoadedState) - so the replica owns it, and the room's first transaction decodes nothing
 	// more (renderedReplica.observe). A room ygo loaded without reading the store through this
-	// service's persistence is decoded again here, from its own document's state.
+	// service's persistence is decoded again here, from its own document's state, under a grant of
+	// its own (holdServerCopy), given back once the copy is the replica's.
 	if !recorded {
-		loaded, _ = decodeStoredState(crdt.EncodeStateAsUpdateV1(doc, nil))
+		encoded := crdt.EncodeStateAsUpdateV1(doc, nil)
+		release := holdServerCopy(len(encoded))
+		loaded, _ = decodeStoredState(encoded)
+		release()
 	}
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order, and
@@ -796,4 +805,23 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 		s.unlockState(room, state)
 	}()
 	s.settleRoom(room, generation)
+}
+
+// loadDecoded is LoadDoc's own read of room's stored state and its decode (decodeStoredState),
+// both under grant, the load's (roomLoad.grant): the read's fold of a history of several updates
+// covers it inside the read's transaction (fold), and the decode covers it for the state the read
+// returned, which ygo decodes again into the room's document on the same grant. ygo hands LoadDoc
+// no context, so each cover waits until it holds its weight, holding no part of the bound
+// meanwhile (copyGrant.cover).
+func (a *servicePersistenceAdapter) loadDecoded(room string, grant *copyGrant) (persistence.LoadResult, decodedState, error) {
+	ctx := grant.carriedBy(context.Background())
+	result, err := a.store.Load(ctx, room)
+	if err == nil {
+		err = grant.cover(ctx, len(result.Update))
+	}
+	if err != nil {
+		return persistence.LoadResult{}, decodedState{}, err
+	}
+	decoded, err := decodeStoredState(result.Update)
+	return result, decoded, err
 }

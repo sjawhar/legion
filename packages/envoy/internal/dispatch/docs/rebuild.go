@@ -143,22 +143,9 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: close document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
 		}
 	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	history, why, retired, err := s.rebuildSource(ctx, artifactID)
 	if err != nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
-	}
-	history, validationErr := decodeHistory(loaded.Update)
-	var why string
-	var retired map[crdt.ClientID]uint64
-	if validationErr == nil {
-		var near bool
-		if why, near = nearACap(history); !near {
-			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
-		}
-		retired = historyClients(history)
-	} else {
-		why = validationErr.Error()
-		retired = undecodableHistoryClients(loaded.Update)
+		return RebuildReport{}, VersionResult{}, err
 	}
 	// The owner row before the room lock the write below takes, as every writer that takes both
 	// does (lockDocumentRoom). Held, it also keeps the open asks the replacement must keep, and
@@ -233,6 +220,32 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	report.SourceVersion = written.version.Number
 	return report, VersionResult{Version: written.version, Wrote: true, Changes: written.changes}, nil
+}
+
+// rebuildSource is what a rebuild of artifactID starts from: the stored history decoded (nil for
+// one that does not decode), why it must be rebuilt - how near a cap it stands (nearACap), or the
+// decode's refusal - and the clients it retires. A history that loads and stands near no cap is
+// ErrDocumentLoads. The read's fold, its decode and the check's re-scan of it run under one grant
+// of the copy-heap bound, whose wait ends with ctx, given back once the history is the rebuild's.
+func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, string, map[crdt.ClientID]uint64, error) {
+	ctx, grant, done := withCopyGrant(ctx)
+	defer done()
+	loaded, err := s.persistence.Load(ctx, artifactID)
+	if err == nil {
+		err = grant.cover(ctx, len(loaded.Update))
+	}
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
+	}
+	history, validationErr := decodeHistory(loaded.Update)
+	if validationErr != nil {
+		return nil, validationErr.Error(), undecodableHistoryClients(loaded.Update), nil
+	}
+	why, near := nearACap(history)
+	if !near {
+		return nil, "", nil, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
+	}
+	return history, why, historyClients(history), nil
 }
 
 // decodeHistory decodes a stored history as validateUpdate does, as a room's load will, and returns

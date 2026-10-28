@@ -577,10 +577,18 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 // after a recover, or the first base of a replica its load handed no copy (keepReplica). A base
 // that does not apply leaves no replica (recover). A rendering other than the one the room last
 // published is published as the room's measurement (publishSize).
+//
+// The decode runs under a grant of the copy-heap bound of its own (holdServerCopy), given back
+// once the copy is the replica's. Its wait has no deadline: it is the update observer's, which
+// holds mu and has no request to end it. No observer runs under a grant, so the observer holds
+// none of the bound as it waits (copyHeaps).
 func (r *renderedReplica) start(room string, base []byte) {
 	published := r.markdown
+	release := holdServerCopy(len(base))
 	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, base, nil); err != nil {
+	err := crdt.ApplyUpdateV1(doc, base, nil)
+	release()
+	if err != nil {
 		slog.Error("dispatch: make the document's rendered copy", "room", room, "error", err)
 		r.doc, r.markdown = nil, nil
 		return
