@@ -5,6 +5,11 @@ operator-launched controller, and the one thing in it a role does for itself: ru
 in the cluster from a role ([Running a workload in the cluster from a
 role](#running-a-workload-in-the-cluster-from-a-role)).
 
+This file uses semantic line breaks: one sentence per line, and a long sentence may break after a clause.
+A blank line separates list items.
+Add a new item next to the item it belongs with, never at the end of a list unless it belongs there, so two pull requests that add items or change different sentences do not conflict.
+`bun scripts/semantic-line-breaks.ts docs/kubernetes.md` checks the layout, and `--write` fixes it.
+
 The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286), and its sources were deleted on 2026-10-03. Its runtime's section below is kept for reference until someone removes it (LEGION-223).
 
 ## Worker image
@@ -85,58 +90,78 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `pyright` CLI) linked at `/usr/local/bin`. TypeScript stays on this repository's own major, since
   `typescript-language-server` runs `tsserver`, which TypeScript 7 no longer ships; the server resolves
   the TypeScript installed beside it unless the repository's own
-  `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
-  (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
-  on it), `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
-  installing launch serialises on the issue's shared bun install cache with `/usr/bin/flock`, so a
-  `roles` container whose image lacks it fails every installing launch; the apt line names the package
-  even though Debian's `priority:required` set already brings it into the base, so the day a base
-  drops it the build fails instead of every launch in the fleet), `ssh-keygen` (from
-  `openssh-client`, which also brings `ssh`, `scp` and
-  `sftp`: they reach no host that `curl`, `wget`, `git`, `python3` and `socat` on the same apt line
-  could not already reach, and what a pod may reach is Legion's ruling, the withheld `network`
-  capability row — dispatch://LEGION-5, the pod is the boundary, except a workload a role starts
-  where its deployment's cluster admits it and the Service fronting it
-  ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role))
-  — a declaration the capability report
-  renders, not a network control this repository ships; the package's setuid
-  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the `runtime-base` stage,
-  and the build's final step refuses an image where any file under `/usr/lib/openssh` or
-  `/usr/bin/ssh-agent` carries one),
-  `psql` (from `postgresql-client`: the Dispatch browser suite `bun run e2e`, which a
-  reader-facing Dispatch change must pass before it merges, reaches `psql` through
-  `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
-  database reset — and the local stack `bun run dispatch:local`
-  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock`,
-  `openssl` and `python3` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the
-  image carries `go`, `flock`, `openssl` and `python3`, a `DATABASE_URL` stands in for `docker`,
-  and `psql` was the
-  one a role had no way to supply, so a role on a digest without it cannot run the suite its own
-  change owes — Debian's `psql` is a Perl wrapper around the versioned client, and it resolves
-  because `perl-base` is in the image),
-  `redis-cli` (from `redis-tools`: no
-  repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
-  because a second image roll costs more than a megabyte), `sqlite3` (a repository's own SQLite
-  fixture or database has no other way to open from a shell, and Oh My Pi's own profile databases
-  under `~/.omp/profiles/legion` are SQLite as well; a role's session is not one of them — it is
-  `results.jsonl`, `state.json` and `title` under `XDG_STATE_HOME`, and the session store these
-  pods otherwise use is Postgres), `nc` (from `netcat-openbsd`, for the reachability check a role would
-  otherwise write as an inline Python loop: the package ships `/usr/bin/nc.openbsd` and the `nc`
-  name comes from the alternatives system rather than being a file of the package, so every gate
-  asks for `nc` and never `nc.openbsd`), `dig` (from `bind9-dnsutils`, the package trixie's virtual
-  `dnsutils` resolves to: how a role whose connection to a service name fails tells "the name does
-  not resolve" from "the packets are dropped"), `gcc` (with `libc6-dev`, the libc headers and startup
-  files it links with: the C compiler Go's cgo builds with, and Go refuses `-race` without cgo, so
-  they are what lets a role run the race detector; the paragraph after this list says how cgo's
-  default is kept),
-  and `chromium` for the browser tools, installed without its Recommends (no
-  setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
-  its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
-  `PATH`, and downloads Chrome for Testing into its cache only with none of those — so the image's
-  `chromium` is the one every worker gets, with nothing downloaded, and the probe runs that same
-  resolution. The image sets no `PUPPETEER_EXECUTABLE_PATH`: a variable the image's `ENV` sets is one
-  `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
-  probe checks (it runs that executable), not something to refuse. `jq` and `ssh-keygen` are real
+  `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`:
+
+  - `python3`
+    (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
+    on it)
+
+  - `curl`, `wget`, `jq`
+
+  - `flock` (from `util-linux`: the install Legion renders for an
+    installing launch serialises on the issue's shared bun install cache with `/usr/bin/flock`, so a
+    `roles` container whose image lacks it fails every installing launch; the apt line names the package
+    even though Debian's `priority:required` set already brings it into the base, so the day a base
+    drops it the build fails instead of every launch in the fleet)
+
+  - `ssh-keygen` (from
+    `openssh-client`, which also brings `ssh`, `scp` and
+    `sftp`: they reach no host that `curl`, `wget`, `git`, `python3` and `socat` on the same apt line
+    could not already reach, and what a pod may reach is Legion's ruling, the withheld `network`
+    capability row — dispatch://LEGION-5, the pod is the boundary, except a workload a role starts
+    where its deployment's cluster admits it and the Service fronting it
+    ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role))
+    — a declaration the capability report
+    renders, not a network control this repository ships; the package's setuid
+    `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the `runtime-base` stage,
+    and the build's final step refuses an image where any file under `/usr/lib/openssh` or
+    `/usr/bin/ssh-agent` carries one)
+
+  - `psql` (from `postgresql-client`: the Dispatch browser suite `bun run e2e`, which a
+    reader-facing Dispatch change must pass before it merges, reaches `psql` through
+    `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
+    database reset — and the local stack `bun run dispatch:local`
+    (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock`,
+    `openssl` and `python3` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the
+    image carries `go`, `flock`, `openssl` and `python3`, a `DATABASE_URL` stands in for `docker`,
+    and `psql` was the
+    one a role had no way to supply, so a role on a digest without it cannot run the suite its own
+    change owes — Debian's `psql` is a Perl wrapper around the versioned client, and it resolves
+    because `perl-base` is in the image)
+
+  - `redis-cli` (from `redis-tools`: no
+    repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
+    because a second image roll costs more than a megabyte)
+
+  - `sqlite3` (a repository's own SQLite
+    fixture or database has no other way to open from a shell, and Oh My Pi's own profile databases
+    under `~/.omp/profiles/legion` are SQLite as well; a role's session is not one of them — it is
+    `results.jsonl`, `state.json` and `title` under `XDG_STATE_HOME`, and the session store these
+    pods otherwise use is Postgres)
+
+  - `nc` (from `netcat-openbsd`, for the reachability check a role would
+    otherwise write as an inline Python loop: the package ships `/usr/bin/nc.openbsd` and the `nc`
+    name comes from the alternatives system rather than being a file of the package, so every gate
+    asks for `nc` and never `nc.openbsd`)
+
+  - `dig` (from `bind9-dnsutils`, the package trixie's virtual
+    `dnsutils` resolves to: how a role whose connection to a service name fails tells "the name does
+    not resolve" from "the packets are dropped")
+
+  - `gcc` (with `libc6-dev`, the libc headers and startup
+    files it links with: the C compiler Go's cgo builds with, and Go refuses `-race` without cgo, so
+    they are what lets a role run the race detector; the paragraph after the list of what the image carries says how cgo's default is kept)
+
+  - `chromium` for the browser tools, installed without its Recommends (no
+    setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
+    its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
+    `PATH`, and downloads Chrome for Testing into its cache only with none of those — so the image's
+    `chromium` is the one every worker gets, with nothing downloaded, and the probe runs that same
+    resolution. The image sets no `PUPPETEER_EXECUTABLE_PATH`: a variable the image's `ENV` sets is one
+    `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
+    probe checks (it runs that executable), not something to refuse.
+
+  `jq` and `ssh-keygen` are real
   binaries so a worker's subprocesses — `bun test`, a script, a subagent's shell — find them, where the
   harness's `jq` builtin reaches only the bash tool. A subprocess's `jq` is therefore the image's
   `/usr/bin/jq`, trixie's, while the bash tool's own `jq` stays the harness's builtin, a different
@@ -210,7 +235,7 @@ E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are y
 ```
 
 So `apt` cannot write a system prefix in an unprivileged container. Unpacking a package's files by
-hand is a separate question — it works for some tools and not for others (the extraction row below)
+hand is a separate question — it works for some tools and not for others (the extraction item below)
 — and what rules it out is not the unpacking but the test the role's own skill states, in
 `skills/legion-worker/references/tools.md` under "What the withheld capability is, and what it is
 not": an extraction under that writable `$HOME` is outside the sanctioned form whatever a role
@@ -223,13 +248,27 @@ suite's rootless Postgres with pgvector is stood up in a pod today. So a role wa
 its own on its `PATH` has the image, a pinned runner, or `uv run --with` for a library. The five
 priced options and their verdicts:
 
-| option | the measurement | verdict |
-| :--- | :--- | :--- |
-| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703), the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes | **chosen** |
-| a per-issue install onto the issue's disk | the issue's disk is 49 GiB, and every cache already sits on it (`XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR`, the nine `skills/legion-worker/references/tools.md` lists), so disk is not what rules it out | **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row — and for a test harness's own prefix, which only its own commands resolve through |
-| a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
-| extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected as the way to get these five clients onto a role's `PATH`**: that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way |
-| `runtime.kubernetes.setup`, the operator-set command run before each role's agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
+Each item below names an option and its measurement, then the verdict on it.
+
+- the image carries the five clients — 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703), the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes
+
+  **chosen**
+
+- a per-issue install onto the issue's disk — the issue's disk is 49 GiB, and every cache already sits on it (`XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR`, the nine `skills/legion-worker/references/tools.md` lists), so disk is not what rules it out
+
+  **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction item below. Still right for a language's own package set — which is the runner item — and for a test harness's own prefix, which only its own commands resolve through
+
+- a runner the image already provides, pinned and failing closed — `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one
+
+  **chosen, as documentation rather than new code**: the image already carries all three
+
+- extracting Debian packages onto the issue's disk — 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on
+
+  **rejected as the way to get these five clients onto a role's `PATH`**: that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way
+
+- `runtime.kubernetes.setup`, the operator-set command run before each role's agent starts — it runs on every start of every role, six times per issue
+
+  **rejected**: it buys nothing the image does not, since it is still an unprivileged container
 
 The forms a role types, the rule that a pin names a coordinate as well as a version, and the line
 between a sanctioned pinned run and the withheld `operator-setup` capability are a role's own
@@ -295,19 +334,80 @@ daemon's own code, plus a third only the image runs — the session-storage prob
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the Legion plugin held to
 the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface held to the one the
 Legion plugin speaks, and every task agent and skill Legion's prompts
-name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the Legion plugin ships
-`oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
-planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
-`ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
-`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `envoy` skills in its), so a build whose OMP or plugins are
-broken fails instead of publishing. The build has none of the operator's model configuration, so it
+name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the agents and skills each plugin ships are listed below), so a build whose OMP or plugins are broken fails instead of publishing.
+
+The Legion plugin ships these in `agents/`:
+
+- `oracle`
+
+- `deep-worker`
+
+- `thermonuclear-deep-review`
+
+- `thermonuclear-code-quality`
+
+- the planner's `plan-gap-analyst` and `plan-reviewer`
+
+It ships these with Legion's other skills in its `dist/skills`:
+
+- the pair's rubrics
+
+- `ce-simplify-code`
+
+The Envoy plugin ships these skills in its `dist/skills`:
+
+- `asd-ste100`
+
+- `dispatch`
+
+- `dispatch-first`
+
+- `dispatch-writing-specs`
+
+- `envoy`
+
+The build has none of the operator's model configuration, so it
 leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `gcc`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`,
-`ssh-keygen`, `flock`, `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` on `PATH` with `go version`
-running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
+profile's lock, and these on `PATH` with `go version` running:
+
+- `go`
+
+- `gcc`
+
+- `curl`
+
+- `wget`
+
+- `python3`
+
+- `node`
+
+- `bun`
+
+- `uv`
+
+- `kubectl`
+
+- `jq`
+
+- `ssh-keygen`
+
+- `flock`
+
+- `psql`
+
+- `redis-cli`
+
+- `sqlite3`
+
+- `nc`
+
+- `dig`
+
+It then prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
 (`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value; the mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My Pi settings — the probe pod's log says why — and the daemon's report shows the row open).
@@ -422,10 +522,34 @@ the image `PATH` — the language servers (`gopls version`, `typescript-language
 version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race
 detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required
 to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed
-environment depends on, is ever lost), `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
-`sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
-into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
+environment depends on, is ever lost), `gofmt`, `kubectl version --client`, and trixie's commands included — the corepack shims fetching their shipped default pnpm and yarn into a scratch directory the step removes.
+Trixie's commands are these:
+
+- `python3`
+
+- `curl`
+
+- `wget`
+
+- `jq --version`
+
+- `flock --version`
+
+- `psql --version`
+
+- `redis-cli --version`
+
+- `sqlite3 --version`
+
+- `nc -h`
+
+- `dig -v`
+
+- `chromium --version`
+
+- `socat -V`
+
+`ssh-keygen` takes no `--version`, so the step generates a
 throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
 five clients are odd the same way: `nc` takes no `--version` either, so the step runs `nc -h`, which
 prints its usage and exits 0, under the `nc` name the alternatives system installs and never
@@ -434,7 +558,30 @@ prints its usage and exits 0, under the `nc` name the alternatives system instal
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gcc --version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+
+```sh
+docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c '
+  uv --version &&
+  node --version &&
+  npm --version &&
+  aws --version &&
+  kubectl version --client &&
+  go version &&
+  gcc --version &&
+  gopls version &&
+  python3 --version &&
+  jq --version &&
+  flock --version &&
+  psql --version &&
+  redis-cli --version &&
+  sqlite3 --version &&
+  nc -h &&
+  dig -v &&
+  ssh-keygen -t ed25519 -N "" -f /tmp/k &&
+  chromium --version &&
+  uv python install 3.13 &&
+  uv run --python 3.13 python -c "print(1)"'
+```
 
 ### Pin by digest, never by tag
 
