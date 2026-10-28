@@ -693,6 +693,25 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 	return mark.warm && r.epoch.Load() == mark.epoch && r.foreign.Load() == mark.foreign
 }
 
+// renderingAt is the rendered markdown of the state a warm fork read found the room in, which the
+// read recorded as mark (warmFork), or nil. It takes the replica as a read does (hold) and answers
+// only when the replica holds every logged commit and still stands at mark (standsAt): it then
+// holds exactly the state the fork read, so its markdown is the fork's. It answers nil, holding
+// nothing, for a replica it cannot take, one that no longer stands at mark, and one outside the
+// schema. The pointer is the replica's own string, which no one writes in place: the replica
+// replaces markdown with a new string, never mutates the one it held, so the caller may keep it
+// once mu is released.
+func (r *renderedReplica) renderingAt(mark forkReadMark) *string {
+	if r.hold() == nil {
+		return nil
+	}
+	defer r.mu.Unlock()
+	if !r.standsAt(mark) {
+		return nil
+	}
+	return r.markdown
+}
+
 // start makes the replica from base, the room's state as of just before the first update its log
 // hands over, and takes its rendering, with that rendering's layout, as the one that update is
 // measured against. It hands the new document to the replica's finder once base is applied

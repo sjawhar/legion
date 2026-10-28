@@ -138,22 +138,25 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
+	// beforeKnown says beforeMarkdown is known without rendering the fork, and knownPath is the
+	// count of the path it was had by, bumped when it is first needed.
 	var beforeMarkdown string
-	var known *atomic.Uint64
+	var beforeKnown bool
+	var knownPath *atomic.Uint64
 	if startErr == nil {
 		switch {
 		case write.forkMarkdown != nil:
-			beforeMarkdown, known = *write.forkMarkdown, &s.renderPaths.beforeFromReplica
+			beforeMarkdown, beforeKnown, knownPath = *write.forkMarkdown, true, &s.renderPaths.beforeFromReplica
 		case write.tree != nil:
-			beforeMarkdown, known = write.markdown, &s.renderPaths.beforeFromWrite
+			beforeMarkdown, beforeKnown, knownPath = write.markdown, true, &s.renderPaths.beforeFromWrite
 		}
 	}
 	write.forkMarkdown = nil
 	rendered := startErr != nil
 	start := func() error {
 		if !rendered {
-			if known != nil {
-				known.Add(1)
+			if beforeKnown {
+				knownPath.Add(1)
 			} else {
 				beforeMarkdown, startErr = documentMarkdown(before)
 				s.renderPaths.beforeRendered.Add(1)
