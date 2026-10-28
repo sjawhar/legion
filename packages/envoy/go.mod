@@ -145,4 +145,4 @@ require (
 // logs each committed transaction's update in commit order under its own lock (UpdateLog), so the
 // room's update observer measures each update against the room the commit before it left. A merged
 // update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4
+replace github.com/reearth/ygo => /legion/scratch/tmp/infra644/ygo4

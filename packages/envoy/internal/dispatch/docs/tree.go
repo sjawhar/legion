@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -251,6 +252,14 @@ func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 	return markdown, offsets, documentSchemaError(err)
 }
 
+// documentRenderingWithLayout is documentMarkdownWithOffsets that records the rendering's
+// pmdoc.Layout as well, from the same render, for a rendering the room's replica may keep and
+// splice a changed block into later (renderedReplica.updateChangesMarkdown).
+func documentRenderingWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
+	markdown, offsets, layout, err := pmdoc.RenderWithLayout(tree)
+	return markdown, offsets, layout, documentSchemaError(err)
+}
+
 // renderDocument is what doc renders now, or the error that stopped it being read or rendered.
 func renderDocument(doc *crdt.Doc) (string, error) {
 	tree, err := treeOf(doc)
@@ -260,22 +269,23 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 	return documentMarkdown(tree)
 }
 
-// renderDocumentForUpdate is renderDocument without pmdoc.Read's deep copy
-// (pmdoc.ReadForRendering): for the update observer's render, which runs the render and discards
-// the tree before releasing the replica's lock (renderedReplica.updateChangesMarkdown), so
-// nothing retains the tree past this call to alias a later reader - a caller that reads tree past
-// the call (updateChangesMarkdown's own onChanged, called before the lock is released) aliases
-// none of it by doing so, since tree itself, not a copy of it, is what the caller walks.
-func renderDocumentForUpdate(doc *crdt.Doc) (string, *pmdoc.Node, error) {
-	if doc == nil {
-		return "", nil, errDocUnloaded
+// renderDocumentForUpdate is renderDocument of the document whose fragment is fragment, without
+// pmdoc.Read's deep copy (pmdoc.ReadForRendering), recording the rendering's layout from the same
+// render: for the update observer's render, which runs the render and discards the tree before
+// releasing the replica's lock (renderedReplica.updateChangesMarkdown), so nothing retains the
+// tree past this call to alias a later reader - a caller that reads tree past the call (the ask
+// blocks updateChangesMarkdown hands classify, walked before the lock is released) aliases none of
+// it by doing so, since tree itself, not a copy of it, is what the caller walks.
+func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, *pmdoc.Layout, error) {
+	if fragment == nil {
+		return "", nil, nil, errDocUnloaded
 	}
-	tree, err := pmdoc.ReadForRendering(doc.GetXmlFragment(fragmentName))
+	tree, err := pmdoc.ReadForRendering(fragment)
 	if err != nil {
-		return "", nil, documentSchemaError(err)
+		return "", nil, nil, documentSchemaError(err)
 	}
-	markdown, err := documentMarkdown(tree)
-	return markdown, tree, err
+	markdown, _, layout, err := documentRenderingWithLayout(tree)
+	return markdown, tree, layout, err
 }
 
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
@@ -341,6 +351,19 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // caller. A replica outside the schema (a nil markdown) renders the update, so such an update
 // still logs and counts as changed.
 //
+// Where the observer does measure an update itself (updateChangesMarkdown), it renders no more of
+// the replica than the update can have changed, and each of its three paths is exact too. ygo
+// names, in each transaction, every shared type an item was integrated into or deleted from
+// (crdt.Transaction.ChangedTypes), and the replica records, for the update it applies, the
+// top-level blocks of its document fragment those types sit in (noteChanged): a change anywhere in
+// a block integrates or deletes an item in a type that block contains, and a block inserted,
+// deleted or moved changes the fragment itself. The rendering reads nothing but the fragment. So an
+// update that changed no type under the fragment left the rendering as it was (untouched); one that
+// changed types inside some blocks, and not the fragment, left every other block's tree as it was,
+// and pmdoc.Layout.Splice renders just those blocks into the markdown, answering exactly what a
+// whole render answers or declining where a guard says the rest of the document could read them
+// differently (incremental); anything else is rendered whole, as it always was (whole).
+//
 // The replica starts from the state the log records as of just before the room's first transaction
 // since its load, so a room that is only read holds no replica.
 type renderedReplica struct {
@@ -349,9 +372,22 @@ type renderedReplica struct {
 	waiting atomic.Int32
 	log     *crdt.UpdateLog
 	doc     *crdt.Doc
+	// fragment is doc's document fragment, the one shared type the rendering reads; nil with doc.
+	fragment *crdt.YXmlFragment
 	// markdown is the room's rendered markdown as the replica's latest update left it, or as the
 	// log's base rendered before any; nil while the document is outside the schema.
 	markdown *string
+	// layout is the pmdoc.Layout of markdown, valid only with it: nil whenever markdown is nil, and
+	// whenever markdown came from a rendering that recorded none (a published rendering without
+	// one), which the next update's whole render records again.
+	layout *pmdoc.Layout
+	// touched lists the top-level blocks of fragment the update being applied changed a type in,
+	// each once, and wholeRender says that the update changed fragment itself or more blocks than
+	// touched lists (maxTouchedBlocks), so the update is rendered whole. noteChanged records them
+	// as doc's transactions commit, and observe resets them before each update it applies, so
+	// neither outlives the update's classification.
+	touched     []crdt.SharedType
+	wholeRender bool
 	// epoch names the replica's run from one state it started from: keepReplica draws it from
 	// replicaEpochs when it makes the replica, and recover draws a fresh one whenever the replica
 	// starts again, so it is unique in the process. No replica of another room instance - the one
@@ -389,8 +425,16 @@ type renderPathCounts struct {
 	// rendering, since the room's load already held them (roomInstance.loadedHead).
 	observerInRoom atomic.Uint64
 	// observerRendered counts the logged updates the update observer applied and then rendered the
-	// replica for (updateChangesMarkdown).
+	// replica whole for (updateChangesMarkdown's whole path).
 	observerRendered atomic.Uint64
+	// observerIncremental counts the logged updates the update observer applied and then rendered
+	// only the top-level blocks they changed for, splicing them into the replica's markdown
+	// (updateChangesMarkdown's incremental path).
+	observerIncremental atomic.Uint64
+	// observerUntouched counts the logged updates the update observer classified as unchanged
+	// without rendering, since they changed nothing under the document's fragment
+	// (updateChangesMarkdown's untouched path).
+	observerUntouched atomic.Uint64
 	// beforeFromReplica counts the operations whose rendering of their fork before they applied was
 	// the room replica's, which held the very state the fork was read from.
 	beforeFromReplica atomic.Uint64
@@ -401,29 +445,10 @@ type renderPathCounts struct {
 	beforeRendered atomic.Uint64
 }
 
-// observedAsks is the ask blocks a logged update left in the room's document, as the update
-// observer hands them to classify: walked from tree, the replica's rendering after the update,
-// only on the first call to askBlocks, so a classify that never reads them - an identity repair's,
-// which returns before it does - walks nothing; or, for an update a published live write's own
-// rendering classified (changedBy), the ids that write walked from its tree of the same state
-// (publishedRendering.askBlocks), with no tree. A classify handed nil has no ask blocks to record:
-// the update changed no rendered markdown, was handed to recover, or left a document that does
-// not render.
-type observedAsks struct {
-	// tree is the rendering the ids are walked from, valid only during classify's call.
-	tree *pmdoc.Node
-	// ids are the ask block ids, nil until askBlocks walks tree: askBlockIDs never returns nil, so
-	// nil means not known yet.
-	ids map[string]struct{}
-}
-
-// askBlocks is the id of every ask block the update left, walked from tree on the first call.
-func (a *observedAsks) askBlocks() map[string]struct{} {
-	if a.ids == nil {
-		a.ids = askBlockIDs(a.tree)
-	}
-	return a.ids
-}
+// maxTouchedBlocks is the most top-level blocks one update may change a type in and still be
+// rendered block by block: renderedReplica.touched holds no more, so an update's record stays a
+// few words whatever it changed, and an update past it is rendered whole.
+const maxTouchedBlocks = 64
 
 // lockForUpdate takes mu for the update observer. A read only tries mu, and takes it only while
 // no observer waits for it, so the observer waits at most for the one read already walking the
@@ -437,12 +462,18 @@ func (r *renderedReplica) lockForUpdate() {
 // observe is the update observer's turn with the replica: it waits for mu (lockForUpdate), drains
 // the room's update log, and moves the replica through each update the log hands over, in commit
 // order, classifying each as it takes it (changedBy). It calls classify, when given, with each
-// update, whether that update changed the room's rendered markdown, and the ask blocks it left
-// (observedAsks) when it did - nil otherwise, and valid only during the call - still holding mu,
-// so the room's own record of what each update introduced moves forward in commit order. The
-// observer is the one holder of mu that waits for it, and the one that drains the log: every
-// committed update is classified exactly once, by whichever observer reaches the log first.
-func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedUpdate, changed bool, asks *observedAsks)) {
+// update, whether that update changed the room's rendered markdown, and asks, the ask blocks it
+// left, when it did, still holding mu, so the room's own record of what each update introduced
+// moves forward in commit order. The observer is the one holder of mu that waits for it, and the
+// one that drains the log: every committed update is classified exactly once, by whichever
+// observer reaches the log first.
+//
+// asks answers the id of every ask block the update left. It finds them only when called, so a
+// classify that never reads them - an identity repair's, which returns before it does - walks
+// nothing, and it is valid only during classify's call, since it reads the replica, which only a
+// holder of mu may. classify is handed nil asks when there are no ask blocks to record: the update
+// changed no rendered markdown, was handed to recover, or left a document that does not render.
+func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedUpdate, changed bool, asks func() map[string]struct{})) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
 	base, updates := r.log.Drain()
@@ -454,6 +485,7 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			r.recover(room, updates[i:], classify)
 			return
 		}
+		r.resetTouched()
 		if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], classify)
@@ -467,55 +499,106 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 	}
 }
 
+// resetTouched forgets which blocks the last update applied changed (noteChanged), dropping its
+// references to them and keeping the list's array for the next update. The caller holds mu.
+func (r *renderedReplica) resetTouched() {
+	clear(r.touched)
+	r.touched, r.wholeRender = r.touched[:0], false
+}
+
+// noteChanged records what txn, a transaction of the replica's document, changed under its
+// fragment: each type ygo says txn changed (crdt.Transaction.ChangedTypes) is the fragment itself,
+// so the update is rendered whole, or sits in a top-level block, the type just below the fragment
+// on its Parent chain, which it records as touched; a chain that ends at another root type is
+// outside what the rendering reads, and touches nothing. A type more than pmdoc.MaxTreeDepth
+// levels down stands deeper than any node a document in the schema holds, so the walk up from it
+// stops there and the update is rendered whole, which is exact for any update: each walk costs at
+// most the schema's depth, however deep a peer nested the types it changed. start registers it on
+// each document the replica makes, after applying the base, so it runs for the transactions of the
+// updates observe applies, under mu.
+func (r *renderedReplica) noteChanged(txn *crdt.Transaction) {
+	if r.wholeRender {
+		return
+	}
+	fragment := crdt.SharedType(r.fragment)
+	for _, changed := range txn.ChangedTypes() {
+		if changed == fragment {
+			r.wholeRender = true
+			return
+		}
+		for block, level := changed, 1; ; level++ {
+			parent := block.Parent()
+			if parent == nil {
+				break
+			}
+			if parent != fragment {
+				if level == pmdoc.MaxTreeDepth {
+					r.wholeRender = true
+					return
+				}
+				block = parent
+				continue
+			}
+			if !slices.Contains(r.touched, block) {
+				if len(r.touched) == maxTouchedBlocks {
+					r.wholeRender = true
+					return
+				}
+				r.touched = append(r.touched, block)
+			}
+			break
+		}
+	}
+}
+
 // changedBy classifies the update the replica has just applied and counted (consumed), published
 // when a published live write made it, nil otherwise, and rendering that write's operation's
 // rendering of it: whether it changed the room's rendered markdown, and the ask blocks it left
-// when it did. It renders the replica (updateChangesMarkdown) only when nothing else tells. A
-// published live write's update can tell in two ways, tried in this order:
+// when it did (observe). It measures the update against the replica (updateChangesMarkdown) only
+// when nothing else tells. A published live write's update can tell in two ways, tried in this
+// order:
 //
 //   - its operation's rendering (publishedRendering), when that rendering was made on this
 //     replica's epoch and foreign count and the replica still stands at both (standsAt): the
 //     replica is then the fork the operation rendered, so the rendering is the replica's, and the
-//     update changed the markdown exactly when it differs from the replica's before it. A change
-//     the operation did not see as one carries no ask blocks, so it is rendered after all;
+//     update changed the markdown exactly when it differs from the replica's before it. The
+//     replica takes its markdown and the layout recorded with it, which is valid with that
+//     markdown; one that recorded none leaves the replica none, so the next update is rendered
+//     whole. A change the operation did not see as one carries no ask blocks, so it is measured
+//     after all;
 //   - its room instance's load already held it (liveWriteOrigin.inRoom), so applying it changed
 //     nothing, while the replica renders at all: one outside the schema renders the update, so it
 //     still logs and counts as changed.
 //
 // renderedReplica says why each is exact. The caller holds mu.
-func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, rendering publishedRendering) (bool, *observedAsks) {
+func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, rendering publishedRendering) (bool, func() map[string]struct{}) {
 	if published != nil {
 		if r.standsAt(rendering.forkReadMark) {
 			if r.markdown != nil && *r.markdown == rendering.markdown {
 				r.paths.observerReused.Add(1)
 				return false, nil
 			}
-			if rendering.askBlocks != nil {
+			if askBlocks := rendering.askBlocks; askBlocks != nil {
 				// Its own string, not a pointer into rendering, which would keep the ask
 				// block ids alive with the replica's markdown.
 				markdown := rendering.markdown
-				r.markdown = &markdown
+				r.markdown, r.layout = &markdown, rendering.layout
 				r.paths.observerReused.Add(1)
-				return true, &observedAsks{ids: rendering.askBlocks}
+				return true, func() map[string]struct{} { return askBlocks }
 			}
 		} else if published.inRoom && r.markdown != nil {
 			r.paths.observerInRoom.Add(1)
 			return false, nil
 		}
 	}
-	changed, tree := r.updateChangesMarkdown(room)
-	r.paths.observerRendered.Add(1)
-	var asks *observedAsks
-	if tree != nil {
-		asks = &observedAsks{tree: tree}
-	}
-	return changed, asks
+	return r.updateChangesMarkdown(room)
 }
 
 // consumed counts update, which the replica has just applied or handed to recover, in foreign
 // unless a published live write committed it. For such a write's update it returns the origin and
-// takes the operation's rendering out of it (liveWriteOrigin.rendering), so no markdown outlives
-// the update's classification; any other update gets nil and no rendering. The caller holds mu.
+// takes the operation's rendering out of it (liveWriteOrigin.rendering), so neither its markdown
+// nor its layout outlives the update's classification; any other update gets nil and no
+// rendering. The caller holds mu.
 func (r *renderedReplica) consumed(update crdt.LoggedUpdate) (*liveWriteOrigin, publishedRendering) {
 	published, _ := update.Origin.(*liveWriteOrigin)
 	if published == nil {
@@ -540,20 +623,22 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 }
 
 // start makes the replica from base, the room's state as of just before the first update its log
-// hands over, and takes its rendering as the one that update is measured against. A base that does
-// not apply leaves no replica (recover).
+// hands over, and takes its rendering, with that rendering's layout, as the one that update is
+// measured against. It registers noteChanged on the new document once base is applied, so what
+// it records is each later update's. A base that does not apply leaves no replica (recover).
 func (r *renderedReplica) start(room string, base []byte) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, base, nil); err != nil {
 		slog.Error("dispatch: make the document's rendered copy", "room", room, "error", err)
-		r.doc, r.markdown = nil, nil
+		r.doc, r.fragment, r.markdown, r.layout = nil, nil, nil, nil
 		return
 	}
-	r.doc = doc
-	if markdown, _, err := renderDocumentForUpdate(doc); err == nil {
-		r.markdown = &markdown
+	r.doc, r.fragment = doc, doc.GetXmlFragment(fragmentName)
+	doc.OnAfterTransaction(r.noteChanged)
+	if markdown, _, layout, err := renderDocumentForUpdate(r.fragment); err == nil {
+		r.markdown, r.layout = &markdown, layout
 	} else {
-		r.markdown = nil
+		r.markdown, r.layout = nil, nil
 	}
 }
 
@@ -564,9 +649,10 @@ func (r *renderedReplica) start(room string, base []byte) {
 // all the same (consumed), and classified as a content change with no ask blocks, since nothing
 // tells what it changed: crediting a connected browser with an edit that changed nothing loses
 // less than an edit credited to nobody.
-func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, classify func(update crdt.LoggedUpdate, changed bool, asks *observedAsks)) {
+func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, classify func(update crdt.LoggedUpdate, changed bool, asks func() map[string]struct{})) {
 	unplaced = append(unplaced, r.log.Reset()...)
-	r.doc, r.markdown = nil, nil
+	r.doc, r.fragment, r.markdown, r.layout = nil, nil, nil, nil
+	r.resetTouched()
 	r.epoch.Store(replicaEpochs.Add(1))
 	for _, update := range unplaced {
 		r.consumed(update)
@@ -683,19 +769,45 @@ func (r *renderedReplica) hold() *crdt.Doc {
 }
 
 // updateChangesMarkdown reports whether the update the replica took last changed the room's
-// rendered markdown, the only document content a version stores, and keeps the new rendering,
-// with the tree it rendered when it changed. It renders the replica, the room's document as of
-// that update, so its caller holds mu, through renderDocumentForUpdate: the tree it reads never
-// outlives its caller's turn with the replica, so it carries none of pmdoc.Read's copy. An update
-// that changes only what no rendering carries - an anchor mark, or a heading id or list item label
-// the browser editor derives - is no content change. A document that does not render counts as
-// changed, with no tree. It is the observer's measure of every update, which changedBy reaches
-// without rendering only where it already knows the answer this would give: a published write's
-// own rendering of the same state, or an update the room's load already held.
-func (r *renderedReplica) updateChangesMarkdown(room string) (bool, *pmdoc.Node) {
-	markdown, tree, err := renderDocumentForUpdate(r.doc)
+// rendered markdown, the only document content a version stores, keeps the new rendering and its
+// layout, and answers, when it changed, the ask blocks the update left (observe). It reads the
+// replica, the room's document as of that update, so its caller holds mu, and it reads no more of
+// it than the update can have changed (noteChanged), on one of three paths:
+//
+//   - untouched: an update that changed no type under the fragment, on a replica whose markdown
+//     and layout are known, changed nothing: nothing is read or rendered;
+//   - incremental: an update that changed types inside some top-level blocks and not the fragment
+//     itself, on such a replica, left the fragment's blocks as many and in the order the layout
+//     recorded, so pmdoc.Layout.Splice renders just the touched blocks into the markdown, read
+//     by pmdoc.ReadBlockForRendering, unless one of its guards declines;
+//   - whole: anything else - the fragment itself changed, more blocks were touched than the
+//     replica records, the replica's markdown or layout is unknown, a touched block is no longer
+//     among the fragment's children, or Splice declined - renders the replica whole through
+//     renderDocumentForUpdate, recording a fresh layout from the same render.
+//
+// renderedReplica says why the first two answer exactly what the whole render would. The trees
+// read never outlive the caller's turn with the replica, so they carry none of pmdoc.Read's copy.
+// An update that changes only what no rendering carries - an anchor mark, or a heading id or list
+// item label the browser editor derives - is no content change. A document that does not render
+// counts as changed, with no ask blocks, and leaves the replica no markdown or layout. It is the
+// observer's measure of every update, which changedBy reaches without it only where it already
+// knows the answer this would give: a published write's own rendering of the same state, or an
+// update the room's load already held.
+func (r *renderedReplica) updateChangesMarkdown(room string) (bool, func() map[string]struct{}) {
+	if !r.wholeRender && r.markdown != nil && r.layout != nil {
+		if len(r.touched) == 0 {
+			r.paths.observerUntouched.Add(1)
+			return false, nil
+		}
+		if changed, asks, ok := r.spliceTouched(); ok {
+			r.paths.observerIncremental.Add(1)
+			return changed, asks
+		}
+	}
+	r.paths.observerRendered.Add(1)
+	markdown, tree, layout, err := renderDocumentForUpdate(r.fragment)
 	if err != nil {
-		r.markdown = nil
+		r.markdown, r.layout = nil, nil
 		if errors.Is(err, ErrDocOutsideSchema) {
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
 		} else {
@@ -704,10 +816,70 @@ func (r *renderedReplica) updateChangesMarkdown(room string) (bool, *pmdoc.Node)
 		return true, nil
 	}
 	if r.markdown != nil && *r.markdown == markdown {
+		r.layout = layout
 		return false, nil
 	}
-	r.markdown = &markdown
-	return true, tree
+	r.markdown, r.layout = &markdown, layout
+	return true, func() map[string]struct{} { return askBlockIDs(tree) }
+}
+
+// spliceTouched is updateChangesMarkdown's incremental path: it splices the touched blocks'
+// rendering into the replica's markdown (pmdoc.Layout.Splice) and reports whether that changed
+// it, with the ask blocks the update left when it did, or ok false where the update must be
+// rendered whole. Splice wants the document's top-level blocks as many and in the order the layout
+// recorded, which an update that did not change the fragment leaves them, and every touched block
+// among them, which a touched block deleted with its parent's own deletion is not; it checks the
+// rest itself. The ask blocks are those of the blocks the new layout says hold one, read only when
+// asked for: the document node is never an ask, so they are the whole tree's. The caller holds mu.
+func (r *renderedReplica) spliceTouched() (changed bool, asks func() map[string]struct{}, ok bool) {
+	children := r.fragment.Children()
+	if len(children) != r.layout.Blocks() {
+		return false, nil, false
+	}
+	touched := make([]int, 0, len(r.touched))
+	for index, child := range children {
+		element, isElement := child.(*crdt.YXmlElement)
+		if !isElement {
+			return false, nil, false
+		}
+		if slices.Contains(r.touched, crdt.SharedType(element)) {
+			touched = append(touched, index)
+		}
+	}
+	if len(touched) != len(r.touched) {
+		return false, nil, false
+	}
+	read := func(index int) (*pmdoc.Node, error) {
+		return pmdoc.ReadBlockForRendering(children[index].(*crdt.YXmlElement))
+	}
+	markdown, layout, ok := r.layout.Splice(*r.markdown, touched, read)
+	if !ok {
+		return false, nil, false
+	}
+	if markdown == *r.markdown {
+		r.layout = layout
+		return false, nil, true
+	}
+	r.markdown, r.layout = &markdown, layout
+	fragment := r.fragment
+	return true, func() map[string]struct{} {
+		ids := map[string]struct{}{}
+		for _, index := range layout.AskBlocks() {
+			block, err := read(index)
+			if err != nil {
+				// A block the layout's render read cannot fail to read now; were it to, the
+				// whole tree's walk is still the answer.
+				tree, _ := pmdoc.ReadForRendering(fragment)
+				return askBlockIDs(tree)
+			}
+			walkAskBlocks(block, func(id string) {
+				if id != "" {
+					ids[id] = struct{}{}
+				}
+			})
+		}
+		return ids
+	}, true
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the

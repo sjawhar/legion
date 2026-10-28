@@ -192,8 +192,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	tree, err := treeOf(fork)
 	var markdown string
 	var offsets []pmdoc.BlockOffset
+	var layout *pmdoc.Layout
 	if err == nil {
-		markdown, offsets, err = documentMarkdownWithOffsets(tree)
+		markdown, offsets, layout, err = documentRenderingWithLayout(tree)
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
@@ -269,10 +270,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	write.updates = append(write.updates, update)
 	write.versions = append(write.versions, version)
 	// What the room's update observer can take in place of rendering the room after this update
-	// (publishedRendering): this operation's rendering, when its fork was read warm.
+	// (publishedRendering): this operation's rendering and its layout, when its fork was read warm.
 	var rendering publishedRendering
 	if read.warm {
-		rendering = publishedRendering{forkReadMark: read, markdown: markdown}
+		rendering = publishedRendering{forkReadMark: read, markdown: markdown, layout: layout}
 		if contentChanged {
 			rendering.askBlocks = askBlockIDs(tree)
 		}

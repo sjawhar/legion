@@ -57,30 +57,40 @@ func renderReuseDocument() string {
 // renderPaths is a reading of the service's renderPathCounts.
 type renderPaths struct {
 	observerReused, observerInRoom, observerRendered   uint64
+	observerIncremental, observerUntouched             uint64
 	beforeFromReplica, beforeFromWrite, beforeRendered uint64
 }
 
 func readRenderPaths(service *Service) renderPaths {
 	counts := &service.renderPaths
 	return renderPaths{
-		observerReused:    counts.observerReused.Load(),
-		observerInRoom:    counts.observerInRoom.Load(),
-		observerRendered:  counts.observerRendered.Load(),
-		beforeFromReplica: counts.beforeFromReplica.Load(),
-		beforeFromWrite:   counts.beforeFromWrite.Load(),
-		beforeRendered:    counts.beforeRendered.Load(),
+		observerReused:      counts.observerReused.Load(),
+		observerInRoom:      counts.observerInRoom.Load(),
+		observerRendered:    counts.observerRendered.Load(),
+		observerIncremental: counts.observerIncremental.Load(),
+		observerUntouched:   counts.observerUntouched.Load(),
+		beforeFromReplica:   counts.beforeFromReplica.Load(),
+		beforeFromWrite:     counts.beforeFromWrite.Load(),
+		beforeRendered:      counts.beforeRendered.Load(),
 	}
 }
 
 func (p renderPaths) minus(base renderPaths) renderPaths {
 	return renderPaths{
-		observerReused:    p.observerReused - base.observerReused,
-		observerInRoom:    p.observerInRoom - base.observerInRoom,
-		observerRendered:  p.observerRendered - base.observerRendered,
-		beforeFromReplica: p.beforeFromReplica - base.beforeFromReplica,
-		beforeFromWrite:   p.beforeFromWrite - base.beforeFromWrite,
-		beforeRendered:    p.beforeRendered - base.beforeRendered,
+		observerReused:      p.observerReused - base.observerReused,
+		observerInRoom:      p.observerInRoom - base.observerInRoom,
+		observerRendered:    p.observerRendered - base.observerRendered,
+		observerIncremental: p.observerIncremental - base.observerIncremental,
+		observerUntouched:   p.observerUntouched - base.observerUntouched,
+		beforeFromReplica:   p.beforeFromReplica - base.beforeFromReplica,
+		beforeFromWrite:     p.beforeFromWrite - base.beforeFromWrite,
+		beforeRendered:      p.beforeRendered - base.beforeRendered,
 	}
+}
+
+// observed is how many logged updates the update observer classified on any of its paths.
+func (p renderPaths) observed() int {
+	return int(p.observerReused + p.observerInRoom + p.observerRendered + p.observerIncremental + p.observerUntouched)
 }
 
 // renderShadow follows every room instance the service loads for one document (watchRenders).
@@ -451,7 +461,7 @@ func (m renderMeasure) expect(t *testing.T, want renderPaths, recovered int) {
 	m.sh.mu.Lock()
 	logged, aligned := m.sh.loggedLocked()-m.updates, m.sh.aligned-m.aligned
 	m.sh.mu.Unlock()
-	if observed := int(got.observerReused + got.observerInRoom + got.observerRendered); observed+recovered != logged {
+	if observed := got.observed(); observed+recovered != logged {
 		t.Errorf("the observers classified %d updates and recovered %d, of %d logged", observed, recovered, logged)
 	}
 	if aligned != logged-recovered {
@@ -476,7 +486,7 @@ func (sh *renderShadow) check(t *testing.T) {
 				t.Errorf("room %d commit %d: observed %d times", roomIndex, index, update.observed)
 			}
 			if published, ok := update.origin.(*liveWriteOrigin); ok {
-				if rendering := published.rendering; rendering.markdown != "" || rendering.askBlocks != nil || rendering.forkReadMark != (forkReadMark{}) {
+				if rendering := published.rendering; rendering.markdown != "" || rendering.layout != nil || rendering.askBlocks != nil || rendering.forkReadMark != (forkReadMark{}) {
 					t.Errorf("room %d commit %d: the published update kept its rendering", roomIndex, index)
 				}
 			}
@@ -669,9 +679,11 @@ func TestRenderReuseAWarmAskKeepsItsAuthor(t *testing.T) {
 }
 
 // E4, E5. A browser edit committed into the room once the write's fork has read it moves the
-// replica past that read: the write's update is rendered, and so is the browser's. A delete-only
-// edit, which advances no clock of the room's state vector, is told by the foreign count all the
-// same.
+// replica past that read: the write's update is measured by the observer, and so is the browser's.
+// The browser's adds or drops a top-level block, which changes the document's fragment, so it is
+// rendered whole; the write's changes one paragraph, which is rendered alone and spliced in. A
+// delete-only edit, which advances no clock of the room's state vector, is told by the foreign
+// count all the same.
 func TestRenderReuseABrowserEditAfterTheForkReadIsRendered(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -709,7 +721,7 @@ func TestRenderReuseABrowserEditAfterTheForkReadIsRendered(t *testing.T) {
 			}
 			waitForLandedAppends(t, service, artifactID)
 			sh.check(t)
-			m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 2}, 0)
+			m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerIncremental: 1}, 0)
 			sh.versions(t, write)
 		})
 	}
@@ -738,7 +750,9 @@ func serviceEdit(t *testing.T, service *Service, artifactID string, edit func(*p
 
 // E6. A commit of the service's own into the room while the write holds its slot moves the replica
 // past the write's fork read just as a browser's does. So does an identity repair: the block-id
-// backfill re-minting the id a browser's block repeats.
+// backfill re-minting the id a browser's block repeats. Each update that changes inside one block
+// - the repair's paragraph, the backfill's re-minted id, the write's paragraph - is spliced in; the
+// browser's appended block is rendered whole.
 func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 	t.Run("service repair", func(t *testing.T) {
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
@@ -756,7 +770,7 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 			t.Fatal("the write never read its fork")
 		}
 		sh.check(t)
-		m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 2}, 0)
+		m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 2}, 0)
 		sh.versions(t, write)
 	})
 	t.Run("identity repair", func(t *testing.T) {
@@ -786,7 +800,7 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 		}
 		waitForLandedAppends(t, service, artifactID)
 		sh.check(t)
-		m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 3}, 0)
+		m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerIncremental: 2}, 0)
 		sh.versions(t, write)
 	})
 }
@@ -794,9 +808,10 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 // E7. A room evicted and reloaded between the write's fork read and its publish has a replica of
 // its own, at another epoch, so the write's rendering is never taken there, though the write's
 // update, which deletes text, carries the old instance's whole delete set. Reloaded before the
-// write's append, the room renders the update; reloaded after its commit, the room's load already
-// holds it - and with a browser's edit the new replica's foreign count is the fork read's, so only
-// the epoch tells the two apart.
+// write's append, the room measures the update, which changes one paragraph, so it is spliced in;
+// reloaded after its commit, the room's load already holds it - and with a browser's edit, which
+// appends a block and so is rendered whole, the new replica's foreign count is the fork read's, so
+// only the epoch tells the two apart.
 func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 	for _, afterCommit := range []bool{false, true} {
 		name := "before the append"
@@ -859,7 +874,7 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 			if afterCommit {
 				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerInRoom: 1}, 0)
 			} else {
-				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 0)
+				m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 1}, 0)
 			}
 			sh.versions(t, write)
 		})
@@ -867,7 +882,7 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 }
 
 // E8. A replica that recovers between the write's fork read and its publish starts again at a
-// fresh epoch, so the write's rendering is not taken: the publish is rendered.
+// fresh epoch, so the write's rendering is not taken: the publish is measured, and spliced in.
 func TestRenderReuseARecoveredReplicaRendersThePublish(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	recovered := false
@@ -897,7 +912,7 @@ func TestRenderReuseARecoveredReplicaRendersThePublish(t *testing.T) {
 	}
 	waitForLandedAppends(t, service, artifactID)
 	sh.check(t)
-	m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 1)
+	m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 1}, 1)
 	sh.versions(t, write)
 }
 
@@ -915,8 +930,9 @@ func joinedLiveWriteOf(t *testing.T, service *Service, artifactID string) *liveW
 }
 
 // E9. A browser commit F between a transaction's two operations: the first operation's counters
-// predate F, so its update renders; the second's fork moved, so its before-rendering renders; and
-// its update takes the write's rendering exactly when F was consumed before its fork read.
+// predate F, so its update is measured; the second's fork moved, so its before-rendering renders;
+// and its update takes the write's rendering exactly when F was consumed before its fork read.
+// Every update measured changes one paragraph, so each is spliced in.
 func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 	for _, consumedFirst := range []bool{true, false} {
 		name := "F consumed later"
@@ -945,9 +961,9 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 			waitForLandedAppends(t, service, artifactID)
 			sh.check(t)
 			if consumedFirst {
-				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerRendered: 2, observerReused: 1}, 0)
+				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerIncremental: 2, observerReused: 1}, 0)
 			} else {
-				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerRendered: 3}, 0)
+				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerIncremental: 3}, 0)
 			}
 			sh.versions(t, write)
 		})
@@ -1001,7 +1017,8 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 }
 
 // E11. A cold write whose version is appended while a room load is under way meets a room whose
-// load read the head before it (roomLoad.took): its update is not in that room, so it renders.
+// load read the head before it (roomLoad.took): its update is not in that room, so it is measured,
+// and spliced in, since it changes one paragraph.
 func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 	service, artifactID, sh := newRenderReuseService(t)
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -1052,7 +1069,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 	}
 	ledger.publish()
 	sh.check(t)
-	m.expect(t, renderPaths{beforeRendered: 1, observerRendered: 1}, 0)
+	m.expect(t, renderPaths{beforeRendered: 1, observerIncremental: 1}, 0)
 	sh.versions(t, write)
 }
 
@@ -1151,8 +1168,8 @@ func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 
 // E14. A room resident but behind the durable head (another process appended) makes the write
 // fork cold, from the store, and the publish goes into that room: a cold fork carries no
-// rendering, and the version is above the room's loaded head, so the update, which deletes text,
-// renders.
+// rendering, and the version is above the room's loaded head, so the update, which deletes text
+// in one paragraph, is measured, and spliced in.
 func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -1181,6 +1198,283 @@ func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 		t.Fatal("the write forked the room behind the head, so nothing here is tested")
 	}
 	sh.check(t)
-	m.expect(t, renderPaths{beforeRendered: 1, observerRendered: 1}, 0)
+	m.expect(t, renderPaths{beforeRendered: 1, observerIncremental: 1}, 0)
 	sh.versions(t, write)
+}
+
+// typingDocument is renderReuseDocument behind a section a browser types into - a paragraph, a
+// nested list, a code block, and paragraphs it splits, deletes and leaves to an agent - and ahead
+// of appendices holding deeper nested lists and more code blocks.
+func typingDocument() string {
+	var b strings.Builder
+	b.WriteString("# Typing specification\n\n")
+	b.WriteString("The typed paragraph opens the document with words a browser types into.\n\n")
+	b.WriteString("- Outer item one\n  - Nested item one holds the typing.\n  - Nested item two waits.\n- Outer item two\n\n")
+	b.WriteString("```go\nfunc typed() {}\n```\n\n")
+	b.WriteString("The split paragraph keeps its words together until the browser presses Enter in it twice.\n\n")
+	b.WriteString("The doomed paragraph is deleted by the browser.\n\n")
+	b.WriteString("The agent paragraph is rewritten by an agent.\n\n")
+	b.WriteString(renderReuseDocument())
+	for section := range 20 {
+		fmt.Fprintf(&b, "## Appendix %d\n\n- Appendix %d outer\n  - Appendix %d nested\n    - Appendix %d deeper\n\n```text\nappendix %d code\n```\n\n", section, section, section, section, section)
+	}
+	return b.String()
+}
+
+// typingBrowser is a browser's editor on a room: its own copy of the document, synced from the
+// room once, which sends the room the update each edit it makes leaves, as the room's one
+// connected peer, and takes in what another wrote when the room broadcasts it (sync).
+type typingBrowser struct {
+	t          *testing.T
+	service    *Service
+	artifactID string
+	doc        *crdt.Doc
+	fragment   *crdt.YXmlFragment
+}
+
+func newTypingBrowser(t *testing.T, service *Service, artifactID string, actor model.Actor) *typingBrowser {
+	t.Helper()
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("warm the room for %s's typing: %v", actor.ID, err)
+	}
+	service.addConnection(artifactID, 1, actor)
+	t.Cleanup(func() { service.removeConnection(artifactID, 1) })
+	b := &typingBrowser{t: t, service: service, artifactID: artifactID, doc: crdt.New()}
+	b.fragment = b.doc.GetXmlFragment(fragmentName)
+	b.sync()
+	return b
+}
+
+// sync takes in what the room holds that the browser's document does not.
+func (b *typingBrowser) sync() {
+	b.t.Helper()
+	room := b.service.srv.GetDoc(b.artifactID)
+	if err := crdt.ApplyUpdateV1(b.doc, crdt.EncodeStateAsUpdateV1(room, b.doc.StateVector()), nil); err != nil {
+		b.t.Fatalf("sync the browser from the room: %v", err)
+	}
+}
+
+// send makes edit in the browser's document, in one transaction, and sends the room the update it
+// made, which the room commits in one transaction of its own.
+func (b *typingBrowser) send(edit func(txn *crdt.Transaction)) {
+	b.t.Helper()
+	before := b.doc.StateVector()
+	b.doc.Transact(edit)
+	room := b.service.srv.GetDoc(b.artifactID)
+	if err := crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(b.doc, before), "peer"); err != nil {
+		b.t.Fatalf("apply the browser's update to the room: %v", err)
+	}
+}
+
+// editTree sends the room edit of the browser's tree, written as pmdoc.Update writes a tree.
+func (b *typingBrowser) editTree(edit func(*pmdoc.Node) *pmdoc.Node) {
+	b.t.Helper()
+	tree, err := treeOf(b.doc)
+	if err != nil {
+		b.t.Fatalf("read the browser's document: %v", err)
+	}
+	want := edit(tree)
+	var updateErr error
+	b.send(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, b.fragment, want) })
+	if updateErr != nil {
+		b.t.Fatalf("edit the browser's document: %v", updateErr)
+	}
+}
+
+// text is the text node of the browser's document whose text starts with prefix, wherever it
+// stands.
+func (b *typingBrowser) text(prefix string) *crdt.YXmlText {
+	b.t.Helper()
+	var find func(parent *crdt.YXmlFragment) *crdt.YXmlText
+	find = func(parent *crdt.YXmlFragment) *crdt.YXmlText {
+		for _, child := range parent.Children() {
+			switch node := child.(type) {
+			case *crdt.YXmlText:
+				if strings.HasPrefix(node.ToString(), prefix) {
+					return node
+				}
+			case *crdt.YXmlElement:
+				if found := find(&node.YXmlFragment); found != nil {
+					return found
+				}
+			}
+		}
+		return nil
+	}
+	text := find(b.fragment)
+	if text == nil {
+		b.t.Fatalf("the browser's document holds no text starting %q", prefix)
+	}
+	return text
+}
+
+// splitParagraph is the edit Enter makes in the top-level paragraph whose text starts with
+// prefix, typed just before the word at: the words from at on move into a new paragraph after it,
+// which the browser editor stamps with a block id of its own.
+func splitParagraph(t *testing.T, prefix, at string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for index, block := range tree.Children {
+			if block.Type != "paragraph" || len(block.Children) != 1 || !strings.HasPrefix(block.Children[0].Text, prefix) {
+				continue
+			}
+			text := block.Children[0].Text
+			cut := strings.Index(text, " "+at)
+			if cut < 0 {
+				t.Fatalf("the paragraph %q has no word %q to split before", text, at)
+			}
+			parsed, err := pmdoc.Parse(text[cut+1:] + "\n")
+			if err != nil {
+				t.Fatalf("parse the split paragraph's tail: %v", err)
+			}
+			pmdoc.EnsureBlockIDs(parsed)
+			block.Children[0].Text = text[:cut]
+			tree.Children = slices.Insert(tree.Children, index+1, parsed.Children...)
+			return tree
+		}
+		t.Fatalf("no top-level paragraph starts %q", prefix)
+		return tree
+	}
+}
+
+// insertBlocksAfter is the edit that inserts the blocks parsed from markdown, stamped with block
+// ids as the browser editor would, after the top-level paragraph whose text starts with prefix.
+func insertBlocksAfter(t *testing.T, prefix, markdown string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse inserted blocks: %v", err)
+	}
+	pmdoc.EnsureBlockIDs(parsed)
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for index, block := range tree.Children {
+			var text strings.Builder
+			for _, run := range block.Children {
+				text.WriteString(run.Text)
+			}
+			if block.Type == "paragraph" && strings.HasPrefix(text.String(), prefix) {
+				tree.Children = slices.Insert(tree.Children, index+1, parsed.Children...)
+				return tree
+			}
+		}
+		t.Fatalf("no top-level paragraph starts %q", prefix)
+		return tree
+	}
+}
+
+// A2. A browser typing into a live room on a real-size document: words, spaces and backspaces in
+// a top-level paragraph and in a nested list item, a bold mark, two Enters, an ask block the
+// browser inserts and then types into, a block delete and a margin record, interleaved with an
+// agent's write and a forced recover. Every update's class, the room's ask blocks and their
+// authors, and the replica's markdown after every commit equal the shadow's independent whole
+// render; and the observer renders the document whole only for the edits that insert, delete or
+// split a top-level block, splicing every keystroke's block in and reading nothing for the
+// margin record.
+func TestRenderReuseABrowserTypingScript(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	sh := watchRenders(t, service, artifactID)
+	document := typingDocument()
+	if len(document) < 390<<10 {
+		t.Fatalf("the typing document is %d bytes, short of a real-size document", len(document))
+	}
+	seedServiceText(t, service, artifactID, document)
+	browser := newTypingBrowser(t, service, artifactID, reuseBob)
+	m := sh.measure()
+
+	var spliced, untouched, enters, blockEdits, agentWrites, recovered int
+	typeAt := func(prefix string, at int, typed string) {
+		t.Helper()
+		for offset, char := range typed {
+			text := browser.text(prefix)
+			browser.send(func(txn *crdt.Transaction) { text.Insert(txn, at+offset, string(char), nil) })
+			spliced++
+		}
+	}
+	backspace := func(prefix string, at, count int) {
+		t.Helper()
+		for typed := range count {
+			text := browser.text(prefix)
+			browser.send(func(txn *crdt.Transaction) { text.Delete(txn, at-1-typed, 1) })
+			spliced++
+		}
+	}
+	const typedParagraph, nestedItem, question = "The typed paragraph", "Nested item one", "Which store backs the typing"
+
+	// Words, a space and backspaces in a top-level paragraph, then in a nested list item.
+	typeAt(typedParagraph, len(typedParagraph), " quickly")
+	backspace(typedParagraph, len(typedParagraph+" quickly"), 2)
+	typeAt(typedParagraph, len(typedParagraph+" quick"), "ly")
+	typeAt(nestedItem, len(nestedItem), " now")
+	backspace(nestedItem, len(nestedItem+" now"), 1)
+	typeAt(nestedItem, len(nestedItem+" no"), "w")
+	// A bold mark over one word.
+	text := browser.text(typedParagraph)
+	browser.send(func(txn *crdt.Transaction) {
+		text.Format(txn, len("The "), len("typed"), crdt.Attributes{"strong": map[string]any{}})
+	})
+	spliced++
+	// Enter, twice, splitting a paragraph.
+	browser.editTree(splitParagraph(t, "The split paragraph", "until"))
+	browser.editTree(splitParagraph(t, "until the browser", "presses"))
+	enters += 2
+	// An ask block the browser inserts, then types into.
+	browser.editTree(insertBlocksAfter(t, typedParagraph, ":::ask{#typed-ask urgency=\"high\" multiple=\"false\"}\n"+question+"?\n:::\n"))
+	blockEdits++
+	typeAt(question, len(question), " now")
+	// A block delete.
+	browser.editTree(dropBlock(t, "The doomed paragraph"))
+	blockEdits++
+	// An agent's write, which the browser takes in, then types after.
+	waitForLandedAppends(t, service, artifactID)
+	write := sh.write(t, applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "The agent paragraph is rewritten", With: "The agent paragraph was rewritten"}))
+	agentWrites++
+	if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
+		t.Errorf("the agent's content_changed = %v, want [true]", stored)
+	}
+	browser.sync()
+	typeAt(typedParagraph, len(typedParagraph+" quickly"), ",")
+	// A margin record, which changes nothing the rendering reads.
+	marks := browser.doc.GetMap(marksMapName)
+	browser.send(func(txn *crdt.Transaction) {
+		marks.Set(txn, "c-typing", map[string]any{"kind": "comment", "by": "user:bob", "text": "a margin note"})
+	})
+	untouched++
+	// A forced recover: the replica cannot place the next keystroke, and starts again at the one
+	// after it.
+	replica := service.replicaOf(service.srv.GetDoc(artifactID))
+	replica.mu.Lock()
+	replica.doc = nil
+	replica.mu.Unlock()
+	text = browser.text(typedParagraph)
+	browser.send(func(txn *crdt.Transaction) { text.Insert(txn, len(typedParagraph+" quickly,"), "!", nil) })
+	recovered++
+	typeAt(nestedItem, len(nestedItem+" now"), " yes")
+
+	waitForLandedAppends(t, service, artifactID)
+	sh.check(t)
+	m.expect(t, renderPaths{
+		observerRendered:    uint64(enters + blockEdits),
+		observerIncremental: uint64(spliced),
+		observerUntouched:   uint64(untouched),
+		observerReused:      uint64(agentWrites),
+		beforeFromReplica:   uint64(agentWrites),
+	}, recovered)
+	got := readRenderPaths(service).minus(m.paths)
+	if limit := uint64(enters + blockEdits + agentWrites + recovered + 1); got.observerRendered > limit {
+		t.Errorf("the observer rendered the document whole %d times, more than the %d structural edits, writes and recovers allow", got.observerRendered, limit)
+	}
+	sh.mu.Lock()
+	logged := sh.loggedLocked() - m.updates
+	sh.mu.Unlock()
+	if rest := logged - recovered - int(got.observerRendered+got.observerReused+got.observerInRoom); int(got.observerIncremental+got.observerUntouched) != rest {
+		t.Errorf("the observer spliced %d updates and left %d untouched, of the %d it neither rendered whole nor reused", got.observerIncremental, got.observerUntouched, rest)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	author, authored := state.askAuthors["typed-ask"]
+	state.mu.Unlock()
+	if !authored || author != reuseBob {
+		t.Errorf("the room owes the browser's ask block to %#v (recorded %t), want %#v", author, authored, reuseBob)
+	}
 }

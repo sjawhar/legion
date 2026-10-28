@@ -525,7 +525,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// be waiting for the replica, and runs its persistence observer as soon as it has it.
 		var classified, changed bool
 		var own *documentUpdateClass
-		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
+		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks func() map[string]struct{}) {
 			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 				// Its own observer records its class (above). The replica takes it all the same,
 				// so the update after it is measured against the room the repair left.
@@ -533,7 +533,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			}
 			classified = true
 			if asks != nil {
-				s.observeAskBlocksForUpdate(room, asks.askBlocks())
+				s.observeAskBlocksForUpdate(room, asks())
 			}
 			// The cursor is this instance's, taken here rather than looked up when the update
 			// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -592,9 +592,9 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // and attributes each one not already recorded (observeAskBlocks), in the same critical section
 // the update observer classifies the update in (renderedReplica.observe): the observer classifies
 // each update in the order the replica took them, so the room's record of its ask blocks moves
-// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
-// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
-// the common one, pays for neither.
+// forward only. The walk that lists those ask blocks (the asks function renderedReplica.observe
+// hands its classify) runs only once the cheap markdown comparison inside observe already showed a
+// real change, so the no-op path, the common one, pays for neither.
 func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)

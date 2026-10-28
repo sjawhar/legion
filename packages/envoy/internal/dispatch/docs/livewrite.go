@@ -189,16 +189,18 @@ type liveWriteOrigin struct {
 }
 
 // publishedRendering is one operation's rendering of the fork it left, kept for the room's update
-// observer (renderedReplica.changedBy): markdown, and askBlocks, the ids of the ask blocks that
-// tree holds, walked only when the operation changed the rendered markdown, since only then does
-// the observer record them. The embedded forkReadMark is the room replica's epoch and foreign
-// count as the operation's own fork read found them; the rendering is the replica's after the
-// update only while the replica still stands at both (renderedReplica says why). Its warm says
+// observer (renderedReplica.changedBy): markdown, the pmdoc.Layout the same render recorded of it,
+// which the replica keeps with the markdown when it takes it, and askBlocks, the ids of the ask
+// blocks that tree holds, walked only when the operation changed the rendered markdown, since only
+// then does the observer record them. The embedded forkReadMark is the room replica's epoch and
+// foreign count as the operation's own fork read found them; the rendering is the replica's after
+// the update only while the replica still stands at both (renderedReplica says why). Its warm says
 // the operation forked warm: the zero value, a cold operation's, vouches for nothing, since a
 // cold fork was read from the store and no replica's state went into it.
 type publishedRendering struct {
 	forkReadMark
 	markdown  string
+	layout    *pmdoc.Layout
 	askBlocks map[string]struct{}
 }
 
