@@ -2,33 +2,38 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-546",
-  "completed": "2026-10-28T09:58:25Z",
-  "round": 6,
-  "headSha": "11a2dcb5055108bcaa89afe7d913af76dd28a7cb",
-  "codeHeadSha": "11a2dcb5055108bcaa89afe7d913af76dd28a7cb",
-  "fingerprint": {
-    "oldHead": "7f536f31512aac649d3b262e8deda3046648c9a7",
-    "oldBase": "d48d71fd3078 (#2228's last tip; legion/INFRA-439 is deleted)",
-    "newHead": "11a2dcb5055108bcaa89afe7d913af76dd28a7cb",
-    "newBase": "fork_point(main@origin | head) = b295a3fbcb42",
-    "withSkillFileset": "ef4039896fe996b6 -> 985dfa6ddf12ac73: changed (only packages/envoy/infra/go.work.sum differs: 25 checksum lines at the old head, none at the new)",
-    "withoutGoWorkSum": "985dfa6ddf12ac73 at both heads",
-    "decision": "full test round: the fingerprint changed and the merged tree carries main's newer code"
-  },
+  "completed": "2026-10-28T10:20:17Z",
+  "round": 7,
+  "headSha": "33f2f681d6c0ef0cdd3cc630b29874cb32ef0287",
+  "codeHeadSha": "81cf8c12ad439ac091aa7a35fd9d3850e24bb729",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 11a2dcb5: P1-P5 and every standalone refusal reproduced."
+    "how": "Drove the same send/publish full-stream surface independently with the real listener (503, Retry-After: 1, streamFullPrefix body, outcome stream_full), and re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 33f2f681: P1-P5 and the standalone refusals reproduced."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "roundSixFailure": "Fixed in 859993f7f6cd95510a976a82d0c72cb6dda7b4e4: a full stream's send and publish answer 503 with Retry-After: 1 under 'envoy: the message bus refused the message because its stream is full', recorded as stream_full. The red test TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer (3ceb0bead0af, unchanged) passes. The census row, AGENTS.md and deploy/README.md say 503, and no file still says 500.",
+  "proof": [
     {
-      "criterion": "A full ENVOY_NOTIFICATIONS refuses new messages with an error the sender can retry, and its send and publish routes answer as the census row and the docs say (census row 'ENVOY_NOTIFICATIONS discard policy'; packages/envoy/AGENTS.md:1342; CHANGELOG.md:1012,1038; deploy/README.md:172) - on the tree merged with main",
-      "evidence": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000) on a standalone nats-server v2.15.1, filled through /v1/messages/publish: publish and send both answer 503 {\"error\":\"envoy: the message bus did not answer: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded\"}, with request records outcome=bus_unavailable (bash /legion/scratch/tmp/t546/tS.sh; https://github.com/sjawhar/legion/pull/2362#issuecomment-6465967683). main's writeBusUnavailable (cmd/listener/api.go:234-264) answers every non-refused, non-denied bus error with busUnansweredPrefix and records it as bus_unavailable. Its own comment carves out ErrPublishDenied because 'the bus answered this publish' and the prefix would send an operator looking for an outage; bus.ErrStreamFull, which this PR adds, is the same case. This PR's census row, AGENTS.md:1342, CHANGELOG.md:1012/:1038 and deploy/README.md:172 say 500. Red test 3ceb0bead0af: `cd packages/envoy && go test ./cmd/listener/ -run TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer -count=1` fails on both routes ('the refusal reads \"envoy: the message bus did not answer: stream ENVOY_NOTIFICATIONS is full: ...\": it says the bus did not answer, but the bus answered that the stream is full'). The test requires 503, a Retry-After, a body naming the full stream without that prefix, and an outcome other than bus_unavailable; the wording is the implementer's."
+      "criterion": "On a full ENVOY_NOTIFICATIONS, /v1/messages/send and /v1/messages/publish answer a retryable 503 that names the full stream, not 'the message bus did not answer', and record an outcome other than bus_unavailable (round 6 failure; census row 'ENVOY_NOTIFICATIONS discard policy')",
+      "surface": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on a standalone nats-server v2.15.1, filled through /v1/messages/publish, driven with curl",
+      "command": "bash /legion/scratch/tmp/t546/tS.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6466425306)",
+      "observed": "publish and send: 'HTTP/1.1 503', 'Retry-After: 1', {\"error\":\"envoy: the message bus refused the message because its stream is full: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded\"}; request records outcome stream_full, status 503; signed GitHub push -> 503, stream unchanged at 15 msgs, first_seq 1; after the operator raised max_bytes to 200000 the same send -> 200.",
+      "headSha": "81cf8c12ad439ac091aa7a35fd9d3850e24bb729",
+      "negativeControl": "NATS server stopped under the running listener: a send -> 503, Retry-After: 1, 'envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded', recorded as bus_unavailable"
+    },
+    {
+      "criterion": "Earlier behaviour holds at this head: a GitHub delivery a full v2.10.29 cluster stream refused is stored once there is room with no step-down; listener and Dispatch starts keep copies, limit, DiscardNew and id; an operator's raise stands; a full stream refuses and keeps what it holds",
+      "surface": "Real envoy-listener on three nats-server v2.10.29 processes; the implementer's harness (real listener and Dispatch on three v2.15.1 processes, one standalone v2.15.1)",
+      "command": "bash /legion/scratch/tmp/t546/tX.sh /legion/scratch/tmp/t546/bin210/nats-server; bash /legion/scratch/tmp/p546b/proof.sh <workspace> (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6466425306)",
+      "observed": "v2.10.29: d1 503 while full, redelivery after the raise -> 200 and stored 15 -> 16 with no step-down, fresh d2 twice stored once. proof.sh: P1 3 current peers, max_bytes 44023414784, discard new, one id; P2 unchanged; P5 50 GiB raise stood, lowering restored; P3 dispatch listening, 5 -> 8 subjects; P4 10 acknowledged, 20 refused 'maximum bytes exceeded (10077)'.",
+      "headSha": "33f2f681d6c0ef0cdd3cc630b29874cb32ef0287",
+      "negativeControl": "GitHub webhook with a bad signature -> 401 'invalid signature'; standalone v2.15.1 with ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'"
     }
   ],
   "observations": [
-    "Held on the merged tree: v2.10.29 cluster - a GitHub redelivery after an operator raise is stored with no step-down (503 -> 200, 15 -> 16), Dispatch's outbox stores project.created and issue.created once each with no step-down; v2.15.1 cluster - the same; the rendered grant raises the stream and three buckets to 3 (grant without STREAM.UPDATE.KV_* refused naming KV_envoy_interests); settings refused at load in both programs; race.sh 4 40: 8/8 PASS with 8 keeper restores.",
-    "One race.sh run lost a round because its R3 listener could not bind 127.0.0.1:16301 (held by another process at that moment); the harness moved to 36301-36303 and the recorded run is clean.",
-    "CI at d5e72a6a, read 2026-10-28T09:50Z: build success, test in progress, lint, typecheck, changes and pr-title queued. Not waited for."
+    "The changelog entries moved to packages/envoy/.changes/unreleased/pr-2362-*.yaml (kind Changed, custom Issue pr2362), matching main@origin's packages/envoy/.changie.yaml; CHANGELOG.md is identical to the merged base.",
+    "The race and keeper harness was not re-run: this round's code change is confined to cmd/listener/api.go and request_record.go (the full-stream answer). Round 6 ran it 8/8 on the same tree.",
+    "CI at 81cf8c12, read 2026-10-28T10:19Z: lint, typecheck, test, build and changes queued. Not waited for."
   ]
 }
