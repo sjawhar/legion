@@ -493,10 +493,11 @@ test("adds nothing when the list is empty or Dispatch is not configured", async 
     sessionStart("startup", home),
   )
   expect(off).toMatchObject({ exitCode: 0, stdout: "", stderr: "" })
-  // The empty list came from the one read; a read that missed the wait may end with the hook's
-  // process before it reaches Dispatch. Dispatch off sends nothing.
-  expect(dispatch.requests.length).toBe(empty.stdout === "" ? 1 : dispatch.requests.length)
-  expect(dispatch.requests.length).toBeLessThanOrEqual(1)
+  // The empty list came from the one read. A read that missed the wait (the hook printed the
+  // failure line) may end with the hook's process before it reaches Dispatch. Dispatch off sends
+  // nothing.
+  const expectedRequests = empty.stdout === "" ? [1] : [0, 1]
+  expect(expectedRequests).toContain(dispatch.requests.length)
 }, 20_000)
 
 test("a `!` token command runs outside the hook: a quick one gives the bearer, a slow one cannot hold the hook", async () => {

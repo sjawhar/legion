@@ -170,6 +170,16 @@ func (f *answersFixture) sentCommentDelivery(t *testing.T, commentID, session st
 	return sent
 }
 
+// setCommentDelivery sets the state of every delivery of comment's mention to session.
+func (f *answersFixture) setCommentDelivery(t *testing.T, commentID, session, state string) {
+	t.Helper()
+	if _, err := f.database.Pool.Exec(context.Background(), `
+		update comment_deliveries set state = $3 where comment_id = $1 and session_id = $2
+	`, commentID, session, state); err != nil {
+		t.Fatalf("set comment %s deliveries to %s: %v", commentID, state, err)
+	}
+}
+
 // list reads session's list with query (a leading "?..." or "") as alice.
 func (f *answersFixture) list(t *testing.T, session, query string) model.SessionAnswersResponse {
 	t.Helper()
@@ -562,13 +572,10 @@ func TestSessionAnswersListsAnEditedCommentAtItsCurrentBody(t *testing.T) {
 	}
 }
 
-// The author routes skip a session a comment's mention reaches (suppressed_authors), so a comment
-// reaches one session both ways only where the ask's follower route does, which ignores mentions:
-// a person's reply on the session's ask that also mentions it.
 // A reply in the session's ask's thread that mentions the session would reach it twice, by the
 // mention and as the ask's follower; the outbox leaves the follower copy to the delivered mention,
 // and the list holds the reply once, as a mention.
-func TestSessionAnswersListsACommentReachedByAMentionAndARouteOnce(t *testing.T) {
+func TestSessionAnswersLeavesAFollowersReplyToTheDeliveredMentionAndListsItOnce(t *testing.T) {
 	f := newAnswersFixture(t)
 	askID := f.ask(t, answersSession, "Which database backs the queue?")
 	reply := f.comment(t, map[string]any{
@@ -585,6 +592,35 @@ func TestSessionAnswersListsACommentReachedByAMentionAndARouteOnce(t *testing.T)
 	item := f.only(t, answersSession)
 	if item.ID != reply || item.Relation != model.SessionAnswerRelationMentionedYou || item.Ask == nil || item.Ask.ID != askID {
 		t.Fatalf("item = %+v, want the reply once, as a mention in the ask's thread", item)
+	}
+}
+
+// One comment both sources hold, the session's topic among its event's destinations (the route)
+// and a sent mention delivery to the session (the mention), is listed once. It happens when the
+// mention's send was not known to be delivered at publish time, so the outbox published the route
+// copy, and a retry delivered the mention after.
+func TestSessionAnswersListsACommentBothTheRouteAndAMentionHoldOnce(t *testing.T) {
+	f := newAnswersFixture(t)
+	f.route(t, "session:"+answersSession)
+	comment := f.comment(t, map[string]any{
+		"body": "@answers, the queue is yours.", "mentions": []map[string]any{{"target": "session:" + answersSession}},
+	}, "alice")
+	if !f.sentCommentDelivery(t, comment, answersSession) {
+		t.Fatal("the mention was not delivered to the session")
+	}
+	// At publish time the send is not known to have landed (a receipt timeout records it failed),
+	// so the outbox publishes the route copy to the session's topic.
+	f.setCommentDelivery(t, comment, answersSession, "failed")
+	f.publishOutbox(t)
+	if !slices.Contains(f.destinations(t, "comment.created", comment), contracts.AgentSubject(answersSession)) {
+		t.Fatal("the route copy did not reach the session's topic")
+	}
+	// A retry delivers the mention: both sources now hold the comment.
+	f.setCommentDelivery(t, comment, answersSession, "sent")
+
+	item := f.only(t, answersSession)
+	if item.ID != comment || item.Relation != model.SessionAnswerRelationMentionedYou || item.Text != "@answers, the queue is yours." {
+		t.Fatalf("item = %+v, want the comment %s once, as a mention", item, comment)
 	}
 }
 
