@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T19:10:00Z",
-  "round": "ci-red pr-title at ae4b7924a9d2",
+  "completed": "2026-10-28T08:46:00Z",
+  "round": "ci-red pr-title at c156b68bd6f6",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
   "head": "5cfd1080069831382a886cc5e72666f5a1274275",
   "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6448930344",
-  "reviewAnswered": "No review this round: the required pr-title check was red (runs 40551347938 and 40551193359) because the title was not a conventional-commit subject. The title is now `feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)`; the code is unchanged since round 2.",
+  "reviewAnswered": "No review this round. The red pr-title result was run 40551347938, which read the old title at 5cfd10800698 and was carried onto the handoff-only heads. GitHub runs no pull_request event (edited included) while the head carries skip-checks: true, so neither the title edit nor a body edit at 08:41:23Z started a run. One COMMENT review (pullrequestreview-5679907413, decides nothing) started PR Title run 40658794266 (pull_request_review) at c156b68bd6f6: success. No commit was pushed to start CI.",
   "proof": [
     {
       "criterion": "The pull request title passes the required pr-title check (conventional-commit subject)",
       "surface": "the pull request's title on GitHub, read by .github/workflows/pr-title.yaml on its `edited` event",
-      "command": "gh pr edit 2411 --repo sjawhar/legion --title \"feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)\"; then the workflow's own test: echo \"$TITLE\" | grep -qE '^[a-z]+(\\([^)]+\\))?!?: .+'",
-      "observed": "gh pr view shows the new title; the workflow's regex accepts it locally (exit 0). Releases version by paths (release.yaml legion-v reads packages/daemon/ and named scripts only), so `feat(scripts)` bumps no release. The workflow run for the edit had not appeared when this round completed (runners backed up); the daemon reads it",
+      "command": "gh pr edit 2411 --title ... (earlier round); then gh api repos/sjawhar/legion/pulls/2411/reviews --method POST -f event=COMMENT (review 5679907413), which started PR Title run 40658794266",
+      "observed": "PR Title run https://github.com/sjawhar/legion/actions/runs/40658794266 (event pull_request_review, head c156b68bd6f64999a735985c1017ae37e6aba597): success; Envoy checks settlement at c156b68b: pr-title passed, 0 failed. Title: feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)",
       "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
       "negativeControl": "the old title `Measure Legion pull requests' merge conflicts before and after a fix (scripts/conflicts, INFRA-588)` is refused by the same regex (exit 1), as pr-title run 40551347938 refused it"
     },
