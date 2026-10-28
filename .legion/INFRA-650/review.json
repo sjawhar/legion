@@ -2,19 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-650",
-  "completed": "2026-10-28T08:37:30Z",
+  "completed": "2026-10-28T09:57:30Z",
   "decision": "approved",
-  "reviewedCodeHead": "2b85acda522fcd05ee25c9e5a02195233c04c15a",
+  "kind": "fingerprint confirmation after a conflict-forced merge, not a new round",
+  "previousApproval": {"commit": "243deb31067127765f4001425104a79a22f33ccc", "review": 5679855425},
+  "newHead": "f8f0458310c00daf51628a57bd119156e7f07d29",
+  "fingerprint": "e46c830b18b2d33608708876d1338efc3c05df95fa74505e140799907cd01dfe at both heads (diff from fork_point(main@origin | head) to head, context 0, excluding .legion and docs/solutions)",
+  "ci": "CI head 5cac746b9cfb (forward merge of main); compare to f8f04583 handoffsOnly true, 2 files. Required lint, typecheck, test, pr-title: completed success; envoy-go-race success too.",
   "critical": 0,
   "important": 0,
   "minor": 2,
-  "ci": "CI head 2b85acda522f (newest pull_request run); compare to c4933f20 handoffsOnly true, 2 files. Required checks lint, typecheck, test, pr-title: completed success. Non-required envoy-go-race failure: TestEventStreamRelayRecoversWhenTheEventLogIsReset (event_stream_relay_test.go:248), event stream relay code this PR does not touch, tracked in dispatch://INFRA-436.",
-  "thermonuclear": "Run once at 2b85acda522f. deep-review: no Medium or High; ref_key unique (migration 0009:28) so first-row creator decode keeps the same kept value and first error; null and [] distinct (fresh nil per miss, slices.Clip keeps both, Version.Authors has no omitempty, model.go:712); map store copies the key, so pgx buffer reuse is safe; failures not stored; only caller getIssueReferences reads and encodes once; no custom Marshal/Unmarshal on Actor/Version. code-quality: two Low test-structure findings, no production-code finding.",
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references_test.go:274-311", "description": "Test oracle uses loadVersions plus a raw created_by select and decode; one served.loadArtifact call (artifacts.go:1180, decodes CreatedBy at 1229 and calls loadVersions at 1206) is the document's own read. Equivalent check today; fast-follow cleanup."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references_test.go:237-332", "description": "null/[] check selects the 40-version document by count and checks fixed positions derived from the seed formula; bytes.Contains over every member's versions is shorter. Fast-follow cleanup."}
-  ],
-  "threads": "No review threads on the pull request (gh api graphql, 0 nodes).",
-  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body, each naming a local load-test Dispatch stack, commands, observations, head 2b85acda522f and a negative control.",
-  "security": "No sensitive surface: the diff changes the decode inside an authenticated read route (references.go:313-379) and adds no route, refusal, credential or subprocess; the per-request memo holds at most one entry per row the existing query already loads."
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references_test.go:274-311", "description": "Unchanged from the approved round: test oracle could be one served.loadArtifact call; fast-follow cleanup."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references_test.go:237-332", "description": "Unchanged from the approved round: null/[] positional check could be bytes.Contains over all members; fast-follow cleanup."}
+  ]
 }
