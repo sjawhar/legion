@@ -20,6 +20,7 @@ import {
   blockSchemaPlugins,
   remarkTypedBlocks,
   type BlockSchema,
+  type HostBlockRenderer,
 } from './block-schema.js';
 import { configureDispatchLinks } from './dispatch-links.js';
 import { schema as gfmSchema } from '@milkdown/preset-gfm';
@@ -40,6 +41,8 @@ import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from '.
 import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
+import { remarkReadOnlyDirectives } from './read-only-directives.js';
+import { remarkUnfitTypedBlocks } from './typed-block-drawing.js';
 
 /**
  * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
@@ -59,7 +62,12 @@ export interface HeadlessProofEditor {
    *
    * Throws for a source the schema has no node for: a raw-HTML block or span (a bare
    * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) and a mark span of
-   * a kind this schema does not carry. A throw leaves the parser's own stack mid-document,
+   * a kind this schema does not carry. Outside read-only mode, with a `blockSchema`, it also
+   * throws for the parser's directive refusals (an unknown typed block, a refused attribute, a
+   * paragraph line that opens like a directive), and draws a typed block whose content breaks
+   * its content rule as its literal lines, as the live (browser) editor imports it; read-only
+   * mode draws a refused directive as text too and does not apply the paragraph-line refusals.
+   * A throw leaves the parser's own stack mid-document,
    * which would make the next parses of unrelated text throw too, so the parser of that
    * policy is dropped and the next parse through it starts on a fresh one.
    */
@@ -73,6 +81,19 @@ export interface HeadlessProofOptions {
   blockId?: BlockIdGenerator;
   /** Typed block schema fetched from the document service before construction. */
   blockSchema?: BlockSchema;
+  /** Draws each typed block's DOM (its node spec's `toDOM`) for a host that serializes the
+   *  parsed document, as the live entry's option of the same name does. */
+  renderBlock?: HostBlockRenderer;
+  /** Read-only parse, for display: a container directive the block schema refuses is drawn as
+   *  its literal fence lines around its formatted content, as is an accepted typed block whose
+   *  content breaks its content rule (both through `remarkReadOnlyDirectives`), and the
+   *  paragraph-line directive refusals are not applied. The default, false, is what the live
+   *  (browser) editor imports: with a `blockSchema` it keeps the parser's directive refusals
+   *  listed at `parseMarkdown`, which the pmdoc fixture generators rely on, and draws a typed
+   *  block whose content breaks its content rule as its literal lines through
+   *  `remarkUnfitTypedBlocks` rather than dropping it. A general read-only mode, so later
+   *  read-only rules hang on it too. */
+  readOnly?: boolean;
 }
 
 export async function createHeadlessProof(options: HeadlessProofOptions = {}): Promise<HeadlessProofEditor> {
@@ -103,7 +124,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     // Frontmatter must be registered after commonmark so `---` parses as YAML.
     ...frontmatterSchema,
     ...codeBlockExtPlugins,
-    ...(options.blockSchema ? blockSchemaPlugins(options.blockSchema) : []),
+    ...(options.blockSchema ? blockSchemaPlugins(options.blockSchema, options.renderBlock) : []),
     ...blockIdSchemas,
     // Some schema nodes reference proof marks (e.g. code_block allows them).
     ...proofMarkPlugins,
@@ -145,7 +166,10 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     // lines with a space or splits them around a `break` node, which the commonmark preset's
     // hardbreak parser takes.
     parseProcessor.use(softBreaks === 'line' ? remarkSoftBreakAsLine : remarkSoftBreakAsSpace);
-    if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
+    if (options.readOnly) parseProcessor.use(remarkReadOnlyDirectives, options.blockSchema, schema);
+    else if (options.blockSchema) {
+      parseProcessor.use(remarkTypedBlocks, options.blockSchema).use(remarkUnfitTypedBlocks, schema);
+    }
     return ParserState.create(schema as never, parseProcessor as never) as unknown as (
       markdown: string,
     ) => ProseMirrorNode;
@@ -197,6 +221,7 @@ export type {
   BlockAttributeSchema,
   BlockSchema,
   BlockTypeSchema,
+  HostBlockRenderer,
 } from './block-schema.js';
 
 export default createHeadlessProof;

@@ -40,13 +40,13 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | You review or approve, build READY, or run the production check | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
-| You need a tool the image may not carry, before you install anything | `skill://legion-worker/references/tools.md` |
+| You need a tool the image may not carry, before you install anything; before you measure Oh My Pi's binary; or a test fails in your pod | `skill://legion-worker/references/tools.md` |
 | A problem outside your issue, or a failed production check | `skill://legion-worker/references/findings.md` |
 
 ## Every role pushes its own commits
 
 - Before a push, read `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'` (earlier phases' commits in it are expected) and run the identity check (`skill://legion-worker/references/default-branch-check.md`). Add no attribution trailer: the pane's jj adds `Omp-Session:`.
-- A push whose commits touch only `.legion/` ends its head's message with `skip-checks: true`, unless it is retro's push (the implementer's retro phase, before the merger's). Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran. No other push carries it. The daemon classifies a push by its paths, never by the trailer, so a wrong trailer can stall the issue but never makes it pass.
+- A push whose commits touch only `.legion/<issue>/` ends its head's message with `skip-checks: true`, unless it is retro's push (the implementer's retro phase, before the merger's). Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran. No other push carries it. The daemon classifies a push by its paths, never by the trailer, so a wrong trailer can stall the issue but never makes it pass.
 - A planner whose issue moved back from implementing starts on the remote tip, `jj -R "$LEGION_WORKSPACE" new legion/<KEY>@origin`, so its handoff never sits on the implementer's unpushed commits.
 
 ## PR body, review, and the merge gate

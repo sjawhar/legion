@@ -19,14 +19,15 @@ export interface FakeSession {
   topics?: string[];
 }
 
-/** A request to the harness's fake Envoy. Playwright starts this listener for local and deployed
- *  runs, so fixture state reaches whichever Dispatch server the suite targets. */
+/** A request to the harness's fake Envoy. The harness (e2e/harness-start.ts) starts this listener
+ *  for local and deployed runs, so fixture state reaches whichever Dispatch server the suite
+ *  targets. */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
   body?: object
 ): Promise<Response> {
-  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeEnvoy.port}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${harnessPorts().fakeEnvoy.port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,
