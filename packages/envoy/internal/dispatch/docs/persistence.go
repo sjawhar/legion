@@ -161,9 +161,10 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // last (flushThrough). An update another writer has stored already appends nothing. Each version
 // it appends advances the instance's cursor inside the lock, as appendUpdate's does, and once the
 // transaction has committed each class is marked stored and its credit held and landed before the
-// lock is released, so the next holder of the lock finds them stored. The worker's own credit
-// lands inside the lock however the transaction ends; the credits of the other updates land only
-// with their committed appends, and stay with their own updates' appends otherwise.
+// lock is released, so the next holder of the lock finds them stored, and the room's shadow is
+// freed once no class it measures is left unstored (dropDrainedShadowLocked). The worker's own
+// credit lands inside the lock however the transaction ends; the credits of the other updates land
+// only with their committed appends, and stay with their own updates' appends otherwise.
 func (p *PgVersioned) appendFlushing(ctx context.Context, room string, worker *workerFlush, credit *UpdateCredit) (persistence.Version, error) {
 	flush := worker.flush
 	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
@@ -191,6 +192,10 @@ func (p *PgVersioned) appendFlushing(ctx context.Context, room string, worker *w
 		for _, unlanded := range flush.markStored(nil) {
 			unlanded.landed()
 		}
+		state := flush.state
+		state.mu.Lock()
+		state.dropDrainedShadowLocked()
+		worker.service.unlockState(room, state)
 		return nil
 	})
 	if err != nil || len(flush.versions) == 0 {

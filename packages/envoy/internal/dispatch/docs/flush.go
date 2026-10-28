@@ -83,7 +83,8 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 }
 
 // roomFlush is what one transaction's flushThrough calls stored of one room instance, the one
-// cursor names: the classes, in commit order, with the version each was appended at. state is the
+// cursor names: the classes, in commit order, with the version each was appended at, the class it
+// was stored with (changed) and the credit its append took (credits; storedClasses). state is the
 // record whose queue the classes were last taken from, which a joined transaction's commit holds
 // locked while it commits and marks them (commitConsuming). through is the position through which
 // the transaction has stored every unstored durable class, once ran is set.
@@ -95,6 +96,8 @@ type roomFlush struct {
 	ran      bool
 	classes  []*queuedClass
 	versions []persistence.Version
+	changed  []bool
+	credits  []*UpdateCredit
 }
 
 // heldThrough is the durable version the flushed instance holds every update through as the
@@ -104,10 +107,11 @@ func (f *roomFlush) heldThrough() int64 {
 	return foldAppended(f.cursor.heldThrough(), f.versions)
 }
 
-// storedContentChange reports whether f stored an update that changed the document's content, for
-// which a settlement is owed. A nil flush stored nothing.
+// storedContentChange reports whether f stored an update as a change to the document's content,
+// for which a settlement is owed, whether or not the room's shadow measured it again. A nil flush
+// stored nothing.
 func (f *roomFlush) storedContentChange() bool {
-	return f != nil && slices.ContainsFunc(f.classes, func(class *queuedClass) bool { return class.contentChanged })
+	return f != nil && slices.Contains(f.changed, true)
 }
 
 // foldAppended folds into base, the version a document stands at, each of versions, ascending,
@@ -132,16 +136,18 @@ func flushGateFrom(ctx context.Context) *roomFlush {
 
 // flushThrough stores, in tx, every update of flush's room instance that its update observer
 // recorded at a commit position through `through` and no writer has stored yet: in commit order,
-// each with the class and the in-flight credit its observer recorded (AppendRoomUpdateTx, whose
-// UpdateCredit.take writes the credit's authors), each gated on that instance's cursor as any
-// append of the room is (appendingCursor). It records them on flush, and the transaction's commit
-// marks them stored and lands their credits (markStored); a transaction that rolls back marks
-// nothing, and the room's persistence stores them later.
+// each with its class and its credit (storedClasses: the ones its observer recorded, or for a
+// browser update stored after a live write it was measured without, the ones the room's shadow
+// measures; AppendRoomUpdateTx, whose UpdateCredit.take writes the credit's authors), each gated on
+// that instance's cursor as any append of the room is (appendingCursor). It records them on flush,
+// and the transaction's commit marks them stored and lands their credits (markStored); a
+// transaction that rolls back marks nothing, and the room's persistence stores them later.
 //
 // The caller holds the document's advisory lock in tx from before it read the head, and calls this
 // before its own append. The classes are read under that lock, and every writer marks what it
-// stored before the lock passes on, so no update is stored twice. Between its appends it renders
-// and decodes nothing: it is the lock, the read of the room's queue, and the appends.
+// stored before the lock passes on, so no update is stored twice. Every class is measured before
+// the first append: between its appends it renders and decodes nothing, so it is the lock, the
+// read of the room's queue, the measures, and the appends.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *roomFlush, through uint64) error {
 	state := s.lockExistingState(flush.room)
 	if state == nil {
@@ -155,34 +161,40 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *roomFlush,
 		}
 		taking = append(taking, class)
 	}
+	window := state.shadowWindowLocked()
 	s.unlockState(flush.room, state)
 	flush.state = state
 	flush.through = max(flush.through, through)
 	flush.ran = true
+	stored := storedClasses(flush.room, window, taking)
 	gated := context.WithValue(ctx, flushGateContextKey{}, flush)
-	for _, class := range taking {
-		version, err := s.persistence.AppendRoomUpdateTx(gated, tx, flush.room, class.update, class.contentChanged, class.credit)
+	for index, class := range taking {
+		version, err := s.persistence.AppendRoomUpdateTx(gated, tx, flush.room, class.update, stored[index].changed, stored[index].credit)
 		if err != nil {
 			return err
 		}
 		flush.classes = append(flush.classes, class)
 		flush.versions = append(flush.versions, version)
+		flush.changed = append(flush.changed, stored[index].changed)
+		flush.credits = append(flush.credits, stored[index].credit)
 	}
 	return nil
 }
 
-// markStored marks what f stored once its transaction has committed: each class stored, and its
-// credit held at the class's version, then landed (UpdateCredit.held, landed). A credit whose state
-// locked reports its caller holds lands through landedLocked; the others are returned, for the
-// caller to land once it holds no state lock. A nil locked holds none.
+// markStored marks what f stored once its transaction has committed: each class stored, the
+// credit its append took held at the class's version (UpdateCredit.held), and its in-flight
+// credit landed (landed), whether its append took that credit or the room's shadow measured its
+// update as no change. A credit whose state locked reports its caller holds lands through
+// landedLocked; the others are returned, for the caller to land once it holds no state lock. A nil
+// locked holds none.
 func (f *roomFlush) markStored(locked func(*roomState) bool) (unlanded []*UpdateCredit) {
 	for index, class := range f.classes {
 		class.stored.Store(true)
+		f.credits[index].held(f.versions[index])
 		credit := class.credit
 		if credit == nil {
 			continue
 		}
-		credit.held(f.versions[index])
 		if locked != nil && locked(credit.state) {
 			credit.landedLocked()
 		} else {

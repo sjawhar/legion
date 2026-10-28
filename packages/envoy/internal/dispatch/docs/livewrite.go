@@ -79,6 +79,10 @@ type liveWrite struct {
 	// they are this transaction's appends all the same (withOwnAppends).
 	versions []persistence.Version
 	flushed  *roomFlush
+	// shadow is the shadow the write's commit left its room (newShadow), until its publish ends:
+	// the publish of its last update names it, so the drain that hands that update over closes
+	// its window (reachShadow).
+	shadow *roomShadow
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyLive) for the version its transaction may write, and
 	// offsets each identified block's byte range in markdown from that same render.
@@ -145,9 +149,11 @@ type liveWrite struct {
 // committed, and registered the ask ids it introduced before this write's publish could reach any
 // observer (Ledger.creditRooms, registerAskAuthors). It carries the write's
 // persistence-suppression slot, which that observer finishes (onLoadDocument). It must remain
-// non-zero sized because ygo compares origins by interface equality.
+// non-zero sized because ygo compares origins by interface equality. shadow is the write's shadow
+// on the publish of its last update, nil on the others.
 type liveWriteOrigin struct {
-	slot *suppressSlot
+	slot   *suppressSlot
+	shadow *roomShadow
 }
 
 // joinedLiveWrite is the calling transaction's open write to artifactID, if it has one.
@@ -600,11 +606,17 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // error, and every write to the document until it recovered again would be refused.
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
+	defer s.closeShadow(write)
 	// Committed, the write has no more use for its fork, so the fork goes before the publish,
-	// which loads the room when no room holds the document (coldFork).
+	// which loads the room when no room holds the document (coldFork). The room's shadow keeps it
+	// (newShadow).
 	write.releaseFork()
 	for index, update := range write.updates {
-		err := s.publishLiveUpdate(write.artifactID, update, write.versions[index])
+		var shadow *roomShadow
+		if index == len(write.updates)-1 {
+			shadow = write.shadow
+		}
+		err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], shadow)
 		if err == nil {
 			continue
 		}
@@ -676,10 +688,11 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 // bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
 // room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
 // stranded persistence on this goroutine, which would otherwise wait on this slot for good.
-func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version) error {
+// shadow, on the write's last update, is the shadow whose window the update's drain closes.
+func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, shadow *roomShadow) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
-	origin := &liveWriteOrigin{slot: slot}
+	origin := &liveWriteOrigin{slot: slot, shadow: shadow}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		instance := s.instanceOf(doc)
 		if instance != nil {
@@ -728,6 +741,7 @@ func (s *Service) finishLiveWrite(write *liveWrite) {
 	write.finished = true
 	write.releaseFork()
 	write.updates = nil
+	write.shadow = nil
 	state := write.state
 	state.mu.Lock()
 	state.liveWriter = nil

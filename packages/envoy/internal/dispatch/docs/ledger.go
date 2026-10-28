@@ -152,12 +152,20 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
-	captures := make([]roomCapture, 0, len(l.versions)+len(l.flushes))
+	captures := make([]roomCapture, 0, len(l.versions)+len(l.flushes)+len(l.order))
 	for _, written := range l.versions {
 		captures = append(captures, roomCapture{room: written.artifactID, capture: written.capture})
 	}
 	for _, flush := range l.flushes {
 		captures = append(captures, flushCapture(flush))
+	}
+	// Each write leaves its room a shadow (roomShadow), installed by the commit under its state's
+	// lock, after the flushes' classes are marked stored.
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		if shadow := write.newShadow(); shadow != nil {
+			captures = append(captures, roomCapture{room: artifactID, capture: authorCapture{state: write.state}, shadow: shadow})
+		}
 	}
 	// The cursors before the commit, not after it: this transaction holds the document's advisory
 	// lock until the commit drops it, and the writers queued on that lock take it the instant it
@@ -253,12 +261,14 @@ func (l *Ledger) takeRoomCursors() {
 	}
 }
 
-// roomCapture is a version's capture with the document it versions, or the room updates a
-// transaction flushed (flush), whose capture holds only the state the flush took them from.
+// roomCapture is a version's capture with the document it versions, the room updates a
+// transaction flushed (flush), or the shadow a live write leaves its room (shadow); the last two
+// hold only the state, which the commit locks.
 type roomCapture struct {
 	room    string
 	capture authorCapture
 	flush   *roomFlush
+	shadow  *roomShadow
 }
 
 // flushCapture is the roomCapture of flush, which locks the state flush took its updates from.
@@ -268,16 +278,19 @@ func flushCapture(flush *roomFlush) roomCapture {
 
 // commitConsuming commits tx, which wrote the versions captures lists and the room updates their
 // flushes stored, and once it has committed marks the in-flight credits each version listed
-// consumed and each flushed update stored, its credit held and landed (roomFlush.markStored). Each
-// capture's state is locked (state.mu) from before the commit until then: an append queued
-// behind the document's advisory lock, which tx holds until it commits, takes that lock the
-// instant the commit drops it, and must find its credit consumed when it reads it
-// (UpdateCredit.take), or it writes an author a version listed to the pending authors; and a
-// durable writer that takes it must find the updates this commit stored marked, or it stores them
-// again (flushThrough). The states are locked in their documents' sorted order, so two
-// transactions versioning the same two documents cannot deadlock. ended runs once the commit
-// returns, with its error and the states still locked; a capture with no state locks nothing. A
-// commit that fails marks nothing: the room's persistence stores the flushed updates later.
+// consumed and each flushed update stored, its credit held and landed (roomFlush.markStored), frees
+// a shadow left with nothing to measure (dropDrainedShadowLocked), and installs each live write's
+// shadow (installShadowLocked), in captures' order. Each capture's state is locked (state.mu) from
+// before the commit until then: an append queued behind the document's advisory lock, which tx
+// holds until it commits, takes that lock the instant the commit drops it, and must find its
+// credit consumed when it reads it (UpdateCredit.take), or it writes an author a version listed
+// to the pending authors; and a durable writer that takes it must find the updates this commit
+// stored marked, or it stores them again, and the write's shadow installed, or it stores a class
+// measured without the write (flushThrough). The states are locked in their documents' sorted
+// order, so two transactions versioning the same two documents cannot deadlock. ended runs once
+// the commit returns, with its error and the states still locked; a capture with no state locks
+// nothing. A commit that fails marks nothing: the room's persistence stores the flushed updates
+// later.
 func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roomCapture, ended func(error)) error {
 	sorted := slices.Clone(captures)
 	slices.SortStableFunc(sorted, func(a, b roomCapture) int { return strings.Compare(a.room, b.room) })
@@ -298,6 +311,12 @@ func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roo
 			written.capture.consumeLocked()
 			if written.flush != nil {
 				unlanded = append(unlanded, written.flush.markStored(holds)...)
+				if state := written.capture.state; state != nil {
+					state.dropDrainedShadowLocked()
+				}
+			}
+			if written.shadow != nil {
+				s.installShadowLocked(written.room, written.capture.state, written.shadow)
 			}
 		}
 	}

@@ -2535,6 +2535,9 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.roomGeneration = s.nextRoomGeneration()
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
+	// The failed room's updates are dropped, or stored as their observer recorded them once
+	// handed over (handOverFailedRoomLocked): no class of it is measured on the shadow again.
+	state.shadow = nil
 	// The failure drops this room's settlement: a queued one is stopped just above, one
 	// already running refuses on the failed room (settleRoom), and its retry stops because
 	// the generation moved (retrySettleLocked). The document's pending-settlement row, which

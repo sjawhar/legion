@@ -562,13 +562,19 @@ func (s *Service) classifyDrained(room string, instance *roomInstance, logged cr
 		s.observeAskBlocksForUpdate(room, tree)
 	}
 	class.durable = true
+	origin, published := logged.Origin.(*liveWriteOrigin)
 	if contentChanged {
 		class.credit = s.creditContentChange(room, logged.Origin, &instance.hold)
+	} else if !published {
+		class.roomCredit = s.unchangedCredit(room, logged.Origin, &instance.hold)
 	}
 	// A published write's update was stored by the transaction that wrote it, before the room
-	// took it.
-	_, published := logged.Origin.(*liveWriteOrigin)
+	// took it. Its last closes the window of the shadow its commit left (reachShadow), before any
+	// update after it is queued.
 	s.queueUpdateClass(room, logged.Update, class, published)
+	if published && origin.shadow != nil {
+		s.reachShadow(room, origin.shadow, &instance.cursor, seq)
+	}
 	return true, contentChanged
 }
 
@@ -629,15 +635,42 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: make(map[string]model.Actor, len(state.connected))}
-	for _, actor := range state.connected {
-		record.authors[actorKey(actor)] = actor
-	}
-	record.lastActor, _ = soleConnectedActor(state.connected)
+	record := connectedCreditLocked(state)
+	record.seq = state.creditSeq.Add(1)
 	state.inflight[record.seq] = record
 	state.lastActor = record.lastActor
 	state.unsettled = true
 	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold}
+}
+
+// unchangedCredit is the credit a browser update the room's update observer measured as no change
+// carries for the room's shadow (documentUpdateClass.roomCredit): the peers connected as the room
+// took it, as creditContentChange would credit them, recorded only while a live write is open,
+// whose shadow may measure the update a change once the write is stored before it. It is not in F
+// and takes no credit sequence: no version lists an update recorded as no change, and its append
+// writes these authors only when it stores the update as a change. Nil for a service repair, and
+// while no write is open.
+func (s *Service) unchangedCredit(room string, origin any, hold *roomHold) *UpdateCredit {
+	if _, service := s.serviceOrigins.Load(origin); service {
+		return nil
+	}
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	if state.liveWriter == nil {
+		return nil
+	}
+	return &UpdateCredit{service: s, room: room, state: state, record: connectedCreditLocked(state), hold: hold}
+}
+
+// connectedCreditLocked is a credit record naming the peers connected to state, and the one of
+// them it pins the edit on, if one. The caller holds state.mu.
+func connectedCreditLocked(state *roomState) *inflightCredit {
+	record := &inflightCredit{authors: make(map[string]model.Actor, len(state.connected))}
+	for _, actor := range state.connected {
+		record.authors[actorKey(actor)] = actor
+	}
+	record.lastActor, _ = soleConnectedActor(state.connected)
+	return record
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

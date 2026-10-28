@@ -65,6 +65,9 @@ type roomState struct {
 	// recorded them, which is seq order for each room instance (queuedClass).
 	updateClasses  []*queuedClass
 	pendingUpdates int
+	// shadow is what the latest committed live write left the room to measure again the classes
+	// of the browser updates stored after its own (roomShadow), nil while none is left.
+	shadow         *roomShadow
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	durableAppends atomic.Int64
@@ -109,13 +112,17 @@ type roomState struct {
 // browser edit credited, and cursor, the durable version the room instance the update was made in
 // stands at, which gates and then takes in the update's own append (StoreUpdateContext). seq is the
 // update's commit position in that room instance (renderedReplica.seq): updates of one instance are
-// stored in seq order (flushThrough).
+// stored in seq order (flushThrough). roomCredit is, for a browser update measured as no change
+// while a live write was open, the peers connected as the room took it, outside F and with no
+// credit sequence of its own: the credit its append takes if the room's shadow measures it a
+// change after all (storedClasses).
 type documentUpdateClass struct {
 	update         []byte
 	seq            uint64
 	contentChanged bool
 	durable        bool
 	credit         *UpdateCredit
+	roomCredit     *UpdateCredit
 	cursor         *roomCursor
 }
 
@@ -133,6 +140,10 @@ type queuedClass struct {
 	documentUpdateClass
 	handed bool
 	stored atomic.Bool
+	// shadowed marks a class the room's shadow measured, and shadowChanged what it measured,
+	// both guarded by that shadow's mu (roomShadow.measure).
+	shadowed      bool
+	shadowChanged bool
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -244,6 +255,9 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // the connection id the service gave it. Its caller holds state.mu.
 func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.released = true
+	// The failed room's shadow goes with it (failRoomLocked frees it already): a carried class is
+	// stored with the class its update observer recorded.
+	state.shadow = nil
 	// Only the updates still waiting for the room's persistence move, with the appends they
 	// count. An append already in flight finishes on the record that counted it, with its class
 	// (finishUpdateClass takes the record consumeUpdateClass answered), so both stay where they
@@ -309,6 +323,8 @@ func (s *Service) queueUpdateClass(room string, update []byte, class documentUpd
 	if class.durable {
 		state.pendingUpdates++
 		state.durableAppends.Add(1)
+	} else {
+		state.recordRepairLocked(class)
 	}
 }
 
