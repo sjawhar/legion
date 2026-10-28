@@ -104,10 +104,15 @@ test("R2 finds a list item that opens with a fence and has no blank line before 
   expect(exitCode).toBe(1);
 });
 
-test("an ordered marker other than 1 does not interrupt a paragraph, so R2 does not apply", async () => {
-  const path = await markdownFile("The release line is\n01. That is the build number.\n");
+test("an ordered marker whose number is not 1 does not interrupt a paragraph, so R2 does not apply", async () => {
+  const path = await markdownFile("The release line is\n2. That is the build number.\n");
   const { stdout } = run([path]);
   expect(stdout).not.toContain("R2");
+});
+
+test("--write does not join a 01. item into the paragraph above it: 01. starts at 1, so it interrupts", async () => {
+  const result = await written("A paragraph line\n01. An item.\n");
+  expect(result.text.split("\n")).toContain("01. An item.");
 });
 
 test("--write keeps a footnote definition that interrupts a paragraph on its own line", async () => {
@@ -142,4 +147,27 @@ test("--write refuses, writing nothing, a re-layout that would change how the fi
   expect(result.stderr.toString()).toContain(`${path}: refusing to write: the block at line 1`);
   expect(result.exitCode).toBe(2);
   expect(await readFile(path, "utf8")).toBe(text);
+});
+
+test("--write leaves YAML front matter as it is", async () => {
+  const text = "---\nname: example\ndescription: Bar. Baz\n---\n\n# Title\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
+
+test("--write does not join a task marker with the text on the next line", async () => {
+  const result = await written("- [x]\n  done\n");
+  expect(result.text).not.toContain("[x] done");
+});
+
+test("--write keeps the spaces of a code span that a line break follows", async () => {
+  const text = "Run `foo   bar \nbaz` now.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
+
+test("--write keeps the line break inside inline <pre> HTML", async () => {
+  const text = "Output follows <pre>line one\nline two</pre> in the doc.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
 });
