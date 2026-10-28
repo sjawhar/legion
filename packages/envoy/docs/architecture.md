@@ -228,7 +228,9 @@ role message is not retained for a future claimant.
 When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
 envelope on `notifications.envoy.exceptions.<original-topic>`. So does a role-lane publish the API
 refuses because no live session holds the role: that refusal is still answered `404`, and the
-exception goes out behind the answer, on a goroutine of its own, so it never delays it. The
+exception goes out behind the answer, on a goroutine of its own, so it never delays it. This adds
+a bus signal only: no Legion consumer acts on a peer's refusal. Upgrade every Legion daemon before
+the listener, because an older daemon logs every refused notice's new reason as malformed. The
 exception payload preserves the original delivery fields:
 
 | Field | Meaning |

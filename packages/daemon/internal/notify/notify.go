@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/roleholder"
 )
 
 const requestTimeout = 10 * time.Second
@@ -26,20 +27,8 @@ const refusalBodyLimit = 4096
 // not a broken publish path, so a caller can hold what it published until one does.
 var ErrNoHolder = errors.New("no live session holds the role")
 
-// roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
-// (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
-// an older listener lacks — and never ErrNoHolder. The listener names the same reasons on the
-// role-lane exception it raises for that refusal (packages/envoy/cmd/listener/role_holder.go,
-// publishRefusalException), so this one list is what both readers ask, through IsNoHolderReason.
-var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
-
-// IsNoHolderReason reports whether reason is one the listener names when it refuses a role publish
-// because no live session holds the role: the reason of the 404 Publish reads as ErrNoHolder, and
-// of the role-lane exception the listener raises for the same refusal. A publisher that met one
-// still holds what it published, so the daemon's exception consumer re-holds nothing for it.
-func IsNoHolderReason(reason string) bool {
-	return slices.Contains(roleHolderReasons, reason)
-}
+// A listener 404 that names a roleholder reason is ErrNoHolder. A 404 without one is some other
+// refusal — a route an older listener lacks — and never ErrNoHolder.
 
 // RoleTopicPrefix is the Envoy subject a role token is reached on (ROLE_TOPIC_PREFIX,
 // packages/contracts/src/subject.ts): a notice goes to its architect's, and a review-stuck notice
@@ -126,7 +115,7 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		var reason struct {
 			Reason string `json:"reason"`
 		}
-		if response.StatusCode == http.StatusNotFound && json.Unmarshal(body, &reason) == nil && IsNoHolderReason(reason.Reason) {
+		if response.StatusCode == http.StatusNotFound && json.Unmarshal(body, &reason) == nil && roleholder.IsNoHolderReason(reason.Reason) {
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
 		}
 		return refusal

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/roleholder"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -138,16 +139,16 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	issue, notice := reported.issue, reported.notice
-	if notify.IsNoHolderReason(exception.Reason) {
+	if roleholder.IsNoHolderReason(exception.Reason) {
 		// The listener refused this publish itself, before forwarding anything, because no live
 		// session held the role, and answered it 404 (notify.ErrNoHolder). The executor that sent it
 		// still holds the row and retries it on its own backoff (errNoticeWaits), or finishes it once
 		// the architect will not hold its role again, so a copy queued here would send the notice
 		// twice. These reasons are never a re-hold, and they are not malformed: a positive match on
-		// the one list notify.Publish reads its 404 by (notify.IsNoHolderReason), so a refusal state
-		// the listener adds there is quiet here too, and the switch below still refuses every other
-		// reason. It logs at debug alone: at hundreds of unheld roles, anything louder is a line
-		// every few hundred milliseconds about a state the executor already handles.
+		// the shared list the listener and notify.Publish both read (roleholder), so the switch below
+		// still refuses every other reason. It logs at debug alone: at hundreds of unheld roles,
+		// anything louder is a line every few hundred milliseconds about a state the executor
+		// already handles.
 		r.log.Debug("outbox notice not re-held: the listener refused its publish, and its row retries on its own",
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
 		return nil

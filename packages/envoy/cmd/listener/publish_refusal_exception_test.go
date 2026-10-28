@@ -108,8 +108,8 @@ func TestARefusalExceptionThatCannotBePublishedIsOnlyLogged(t *testing.T) {
 // publish to a goroutine of its own and returns, so the handler returns and net/http sends the
 // answer it was holding. Here the bus is reconnecting, the state that made an in-line publish
 // delay the 404 past the route's budget and the Envoy client's per-attempt deadline: an in-line
-// publish waits there for a connection until refusalExceptionBudget runs out, and this call must
-// return long before that.
+// publish waits there for a connection until the bus's 5 s publish bound runs out, and this call
+// must return long before that.
 func TestARefusalExceptionDoesNotWaitForTheBus(t *testing.T) {
 	server, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -119,18 +119,45 @@ func TestARefusalExceptionDoesNotWaitForTheBus(t *testing.T) {
 	t.Cleanup(client.Close)
 	server.Stop(t)
 	deadline := time.Now().Add(10 * time.Second)
-	for client.Connected() {
+	for client.Connected() || !client.Conn.IsReconnecting() {
 		if time.Now().After(deadline) {
-			t.Fatal("the client still reads connected 10 s after its server stopped")
+			t.Fatal("the client is not reconnecting 10 s after its server stopped")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if client.Connected() || !client.Conn.IsReconnecting() {
+		t.Fatal("the client must be reconnecting, not connected or closed")
 	}
 
 	started := time.Now()
 	publishRefusalException(client, logging.NewWithWriter("test", &cmdtest.LockedBuffer{}), refusedPublish(""), roleHolderResult{state: roleHolderUnclaimed})
-	if elapsed := time.Since(started); elapsed > refusalExceptionBudget/10 {
-		t.Fatalf("publishRefusalException took %s against a reconnecting bus, want it back within %s: the 404 waits for it",
-			elapsed, refusalExceptionBudget/10)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("publishRefusalException took %s against a reconnecting bus, want it back within 500ms: the 404 waits for it",
+			elapsed)
+	}
+}
+
+// A non-live state outside roleholder is not a refusal reason the Legion daemon knows, so it raises
+// no exception. This keeps a third listener state from becoming a malformed role-lane exception.
+func TestARefusalExceptionIsRaisedOnlyForASharedNoHolderReason(t *testing.T) {
+	client := setupPublishTestClient(t)
+	item := refusedPublish("{}")
+	item.Topic = contracts.RoleTopicPrefix + "unknown-refusal"
+	probe, err := client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe to the exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the exception subscription: %v", err)
+	}
+
+	publishRefusalException(client, logging.NewWithWriter("test", io.Discard), item, roleHolderResult{state: roleHolderState("not_live")})
+
+	if message, err := probe.NextMsg(250 * time.Millisecond); err == nil {
+		t.Fatalf("an unlisted refusal state raised an exception: %s", message.Data)
+	} else if !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("wait for an exception: %v", err)
 	}
 }
 

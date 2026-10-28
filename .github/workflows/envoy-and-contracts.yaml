@@ -263,7 +263,7 @@ jobs:
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/listenfd/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy
-            # (packages/envoy/listenfd: added by #2229).
+            # (packages/envoy/listenfd: added by #2229; packages/envoy/roleholder: added by #2434).
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
               - 'packages/envoy/internal/bus/*'
@@ -282,6 +282,7 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # The Dispatch server's packages plus what `go test ./cmd/dispatch` adds under both its
             # memory and its multiprocess tag: the whole of cmd/dispatch and internal/dispatch,
             # whose .go files cmd/dispatch/settings_test.go:136 walks, the packages its tests

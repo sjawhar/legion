@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/roleholder"
 )
 
 type roleClaimResolver interface {
@@ -27,10 +28,13 @@ type roleClaimResolver interface {
 
 type roleHolderState string
 
+// roleHolderUnclaimed and roleHolderLapsed are the shared no-holder reasons the Legion daemon reads
+// (roleholder), not listener-local spellings, so the listener's 404, its refusal exception, the
+// daemon's notify.Publish and its exception consumer all read one list.
 const (
 	roleHolderLive      roleHolderState = "live"
-	roleHolderUnclaimed roleHolderState = "unclaimed"
-	roleHolderLapsed    roleHolderState = "holder_lapsed"
+	roleHolderUnclaimed roleHolderState = roleholder.Unclaimed
+	roleHolderLapsed    roleHolderState = roleholder.HolderLapsed
 )
 
 type roleHolderResult struct {
@@ -132,36 +136,34 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 // magnitude smaller, so its own reports always carry their payload whole.
 const refusalExceptionBound = 64 << 10
 
-// refusalExceptionBudget bounds the exception publish of one refused role-lane publish. It is the
-// publish path's own bound (bus publishBound), spent on a context of this call's own rather than
-// the request's, which net/http cancels when the handler returns.
-const refusalExceptionBudget = 5 * time.Second
-
 // publishRefusalException raises the role-lane exception of a publish this listener refused because
-// no live session holds the role, so the Legion daemon hears of a peer's publish that reached no
-// holder; until it existed, the role lane raised an exception only in the delivery path, and this
-// refusal was silent to the bus. The envelope is the delivery path's own
-// (deliveryExceptionEnvelope), so the daemon's consumer decodes one shape, and the reason is the
-// refusal's own state -- unclaimed, or holder_lapsed carrying the lapsed holder as its recipient --
-// which the daemon tells apart from a delivery that failed after a holder was resolved.
+// no live session holds the role. It adds that bus signal; no Legion consumer acts on a peer's
+// refusal today. The daemon's consumer handles only its own notices, and it treats these two
+// reasons as a refused outbox row that retries on its own. A consumer that should act for a peer
+// would have to wake or re-claim the claim behind the refused topic. The envelope is the delivery
+// path's own (deliveryExceptionEnvelope), and the reason is the shared no-holder reason (roleholder).
+// A non-live state this function receives that roleholder does not list raises no exception, so a
+// new listener state cannot become a reason the daemon calls malformed.
 //
 // It publishes on a goroutine of its own, after the caller has written the 404. net/http holds a
 // handler's answer until the handler returns, so publishing in line would delay the 404 by as long
-// as the publish takes -- up to the publish bound on a reconnecting connection, past this route's
-// own budget and past the Envoy client's per-attempt deadline, whose retry would refuse a second
-// time and raise a second exception. Detached, the answer is written and the handler returns while
-// the exception goes out behind it. The publish is best effort: nothing waits for it, nothing
-// retries it, and a failure is logged (exceptionPublishFailedLine) and nothing more.
+// as the publish takes -- up to the bus's own publish bound on a reconnecting connection, past this
+// route's own budget and past the Envoy client's per-attempt deadline, whose retry would refuse a
+// second time and raise a second exception. client.Publish keeps that bus bound itself, so this
+// detached call adds no second one. Nothing waits for it, nothing retries it, and a failure is
+// logged (exceptionPublishFailedLine) and nothing more.
 func publishRefusalException(client *bus.Client, logger *logging.Logger, item contracts.Envelope, result roleHolderResult) {
-	exception, err := deliveryExceptionEnvelope(item, string(result.state), result.holder, refusalExceptionBound)
+	reason := string(result.state)
+	if !roleholder.IsNoHolderReason(reason) {
+		return
+	}
+	exception, err := deliveryExceptionEnvelope(item, reason, result.holder, refusalExceptionBound)
 	if err != nil {
 		logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), refusalExceptionBudget)
-		defer cancel()
-		if err := client.PublishWithin(ctx, exception); err != nil {
+		if err := client.Publish(exception); err != nil {
 			logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 		}
 	}()

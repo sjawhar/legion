@@ -134,8 +134,10 @@ request's `.>` gets its lifecycle events as well as its comments and checks.
 A role message is not stored for later. If no live session holds the role, a publish through the
 API is refused with `404`, and the listener also publishes one exception naming why it refused:
 `unclaimed` when nothing claims the role, or `holder_lapsed` when a claim exists but its holder is
-no longer live. If a holder is found but does not take the message, the listener publishes an
-exception naming that reason instead: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+no longer live. That exception is only a bus signal: nothing re-sends a refused publish except the
+Legion daemon's own outbox notice, whose row retries by itself. If a holder is found but does not
+take the message, the listener publishes an exception naming that reason instead: `no_holder`,
+`delivery_failed`, or `receipt_timeout`.
 
 ## Messages a session missed
 
