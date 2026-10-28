@@ -401,6 +401,7 @@ jobs:
               - 'skills/**'
             # envoy-go's gate alone; every other Go job has a filter of its own.
             envoy:
+              - '.github/workflows/envoy-and-contracts.yaml'
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
@@ -531,7 +532,8 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - '.github/workflows/release.yaml'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
-            # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
+            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts and
+            # extensions/askgate/askgate-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
             # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
@@ -762,9 +764,10 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts runs the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts and extensions/askgate/askgate-omp.test.ts run the
+      # pinned Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on
+      # GitHub Actions without one. The pin is read from .omp-pin, the repository's one copy of it
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
@@ -1092,8 +1095,13 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # The API package owns the largest set of Postgres-backed tests. Running it with the other
+      # package binaries makes all of their per-test database cleanup queue on the service's one
+      # checkpointer, so run it before the rest of the module.
       - name: Unit test envoy Go package
-        run: go list ./... | grep -v /integration | xargs go test
+        run: |
+          go test ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
