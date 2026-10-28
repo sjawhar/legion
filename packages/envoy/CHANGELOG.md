@@ -1737,6 +1737,11 @@
   its level is now written `***`, so it no longer reads back as an unclosed front-matter opener
   that turns the typed block into text (INFRA-581).
 
+- A document write now reads an unclosed code fence inside a typed block in a list item, a quote
+  or a footnote definition as the browser does, without the trailing newline it kept from the
+  blank line its container ends at; one in a quote that a last `>` line with no line feed ends
+  keeps that blank line, as the browser keeps it (INFRA-581).
+
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach
   the database, no lease could be renewed, and the first sweep after the outage ended every
