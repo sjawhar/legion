@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-536",
+  "completed": "2026-10-28T10:11:13Z",
+  "round": 3,
+  "kind": "confirmation after a conflict-forced merge",
+  "approvedBefore": "35a47ab1c0bf0eff1dd96ea8dac1db7d720280ab",
+  "codeHead": "c07181dc2fa1fd4ba2a97497e700a0d8b46b1dd1",
+  "fingerprint": "e27cb169e075462183b62c43f00c842eab3501a4722a0f38d27833145cfec4a4 at 35a47ab1 and at 824b7482: unchanged",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "ci": "CI head c07181dc (the merge of main b295a3fb, which carries INFRA-534's pmdoc tilde and alt-text changes). The required lint, typecheck, test and pr-title passed. envoy-go, envoy-go-race, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-smoke and envoy-infra-go passed too. The non-required dispatch was still in progress. compare c07181dc...824b7482: handoffsOnly true.",
+  "conflict": "GitHub reports the pull request CONFLICTING again: main moved to aeeee6c0. git merge-tree finds one conflict, packages/envoy/CHANGELOG.md. Main's #2419 moves changelog entries into fragment files, so the merge must carry this entry the new way. Main's #2313 runs the iphone project only for tests tagged @phone, and doc.e2e.ts auto-merges.",
+  "keyFindings": []
+}
