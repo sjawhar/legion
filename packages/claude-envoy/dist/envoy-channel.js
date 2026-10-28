@@ -36294,7 +36294,10 @@ var IssueEventPayloadSchema = object({
   status: string2().optional(),
   priority: number2().int().min(0).max(3).nullable().optional(),
   rank: string2().optional(),
-  route: string2().nullish()
+  route: string2().nullish(),
+  changed: array(string2()).optional(),
+  ancestors: array(string2()).optional(),
+  thread_logins: array(string2()).optional()
 });
 var ArtifactCreatedEventPayloadSchema = object({
   artifact: object({ id: string2().optional(), slug: string2().optional(), name: string2().optional() }).optional()
@@ -36352,7 +36355,8 @@ var askEventPayloadFields = {
     reason: string2().optional(),
     actor: object({ kind: string2().optional(), id: string2().optional() }).passthrough().optional(),
     at: string2().optional()
-  }).nullish()
+  }).nullish(),
+  thread_logins: array(string2()).optional()
 };
 var AskEventPayloadSchema = intersection(object(askEventPayloadFields), object({
   previous: never().optional(),
@@ -36414,7 +36418,8 @@ var CommentEventPayloadSchema = object({
   author: object({ kind: string2(), id: string2() }).optional(),
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
-  deliveries: array(CommentDeliverySchema).optional()
+  deliveries: array(CommentDeliverySchema).optional(),
+  thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
   id: string2().optional(),
@@ -36423,7 +36428,8 @@ var MessageEventPayloadSchema = object({
   in_reply_to: string2().nullish(),
   reply_body: string2().optional(),
   thread_target: string2().optional(),
-  author: object({ kind: string2(), id: string2() }).optional()
+  author: object({ kind: string2(), id: string2() }).optional(),
+  thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
 var DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
@@ -48820,7 +48826,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 40
+  daemonApiVersion: 41
 };
 
 // src/channel-forwarder.ts

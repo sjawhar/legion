@@ -181,6 +181,11 @@ func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
 	var inline *nodeLocation
 	var boundaries []insertionBoundary
 	walk(doc, func(node *Node, path []int, start, end int) bool {
+		// Only a node whose range holds pos can hold an inline point or a child boundary at pos, so
+		// skipping the rest keeps childBoundary, which measures every child, off nodes that cannot.
+		if pos < start || pos > end {
+			return true
+		}
 		if isTextblock(node.Type) && start+1 <= pos && pos <= end-1 {
 			location := nodeLocation{path: append([]int(nil), path...), pos: start, end: end}
 			inline = &location
