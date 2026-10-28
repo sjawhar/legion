@@ -39,6 +39,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the check the skill requires, a heredoc plan naming `skills/dispatch/SKILL.md`, a relative
   mention) was voided, and is now scored and flagged `skills=ran:N,wrote:N,assigned:N`, with up to
   three hits of each kind printed as the `outside` flag prints them. Subagents' calls count too.
+- The skill-scenario scorer's summary tables end with a `flagged` column: per scenario and label,
+  and per source and label beside the median fault counts, how many counted runs carry a flag
+  (`outside=`, `skills=` or `writes_seen=`). A flagged run stays in the pass counts and the
+  medians; the column says how many of them to read before trusting the numbers.
 - The skill-scenario scorer reads a spec-only check from the subagent's own transcript
   (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
   from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no

@@ -2299,6 +2299,20 @@ specRun("spec-writing-head-18", {
   turns: "1 first exit=0\n2 answered exit=0\n",
   judges: { "checkable.json": { version: null, rows: [] } },
 });
+// A label of two runs that both pass, one of them flagged: it named a file of the operator's home.
+specRun("spec-writing-flagged-1", {
+  transcript: conversation(
+    routedRead,
+    readOf("o1", path.join(homedir(), "src", "other-repo", "README.md")),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-flagged-2");
 // Three runs of another label, for the median fault count.
 for (const [n, faults] of [2, 4, 3].entries())
   specRun(`spec-writing-base-${n + 1}`, {
@@ -2315,8 +2329,8 @@ test("a run whose agent never got a model turn is a rig error, not a failure", (
     expect(out).not.toContain(`${name}\tpass=`);
   }
   // Pass counts over the one run that got a turn; the other is counted only as a rig error.
-  expect(out).toContain("tester-proof\thead\t0/1\t0/1\t1\n");
-  expect(out).toContain("ask-on-message\thead\t0/1\t0/1\t1\n");
+  expect(out).toContain("tester-proof\thead\t0/1\t0/1\t1\t0\n");
+  expect(out).toContain("ask-on-message\thead\t0/1\t0/1\t1\t0\n");
 });
 
 test("a run whose agent got a turn and did nothing is a failure", () => {
@@ -2387,7 +2401,7 @@ test("two runs of one batch that name one Dispatch database are rig errors, sayi
   expect(out).toContain(
     "ask-on-message-shared-2\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-1, so each could read the other's issue and asks"
   );
-  expect(out).toContain("ask-on-message\tshared\t0/0\t0/0\t2\n");
+  expect(out).toContain("ask-on-message\tshared\t0/0\t0/0\t2\t0\n");
 });
 
 test("runs on databases of their own are scored, and one name in two batches is two databases", () => {
@@ -2417,8 +2431,8 @@ test("an older spec run with no dispatch.json is scored, with a note that it ran
     );
     expect(out).not.toContain(`${name}\trig error`);
   }
-  expect(out).toContain("spec-writing\tolder\t1/1\t1/1\t0\n");
-  expect(out).toContain("spec-rewrite\tolder\t1/1\t1/1\t0\n");
+  expect(out).toContain("spec-writing\tolder\t1/1\t1/1\t0\t0\n");
+  expect(out).toContain("spec-rewrite\tolder\t1/1\t1/1\t0\t0\n");
   // A spec run that records its own Dispatch gets no such note.
   expect(rowOf("spec-writing-head-1")).not.toContain("no dispatch.json");
 });
@@ -2531,12 +2545,12 @@ test("askgate: another label and case pair, a directory naming no case, and a ca
 });
 
 test("askgate: the counts are per case and label", () => {
-  expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\n");
-  expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\n");
-  expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
-  expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");
-  expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\n");
-  expect(out).toContain("askgate\ton\t0/0\t0/0\t1\n");
+  expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\t0\n");
+  expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\t0\n");
+  expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\t0\n");
+  expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\t0\n");
+  expect(out).toContain("askgate\ton\t0/0\t0/0\t1\t0\n");
 });
 
 // live-read: the pinned Oh My Pi answers a `read` of skill://<name>[/<path>] with one header line,
@@ -2631,7 +2645,7 @@ test("a spec-writing run that follows every rule passes every score", () => {
 
 test("a spec-rewrite run is scored by the same rules", () => {
   expect(scoresOf("spec-rewrite-head-1")).toEqual(allPass);
-  expect(out).toContain("spec-rewrite\thead\t1/1\t1/1\t0\n");
+  expect(out).toContain("spec-rewrite\thead\t1/1\t1/1\t0\t0\n");
 });
 
 test("outline: the spec's ## headings are exactly the outline's, in order", () => {
@@ -2998,6 +3012,14 @@ test("plan and checkable: a run that ends with no approval fails both", () => {
 });
 
 test("score spec-writing prints each source and label's median fault count", () => {
-  expect(out).toContain("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks\n");
-  expect(out).toContain("\nacme-1\tspec-writing\tbase\t3\t3\t0\n");
+  expect(out).toContain(
+    "\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks\tflagged\n"
+  );
+  expect(out).toContain("\nacme-1\tspec-writing\tbase\t3\t3\t0\t0\n");
+});
+
+test("the summary tables print how many counted runs carry a flag", () => {
+  expect(out).toContain("\nscenario\tlabel\tpass\tpass+ref\trig errors\tflagged\n");
+  expect(out).toContain("spec-writing\tflagged\t2/2\t2/2\t0\t1\n");
+  expect(out).toContain("\nacme-1\tspec-writing\tflagged\t2\t0\t0\t1\n");
 });

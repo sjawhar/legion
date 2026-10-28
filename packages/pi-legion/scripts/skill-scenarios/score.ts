@@ -225,6 +225,10 @@ interface Row {
   source?: string;
   faults?: number;
   steBreaks?: number;
+  /** Whether the row's first line carries a flag: `outside=`, `skills=` (scoreRuns), or
+   * `writes_seen=` (specRow). A flagged run is counted; the flag says what to read before trusting
+   * it. */
+  flagged?: boolean;
 }
 
 /** A Dispatch scenario's row: its asks, each printed whole under the row because a person judges
@@ -2529,6 +2533,7 @@ function specRow(
     source,
     faults: faultCount,
     steBreaks: faults.ste_breaks,
+    flagged: disagree,
   };
 }
 
@@ -2901,6 +2906,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
         const [first = "", ...rest] = scored.notes.split("\n");
         const row = {
           ...scored,
+          flagged: scored.flagged === true || flags.length > 0,
           notes: [
             `${first}${flags.map((flag) => flag.inline).join("")}`,
             ...rest,
@@ -2918,7 +2924,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
   }
   for (const row of rows) console.log(`${row.run}\tpass=${row.pass}\tref=${row.ref}\t${row.notes}`);
   for (const error of errors) console.log(`${error.run}\trig error: ${error.reason}`);
-  console.log("\nscenario\tlabel\tpass\tpass+ref\trig errors");
+  console.log("\nscenario\tlabel\tpass\tpass+ref\trig errors\tflagged");
   const keys = [
     ...new Set([
       ...rows.map((row) => `${row.scenario}\t${row.label}`),
@@ -2930,8 +2936,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     const passed = group.filter((row) => row.pass);
     const withRef = passed.filter((row) => row.ref);
     const failed = errors.filter((error) => error.key === key).length;
+    const flagged = group.filter((row) => row.flagged).length;
     console.log(
-      `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}`
+      `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}\t${flagged}`
     );
   }
   // For each source and label, the median fault count of its spec runs (faults.json): the count
@@ -2944,11 +2951,11 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     ),
   ];
   if (specKeys.length > 0) {
-    console.log("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks");
+    console.log("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks\tflagged");
     for (const key of specKeys) {
       const group = rows.filter((row) => `${row.source}\t${row.scenario}\t${row.label}` === key);
       console.log(
-        `${key}\t${group.length}\t${median(group.map((row) => row.faults ?? 0))}\t${median(group.map((row) => row.steBreaks ?? 0))}`
+        `${key}\t${group.length}\t${median(group.map((row) => row.faults ?? 0))}\t${median(group.map((row) => row.steBreaks ?? 0))}\t${group.filter((row) => row.flagged).length}`
       );
     }
   }
@@ -2966,6 +2973,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           askgate: the rule for the run's label and case (askgateReview)",
       "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",
       "rig errors runs the rig could not score (unscored), left out of both counts",
+      "flagged    counted runs whose row carries a flag (outside=, skills=, writes_seen=): each is",
+      "           in the counts and medians, and its notes say what to read before trusting it",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",
       "           before believing it, since the stand-in sees only a bun reached through PATH",
     ].join("\n")
