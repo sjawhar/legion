@@ -30,11 +30,12 @@ export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrin
 
 /** Portal content for an inline reference anchor: the resolved title once
  * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
- * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
- * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
- * hand-written reference never shows a broken-image glyph. When the element it renders into is a
- * link, its href follows `useReferencePath`, which a pinned block of a spec resolves only once its
- * issue is read. */
+ * thumbnail when the reference names an image artifact. It shows no document text, so it reads
+ * none. A thumbnail the browser cannot draw (a pinned version the server does not serve) is
+ * dropped, leaving the title alone, so a stale or hand-written reference never shows a
+ * broken-image glyph. When the element it renders into is a link, its href follows
+ * `useReferencePath`, which a pinned block of a spec resolves only once its issue's summary is
+ * read. */
 export function RefLink({
   anchor,
   route,
@@ -42,7 +43,7 @@ export function RefLink({
   anchor?: HTMLElement;
   route: DispatchReferenceRoute;
 }): ReactNode {
-  const { picture, title } = useReferenceTarget(route);
+  const { picture, title } = useReferenceTarget(route, { text: false });
   const path = useReferencePath(route);
   useLayoutEffect(() => {
     if (anchor instanceof HTMLAnchorElement) {

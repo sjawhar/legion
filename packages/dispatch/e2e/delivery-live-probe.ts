@@ -1,10 +1,11 @@
 /** `bun e2e/delivery-live-probe.ts`: an agent's client for `GET /ws/delivery`, the websocket the
  *  Delivery and Pipeline pages keep themselves current over. It subscribes one view under a bearer
  *  token and writes one JSON line per frame Dispatch sends, applying each to the body it holds with
- *  the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: at once after
- *  Dispatch's restart close (1012), with backoff after any other close, and in place of a socket
- *  that has carried no frame for two heartbeats; each new connection resumes from the last change
- *  it applied. The watch ends after `--minutes`, on Ctrl-C, or when Dispatch refuses the view.
+ *  the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: within the first
+ *  attempt's spread (up to 2 s) after Dispatch's restart close (1012), with backoff after any
+ *  other close, and in place of a socket that has carried no frame for two heartbeats; each new
+ *  connection resumes from the last change it applied. The watch ends after `--minutes`, on
+ *  Ctrl-C, or when Dispatch refuses the view.
  *  Then `--body-file` writes the body it holds, and `--compare` reads the matching GET routes for
  *  the last window it applied and writes, for each, whether the pull request ids, run ids and every
  *  measure are equal.
@@ -118,7 +119,8 @@ const USAGE =
 
 /** The probe's one subscription. */
 const SUB = "probe";
-/** Dispatch closes every socket with this code when it shuts down; the page reconnects at once. */
+/** Dispatch closes every socket with this code when it shuts down; the page reconnects within the
+ *  first attempt's spread (`reconnectDelayMs(0)`). */
 const SERVICE_RESTART = 1012;
 /** The code the page closes a silent socket with before it opens another (api/delivery-live.ts). */
 const REPLACED = 4000;
@@ -489,13 +491,11 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
       fail(`Dispatch refused the connection to ${liveUrl.href}: ${reason || `close ${code}`}`);
       return;
     }
-    if (code === SERVICE_RESTART) {
-      open();
-      return;
-    }
-    const delay = reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
+    // As the page does: Dispatch's restart close starts the backoff over, so the next attempt
+    // waits within the first attempt's spread.
+    if (code === SERVICE_RESTART) attempt = 0;
+    const handle = setTimeout(open, reconnectDelayMs(attempt));
     attempt += 1;
-    const handle = setTimeout(open, delay);
     cancelReconnect = () => clearTimeout(handle);
   };
 

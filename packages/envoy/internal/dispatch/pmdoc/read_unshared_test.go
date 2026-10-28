@@ -15,7 +15,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 )
 
 // ReadUnshared reads a text by walking its items rather than through ygo's ToDelta, which Read
@@ -387,7 +387,7 @@ func readersAgreeOn(t *testing.T, doc *crdt.Doc) {
 // right neighbour.
 func itemsDoc(items ...*crdt.Item) *crdt.Doc {
 	doc := runTextScript(insertStep(0, "a"))
-	text := docstest.FirstText(doc.GetXmlFragment("prosemirror"))
+	text := crafted.FirstText(doc.GetXmlFragment("prosemirror"))
 	for index := range items {
 		if index > 0 {
 			items[index].Left = items[index-1]
