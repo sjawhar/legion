@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T15:40:00Z",
+  "completed": "2026-10-28T16:45:00Z",
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
@@ -48,6 +48,7 @@
   "filesChanged": [
     ".dispatch/architecture/dispatch-events.md",
     ".github/workflows/envoy-and-contracts.yaml",
+    "docs/site/src/content/docs/dispatch/running-dispatch.md",
     "packages/envoy/.changes/unreleased/pr2392-Changed-20261028-124735.yaml",
     "packages/envoy/AGENTS.md",
     "packages/envoy/cmd/dispatch/AGENTS.md",
@@ -111,7 +112,8 @@
     "Third forward merge (b923561b onto main 4e55b2e0): main's 582cb2a2 runs internal/dispatch/api on its own line, which now carries -timeout 20m; per #2419 the changelog entry moved out of packages/envoy/CHANGELOG.md into packages/envoy/.changes/unreleased/pr2392-Changed-20261028-101132.yaml, written by changie new --custom Issue=pr2392 as INFRA-514's architect directed. Fingerprint e04cb4de... -> 06301544..., changed; PR comment posted. go vet and the events, refs and api live-path tests pass on the merged tree.",
     "Review round 2 (code 64c7b2350484): a failed horizon observation is logged at most every 30 s, and Await returns its error once every observation has failed for 10 s. The stall diagnosis runs on context.Background(). A relay start after the lifetime ends is refused. The hub's seed send selects on the lifetime. streamEvents waits in one select with an immutable opensEarly, and a stream that opened early ends if its second clamp finds a reset. horizon() moved into event_stream_relay.go. The changelog fragment is INFRA-591-Changed-20261028-101132.yaml with Issue INFRA-591, per root AGENTS.md and INFRA-514's architect's round decision. The PR body's load table is now the tester's pair against main 4e55b2e0, with the c210f10d medians kept as history.",
     "Key fixes, as the controller's ruling and INFRA-514's architect directed (code 8e7111478fb3): the changelog fragment was recreated with `changie new --custom Issue=pr2392` as packages/envoy/.changes/unreleased/pr2392-Changed-20261028-124735.yaml (same body, no key), and the workflow comment no longer names the issue. `jj diff --from fork_point(main@origin | 8e7111478fb3) --to 8e7111478fb3 '~.legion' | grep -E '^\\+.*INFRA-[0-9]+'` finds nothing. Text only; no code or test changed.",
-    "Review round 3 (code 1adb786e0343, a forward merge of main 25ef8cd2 that GitHub did not force; it was made for the semantic conflict the review found). store.ConnectionsPerProcess now adds horizonPoolSize, and envoy-infra gcp dispatchConnectionsPerPod goes from 86 to 88. On the merged code TestDispatchConnectionsPerPodIsTheServers first failed (expected 88, actual 86) and now passes; the rest of infra/gcp passes except two data-disk tests that need mkfs.ext4, absent here. D2, as decided by INFRA-514's architect: the first release with this change rolls at one replica, written in packages/envoy/infra/README.md, in the changelog fragment and in the PR body's Rollout line. Fingerprint 429d29e8... -> 8302a4cc..., changed; PR comment posted. No added line carries a Dispatch key."
+    "Review round 3 (code 1adb786e0343, a forward merge of main 25ef8cd2 that GitHub did not force; it was made for the semantic conflict the review found). store.ConnectionsPerProcess now adds horizonPoolSize, and envoy-infra gcp dispatchConnectionsPerPod goes from 86 to 88. On the merged code TestDispatchConnectionsPerPodIsTheServers first failed (expected 88, actual 86) and now passes; the rest of infra/gcp passes except two data-disk tests that need mkfs.ext4, absent here. D2, as decided by INFRA-514's architect: the first release with this change rolls at one replica, written in packages/envoy/infra/README.md, in the changelog fragment and in the PR body's Rollout line. Fingerprint 429d29e8... -> 8302a4cc..., changed; PR comment posted. No added line carries a Dispatch key.",
+    "Review round 4: docs/site/src/content/docs/dispatch/running-dispatch.md now lists the event horizon's up to 2 connections and gives one server's ceiling as 88 (64+12+4+1+1+2 plus 4 held open), matching store.ConnectionsPerProcess. Main changed none of store/, infra/gcp/dispatch.go or that page since 25ef8cd2, so the number stands and no forward merge was needed (GitHub reports the PR mergeable). check-private-names.sh passes; no other page states the 86 count."
   ],
   "openQuestions": [
     "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
