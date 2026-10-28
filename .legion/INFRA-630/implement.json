@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T09:51:25Z",
+  "completed": "2026-10-28T10:20:18Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2423",
   "proof": [
+    {
+      "criterion": "Round 5: no issue key in public files; verify-build names a failed listing; the credential check refuses another workflow's push command in the fold and the fold's in a release",
+      "surface": "the workspace at the head; .github/scripts shell tests; bun run verify-build",
+      "command": "git grep -n 'INFRA-630' -- . ':!.legion'; bash .github/scripts/check-release-credentials.test.sh; bun run verify-build $TMPDIR/r5.tar; the same with a stub git failing ls-files first on PATH",
+      "observed": "git grep prints nothing (exit 1); 269 passed, 0 failed; verify-build exit 0 and jj status clean; release-push.test.sh, changelog-fold.test.sh and check-release-credentials.sh pass",
+      "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+      "negativeControl": "stub git: '::error::verify-build.sh: git ls-files could not list the ignored files of the build, so the build is not checked', exit 1, no tar; check-release-credentials.sh with FOLD widened to allow push-built: the suite fails, 265 passed, 4 failed"
+    },
     {
       "criterion": "Round 4: one land_on_main after merging #2419, and the merged release and credential scripts pass",
       "surface": ".github/scripts shell tests at the merged head",
@@ -54,7 +62,7 @@
     "docs/solutions/legion/the-claude-code-plugin-mirror-is-generated-from-the-skills-and-its-build-rewrites-dist-too-INFRA-227.md",
     "docs/solutions/legion/unchanged-diff-fingerprint-one-fileset-verified-by-a-pair.md",
     "docs/solutions/skill-patterns/a-skill-over-the-byte-guard-sheds-a-whole-on-demand-section-to-a-reference-verbatim-and-proves-the-move-with-cmp-INFRA-376.md",
-    "packages/claude-envoy/.changes/unreleased/INFRA-630-built-plugin-rebuilt-on-main.yaml",
+    "packages/claude-envoy/.changes/unreleased/pr-2423-built-plugin-rebuilt-on-main.yaml",
     "packages/claude-envoy/AGENTS.md",
     "packages/claude-envoy/CHANGELOG.md",
     "packages/claude-envoy/README.md",
@@ -174,7 +182,7 @@
     "scripts/e2e/dispatch-user-turns.sh: `bun run build:web` of the Dispatch web app.",
     "scripts/pi-plugin-prepack.sh: pi-envoy's/pi-legion's `bun run build --metafile`, other packages."
   ],
-  "round": 5,
+  "round": 6,
   "round1": [
     "Finding 1: deleted the scheduled run's age-based red step and its header sentences; schedule hourly -> daily (23 5 * * *) (783ad752).",
     "Finding 2: '## Contract change census' added to the PR body: searches, every hit with its disposition, rollout = immediate refusal and what it closes.",
@@ -203,5 +211,11 @@
     "Workflow comments point to verify-build.sh; check-private-names.sh names three jobs; README/AGENTS/rebuild comment name both extracting jobs.",
     "Changelog entry moved to packages/claude-envoy/.changes/unreleased/INFRA-630-built-plugin-rebuilt-on-main.yaml per main's new convention.",
     "PR body Change and Not proven / risk corrected."
+  ],
+  "round5": [
+    "Fragment renamed pr-2423-built-plugin-rebuilt-on-main.yaml, key dropped from its body; ten docs/solutions status lines name sjawhar/legion#2423 (controller ruling 10:04Z).",
+    "verify-build.sh: a failed git ls-files gets its own ::error:: line.",
+    "check-release-credentials.test.sh: the fold's push step running push-built or push-main, and a release step running push-fold, are refused (mutation of FOLD caught).",
+    "Caller lists kept once: extract-built's callers at release-push.sh's extract-built paragraph, verify-build's in its header; copies cut in verify-build.sh, claude-envoy-rebuild.yaml, envoy-and-contracts.yaml, check-private-names.sh; verify-build's steps 2-3 explained once (at the code)."
   ]
 }
