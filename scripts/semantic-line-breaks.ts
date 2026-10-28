@@ -210,11 +210,6 @@ interface VerbatimFrom {
 interface Blocks {
   lines: LineInfo[];
   items: ListItem[];
-  /**
-   * The innermost list item open at each line, if any. A blank line is still inside the item
-   * above it: only a later non-blank line can close an item.
-   */
-  owners: (ListItem | undefined)[];
   /** Where markVerbatim found the first verbatim open, if anywhere. */
   verbatimFrom: VerbatimFrom | undefined;
 }
@@ -396,7 +391,6 @@ function scanBlocks(source: readonly string[]): Blocks {
   const lines: LineInfo[] = [];
   const items: ListItem[] = [];
   const open: ListItem[] = [];
-  const owners: (ListItem | undefined)[] = [];
   let paragraph: Paragraph | undefined;
   let fence: Fence | undefined;
   /** What ends the open HTML block; for BLANK (kinds 6 and 7) the blank line is outside it. */
@@ -523,7 +517,6 @@ function scanBlocks(source: readonly string[]): Blocks {
   for (const [index, line] of source.entries()) {
     if (index <= frontMatter) {
       lines.push(info("other"));
-      owners.push(undefined);
       continue;
     }
     // A fence or HTML block inside a list item ends with the item.
@@ -560,9 +553,8 @@ function scanBlocks(source: readonly string[]): Blocks {
       lines.push(blockLine(index, line, source[index + 1]));
     }
     if (!isBlank(line)) for (const item of open) item.last = index;
-    owners.push(open.at(-1));
   }
-  return { lines, items, owners, verbatimFrom: markVerbatim(source, lines, frontMatter + 1) };
+  return { lines, items, verbatimFrom: markVerbatim(source, lines, frontMatter + 1) };
 }
 
 /**
@@ -1125,15 +1117,17 @@ function check(text: string, blocks: Blocks): Finding[] {
       }
     }
   }
-  // R3 counts an item's own lines. Each line inside a list item (from its first line to its last
-  // non-blank one), blank lines included, counts toward the innermost item open at that line. So a
-  // nested item is checked on its own, and text after a nested list counts toward its parent.
-  const inside = new Array<boolean>(lines.length).fill(false);
-  for (const item of blocks.items) inside.fill(true, item.first, item.last + 1);
+  // R3 counts an item's own lines. Each line from an item's first line to its last non-blank one
+  // belongs to that item, unless a nested item, which starts later, claims it. So a nested item is
+  // checked on its own, and text after a nested list counts toward its parent. A blank line between
+  // a nested item and what follows it inside the parent counts toward the parent; a blank line
+  // after an item's last line outside any enclosing item counts toward no item.
+  const owners = new Array<ListItem | undefined>(lines.length).fill(undefined);
+  for (const item of blocks.items) owners.fill(item, item.first, item.last + 1);
   const own = new Map<ListItem, number>();
   for (const [index, line] of lines.entries()) {
-    const owner = blocks.owners[index];
-    if (inside[index] && owner) own.set(owner, (own.get(owner) ?? 0) + screenRows([line]));
+    const owner = owners[index];
+    if (owner) own.set(owner, (own.get(owner) ?? 0) + screenRows([line]));
   }
   for (const [item, rows] of own) {
     if (rows > MAX_SCREEN_ROWS) {
