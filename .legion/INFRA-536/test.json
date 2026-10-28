@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-536",
+  "completed": "2026-10-28T10:00:00Z",
+  "round": 6,
+  "kind": "rebase re-check 25cf9b5e → f62a76c0: fingerprint unchanged, bare gates only, plus the INFRA-534 tilde-writer interaction the INFRA-138 architect asked for (Envoy d22434a7)",
+  "headTested": "f62a76c0a1ff552b93c5c22b3e7c9e4382cc5c71",
+  "codeHead": "c07181dc2fa1",
+  "fingerprint": "unchanged: 25cf9b5ebefa… and f62a76c0a1ff… both e27cb169e075462183b62c43f00c842eab3501a4722a0f38d27833145cfec4a4. Since round 5: retro 33ee6bf3 (docs/solutions) and 6965cec5 (removes .legion/INFRA-536/), then c07181dc merges main b295a3fb (which carries INFRA-534, #2360 a4960862, the tilde and alt-text writer in escape.go, render_inline.go, parse.go, delimiters.go), resolving packages/envoy/CHANGELOG.md alone.",
+  "workspaceRecreated": "The pod and workspace were recreated before this turn: the round-5 handoff (aaa81f70) is on the branch's history, and retro removed .legion/INFRA-536/. The stored corpus was rebuilt with INFRA-172's escaped-pipe-census.ts v2 (--latest-only: 6,342 documents, 0 failures), and the reference corpus with gen/reference-corpus.ts (8,000 documents, byte-identical size to before).",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The diff is unchanged since round 4, whose verification stands. At c07181dc the implementer's browser command passed again in chromium and iphone, and the differential (proof 3) was re-run against the new base main b295a3fb with the same gate counts."
+  },
+  "failed": 0,
+  "failures": [],
+  "ci": "read at c07181dc (f62a76c0 is handoff-only): lint, typecheck and one build success; test in progress; changes, pr-title and one build queued; the PR is MERGEABLE. Not waited for.",
+  "proof": [
+    {
+      "criterion": "A1 still holds on the merged head",
+      "surface": "Dispatch browser suite in this pod: real Go server, real migrations on Postgres 17, production SPA bundle, live editor, the Conversation, real packages/envoy-client/bin/dispatch.ts",
+      "command": "bash $TMPDIR/infra536/run-e2e.sh doc.e2e.ts zz-tester-probe.e2e.ts -g \"backslash before a character reference|tester probe\"",
+      "observed": "doc.e2e.ts:707 passed in chromium (3.8s) and iphone (4.3s)",
+      "headSha": "f62a76c0a1ff552b93c5c22b3e7c9e4382cc5c71",
+      "negativeControl": "round 1: the same test on base 4bbb2a9c failed, the editor showing [\"Plain & end.\"]; the e2e files are unchanged since"
+    },
+    {
+      "criterion": "Architect's check: an escaped character reference meets INFRA-534's tilde writer (`&#126;`) correctly: `\\&#126;`, `~\\&#126;~`, `~~a\\&amp;~~` and an image alt holding `\\&#126;` in a table cell read alike in the editor, the stored markdown, doc-read and a comment, and the stored bytes hold on a second write",
+      "surface": "same stack: a spec written through the API, the live editor, the stored markdown read by the headless engine, dispatch doc-read, a comment in the Conversation, editArtifact insert, dispatch artifact uploads",
+      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts and zz-engine-json.ts (deleted after the run), run-e2e.sh zz-tester-probe.e2e.ts --project chromium",
+      "observed": "1 passed. Written: `a \\&#126; b`, `c ~\\&#126;~ d`, `e ~~a\\&amp;~~ f`, `| ![\\&#126;](https://a.example/u) |`, `g x\\~\\&#126;y ~~\\&#126;\\~~~ z`, `| ![\\~ \\&#126; ~](https://a.example/v) ~\\&#126;~ |`. Engine reading: `a &#126; b`; `&#126;` struck; `a&amp;` struck; alt `&#126;`; `g x~&#126;y ` then `&#126;~` struck; alt `~ &#126; ~` then `&#126;` struck. The editor's runs (text, strike, img alt and src) equal it. The engine reads the stored markdown `a &amp;#126; b\\n\\nc ~~&amp;#126;~~ d\\n\\ne ~~a&amp;amp;~~ f\\n\\n| h |\\n| --- |\\n| ![&amp;\\\\#126\\\\;](https://a.example/u) |\\n\\ng x&#126;&amp;#126;y ~~&amp;#126;&#126;~~ z\\n\\n| h |\\n| --- |\\n| ![\\\\~ &amp;\\\\#126\\\\; \\\\~](https://a.example/v) ~~&amp;#126;~~ |\\n` the same way. doc-read prints exactly those bytes. The comment shows struck [`&#126;`, `a&amp;`, `&#126;~`, `&#126;`], alts [`&#126;`, `~ &#126; ~`] and the plain runs. An editArtifact insert of `Tail.` leaves the stored bytes unchanged (`<stored>\\nTail.\\n`), and two dispatch artifact uploads of them (versions 1 and 2) doc-read back byte-identical. A throwaway Go test over these and three more mixes (`~\\&#126;~~\\&amp;~ ~~~\\&#126;~~~ \\~&#126;\\&#126;`, image and link titles holding `\\&#126;~`, a footnote label `\\&#126;~`): Go reads each as the engine does, RefuseMisreadDocument accepts each, and Render is stable on a second render.",
+      "headSha": "f62a76c0a1ff552b93c5c22b3e7c9e4382cc5c71",
+      "negativeControl": "round 3: dispatch artifact of a code block with language `&amp;` -> exit 1, `outside Proof schema: a code block whose language holds a backslash escape or a character reference`; round 1: the A1 test on base 4bbb2a9c -> editor [\"Plain & end.\"]"
+    },
+    {
+      "criterion": "Stored documents keep their reading, against main b295a3fb (with INFRA-534)",
+      "surface": "pmdoc differential over 6,342 stored production documents (fresh census), 8,000 generated (gen/reference-corpus.ts) and 85 in-repo documents (14,427)",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base b295a3fb --head f62a76c0 --corpus $TMPDIR/infra536/stored.jsonl --corpus $TMPDIR/infra536/references.jsonl --out $TMPDIR/infra536/tester-diff6",
+      "observed": "regressions 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0; engine-tree churn 231 and misreads 2 (the INFRA-425 bare-URL link address, recorded by the architect's decision), every report row from the generated corpus; the stored corpus flags nothing",
+      "headSha": "f62a76c0a1ff552b93c5c22b3e7c9e4382cc5c71",
+      "negativeControl": "the base side of the same run: 4,722 documents the head fixes and 1,483 engine trees main renders wrong"
+    }
+  ]
+}
