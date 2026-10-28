@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T13:40:00Z",
+  "completed": "2026-10-28T14:30:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "83dd924b2e06f96a54a9b35d26b1831e028972aa",
-  "round": "4 (after the review-round cap; the INFRA-514 architect scoped it to the tester's one failure): no Dispatch key in the added text. The changelog fragment is recreated with changie --custom Issue=pr2395 (pr2395-Changed-20261028-131137.yaml, body unchanged and keyless); the keys in the workflow comments, outbox/role.go, migrations 0135 and 0136, dispatch-outbox.md, infra/README.md, THROUGHPUT.md and the pr2225 docs/solutions note now name #2395 or the case; the grep is in the PR body. No code change. Earlier rounds: round 3 answered the round-1 review at f10d635e.",
+  "head": "7a86169c8e4c",
+  "round": "5 (the round-2 review; the INFRA-514 architect scoped it): dispatch_memory's path filter names internal/testnats; infra/gcp dispatchConnectionsPerPod is 86, the branch's own store.ConnectionsPerProcess (64+4+1+11+2+4), with running-dispatch.md and the fragment saying 86 and 'up to 11'; a stray infra/go.work.sum rewrite from a local test run is restored; the contract change census is re-run at 7a86169c with every hit listed (PR comments 6471277745 and 6471278505), the body's census no longer names CHANGELOG.md and its rollout line points at the Rollout bullet. No outbox code change. Main's own count fix had not landed and GitHub reported no conflict, so main was not merged. The review's fast-follow items are named on the body's Fast-follow line.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -78,6 +78,14 @@
       "observed": "1 added line, in core-nats-receipt-backed-current-holder-delivery.md, whose LEGION-101 was already on main (4 occurrences at 2d872499); no added path names a key outside .legion/; the fragment is pr2395-Changed-20261028-131137.yaml with custom Issue: pr2395 and the same body; store migration tests ok (66.9 s); gofmt and go vet of the outbox package clean",
       "headSha": "83dd924b2e06f96a54a9b35d26b1831e028972aa",
       "negativeControl": "The same grep at the tester's head f10d635e counted the keys the tester listed (workflow :223 and :273, role.go:164, 0135:1-2, 0136:1, dispatch-outbox.md:63, infra/README.md:580, THROUGHPUT.md:18 and :36-39, the pr2225 note :43) and the fragment path INFRA-590-outbox-one-publisher.yaml"
+    },
+    {
+      "criterion": "The GCP component's per-pod connection count equals envoy-dispatch's own sum, and every path filter names what its job compiles",
+      "surface": "the envoy-infra module's gcp package test and the dispatch_memory job's package set",
+      "command": "cd packages/envoy/infra && go test -count=1 -run TestDispatchConnectionsPerPodIsTheServers -v ./gcp/; cd .. && go list -deps -test -tags memory ./cmd/dispatch, each package checked against the dispatch_server, dispatch_command_tests and dispatch_memory entries of .github/workflows/envoy-and-contracts.yaml",
+      "observed": "--- PASS: TestDispatchConnectionsPerPodIsTheServers (86 = store.ConnectionsPerProcess); no package of the dispatch_memory job's set is missing from its filter",
+      "headSha": "7a86169c8e4c",
+      "negativeControl": "At 83dd924b the test fails with 85 against 86 (the reviewer's reading), and the same package check printed 'missing: internal/testnats' before the filter edit"
     }
   ],
   "filesChanged": [
