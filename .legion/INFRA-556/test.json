@@ -2,43 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-28T10:29:30Z",
+  "completed": "2026-10-28T14:20:00Z",
+  "round": 2,
+  "testedCodeHead": "9788cdedf0f3",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at code head 9952be5a: the whole multiprocess file passed (ok 530.006s, 94 PASS, 0 FAIL). Re-ran the seven new tests at the test-support commit aa50b68c (git archive, GOWORK=off): all seven fail on their bugs (FAIL 331.060s). Ran the browser spec independently at 9952be5a, which is newer than the implementer's browser head ef1efb43: 9952be5a merged into the implementer's harness merge ff994c2e with no conflicts. Result: 1 passed, then 3 passed with --repeat-each=3. The spec fails on a0f877c5 (the harness without the fix)."
+    "how": "Re-ran the implementer's multiprocess command at 9788cded: ok 546.966s, 100 PASS, 0 FAIL, including the seven tests for the spec items. Drove both review fixes on real binaries with tests of my own. Each fails at the reviewed head 9952be5a and passes at 9788cded."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Items 1-6 and D10: edits, awareness and room state reach every process with no disconnect (finding 7 included); close and reopen change every process's rooms; ask author is durable; an agent write, the lost-edit check and its participants see every process; reads are never older than the store; rebuild, resumption, the conditional-edit cap and cold writes work across processes; each document socket names its serving process",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc websockets (go test -tags multiprocess ./cmd/dispatch)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 530.006s, 94 PASS, 0 FAIL. Passing tests include TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive (17.37s; keystrokes cross in 12-43 ms; after 200 alternating keystrokes the counters are 0/0 on A and on B), TestClosingAndReopeningAnIssueChangesEveryProcessesRooms (22.99s), TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt (73.54s), TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess (21.70s), TestAReadOnTheOtherProcessIsNeverOlderThanTheStore (14.51s), TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses (83.45s) and TestEachDocumentSocketNamesItsServingProcess (9.24s). Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6466612269",
-      "headSha": "9952be5aaf5a",
-      "negativeControl": "The same seven tests at aa50b68c (no fix) gave FAIL 331.060s, each on its bug: 'the peer's connection closed', 'finding 7 ... 34 room failures and 34 lock-waiting compactions', 'the socket stayed open 1s later' after the close through B, ask author 'alice, want bob', the agent edit of a deleted paragraph 'answered 200', 409 ANCHOR_MISSING on B, the rebuild while live on B 'answered 200', 0 of 33 conditional edits got 429, and 'carries no X-Dispatch-Process header'"
-    },
-    {
-      "criterion": "Adversarial two-process runs: the change holds under listener and sender connection loss, concurrent typing, a killed, frozen or gracefully stopped peer process, close and reopen toggled quickly, and the process header on refusals",
-      "surface": "two real envoy-dispatch binaries on one Postgres, from a throwaway test file in cmd/dispatch (-tags multiprocess) that is not committed",
-      "command": "go test -tags multiprocess -count=1 -v -run TestProbe ./cmd/dispatch (8 probes: pg_terminate_backend of A's 'dispatch-listener <id>' and 'dispatch-sender <id>' backends; 60+60 keystrokes at once on A and B; SIGKILL of B; SIGSTOP then SIGCONT of B; SIGTERM of B; 7 alternating close/reopen PATCHes through A and B; GET /ws/doc refusals on both processes)",
-      "observed": "All 8 pass at head. Listener outage: bob's 3 keystrokes on B reached alice on A 1.36 s after the outage began, with no reconnect and no room close. A close through B during a second outage closed alice's room after the redial, and she reconnected read-only. Concurrent typing: editors and API reads on A and B converged to 60 a and 60 b, counters 0/0. SIGKILL: a tab that joins A 47 s later is not shown bob, so the room forgot him; an agent write through A answered 200 in 72 ms. Sender killed: the next cursor reached B within 1 s. SIGSTOP: alice's keystrokes stored in 13-14 ms; the agent write answered 200 in 1.59 s; after SIGCONT, bob caught up in 10 ms with no reconnect. SIGTERM: bob's presence left alice in 80 ms and his last keystroke was kept. Toggles: the last change wins on both processes. Refusals (401 and 404) carry X-Dispatch-Process on A and B.",
-      "headSha": "9952be5aaf5a",
-      "negativeControl": "The same probes at aa50b68c: concurrent typing fails with 'write: broken pipe' (room closed); SIGKILL and SIGTERM fail with the cursor never crossing; SIGSTOP fails with alice's keystroke not stored within 5 s. The toggle probe also passes at aa50b68c, so it does not tell head from base."
-    },
-    {
-      "criterion": "Browser suite against two server processes: two readers on different processes see each other's edits, cursors and presence within one second, with no reconnect",
-      "surface": "Dispatch's Playwright suite in Chromium on INFRA-559's two-process harness (two envoy-dispatch processes behind the round-robin proxy, alice pinned to A and bob to B). Tree: 9952be5a merged into the implementer's throwaway merge ff994c2e (legion/INFRA-556 ef1efb43 + legion/INFRA-559 a0f877c5), with no conflicts",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/tester556_after?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess (then again with --repeat-each=3)",
-      "observed": "1 passed (10.0s), then 3 passed (27.1s)",
-      "headSha": "9952be5aaf5a",
-      "negativeControl": "The same spec on a0f877c5 (main plus the harness, without this change; database tester556_before) gave 1 failed. Alice's page opened 3 document sockets and bob's opened 2 (want 1 each). 'bob's page on B shows alice's cursor within 1 s': element(s) not found. 'alice's page on A shows bob's second edit within 1 s' failed. The connection dot did not always read connected."
+      "criterion": "The head that merges carries green CI: required lint, typecheck, test and pr-title on the pull request",
+      "evidence": "GitHub reports PR #2414 mergeable=CONFLICTING, mergeStateStatus=DIRTY against main 08572e01 (`gh pr view 2414 --repo sjawhar/legion --json mergeable,mergeStateStatus`). A local `git merge 08572e0147b6` at 9788cded conflicts in packages/envoy/internal/dispatch/docs/service.go, docs/api.go, docs/ledger.go, store/pool.go and cmd/dispatch/multiprocess_test.go. Main has 10 commits beyond aeeee6c0; #2233 (closing an issue withdraws its open asks), #2416 (settlement renders once) and #2425 touch the same paths. `gh api repos/sjawhar/legion/commits/9788cdedf0f3/check-runs --jq .total_count` returns 0, and the same holds for 937af5d9: no pull-request CI runs while the conflict stands. The resolution changes core room code, so the merged head needs a full test round. The implementer merges main forward. There is no red test to write for a merge conflict."
     }
   ],
-  "ci": "Read at code head 9952be5a at 2026-10-28T10:29Z: lint, test, typecheck, build and changes success. dispatch, dispatch-multiprocess, dispatch-memory, envoy-go, envoy-go-race, envoy-e2e-local and broker-multiprocess queued; envoy-smoke and pi-legion in progress. PR head a6f4bc6d is handoff-only.",
-  "notes": [
-    "Docs criterion: the documented connection numbers (64 + 11 + 4 + 1 + 1 + 4 = 85) match store/pool.go (sharedPoolSize 64, leasePoolSize 11, roomsPoolSize 4, healthPoolSize 1, outboxPoolSize 1). The 'Running more than one copy' text about live co-editing matches what the probes saw. The reviewer reads the prose.",
-    "Expiry observation, not a defect: when a room expires an awareness client relayed from a killed process, ygo sends no removal to tabs that are already open. A real y-protocols browser removes that client by itself after outdatedTimeout (30 s; node_modules y-protocols/awareness.js lines 13 and 70). Tabs that join later are not shown the client.",
-    "Changelog: main's #2419 (184897ac) renamed packages/envoy/CHANGELOG.md's '## [Unreleased]' to '## Before changelog fragments' and asks for changelog entries as packages/<pkg>/.changes/unreleased/<KEY>-<slug>.yaml fragments ('Never edit a CHANGELOG.md'). This PR still adds its two entries to CHANGELOG.md under the old heading. GitHub shows the PR mergeable, so if it merges as it is, both entries land under 'Before changelog fragments'. Sent to the architect."
-  ]
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "Items 1-6 and D10 across two processes, at the round's head",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 546.966s, 100 PASS, 0 FAIL. After 200 alternating keystrokes every counter reads 0 on A and B, RoomCloses included. The 9 round-1 tests that try to break the change pass again. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6470753511",
+      "headSha": "9788cdedf0f3",
+      "negativeControl": "Round 1: the seven tests fail at aa50b68c, each on its bug (https://github.com/sjawhar/legion/pull/2414#issuecomment-6466612269)"
+    },
+    {
+      "criterion": "Review item 3: closing an issue keeps the edits its rooms took while it was open, and refuses updates a room took more than closeMargin (2 s) after the close",
+      "surface": "two real envoy-dispatch binaries: A's persistence held by the test hook, or A's listener backend ended every 100 ms so that A cannot hear the close; the close made through B's PATCH /api/v1/issues/{key}",
+      "command": "go test -tags multiprocess -run 'TestProbe2CloseKeepsAQueuedKeystroke|TestProbe2CloseMarginWhileADeaf' ./cmd/dispatch (throwaway test file, not committed)",
+      "observed": "The held keystroke is stored after the close: A and B both read 'beforeZ', and alice reconnects read-only and sees it. With A unable to hear the close, a keystroke 0.5 s after the close is stored. One 3.5 s after the close is refused and not stored, A's room closes (socket ended 1.09 s after the close, code 1006), and alice reconnects read-only.",
+      "headSha": "9788cdedf0f3",
+      "negativeControl": "At 9952be5a: 'alice's keystroke taken before the close was not stored within 10s' and 'keystroke 0.5 s after the close (inside closeMargin) was not stored within 5s'"
+    },
+    {
+      "criterion": "Review item 4: conditional-edit admissions waiting on a document do not hold the shared pool",
+      "surface": "a real envoy-dispatch binary (A) with another session holding the document's queue lock pg_advisory_xact_lock(0x51554555, hashtext(artifact id)), 100 conditional edits sent to A at once, and reads of another issue on A",
+      "command": "go test -tags multiprocess -run 'TestProbe2QueueLockHeldStormLeavesThePool|TestProbe2ConditionalEditStormLeavesThePool' ./cmd/dispatch (throwaway test file, not committed)",
+      "observed": "Reads of another issue answer in 13-41 ms while the lock is held. pg_stat_activity shows 1 backend waiting on the advisory lock. After release, 1×200 and 99×409. Storm of 150 behind a parked edit: 119×429 and 31×409 (at most 32 per document, the parked one included), with other requests answering in at most 153 ms.",
+      "headSha": "9788cdedf0f3",
+      "negativeControl": "At 9952be5a the read of another issue on A never answered: the test timed out after 20 min at that read, with the shared pool exhausted by waiting admissions"
+    }
+  ],
+  "notRunThisRound": "The browser spec on INFRA-559's harness, and driving the census entries through their clients (browser for entries 1 and 2, the doc-edit client for entry 3). The conflict resolution changes them, so they run at the merged head.",
+  "ci": "0 check runs at 9788cded and at 937af5d9 while the PR conflicts (read 2026-10-28T14:15Z)."
 }
