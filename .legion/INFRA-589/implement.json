@@ -2,36 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T14:15:00Z",
-  "round": 9,
-  "answersReview": "review.json round 4 at code head 8530db16: two correctness findings, fixed in f93dbc53 per the architect's cap, each with a test that fails on 8530db16; threads PRRT_kwDORFy7ds6xHEDv and PRRT_kwDORFy7ds6xHED0 answered and resolved.",
+  "completed": "2026-10-28T15:20:00Z",
+  "round": 10,
+  "answersTestFailures": "test.json (tester round 9) failure 1: the head was CONFLICTING with main. Forward merge of main (823c1906), fingerprint unchanged; plus the architect's README line on Postgres 16 against production's 18 (2e8dde76). No code change.",
   "proof": [
     {
-      "criterion": "Finding 1: a sampler whose context has ended keeps no sample, so no zero or negative value enters the statistics",
-      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest; and the unit test",
-      "command": "run-step.sh smoke-r13 --events 2 --sessions 50 --requests 10 --duration 60s --grace 2s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; cd packages/envoy && go test -run TestSamplerMarksNoReadThatFailedOnceTheStepEnded ./loadtest",
-      "observed": "exit 0; pg_conns_total min 31 over 13 samples, goroutines min 135, nats_in/out 10.3/22.1 msgs/s, pg/pprof/nats read errors 0, receipts 580/580; the test passes",
-      "headSha": "f93dbc536e5277b00fc1fe3c74c7032e50e15597",
-      "negativeControl": "with 8530db16's sample.go (go test -overlay) the test fails: one sample is kept after the context ended"
+      "criterion": "The head merges cleanly with main and the diff is unchanged by the merge",
+      "surface": "GitHub pull request #2369 and the branch diff",
+      "command": "gh pr view 2369 -R sjawhar/legion --json mergeable; the unchanged-diff fingerprint at 81fc0511 and 823c1906",
+      "observed": "MERGEABLE at 2e8dde76; fingerprint 214869c9... before and after the merge (unchanged); the one conflict was packages/envoy/AGENTS.md, where main's two new rows and the Load test row are all kept; posted at https://github.com/sjawhar/legion/pull/2369#issuecomment-6472291094",
+      "headSha": "2e8dde7633304d66c292b57f8a20eee3be520275",
+      "negativeControl": "the same read gave CONFLICTING at 17cff7ca (tester round 9)"
     },
     {
-      "criterion": "Finding 2: meta.json and every printed endpoint hold no -nats user and no password, for a single URL and for a comma-separated list",
-      "surface": "same pod and CLI",
-      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign ... -nats 'nats://<token>@127.0.0.1:14222,nats://loadgen:<password>@127.0.0.1:14222' -pg 'postgres://postgres:<password>@127.0.0.1:15432,127.0.0.1:15432/dispatch?sslmode=disable' ...; loadgen tables; grep -cF each secret over every step file, TABLES.md, stdout and stderr",
-      "observed": "exit 0, committed 31/31, receipts 155/155; NATS token matches 0, password matches 0, bearer token matches 0; meta.json '-nats=nats://127.0.0.1:14222,nats://127.0.0.1:14222' and '-pg=postgres://127.0.0.1:15432,127.0.0.1:15432/dispatch?sslmode=disable'",
-      "headSha": "f93dbc536e5277b00fc1fe3c74c7032e50e15597",
-      "negativeControl": "with 8530db16's guard.go (go test -overlay) TestAForeignRunsMetaHoldsNoTokenOrPassword (token-user case, list case) and TestGuardPrintsNoURLPassword fail"
+      "criterion": "The merged build seeds and runs (main moved Dispatch to Postgres 18; the harness runs 16.2)",
+      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest",
+      "command": "stack.sh setup && stack.sh start && stack.sh seed --force; run-step.sh merged-r14 --events 2 --sessions 50 --requests 10 --duration 60s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20",
+      "observed": "seed exit 0 in 1,093 s at migration 135 on PostgreSQL 16.2 (4 projects, 1,000 issues, 8,000 comments); step exit 0, committed/offered 16/16, 22/22, 20/20, 35/35, 23/23, receipts 580/580, clock_anomalies 0, NATS 10.3/22.0 msgs/s, 0 failed reads, no mark; build 2e8dde76, build_dirty false",
+      "headSha": "2e8dde7633304d66c292b57f8a20eee3be520275",
+      "negativeControl": "go test ./loadtest ok, run-step.test.sh 4 PASS, common.test.sh 7 PASS at the merged head"
     }
   ],
   "filesChanged": [
-    "packages/envoy/loadtest/sample.go, sample_test.go",
-    "packages/envoy/loadtest/guard.go, guard_test.go, run_test.go",
-    "packages/envoy/loadtest/README.md (meta.json row and the guard's URL rule)"
+    "merge of main (823c1906): packages/envoy/AGENTS.md conflict resolved keeping both sides",
+    "packages/envoy/loadtest/README.md: one 'Differences from production' line on Postgres 16 against 18 (2e8dde76)"
   ],
-  "trickyParts": [
-    "redactURL drops the whole userinfo (user and password) of every comma-separated element, parsing an element without a scheme (later hosts of a Postgres URL) under a stand-in scheme; the URL check accepts lists whose first element has a scheme and whose others name a host."
+  "trickyParts": [],
+  "deviations": [
+    "The README line says production runs PostgreSQL 18, read from gcp:Dispatch's default database version (POSTGRES_18); the minor version 18.6 the architect named is not stated, since no file in the repository gives it."
   ],
-  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
 }
