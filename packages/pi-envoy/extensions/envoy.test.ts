@@ -14941,10 +14941,12 @@ describe("messages missed while the subscription was down", () => {
     dispatch?: (url: URL) => Promise<Response | undefined>
   ): typeof fetch {
     return (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(input.toString());
+      const request =
+        input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+      const url = new URL(request.url);
       const answered = await dispatch?.(url);
       if (answered !== undefined) return answered;
-      const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+      const body = (request.method === "GET" ? {} : await request.json()) as {
         readonly session_id: string;
         readonly dir?: string;
         readonly topics: readonly string[];
@@ -16380,7 +16382,9 @@ describe("messages missed while the subscription was down", () => {
         readonly entries?: readonly unknown[];
       } = {}
     ) {
-      process.env.DISPATCH_URL = "http://dispatch.test";
+      // DispatchClient remembers whether an origin runs keyed writes. A different test's answer
+      // must not turn this reply fixture's unkeyed 503 into a timed retry.
+      process.env.DISPATCH_URL = `http://${query}.dispatch.test`;
       process.env.DISPATCH_TOKEN = "dispatch-token";
       const replies: unknown[] = [];
       const session = await bootReplay(query, model, {

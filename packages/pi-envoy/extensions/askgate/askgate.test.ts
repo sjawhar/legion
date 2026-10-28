@@ -4254,7 +4254,8 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     );
     const sent: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-      const request = new Request(url, init);
+      const request =
+        url instanceof Request ? new Request(url, init) : new Request(url.toString(), init);
       const route = new URL(request.url).pathname;
       if (route.endsWith("/artifacts")) {
         const file = (await request.formData()).get("file") as Blob;
