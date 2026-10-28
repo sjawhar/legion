@@ -17,7 +17,10 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
 
 - resolves target OpenCode sessions
 
-- delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if a session is unavailable) publishes retained `notifications.dispatch.issue.<KEY>.<type>`, `notifications.dispatch.document.<PROJECT>.<slug>.<type>`, and `notifications.dispatch.project.<PROJECT>.<type>` envelopes
+- delivers to a session registered with a serve port (OpenCode) by hot `prompt_async`, ordinary events staying in JetStream for retry while that session is unavailable;
+  a self-subscribed session (Oh My Pi, Claude Code) receives on its own NATS subscriptions, the listener skips its push to it (`internal/session/session.go`), and it reads back what it missed while those were down from the stream through `POST /v1/replay` ("Listener API")
+
+- publishes retained `notifications.dispatch.issue.<KEY>.<type>`, `notifications.dispatch.document.<PROJECT>.<slug>.<type>`, and `notifications.dispatch.project.<PROJECT>.<type>` envelopes
 
 It does not own Legion workflow policy.
 The daemon/controller decides what to do; Envoy moves events to the right session.
@@ -1165,9 +1168,16 @@ An image is read without the marks around it, a link among them, as the browser 
 Delimiter runs pair as that parser pairs them:
 CommonMark's rule of three is judged on the lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**` is text.
 A run of `*` or `_` can also open where another `*` or `_` follows it and close where one precedes it, as that parser's attention markers let it (`emphasisParser`), where goldmark's flanking rules alone decide, so in `b_*a**` the `*` can both open and close, the rule of three keeps it from the `**`, and the line is text.
-That parser counts `~` as such a marker too, and Go does not:
-beside a `~` its strikethrough resolver pairs runs apart from and sometimes before the `*` and `_` runs, which goldmark's one delimiter stack does not model, so the `~` half alone would misread `[**~~**d**~~**](u)`, which both parsers read as strong struck `d` under the flanking rules.
-The writer takes a spelling that reads back under CommonMark's flanking rules as well before one that reads back under that parser's alone (`inlineWithEscapes`), so it keeps the bytes it wrote before the marker rule.
+That parser counts `~` as such a marker too, and so does Go.
+A run of `~` pairs only with a run of its own length, one or two, and a run directly after a `~` is text unless a backslash escapes that `~` (`tildeParser`), as the browser editor's strikethrough reads them.
+pmdoc pairs the runs itself (`delimiterList`), never on goldmark's delimiter stack:
+`~` runs and `*`/`_` runs in separate passes, as that parser's two resolvers do, the group whose run the textblock tokenized first going first, `~` first inside a link or image label, and the runs of the other group a pair encloses paired inside it;
+and a closer looks only at the last opener of each of the at most six buckets its kind's openers are filed in by what the rule of three reads of them (`nearestOpener`), so pairing is linear in the runs.
+A correctly stored rendering keeps its bytes:
+the writer keeps a spelling that reads back under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dispatch stored markdown under (`storedMarkdown`:
+`*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs of either length paired, a run after any `~` refused, every run in one loop;
+`flankingMarkdown`: the same with flanking alone), and failing that under the first two, and failing that under that parser's alone (`inlineWithEscapes`), so wherever the bytes main wrote read back as that parser reads them they stay;
+an image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`).
 A code span keeps the whitespace that starts each of its later lines past the prefix of the containers around it, as the browser editor's parser reads it, a line holding only whitespace before the closer included;
 goldmark's paragraph trims it (`lineRecordingParagraph`, `multilineCodeSpanText`).
 A space or a line feed is the padding such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the writer pads a span whose text starts and ends with one.
@@ -2356,6 +2366,16 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   Retiring a subject is an operator step once no deployment compiled with it can start:
   `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
 
+- The same reconcile keeps `ENVOY_NOTIFICATIONS`'s metadata as deployed, since `UpdateStream` writes the whole configuration and would otherwise drop it, and sets `envoy_stream_id` (`bus.StreamIDMetadataKey`) once:
+  a fresh random id on a stream the start creates, and, on a deployed stream without one, an id derived from the stream's name and the Created time `STREAM.INFO` answers.
+  A deployed stream without one whose subjects, retention and duplicate window need no change gets it in one `UpdateStream` that writes the stream's own deployed configuration with only the id added to its metadata, so its replicas, storage, limits and every other setting stay as they are;
+  one that needs a reconcile gets it in the reconcile's `UpdateStream`.
+  An id the stream holds is never changed.
+  JetStream's stream update has no compare-and-swap, so two starts racing to add the id would each write their own;
+  the derived id makes them write the same one.
+  A start that finds no stream and is refused `stream name already in use` (another start created it in between, with an id of its own) reconciles that stream and keeps its id.
+  A build older than the id writes the configuration without metadata whenever it updates the stream, and the next start of this build derives the id again.
+
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
 ## Listener API
@@ -2431,6 +2451,34 @@ Each item below names an endpoint and its method, then its contract, and an item
   Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window.
   A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400.
 
+- `/v1/replay` (POST)
+
+  The messages `ENVOY_NOTIFICATIONS` stored for a session after a cursor per subject, so a self-subscribed session (pi-envoy, claude-envoy, through `@legion/envoy-client/replay`) reads back what it missed while its own NATS subscriptions were down (`cmd/listener/replay.go`).
+  Body `{session_id, subjects: [{subject, after?}], max_messages?}`;
+  answer `{stream: {id?, created, first_seq, last_seq}, subjects: [{subject, messages: [{seq, subject, time, data}], next_after, more, refused?}]}`, `data` being the stored envelope JSON.
+  `stream.id` is the stream configuration's `envoy_stream_id` metadata (`bus.StreamIDMetadataKey`, set once by the stream reconcile under "Operational notes"), omitted for a stream without one;
+  it is the stream's identity, because it lives in the configuration and so a backup and restore, the reconcile and a leader election keep it, while `created` (`STREAM.INFO`'s Created) changes at a restore, and after a clustered restore the servers can report different Created times (per nats-server's clustered restore code), so it can change at a later leader election too.
+  The watermark is the stream's `last_seq`, read once at the start (`STREAM.INFO`);
+  each subject is read with `STREAM.MSG.GET … next_by_subj` (`bus.Client.NextStoredMessage`) from `after + 1` up to it.
+  A subject with no `after` gets no messages and `next_after` = the watermark, which is how a cursor starts.
+  `next_after` is the watermark once a subject is read to it, else the last sequence returned (or `after`) with `more: true`:
+  one answer stops at `max_messages` (default 100, at most 500, across the answer), 2 MiB of data (the first message goes in whatever its size) or 5 s of reading, inside the server's 10 s write deadline.
+
+- A subject is answered only when it is exactly `notifications.agent.<session_id>`, or one of the session's registered interests that lies, under NATS wildcard rules, inside a shared stream subject (`bus.SharedStreamTopic`):
+  `notifications.dispatch.>`, `notifications.github.>`, `notifications.slack.>`, `notifications.ghostwispr.>` and `notifications.whatsapp.>`, whose publishers never put one session's private payload on them.
+  Every other subject is `refused: "not_followed"`, whatever the interest store holds:
+  another session's agent subject or a wildcard over them, every exception lane (`notifications.envoy.exceptions.…`, the session's own included, since a lane carries the undelivered message's payload), the Legion controller's `notifications.legion.>` notices, a wildcard wider than one shared subject (`notifications.>`, `notifications.*`) and an ad-hoc topic.
+  Every subject of the stream's configuration is classified shared or private beside `streamSubjects` in `internal/bus/stream.go`, and a test fails on one in neither list.
+  An answered subject no subject of the deployed stream's configuration (read from `STREAM.INFO`, not this binary's list) contains is `refused: "not_retained"`;
+  either refusal gets no messages and `next_after` = its `after`.
+  More than 32 subjects, a subject NATS would refuse as a filter, a missing `session_id`, a `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a control character, which would make `notifications.agent.>` the caller's own subject and read every session's inbox), or a `max_messages` below 1 is a 400.
+  NATS refusing the read outright (the listener's user lacks `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, no JetStream, no stream) is `503 {"code":"REPLAY_UNAVAILABLE","error":"<NATS error>"}`, any other failed read a plain 503.
+  Trust model: `/v1/replay` trusts `session_id` as every `/v1` route does, with no check beyond `/v1`'s own authentication (`apiAuth`) and no per-session secret, and no check that the session is live, so a caller who can call `/v1` and knows a session's id, live or ended, can read that session's 72 hours of stored inbox:
+  with a bearer configured, a holder of the API credential (the shared token or an accepted service-account token);
+  with none, any request whose `Host` is loopback or a name in `ENVOY_ALLOWED_HOSTS`, which on the GCP hub, whose listener takes no bearer, includes its tailnet name, so there it is every tailnet peer the tailnet's access rules let reach the port;
+  what the route refuses is reading any session it does not name (a wildcard, another session's subject through an interest, an exception lane).
+  A listener older than the route answers 404 (the `/v1` catch-all), which the client reads as "does not replay".
+
 - `/v1/roles/<role>` (GET)
 
   Returns the live role holder, including its capabilities, `machine_id` (the listener it registered through, which owns its delivery unless its stored subscription names another, as `/v1/interests/subscribe` below says), `host` (the machine it actually runs on, as its own plugin reported it, and where its owning listener reaches a serve-port holder;
@@ -2456,7 +2504,16 @@ Each item below names an endpoint and its method, then its contract, and an item
   Persists session topics, route metadata, optional delivery `capabilities`, and `host` (where the session process actually runs, as the client's `machineID()` reports it
   — distinct from `machine_id`, always the registering listener's own machine);
   registrations without capabilities persist `[]`, and one without `host` (an older plugin) falls back to `machine_id` on every read.
-  The stored subscription keeps the `machine_id` of the listener the session first subscribed through, and a later registration through another listener changes only the session entry's:
+  A topic reaching a private stream subject (`bus.privateStreamSubjects`:
+  each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
+  `bus.ReachesPrivateStreamSubject`) — is not stored, since `/v1/replay` answers the stored topics and the stored topics drive the fan-out to serve-port sessions, and such a topic would hand the session messages meant for another session or for the controller's role holder:
+  the rest of the registration is stored, the answer stays 200, and `warnings` names each topic left out (`<topic> was not registered: …`).
+  The registration is not refused whole because a released pi-envoy registers every subject it has open, a fork parent's agent subject and any topic its `envoy_subscribe` took included.
+  A row an earlier build stored with such a topic is cleaned at the session's next registration:
+  the registry drops every such topic from the merged row, not only from the incoming topics (`store.Registry.Upsert`, which `/v1/roles/set` writes through too;
+  `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat.
+
+- The stored subscription keeps the `machine_id` of the listener the session first subscribed through, and a later registration through another listener changes only the session entry's:
   the subscription's says which listener fans a topic out to the session (`store.Registry.Match`).
   A listener delivers only to a serve-port session it owns.
   Its owner is the listener its stored subscription names, the one `Match` delivers on, else, with no subscription stored, the listener it registered through (the entry's `machine_id`);
@@ -2475,7 +2532,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   A stored subscription this build cannot decode (`store.ErrMalformedInterest`) is replaced by the one the registration names, with this listener's `machine_id`, not merged with it, and the registry logs `registry replaced an interest record it cannot decode` at WARN naming the session;
   its role claims, in the role bucket, are kept.
   `/v1/roles/set` writes the claimant's subscription the same way.
-  The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard.
+  The response's `warnings` also say when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard.
   When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`).
   Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`).
 
@@ -2484,6 +2541,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   Removes the supplied topics and returns them in `removed`.
   A stored subscription this build cannot decode (`store.ErrMalformedInterest`) routes none of its topics, so it is left as it is, logged at WARN naming the session, and the route still releases the role claims the topics name and answers 200.
   A write route (below the list).
+  The row it rewrites also drops any stored topic reaching a private stream subject other than the session's own agent subject, as `/v1/interests/subscribe` says.
 
 - `/v1/sessions` (GET)
 
@@ -2817,10 +2875,29 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
 The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting until its session ends or for the shorter lifetime its request signed, and key-bound launcher credentials to enrolled agent sessions and pods;
 `cmd/agent-secrets` is its client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a runtime, requests grants, polls a pending decision to completion, and either prints session/grant state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into its environment.
 Every line it prints about a secret names the store it answered from (`cmd/agent-secrets/source.go`):
-the broker `AGENT_SECRETS_URL` names, by host, and that broker's own store, read once from the public `GET /v1/settings` and named as `AWS Secrets Manager account <id> in <region>` or `GCP Secret Manager project <number>`, the broker alone where those settings cannot be read.
-The injection form writes one line to stderr before it execs, naming the injected names and that source and never a value;
-`request`, `status` and `self` print it as `source:`, `secret show` the store as `store:` (and `secret list` one line on stderr, with `store` on each row under `--json`), and every refusal carries it, so no answer or refusal of this CLI's is read as another secrets CLI's about the same name.
+the broker `AGENT_SECRETS_URL` names, and the kind of that broker's own store, read once from the public `GET /v1/settings` (`AWS Secrets Manager`, `GCP Secret Manager`), the broker alone where those settings cannot be read, as `the broker AGENT_SECRETS_URL names (GCP Secret Manager)`.
+The injection form writes one line to stderr before it execs, naming the injected names and that source, never a value (`agent-secrets: NAME from the broker AGENT_SECRETS_URL names (GCP Secret Manager)`;
+`packages/envoy-client/src/slack-post.ts` matches its `agent-secrets: NAME from ` prefix);
+`request`, `status` and `self` print it as `source:`, and every denial, pending request and refusal carries it, so no answer or refusal of this CLI's is read as another secrets CLI's about the same name.
+None of these lines names the broker's host or the store's account, region or project, since an agent's output is quoted wherever it goes, a public pull request among them;
+only a broker that could not be reached is named, by its URL through `redact.URL`, so a stale address reads as one.
+Only the secret forms, which a person runs under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account <id> in <region>`, `GCP Secret Manager project <number>`):
+`secret show` as `store:`, `secret list` one line on stderr, with `store` on each row under `--json`.
 No line names a secret's version: a grant's release carries names and values alone, and a session holds no sign-in of its own to the store.
+No output of `agent-secrets`, `agent-secrets-helper` (`internal/broker/helper`'s broker calls included) or `agent-secrets-devrelay` prints a credential the broker's URL carries:
+a message names that URL through `internal/redact`'s `URL`, an allow-list that prints the value as written only when it is provably a plain http(s) URL (printable ASCII with no `@`, `%`, `?`, `#`, backslash or whitespace;
+net/url reads it back byte for byte as an http or https scheme, a DNS name, IPv4 or bracketed zone-less IPv6 host with an optional port of one to five digits, and a path of `[A-Za-z0-9._~/-]`), and as `redact.NotPrinted` otherwise, printing no part of it.
+A URL with user info prints as `NotPrinted` too, not as `xxxxx@host`: a host-less value whose password holds an `@` would print the password's tail as the host.
+An error net/http or net/url makes passes through `redact.Error(err, base)` (or `redact.Cause`, the same without net/http's `*url.Error` wrapper):
+it is err itself only when base is clean, the URL that error names is base followed by nothing or a plain `/v1/` path (`redact.Call`;
+a redirect's target on another host or path, or with a query, is not), and the error it wraps is a transport failure (`net.OpError`, name resolution, refused, timeout, TLS, `http.ErrSchemeMismatch`, EOF, a reset, a broken pipe:
+the set `peerAnswered` reads), an HTTP status answer, or text the allow-list passes (a malformed `Location`'s error quotes the target and is not).
+Otherwise its text is the class alone (`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and errors.As on err, and it unwraps to err so callers classify as before.
+`agent-secrets` refuses an id that `url.PathEscape` would change (`pathID`) before any call, never escaping it:
+the proof signs the URL as built and the broker rebuilds the htu from the decoded path.
+That refusal is a `refusedBeforeCall`, which `refusalText` prints with no `asked the broker` ending.
+Extend the allow-list only with a check a test proves, never a parser that prints part of a value it rejects.
+`agent-secrets-helper install` writes its unit `0600`, since its `Environment=` line holds the URL.
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's body verbatim as before, and makes no settings call.
 The other secrets CLI a box may hold, `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is archived):
 it reads its agent tier from local sops files and its human tier through the local secretsd daemon, which asks for a YubiKey touch, and it never reads this broker.

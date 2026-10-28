@@ -23,7 +23,9 @@ Every other pair is expected to merge clean.
 
 ## How each side was ported
 
-Each patch applies to the head file (the new layout).
+Each patch applies to the head file (the new layout) as commit 3c583c55 holds it: this pull request's regeneration of main 2df3353c's two files.
+`run.sh` reads the base from that commit (`REPLAY_BASE` overrides it), so a later regeneration on a newer main, which lays the files out by the same rules, does not make every patch be ported again.
+In this README, "the head" means that commit.
 The patch for a side carries that side's sentence-level change to the file, one sentence per line, and each changed file passes `bun scripts/semantic-line-breaks.ts`.
 
 - **Forward**: the head does not yet hold the side's change.
@@ -58,7 +60,7 @@ A new migration now describes itself in the header comment of its own `.up.sql`.
 | append (b) | AGENTS Where to look | different items | clean | clean |
 | append (c, control) | README Routes | same place (after 1451) | conflict | conflict, 1 hunk |
 
-Line numbers are head lines.
+Line numbers are lines of the head, 3c583c55.
 Four of the six real pairs merge clean.
 The other two still conflict on the new layout, because their two sides meet at the same point:
 

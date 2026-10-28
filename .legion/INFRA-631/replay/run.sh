@@ -5,15 +5,19 @@
 #   bash .legion/INFRA-631/replay/run.sh [repo root]
 #
 # The repo root defaults to the checkout this script sits in (three directories above it). The two
-# files are read from there, committed as the base of a throwaway repository under
-# ${TMPDIR:-/tmp}/replay-$$ (set TMPDIR to keep it off /tmp), and each patch beside this script is
-# applied with `git apply` on a branch of its own from that base. For every pair the script prints
-# its classification, computed from the two patches' hunks against the base file, then one line:
-# merge, file, class, expected, observed, PASS or FAIL. It exits 1 on any FAIL.
+# files are read from its git history at REPLAY_BASE (default 3c583c55, this pull request's
+# regeneration of main 2df3353c's files, which the patches were written against), committed as the
+# base of a throwaway repository under ${TMPDIR:-/tmp}/replay-$$ (set TMPDIR to keep it off /tmp),
+# and each patch beside this script is applied with `git apply` on a branch of its own from that
+# base. A later regeneration on a newer main lays the files out by the same rules, so the patches
+# are not ported again each time main moves. For every pair the script prints its classification,
+# computed from the two patches' hunks against the base file, then one line: merge, file, class,
+# expected, observed, PASS or FAIL. It exits 1 on any FAIL.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "${1:-$here/../../..}" && pwd)
+pin=${REPLAY_BASE:-3c583c55614c7082387a52fdf4070ce52c91639b}
 agents=packages/envoy/AGENTS.md
 readme=packages/envoy/cmd/dispatch/README.md
 
@@ -24,7 +28,7 @@ git init -q "$work"
 g() { git -C "$work" -c user.name=replay -c user.email=replay@example.invalid "$@"; }
 for f in "$agents" "$readme"; do
   mkdir -p "$work/$(dirname "$f")"
-  cp "$root/$f" "$work/$f"
+  git -C "$root" show "$pin:$f" > "$work/$f"
 done
 g add -A
 g commit -q -m base

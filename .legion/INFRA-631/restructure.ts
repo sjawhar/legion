@@ -428,6 +428,20 @@ const SPLITS: Split[] = [
     reason: "the `/v1/messages/publish` item runs 66 screen rows; topic checks stand alone",
   },
   {
+    id: "split-listener-replay-subjects",
+    guide: "agents",
+    anchor: "A subject is answered only when it is exactly",
+    reason:
+      "the `/v1/replay` item runs 60 screen rows on main; which subjects it answers stands alone",
+  },
+  {
+    id: "split-listener-subscribe-owner",
+    guide: "agents",
+    anchor: "The stored subscription keeps the `machine_id` of the listener",
+    reason:
+      "the `/v1/interests/subscribe` item runs 65 screen rows on main; which listener owns a session stands alone",
+  },
+  {
     id: "split-github-live-settlement",
     guide: "agents",
     anchor: "A live settlement is a possibly incomplete view",

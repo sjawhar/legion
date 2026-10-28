@@ -53,6 +53,9 @@ type Admission struct {
 	// first record behind: every key in pending releases once the Dispatch consumer's position
 	// has Reached it. Zero means nothing is held.
 	target int64
+	// holds counts Reconcile's deferrals into pending (Holds), so a poller of the hold tells one
+	// hold from the next, which can wait on the same target and be released by the same position.
+	holds uint64
 	// catchingUp names each root the daemon's boot catch-up has yet to finish
 	// (HoldForCatchUp): its record may still miss what its Dispatch event log holds, so no pass
 	// decides whether it waits on a person (workflow's ReconcileAwaiting), nor resumes it once
@@ -446,6 +449,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake
 		for key, summary := range deferred {
 			a.pending[key] = summary
 		}
+		a.holds++
 		if target > a.target {
 			a.target = target
 		}
@@ -911,7 +915,9 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	if orphan {
 		if pr != nil {
-			pr.Generation = int64(stored.Generation)
+			// The carried pull request starts the generation's fence; its head run goes, as with a
+			// new generation (record.ClearGeneration), since its replay would put the old fence back.
+			pr.Generation, pr.Run = int64(stored.Generation), nil
 			if err := a.store.PutPullRequest(ctx, tx, *pr); err != nil {
 				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
 			}
@@ -1353,6 +1359,16 @@ func (a *Admission) Target() int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.target
+}
+
+// Holds counts the times Reconcile has deferred keys into the hold since the daemon started: the
+// boot's reconcile, and each recovery of a repository GitHub answered for again. A poller of the
+// hold (the daemon's pollHoldRelease) folds it into what it applies, so a later hold, released by
+// a position equal to an earlier hold's, is applied rather than taken for that earlier release.
+func (a *Admission) Holds() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.holds
 }
 
 // refreshHeldSummary keeps a held, unrecorded key's own pending summary — the one release
