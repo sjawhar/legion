@@ -266,8 +266,10 @@
 - No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
   credential the broker's URL carries: everything before the URL's last `@`, and any query or
   fragment, print as `xxxxx` (`internal/redact`) in every message that names the URL, so a token
-  holding a `/`, `?` or `#`, a password that begins with digits, and a mistyped `http:/` or
-  `https//` hide whole too - a broker
+  holding a `/`, a password that begins with digits, and a mistyped `http:/` or `https//` hide
+  whole too; when a `?` or `#` comes before that `@` (an `@` in a query or fragment value, say),
+  everything after the scheme prints as one `xxxxx`; and a URL whose `@` is percent-encoded is
+  read decoded - a broker
   that could not be reached, the secret forms' refusal of a plain-http broker, the helper's
   `listening` log line, and every error the helper's broker calls make (a machine login, an
   enrollment, a renewal, a refresh or a revoke, which `agent-secrets machine login`, `register

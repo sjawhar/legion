@@ -15,10 +15,10 @@ const mask = "xxxxx"
 // parts is raw split as URL reads it. Each field is a slice of raw: prefix is the scheme with
 // its separator as written ("https://", or "http:/" and "https//" for a mistyped http(s)), and
 // the others hold no separator: userinfo ends before its '@', query follows its '?' and
-// fragment its '#'.
+// fragment its '#'. When opaque, userinfo is everything after the prefix, and the rest is empty.
 type parts struct {
 	prefix, userinfo, rest, query, fragment string
-	hasUser, hasQuery, hasFragment          bool
+	hasUser, hasQuery, hasFragment, opaque  bool
 }
 
 // split reads raw as a string rather than through net/url, so a value no URL parser reads (a
@@ -27,16 +27,23 @@ type parts struct {
 //     "://", or "http" or "https" followed by ":/" or "//"; anything else has no prefix, so a
 //     user name before a ':' is never printed as a scheme;
 //   - the userinfo is everything after the prefix up to the last '@' anywhere in raw. A password
-//     or token holding a '/', '?', '#', ':' or digits (which a URL must escape, or which reads as
-//     a port) therefore hides whole; an '@' in a path or query hides the host before it too,
-//     which a broker's base URL, having neither, never shows;
-//   - the query is what follows the first '?' after the userinfo, up to a '#', and the fragment
-//     what follows the first '#'.
+//     or token holding a '/', ':' or digits (which a URL must escape, or which reads as a port)
+//     therefore hides whole; an '@' in a path hides the host before it too, which a broker's
+//     base URL, having no path, never shows;
+//   - when the text before that '@' holds a '?' or '#', the '@' may sit in a query or fragment
+//     (or in a password that holds one), so nothing after it can be told for a host: the whole
+//     value after the prefix is opaque, and prints as one mask;
+//   - otherwise the query is what follows the first '?' after the userinfo, up to a '#', and the
+//     fragment what follows the first '#'.
 func split(raw string) parts {
 	var p parts
 	p.prefix = prefix(raw)
 	s := raw[len(p.prefix):]
 	if at := strings.LastIndexByte(s, '@'); at >= 0 {
+		if strings.ContainsAny(s[:at], "?#") {
+			p.userinfo, p.opaque = s, true
+			return p
+		}
 		p.userinfo, s, p.hasUser = s[:at], s[at+1:], true
 	}
 	if i := strings.IndexAny(s, "?#"); i >= 0 {
@@ -55,6 +62,55 @@ func split(raw string) parts {
 	}
 	p.rest = s
 	return p
+}
+
+// readable is raw as split reads it: raw itself, or, when raw holds no '@' and the part before
+// its first '?' or '#' does once percent-decoded (an escaped "%40", or a whole URL escaped), raw
+// decoded, so an escaped separator hides no credential.
+func readable(raw string) string {
+	if strings.Contains(raw, "@") {
+		return raw
+	}
+	head := raw
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		head = raw[:i]
+	}
+	if strings.Contains(unescape(head), "@") {
+		return unescape(raw)
+	}
+	return raw
+}
+
+// unescape decodes each well-formed %XX in s and leaves any other '%' as it is, so a bad escape
+// (which url.PathUnescape refuses whole) does not stop the rest decoding.
+func unescape(s string) string {
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if hi, lo := unhex(s[i+1]), unhex(s[i+2]); hi >= 0 && lo >= 0 {
+				b.WriteByte(byte(hi<<4 | lo))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func unhex(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // prefix is raw's scheme with its separator as split reads it, or "" for none.
@@ -87,12 +143,17 @@ func prefix(raw string) string {
 
 // URL is raw with everything that can carry a credential replaced by "xxxxx": the userinfo,
 // user name and password both (a token is often the user name alone), the query and the
-// fragment, each keeping its separator ("xxxxx@", "?xxxxx", "#xxxxx"). A URL that carries none of
-// them prints unchanged. split says how raw is read.
+// fragment, each keeping its separator ("xxxxx@", "?xxxxx", "#xxxxx"), or everything after the
+// scheme for a value split reads as opaque. A URL that carries none of them prints unchanged.
+// split and readable say how raw is read.
 func URL(raw string) string {
-	p := split(raw)
+	p := split(readable(raw))
 	var b strings.Builder
 	b.WriteString(p.prefix)
+	if p.opaque {
+		b.WriteString(mask)
+		return b.String()
+	}
 	if p.hasUser {
 		b.WriteString(masked(p.userinfo) + "@")
 	}
@@ -114,29 +175,41 @@ func masked(part string) string {
 	return mask
 }
 
-// hidden is what URL hides of raw, each user name, password, query and fragment, as written and
-// unescaped, for a test of whether a message repeats one.
+// minHidden is the shortest piece hidden reports: a shorter one ("u", "v1") is a substring of
+// too many causes ("refused") to tell a repeat from chance, and withholding on it loses the
+// cause for nothing.
+const minHidden = 4
+
+// hidden is what URL hides of raw that a message could repeat: the userinfo (the whole opaque
+// value, for one split reads so) and each piece of it between separators, the query and each
+// of its values, and the fragment, as written and percent-decoded, each of at least minHidden
+// bytes.
 func hidden(raw string) []string {
-	p := split(raw)
+	p := split(readable(raw))
 	var out []string
 	add := func(s string) {
-		if s == "" {
+		if len(s) < minHidden {
 			return
 		}
 		out = append(out, s)
-		if unescaped, err := url.PathUnescape(s); err == nil && unescaped != s {
-			out = append(out, unescaped)
+		if decoded := unescape(s); decoded != s && len(decoded) >= minHidden {
+			out = append(out, decoded)
 		}
 	}
-	if p.hasUser {
+	if p.hasUser || p.opaque {
 		add(p.userinfo)
 		// Each piece between separators too, so a cause naming the host net/url read out of a
 		// token holding a '/' (a DNS lookup of it, say) is caught.
-		for _, piece := range strings.FieldsFunc(p.userinfo, func(r rune) bool { return strings.ContainsRune(":/?#@", r) }) {
+		for _, piece := range strings.FieldsFunc(p.userinfo, func(r rune) bool { return strings.ContainsRune(":/?#@&=", r) }) {
 			add(piece)
 		}
 	}
 	add(p.query)
+	for pair := range strings.SplitSeq(p.query, "&") {
+		if _, value, ok := strings.Cut(pair, "="); ok {
+			add(value)
+		}
+	}
 	add(p.fragment)
 	return out
 }

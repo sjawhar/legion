@@ -366,33 +366,40 @@ func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T
 }
 
 // Both DISPATCH_AGENT_SECRETS_URL refusals name the URL with its user name, password and query
-// redacted: a shape refusal (a path) and the dev sign-in's refusal of a remote broker.
+// redacted: a shape refusal (a path) and the dev sign-in's refusal of a remote broker, with a
+// credential in the userinfo or a query value holding an '@'.
 func TestResolveBootConfigRefusesAgentSecretsURLWithoutNamingItsCredential(t *testing.T) {
-	shape := map[string]string{
-		"DATABASE_URL":                              "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":                      "agent-token",
-		"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
-		"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
-		"DISPATCH_AGENT_SECRETS_URL":                "https://tokuser9f3:hunter2pw@broker.example.com/v1?token=qtok77",
-		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+	shape := func(brokerURL string) settingValues {
+		return envGetter(map[string]string{
+			"DATABASE_URL":                              "postgres://dispatch",
+			"DISPATCH_AGENT_TOKEN":                      "agent-token",
+			"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
+			"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		})
 	}
-	remote := devSignInEnvironment(map[string]string{
-		"DISPATCH_AGENT_SECRETS_URL":                "https://tokuser9f3:hunter2pw@broker.example.com?token=qtok77",
-		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
-	})
+	remote := func(brokerURL string) settingValues {
+		return devSignInEnvironment(map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		})
+	}
 	for name, row := range map[string]struct {
 		env  settingValues
 		want string
 	}{
-		"a path":          {envGetter(shape), `DISPATCH_AGENT_SECRETS_URL="https://xxxxx@broker.example.com/v1?xxxxx"`},
-		"a remote broker": {remote, `DISPATCH_AGENT_SECRETS_URL="https://xxxxx@broker.example.com?xxxxx"`},
+		"a path":                               {shape("https://tokuser9f3:hunter2pw@broker.example.com/v1?token=qtok77"), `DISPATCH_AGENT_SECRETS_URL="https://xxxxx@broker.example.com/v1?xxxxx"`},
+		"a remote broker":                      {remote("https://tokuser9f3:hunter2pw@broker.example.com?token=qtok77"), `DISPATCH_AGENT_SECRETS_URL="https://xxxxx@broker.example.com?xxxxx"`},
+		"a path, with an '@' in a query value": {shape("https://broker.example.com/?password=hunter@2pwSECRET"), `DISPATCH_AGENT_SECRETS_URL="https://xxxxx"`},
+		"a remote broker, with an '@' in a query value": {remote("https://broker.example.com?a=1&token=qtok@77SECRET&b=2"), `DISPATCH_AGENT_SECRETS_URL="https://xxxxx"`},
 	} {
 		_, err := resolveBootConfig(row.env)
 		if err == nil || !strings.Contains(err.Error(), row.want) {
 			t.Errorf("%s: err = %v, want a refusal naming %s", name, err, row.want)
 			continue
 		}
-		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok", "2pwSECRET", "77SECRET"} {
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("%s: refusal %q names %q", name, err, secret)
 			}

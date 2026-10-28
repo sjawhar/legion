@@ -11,7 +11,7 @@ import (
 
 // secretsIn are the credential-like values the rows below put in a URL; no redacted form may
 // hold one.
-var secretsIn = []string{"tokuser9f3", "hunter2pw", "hunt", "er2pw", "nter2pw", "qtok77", "frag9z", "AbCtok9f3", "dEfgh", "ij=", "1234"}
+var secretsIn = []string{"tokuser9f3", "hunter2pw", "hunt", "er2pw", "nter2pw", "qtok77", "frag9z", "AbCtok9f3", "dEfgh", "ij=", "1234", "2pwSECRET", "77SECRET", "9zSECRET", "p@ss", "f@g", "t@k"}
 
 // TestURLHidesEveryPartThatCanCarryACredential: a user name, a password, a query and a fragment
 // each print as "xxxxx" after their separator, in a URL net/url reads and in one it does not;
@@ -31,22 +31,37 @@ func TestURLHidesEveryPartThatCanCarryACredential(t *testing.T) {
 		// A bad escape, which net/url refuses.
 		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", "http://xxxxx@127.0.0.1:1"},
 		// A password holding a character a URL must escape: net/url refuses these, and the
-		// value must not print whole because of it.
+		// value must not print whole because of it. A '?' or '#' before the '@' could as well
+		// start a query or fragment holding the '@', so all after the scheme hides.
 		{"https://tokuser9f3:hunt/er2pw@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
-		{"https://tokuser9f3:hunt?er2pw@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
-		{"https://tokuser9f3:hunt#er2pw@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
+		{"https://tokuser9f3:hunt?er2pw@secrets.internal.example", "https://xxxxx"},
+		{"https://tokuser9f3:hunt#er2pw@secrets.internal.example", "https://xxxxx"},
 		{"http://tokuser9f3:hunter2pw@127.0.0.1:badport", "http://xxxxx@127.0.0.1:badport"},
 		// IPv6 hosts, with and without userinfo.
 		{"http://[::1]:13380/v1/requests", "http://[::1]:13380/v1/requests"},
 		{"http://tokuser9f3:hunter2pw@[::1]:13380/v1/requests", "http://xxxxx@[::1]:13380/v1/requests"},
-		// An '@' in the path or query hides everything before it, host included: a broker's base
-		// URL has neither, and a credential holding '/' or '?' reads the same way.
+		// An '@' in the path hides everything before it, host included: a broker's base URL has
+		// no path, and a credential holding '/' reads the same way.
 		{"https://secrets.internal.example/v1/users/ada@example.com", "https://xxxxx@example.com"},
-		{"https://secrets.internal.example/?next=ada@example.com", "https://xxxxx@example.com"},
+		// An '@' in a query or fragment: nothing after it is a host, and none of the query or
+		// fragment prints.
+		{"https://secrets.internal.example/?next=ada@example.com", "https://xxxxx"},
+		{"https://secrets.example/?password=hunter@2pwSECRET", "https://xxxxx"},
+		{"https://secrets.example/?password=p@ss", "https://xxxxx"},
+		{"https://secrets.example/#f@g", "https://xxxxx"},
+		{"https://secrets.example/#frag@9zSECRET", "https://xxxxx"},
+		{"https://secrets.example/?a=1&token=t@k&b=2", "https://xxxxx"},
+		{"https://secrets.example/?a=1&token=qtok@77SECRET&b=2", "https://xxxxx"},
+		{"https://tokuser9f3:hunter2pw@secrets.example/?next=ada@example.com", "https://xxxxx"},
+		// A percent-encoded '@', and a whole URL percent-encoded: read decoded. An escaped '@'
+		// in a query alone leaves the host named.
+		{"http://tokuser9f3:hunter2pw%40127.0.0.1:1", "http://xxxxx@127.0.0.1:1"},
+		{"https%3A%2F%2Ftokuser9f3%3Ahunter2pw%40secrets.example", "https://xxxxx@secrets.example"},
+		{"https://secrets.example/?token=qtok77%40x", "https://secrets.example/?xxxxx"},
 		// No scheme at all, and no scheme with "://" later in the value.
 		{"tokuser9f3:hunter2pw@secrets.internal.example", "xxxxx@secrets.internal.example"},
 		{"tokuser9f3:hunter2pw@secrets.internal.example/?next=https://x", "xxxxx@secrets.internal.example/?xxxxx"},
-		{"secrets.internal.example/v1?next=https://tokuser9f3:hunter2pw@x", "xxxxx@x"},
+		{"secrets.internal.example/v1?next=https://tokuser9f3:hunter2pw@x", "xxxxx"},
 		{"tokuser9f3:hu://nter2pw@secrets.example", "xxxxx@secrets.example"},
 		// A mistyped scheme separator: one slash, or no colon.
 		{"http:/tokuser9f3:hunter2pw@127.0.0.1:1/v1", "http:/xxxxx@127.0.0.1:1/v1"},
@@ -55,8 +70,8 @@ func TestURLHidesEveryPartThatCanCarryACredential(t *testing.T) {
 		// A token holding '/', '?' or '#', and a password that begins with digits, which reads
 		// as a port.
 		{"https://AbCtok9f3/dEfgh+ij=@secrets.example", "https://xxxxx@secrets.example"},
-		{"https://AbCtok9f3?dEfgh@secrets.example", "https://xxxxx@secrets.example"},
-		{"https://AbCtok9f3#dEfgh@secrets.example", "https://xxxxx@secrets.example"},
+		{"https://AbCtok9f3?dEfgh@secrets.example", "https://xxxxx"},
+		{"https://AbCtok9f3#dEfgh@secrets.example", "https://xxxxx"},
 		{"https://tokuser9f3:1234/hunter2pw@secrets.example", "https://xxxxx@secrets.example"},
 		{"", ""},
 	} {
@@ -92,6 +107,13 @@ func TestErrorHidesTheURLAndACauseThatRepeatsIt(t *testing.T) {
 		{"a user name read as a scheme", schemeErr, `Get "xxxxx@127.0.0.1:1/v1/requests": (withheld: it repeats a part of the URL that can carry a credential)`, nil},
 		{"wrapped", errors.Join(errors.New("enroll"), &url.Error{Op: "Get", URL: "http://tokuser9f3@127.0.0.1:1", Err: syscall.ECONNREFUSED}),
 			"enroll\nGet \"http://xxxxx@127.0.0.1:1\": connection refused", syscall.ECONNREFUSED},
+		// A piece shorter than minHidden ("u", "v1") is no repeat: a one-letter user name
+		// matches "refused" by chance, and the cause stays.
+		{"a one-letter user name", &url.Error{Op: "Get", URL: "http://u:p@127.0.0.1:1/v1", Err: syscall.ECONNREFUSED},
+			`Get "http://xxxxx@127.0.0.1:1/v1": connection refused`, syscall.ECONNREFUSED},
+		// A query value repeated by the cause is still withheld.
+		{"a cause repeating a query value", &url.Error{Op: "Get", URL: "http://127.0.0.1:1/?token=qtok77", Err: errors.New("dial qtok77: refused")},
+			`Get "http://127.0.0.1:1/?xxxxx": (withheld: it repeats a part of the URL that can carry a credential)`, nil},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.err == nil {
