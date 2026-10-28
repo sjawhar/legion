@@ -19,10 +19,14 @@ body: |-
   dead costs at most about 3 s of staleness. A `dispatch_doc_ping` notification keeps a healthy
   connection trusted: about one a second for the whole deployment while some server holds a room, a
   cached read or a preload and no document write is announced, and none otherwise; a server that
-  only hears other servers' writes sends none. Settlement waits wake when the room's appends land
-  rather than polling every millisecond, and opening a document socket reads the issue and the
-  caller once, walks no list of rooms, and reserves its room and connection slots before it loads,
-  so sockets opening together stay within the caps and a socket over a cap is refused with 503.
+  only hears other servers' writes sends none. A room another server's write leaves behind while
+  this server is still loading it is closed once it is resident, rather than standing behind the
+  store until a browser's edit is refused, and a room waiting on its document's lock no longer holds
+  up any other document's notification or the cached reads that depend on it. Settlement waits
+  wake when the room's appends land rather than polling every millisecond, and opening a document
+  socket reads the issue and the caller once, walks no list of rooms, and reserves its room and
+  connection slots before it loads, so sockets opening together stay within the caps and a socket
+  over a cap is refused with 503.
   `DISPATCH_MAX_LIVE_ROOMS` and `DISPATCH_MAX_DOC_CONNECTIONS` (1,000 each) set those caps, the
   cold reads' cache takes a sixteenth of the Go memory limit (at least 64 MiB, at most 1 GiB, and
   256 MiB with none), and the profiler port (`DISPATCH_PPROF_PORT`) serves `/debug/vars`, the

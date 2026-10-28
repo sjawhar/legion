@@ -569,8 +569,10 @@ together and the first holder to fire resets the rest; the longest gap between p
 plus a delivery, inside `headTrustWindow`. A process holding none of those sends no ping and still
 counts what it hears as delivery, so a deployment sends about one ping a second while some process
 holds a room, a cached read or a preload and no document write is announced, and
-none otherwise. A read on one process therefore lags a commit on another by at most the
-notification's delivery, and by at most 3 s plus that delivery on a half-open LISTEN connection.
+none otherwise. The evictor's listener goroutine waits on no document lock - every room's
+decision, its re-examinations included, runs on that room's own goroutine (below) - so a read on
+one process lags a commit on another by at most the notification's delivery, and by at most 3 s
+plus that delivery on a half-open LISTEN connection.
 Its entry carries the canonical
 markdown, document token, block ranges/tokens and block paths, is immutable after construction,
 and is bounded by a weighted LRU whose budget `New` sets from the Go memory limit
@@ -827,11 +829,19 @@ a brief reconnect, never stale text a reader can act on. A head notification cos
 room this process does not hold or one whose cursor stands at `v`, and none for this process's own
 write, which waits for that write's bookkeeping (the head tracker's in-flight writes) and looks at
 the cursor again; anything else is decided on that room's own goroutine, with the unlocked head
-read and the confirmation under the document's advisory lock, so one room's lock wait never holds
-the listener. A bare `dispatch_doc_changed` only invalidates the head tracker's entry: every write
-of this build sends the head notification beside it, so the bare id alone is an older build's
-write during a roll, which this build's rooms do not follow (their next durable write is refused,
-`ErrRoomBehindHead`, and they reload) and which still invalidates a cached cold read.
+read and the confirmation under the document's advisory lock, each such goroutine reading through a
+pool hold mark of its own. The re-examination of a room whose eviction interval refused a
+notification, when that window ends, and the sweep of every resident room after each LISTEN
+stands go to the same goroutines, so one room's lock wait never holds the listener, any other
+room's decision or the head tracker's next delivery. ygo reports a room that is still loading as
+absent, so a head notification for it goes to the load's record (`roomLoad`): when the instance
+the load starts stands at another head than the last such notification names, the room goes to
+its goroutine, which waits for ygo to publish it and then decides it, rather than leaving a room
+born behind the store until a browser's edit is refused. A bare `dispatch_doc_changed` only
+invalidates the head tracker's entry: every write of this build sends the head notification beside
+it, so the bare id alone is an older build's write during a roll, which this build's rooms do not
+follow (their next durable write is refused, `ErrRoomBehindHead`, and they reload) and which still
+invalidates a cached cold read.
 Cross-process live co-editing of one document, two rooms with updates streaming between them, is
 a follow-up issue and out of scope here.
 

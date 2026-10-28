@@ -204,6 +204,11 @@ type roomInstance struct {
 // store stood one past it, and the gate would refuse its every durable write until it reloaded -
 // a room born behind, which no reload is guaranteed to fix, since the next load can lose the same
 // race.
+//
+// Another process's write in that window reaches no instance here either, and took never hears of
+// it: what reaches this process is its documentHeadChannel notice, which the stale-room evictor
+// hands here (notice) rather than to a room it cannot find, and the instance is decided on it
+// once it is resident (start, keepInstance).
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
@@ -211,6 +216,12 @@ type roomLoad struct {
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
 	instance *roomInstance
+	// noticed is the last documentHeadChannel notice the stale-room evictor heard for the room
+	// before the instance existed, and recheck the evictor's decision on it, nil while none came
+	// (notice). The notices of one document arrive in the order their writes committed, so the
+	// last one names the head the history stood at when it was heard.
+	noticed documentHeadNotice
+	recheck func(documentHeadNotice)
 	// size is the encoded bytes of the history the load handed ygo, which the room counts as
 	// resident once it loads (onLoadDocument). tree is the tree a document socket's admission read
 	// and rendered from the state the load took (takePreload), which the room's load takes rather
@@ -272,8 +283,14 @@ func (load *roomLoad) took(version persistence.Version) {
 // start is the instance this load leaves behind: it stands at the head the load read, with every
 // version took recorded since folded in, in order and only where each follows the one before, as
 // every advance of a cursor is (advanceRoomCursor). The load holds it from here, so a version
-// appended before ygo publishes the loaded room still reaches it.
-func (load *roomLoad) start() *roomInstance {
+// appended before ygo publishes the loaded room still reaches it. recheck is the evictor's
+// decision on the last notice heard before the instance existed (notice), bound to that notice,
+// when that notice names a head other than the one the instance stands at, and nil otherwise. The
+// load then read the store before the write that notice announced - a prune among them, whose
+// head is lower - or after a later write whose own notice had not arrived yet, which the
+// decision's read of the head tells apart; its caller hands the room to that decision once the
+// instance is listed (keepInstance).
+func (load *roomLoad) start() (instance *roomInstance, recheck func()) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	through := load.head
@@ -285,7 +302,27 @@ func (load *roomLoad) start() *roomInstance {
 	}
 	load.appended = nil
 	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}, loadedHead: load.head}
-	return load.instance
+	if decide, notice := load.recheck, load.noticed; decide != nil && notice.Head != through {
+		recheck = func() { decide(notice) }
+	}
+	load.noticed, load.recheck = documentHeadNotice{}, nil
+	return load.instance, recheck
+}
+
+// notice records notice, a documentHeadChannel notice the stale-room evictor heard for the room
+// while ygo reported no room of it, with recheck, the evictor's decision on such a notice
+// (staleRoomEvictor.noticeLoading). Before the instance exists the load keeps the latest notice
+// for start, and reports false. Once it exists - between start and ygo publishing the room, or
+// after the room has gone and before its document is collected - it reports whether notice names
+// a head other than the one the instance stands at, which its caller then decides on itself.
+func (load *roomLoad) notice(notice documentHeadNotice, recheck func(documentHeadNotice)) bool {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	if load.instance != nil {
+		return load.instance.cursor.heldThrough() != notice.Head
+	}
+	load.noticed, load.recheck = notice, recheck
+	return false
 }
 
 // tookResidentVersion records version, which this process has just made durable for room outside
@@ -306,7 +343,9 @@ func (s *Service) tookResidentVersion(room string, version persistence.Version) 
 // advance of the instance's cursor: the instance holds every durable update through the head that
 // load read, and every version this process appended while it ran (roomLoad). The load's record
 // goes with the document, as the listing does: until then took still reaches this instance
-// through it, which is what ygo's loading window needs it for.
+// through it, which is what ygo's loading window needs it for. A notice the load heard that the
+// instance does not stand at goes to the stale-room evictor's decision for the room (start), which
+// waits for ygo to publish the room before it decides (staleRoomEvictor.awaitResidence).
 func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
@@ -315,9 +354,12 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 		value = s.beginRoomLoad(room)
 	}
 	load := value.(*roomLoad)
-	instance := load.start()
+	instance, recheck := load.start()
 	listResident(&s.instances, live, instance)
 	runtime.AddCleanup(live, func(load *roomLoad) { s.roomLoads.CompareAndDelete(room, load) }, load)
+	if recheck != nil {
+		recheck()
+	}
 	return instance
 }
 
