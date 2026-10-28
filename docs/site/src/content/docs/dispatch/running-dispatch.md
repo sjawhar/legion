@@ -291,8 +291,12 @@ What a reader sees while two servers are serving:
   stored history holds all of them. A server whose copy of a document is not the current one
   writes no version from it and settles nothing on it; it reloads the document instead.
 - Notifications are published by one server at a time, so a second server does not reorder an
-  issue's notifications. When the publishing server stops, dies or loses NATS, the other takes
-  over within ten seconds; the health check's `outbox_publisher` says which server publishes.
+  issue's notifications. When the publishing server stops, is killed or loses its connection to
+  NATS, the other takes over within ten seconds; the health check's `outbox_publisher` says which
+  server publishes. A publishing server whose NATS goes silent without the connection dropping,
+  while it has nothing to send, is found out only by its next send, which waits five seconds for
+  NATS to answer and then two for a probe of the connection: the other server then takes over
+  within ten seconds of the next notification, not of the moment NATS went silent.
 - A document's live session belongs to one server. While someone has a document open on one
   server, that session does not carry the other server's edits, so the people shown as present,
   and their cursors, are the ones editing on that server. A write that lands on the other server

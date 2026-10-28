@@ -398,14 +398,19 @@ What the two processes share, and what each keeps to itself:
 - One process publishes the events outbox at a time. Each process's outbox reads and sends events
   only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration
   `0135_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the
-  other holds it; `/healthz` says which (`outbox_publisher`). A holder that stops releases the
-  hold, which wakes the standby at once; one that is killed is replaced once its hold lapses, six
-  seconds after its last renewal; one whose NATS stays down for three seconds, or whose failed
-  sends meet a connection that does not answer a probe, releases the hold too. A holder sends
-  nothing once its hold's deadline has passed, so one that freezes and resumes publishes nothing
-  beside the new holder. Each owner's events (an issue's, a document's or a project's) keep their
-  order per destination: an event goes to a session's subject, or to the owner's topic family, only
-  after every earlier unpublished event of its owner bound there has reached it.
+  other holds it; `/healthz` says which (`outbox_publisher`). A holder that stops sends nothing
+  more, records what NATS already answered, releases the rest of its batch and then the hold, which
+  wakes the standby at once; a graceful stop waits for that before it closes the database pool, up
+  to `outboxStopBudget` after its shutdown starts. One that is killed is replaced once its hold
+  lapses, six seconds after its last renewal; one whose NATS stays down for three seconds, or whose
+  failed sends meet a connection that does not answer a probe, releases the hold too. One that
+  finds its hold lost releases it as well, which stops its renewal and deletes the row only while
+  the row still names it. A holder sends nothing once its hold's deadline has passed, a send
+  already waiting for a connection included (`bus.Client.WindowUntil`), so one that freezes and
+  resumes publishes nothing beside the new holder. Each owner's events (an issue's, a document's or
+  a project's) keep their order per destination: an event goes to a session's subject, or to the
+  owner's topic family, only after every earlier unpublished event of its owner bound there has
+  reached it.
 - Each event reaches each receiver once, delivered at least once. A holder that dies between
   NATS's acknowledgement and the write that records it leaves the batch to be sent again by the
   next holder: JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a
@@ -951,11 +956,15 @@ walks past neither. It adds `events.publish_error`, nullable text with no defaul
 that rewrites no row: why an event's last attempt failed, cleared once it is published. It drops
 `events_unpublished` (`0003`) and `events_unpublished_ready` (`0020`), which only the per-row claim
 read; the release before it reads neither the new column nor the new indexes, and its claim still
-runs without the dropped ones. The index builds read every row of `events` under `SHARE`, which
-holds writes to `events` until the migration's transaction commits (no `concurrently`, which a
-migration's transaction cannot run): 1.1 s on 1,000,000 event rows and 7.2 s on 5,000,000, on
-Postgres 17 with two cores. Its census answers `0`, since it refuses and rewrites no row, and the
-census reports `events`, the table it locks, with its row count and size.
+runs without the dropped ones. The migration runs in one transaction, so every lock it takes is
+held until it commits. It builds the three indexes first: each reads every row of `events` under
+`SHARE`, which holds writes to `events` from then until the commit and lets reads go on (no
+`concurrently`, which a migration's transaction cannot run): 1.1 s on 1,000,000 event rows and
+7.2 s on 5,000,000, on Postgres 17 with two cores. It then adds the column and drops the two old
+indexes, each under `ACCESS EXCLUSIVE`, which holds reads of `events` too, so reads wait only for
+those last statements, which rewrite no row, and for the commit. Its census answers `0`, since it
+refuses and rewrites no row, and the census reports `events`, the table it locks, with its row
+count and size.
 
 From `0136`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back
 its owner's later events from each destination it has not reached. The rows that start doing so

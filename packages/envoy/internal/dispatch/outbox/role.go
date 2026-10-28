@@ -110,10 +110,11 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 // same resolution to its delivery outcomes:
 //
 //   - no claim (the listener's no_holder): reached, nothing sent;
-//   - a claim whose holder's session is gone: the claim is released and resolved again, at most
-//     twice (roles.ResolveHolder); once released, or found already gone, reached with nothing sent;
-//     a claim the store kept (the listener's "holder is not live") and one that churned past the
-//     bound stay pending;
+//   - a claim whose holder's session is gone: the claim is released, and a release that finds a
+//     fresh claim in its place resolves the role once more, two reads of the claim in all
+//     (roles.ResolveHolder, resolutionAttempts); once released, or found already gone, reached
+//     with nothing sent; a claim the store kept (the listener's "holder is not live") and one
+//     replaced again by the second read (roles.Churned) stay pending;
 //   - a read that failed (the listener's lookup failures): pending;
 //   - the holder is item's own actor session (the listener's echo skip): reached, nothing sent;
 //   - a holder whose last heartbeat is older than session.ClaimStaleAfter: pending, where the

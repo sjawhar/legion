@@ -357,11 +357,12 @@ type outcome struct {
 }
 
 // settleEvent returns what event, sent by its batch, came to. An event that could not be read is
-// backed off. One with a send that met a lost connection, the hold's deadline or the process
-// stopping is released; releaseUnacknowledged releases one whose sends NATS did not acknowledge
-// too. One whose destinations could not all be resolved, or a send of which NATS answered with a
-// failure, is backed off. Otherwise one with a destination held back waits on its blockers
-// (holdBack), and one with none is published.
+// backed off. One with a send that met a lost connection or the process stopping is released;
+// releaseUnacknowledged releases one whose sends NATS did not acknowledge too. One with a send that
+// met the hold's deadline settles as released as well, but its batch is left unrecorded, not
+// released (scanBatch): that outcome is never written. One whose destinations could not all be
+// resolved, or a send of which NATS answered with a failure, is backed off. Otherwise one with a
+// destination held back waits on its blockers (holdBack), and one with none is published.
 func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	result := outcome{id: event.event.ID}
 	if event.failure != nil {

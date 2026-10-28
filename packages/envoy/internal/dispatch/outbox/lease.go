@@ -125,9 +125,11 @@ func (o *Outbox) Publishing() bool {
 // connection released), and the holder's one retry timer, armed to the earliest back-off due
 // (nextRetry). Nothing scans on a period.
 //
-// On ctx's end the holder takes no further batch, finishes the one in flight and records it, and
-// releases the hold, which wakes a standby at once. Run returns once that is done and every wake
-// source has stopped.
+// On ctx's end the holder takes no further batch. In the batch in flight it makes no further send,
+// settles the sends still in flight as lost (sendChains), records what NATS already answered and
+// releases the rest (scanBatch), and then releases the hold (publish), which wakes a standby at
+// once. Run returns once that is done and every wake source has stopped; a graceful stop of the
+// process waits for that before it closes the pool, up to cmd/dispatch's outboxStopBudget.
 func (o *Outbox) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
