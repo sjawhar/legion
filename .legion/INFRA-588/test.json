@@ -2,18 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-28T08:47:00Z",
-  "round": 3,
-  "head": "9a4755c2aee076da6867b65cc179e0f6f5830c1a",
-  "codeHead": "5cfd1080069831382a886cc5e72666f5a1274275",
-  "roundNote": "Round 3 answers the red pr-title check by changing the pull request title. No commit changed code: jj diff 5cfd10800698..9a4755c2 names only .legion/INFRA-588/implement.json and test.json. So the round-2 proofs below, all taken at code 5cfd10800698, still apply. This round adds the title proof and a smoke run in the recreated workspace.",
+  "completed": "2026-10-28T10:15:00Z",
+  "round": 4,
+  "head": "b808af2f7f88ad2ee9396dd9d12f58598a419a2b",
+  "codeHead": "b5484b414155aebeb936fd32a64db319b151ccbe",
+  "roundNote": "Round 4 answers the architect's send-back for the controller's ruling (dispatch://INFRA-472, 'Stop new leaks only'): the Dispatch key comes out of the README and the pull request title. b5484b414155 changes only scripts/conflicts/README.md since 5cfd10800698, so the round-2 code proofs below still apply. Round 3's title proofs still apply too, for the new, key-free title.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3: ran pr-title.yaml's own regex (^[a-z]+(\\([^)]+\\))?!?: .+) on the live title: exit 0. Ran it on the old title: exit 1. Read PR Title run 40658794266 (pull_request_review event, head c156b68bd6f6): every step success, the conventional-title step included. Read the failed run 40551347938: it is the conventional-title step's error. Re-fetched the before records into the recreated scratch volume and ran P1 at 9a4755c2: 126/80/253, tiers 89/108, the implementer's figures. Round 2 (same code): drove the open-PR finding myself on one clone, this head against ebeda2541e7f's scripts, and read 61 against 19 PRs, where gh pr list --state open gave 61 open legion/ PRs created by the window's end, 41 not updated since its start; re-ran P1-P4 in a fresh workdir and checked each figure another way."
+    "how": "Round 4: grepped every line the pull request adds outside .legion/ (16 files) for Dispatch keys, for dispatch:// refs and for the project key: no hit. The same grep finds 4 keys in README.md at 5cfd10800698. The live title is conventional and names no key, and check-private-names.sh is clean. I ran the README's reproduce example with <KEY> filled in: 126/80/253, the same as before. Earlier rounds: see each proof entry's headSha."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "No public file the pull request adds names a Dispatch key, and the squash subject (the PR title) does not either (round 4, the controller's ruling under dispatch://INFRA-472)",
+      "surface": "the files the pull request adds or changes outside .legion/, and its title on GitHub",
+      "command": "jj diff --from c892b97df887 --to b808af2f --git over the 16 changed files outside .legion/, added lines grepped -E '\\b[A-Z][A-Z0-9]+-[0-9]+\\b'; grep -nE 'dispatch://|INFRA|LEGSMOKE' scripts/conflicts/**; gh pr view 2411 --json title; bash .github/scripts/check-private-names.sh; the README's 'Reproduce the before measurement' block run with <KEY> filled in",
+      "observed": "no hit in any added line or file (grep exit 1); title 'feat(scripts): measure Legion pull requests' merge conflicts before and after a fix', conventional (exit 0), no key; check-private-names clean (5485 files); README example exit 0, 126 PRs read, 80 carrying, 253 conflicting",
+      "headSha": "b808af2f7f88ad2ee9396dd9d12f58598a419a2b",
+      "negativeControl": "the same grep on scripts/conflicts/README.md at 5cfd10800698 counts 4 lines naming the key"
+    },
     {
       "criterion": "The pull request title passes the required pr-title check (round 3, the red check)",
       "surface": "the pull request title on GitHub, as .github/workflows/pr-title.yaml's 'Require a conventional PR title' step reads it",
@@ -72,7 +80,8 @@
     }
   ],
   "observations": [
-    "CI: at code head 5cfd10800698 lint, typecheck and test are success. The pr-title check: failure there (old title, run 40551347938), success at c156b68bd6f6 (run 40658794266). At 9a4755c2 there are no check runs, because the head is handoff-only with skip-checks. Retro's push carries no trailer, so it runs pr-title again on the final head.",
-    "The round-1 note still applies: no test pins a PR merged exactly at `since` (a mutation that counts it as before the window passes the suite), and the CLI keeps it (round-1 crafted records)."
+    "CI at code head b5484b414155: lint, typecheck, test and pr-title were queued when I read them. At 5cfd10800698, whose code is the same, lint, typecheck and test are success. b808af2f is handoff-only with skip-checks and has no runs; retro's push runs them again.",
+    "Squash commit body: the repository's squash_merge_commit_message is COMMIT_MESSAGES. The 10 code commit subjects end in '(INFRA-588)', so main's commit body will name the key. I reported this to the architect over Envoy. The architect chose to keep the subjects, the same as the branch name and the 'Dispatch:' line, and is raising commit messages with the controller under INFRA-472 (Envoy d02df0df, 10:13Z). The PR body still names the key in the implementer's Before and E2E lines and on the required 'Dispatch:' line; my own E2E line no longer does.",
+    "The round-1 note still applies: no test pins a PR merged exactly at `since`, and the CLI keeps it."
   ]
 }
