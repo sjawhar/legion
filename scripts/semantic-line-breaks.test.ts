@@ -244,3 +244,57 @@ test("a second --write changes nothing when a paragraph holds a tag alone on its
   const twice = await written(once.text);
   expect(twice.text).toBe(once.text);
 });
+
+test("--write refuses a join inside a code span that it misreads as a link destination", async () => {
+  // The script reads up to `d)` as the link's destination, so the line break looks like prose;
+  // mdast reads the code span `c d) e \nf`, whose content the join would change.
+  const text = "See [a](b `c d) e \nf` g.\n";
+  const path = await markdownFile(text);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  expect(result.stderr.toString()).toContain(`${path}: refusing to write: the block at line 1`);
+  expect(result.exitCode).toBe(2);
+  expect(await readFile(path, "utf8")).toBe(text);
+});
+
+test("--write reads a < that opens no valid tag as text, so a code span after it stays masked", async () => {
+  const text = 'See <K, V="x > `code" > here \nand` then more.\n';
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write reads a < that opens no valid tag as text, so a <code> element after it stays masked", async () => {
+  const text = 'See <K, V="x > <code>a" > here \nand</code> then more.\n';
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("a second --write changes nothing when a paragraph holds a line of only :", async () => {
+  const once = await written("Intro text\n:\nmore text\n");
+  expect(once.exitCode).toBe(0);
+  const twice = await written(once.text);
+  expect(twice.exitCode).toBe(0);
+  expect(twice.text).toBe(once.text);
+});
+
+test("a second --write changes nothing when a paragraph holds a line of only -=", async () => {
+  const once = await written("Intro text\n-=\nmore text\n");
+  expect(once.exitCode).toBe(0);
+  const twice = await written(once.text);
+  expect(twice.exitCode).toBe(0);
+  expect(twice.text).toBe(once.text);
+});
+
+test("--write refuses, writing nothing, a re-layout that a second re-layout would change again", async () => {
+  // `[see. Next [a]:` could open a link reference definition, so the line stays apart; once the
+  // sentence break moves `[a]:` to the next line, a second run joins `[see.` onto `Intro text`.
+  const text = "Intro text\n[see. Next [a]: b\n";
+  const path = await markdownFile(text);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  expect(result.stderr.toString()).toBe(
+    `${path}: refusing to write: a second re-layout would change it again (first difference at line 1)\n`
+  );
+  expect(result.exitCode).toBe(2);
+  expect(await readFile(path, "utf8")).toBe(text);
+});

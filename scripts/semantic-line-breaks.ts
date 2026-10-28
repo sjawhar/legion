@@ -8,18 +8,21 @@
 // or by YAML's `...`) and the text of a setext heading byte for byte, and R1 does not read them.
 // It never joins a line onto the one before when the line could open or interrupt a block, nor
 // cuts a line where the new line would start so. It never joins or cuts inside a code span or
-// inline HTML (a tag runs through its quoted attribute values): the content of `<pre>`,
+// inline HTML, read left to right as CommonMark reads them (a tag runs through its quoted attribute
+// values, and a `<` that opens no raw HTML or autolink is text): the content of `<pre>`,
 // `<textarea>`, `<script>`, `<style>`, `<code>`, `<tt>`, `<kbd>` and `<samp>` stays as it is
 // through the close tag.
 //
-// `--write` then writes a file only when two guards hold: the text is the same once whitespace is
-// folded, and the file renders the same, parsed before and after with micromark and its GFM and
+// `--write` then writes a file only when three guards hold: the text is the same once whitespace
+// is folded; the file renders the same, parsed before and after with micromark and its GFM and
 // front matter extensions (CommonMark, GitHub's tables, footnotes, task lists and strikethrough,
-// and YAML front matter, which must stay exactly the same). A construct this script misreads
-// therefore leaves the file as it was and fails loudly, naming the first block whose rendering
-// would change. The comparison ignores only what a re-layout must change: where a line breaks
-// inside text, and whether a list is loose (the blank lines R2 puts between items). Only
-// `--write` loads the parser, so check mode runs without `bun install`.
+// and YAML front matter, which must stay exactly the same); and a second re-layout of the result
+// changes nothing. A construct this script misreads therefore leaves the file as it was and fails
+// loudly, naming the first block whose rendering would change or the first line a second
+// re-layout would change. The rendering comparison ignores only what a re-layout must change:
+// where a line breaks inside text (not inside a code span), and whether a list is loose (the blank
+// lines R2 puts between items). Only `--write` loads the parser, so check mode runs without
+// `bun install`.
 //
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
 import { existsSync } from "node:fs";
@@ -74,11 +77,15 @@ const HTML_TAG_LINE =
  * Text a paragraph line, after its indentation, may not start with when `--write` joins it onto the
  * line before or cuts a line before it, because under CommonMark or GFM it could open a block or
  * end the paragraph: a list marker, `#`, `>`, `|`, a fence, a footnote, a link reference
- * definition's label, a task box, or a whole line that could be a setext underline, a rule or a
- * table delimiter row. startsBlock adds the HTML that could.
+ * definition's label or a task box. startsBlock adds RULE_LIKE_LINE and the HTML that could.
  */
 const CONTINUATION_BLOCK_START =
-  /^(?:[-+*](?:[ \t]|$)|\d+[.)](?:[ \t]|$)|[#>|]|`{3,}|~{3,}|\[\^|\[(?:[^\\\]]|\\.)+\]:|\[[ xX]\](?:[ \t]|$)|[-=*_|: \t]+$)/;
+  /^(?:[-+*](?:[ \t]|$)|\d+[.)](?:[ \t]|$)|[#>|]|`{3,}|~{3,}|\[\^|\[(?:[^\\\]]|\\.)+\]:|\[[ xX]\](?:[ \t]|$))/;
+/**
+ * A whole line that could be a setext underline, a rule or a table delimiter row. Such a line in a
+ * paragraph neither joins onto the line before nor has the line after joined onto it.
+ */
+const RULE_LIKE_LINE = /^[-=*_|: \t]+$/;
 /** A list item line whose content is only a task box: the line after it must stay apart. */
 const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
 /**
@@ -86,6 +93,27 @@ const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
  * joined or cut: a raw-text element, or inline code, whose line breaks GitHub shows.
  */
 const VERBATIM_OPEN = /^<(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\n/>])/i;
+/** Whitespace inside inline HTML: spaces and tabs, and at most one line ending. */
+const TAG_SPACE = String.raw`[ \t]*(?:\r?\n[ \t]*)?`;
+/** CommonMark's open tag: a tag name, attributes each led by whitespace, an optional `/`, `>`. */
+const OPEN_TAG = new RegExp(
+  String.raw`<[A-Za-z][A-Za-z0-9-]*(?:(?=[ \t\r\n])${TAG_SPACE}[A-Za-z_:][A-Za-z0-9_.:-]*(?:${TAG_SPACE}=${TAG_SPACE}(?:[^ \t\r\n"'=<>${"`"}]+|'[^']*'|"[^"]*"))?)*${TAG_SPACE}/?>`,
+  "y"
+);
+/**
+ * CommonMark's other inline raw HTML, read at a `<`: a closing tag, a comment, a processing
+ * instruction, a declaration and CDATA; then its autolinks, a URI (no ASCII control character,
+ * space, `<` or `>`) and an email address.
+ */
+const INLINE_HTML: readonly RegExp[] = [
+  new RegExp(`</[A-Za-z][A-Za-z0-9-]*${TAG_SPACE}>`, "y"),
+  /<!--(?:-?>|[\s\S]*?-->)/y,
+  /<\?[\s\S]*?\?>/y,
+  /<![A-Za-z][^>]*>/y,
+  /<!\[CDATA\[[\s\S]*?\]\]>/y,
+  /<[A-Za-z][A-Za-z0-9+.-]{1,31}:[!-;=?-~\u0080-\uffff]*>/y,
+  /<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*>/y,
+];
 /**
  * A fence line of a YAML front matter block as micromark's front matter extension reads it, both
  * the opener on the first line and the closer: `---`, then only spaces or tabs.
@@ -253,9 +281,11 @@ function definitionTail(rest: string): DefinitionTail | undefined {
  * later line that `closers` accepts, so the two readings share one definition:
  *
  * - "micromark": `---` only, as micromark's front matter extension reads it, which closes no block
- *   at `...`. The guard picks its parser with this. It parses a block `...` closes as ordinary
- *   text (a rule, then a paragraph), and since scanBlocks leaves that block byte for byte, the text
- *   it compares is the same on both sides.
+ *   at `...`. The guard picks its parser with this. Where no later line is `---`, micromark parses
+ *   a block `...` closes as ordinary text (a rule, then a paragraph), which scanBlocks leaves byte
+ *   for byte. Where a later line is `---`, micromark reads every line up to it as the YAML block,
+ *   the `...` and the text after it included, so a re-layout of that text changes the YAML block,
+ *   which must stay exactly the same, and the guard refuses to write the file, which is safe.
  * - "yaml": `---` or `...`, as Jekyll and YAML read it. scanBlocks reads front matter with this:
  *   check mode does not read the block and `--write` leaves it byte for byte.
  */
@@ -536,32 +566,26 @@ function destinationEnd(line: string, from: number): number {
 }
 
 /**
- * Index just past the inline HTML that opens at `from`, or -1 when no `>` closes it. An open tag
- * runs through its quoted attribute values, as in CommonMark: a `"` or `'` after an attribute's
- * `=` opens one, and an open tag with a value no quote closes is none. An element VERBATIM_OPEN
- * opens runs through its close tag, so its content is never joined or cut.
+ * Index just past the inline HTML or autolink that opens at `from`, or -1 when the `<` opens none
+ * under CommonMark's raw HTML rules (OPEN_TAG and INLINE_HTML) and is text. An open tag runs
+ * through its quoted attribute values. An element VERBATIM_OPEN opens runs through its close tag,
+ * so its content is never joined or cut.
  */
 function htmlEnd(text: string, from: number): number {
-  if (text.startsWith("<!--", from)) {
-    const close = text.indexOf("-->", from + 4);
-    if (close !== -1) return close + 3;
+  OPEN_TAG.lastIndex = from;
+  const tag = OPEN_TAG.exec(text)?.[0];
+  if (tag === undefined) {
+    for (const construct of INLINE_HTML) {
+      construct.lastIndex = from;
+      if (construct.test(text)) return construct.lastIndex;
+    }
+    return -1;
   }
-  const openTag = /[A-Za-z]/.test(text.charAt(from + 1));
-  let tagEnd = from + 1;
-  for (; tagEnd < text.length && text[tagEnd] !== ">"; tagEnd++) {
-    if (!openTag || text[tagEnd] !== "=") continue;
-    let value = tagEnd + 1;
-    while (/[ \t\r\n]/.test(text.charAt(value))) value++;
-    const quote = text.charAt(value);
-    if (quote !== '"' && quote !== "'") continue;
-    tagEnd = text.indexOf(quote, value + 1);
-    if (tagEnd === -1) return -1;
-  }
-  if (tagEnd === text.length) return -1;
-  const element = VERBATIM_OPEN.exec(text.slice(from, tagEnd + 1))?.[1];
-  if (element === undefined) return tagEnd + 1;
+  const tagEnd = from + tag.length;
+  const element = VERBATIM_OPEN.exec(tag)?.[1];
+  if (element === undefined) return tagEnd;
   const close = new RegExp(`</${element}[ \\t\\n]*>`, "gi");
-  close.lastIndex = tagEnd + 1;
+  close.lastIndex = tagEnd;
   const match = close.exec(text);
   return match ? match.index + match[0].length : text.length;
 }
@@ -569,9 +593,10 @@ function htmlEnd(text: string, from: number): number {
 /**
  * Which characters of the text are prose: outside inline code spans, inline HTML (a tag or an
  * autolink, and an element such as `<pre>` or `<code>` through its close tag, as htmlEnd reads it)
- * and link destinations.
+ * and link destinations, read left to right, so whichever of a code span and inline HTML starts
+ * first wins and a `<` inside a code span opens no tag.
  * A backtick run with no equal-length run after it in the text is literal text, and so is a `<`
- * no `>` closes. The text may be a whole paragraph, its lines joined with `\n`.
+ * that opens no inline HTML. The text may be a whole paragraph, its lines joined with `\n`.
  */
 function proseMask(text: string): boolean[] {
   const prose = new Array<boolean>(text.length).fill(true);
@@ -586,7 +611,7 @@ function proseMask(text: string): boolean[] {
       const end = close === -1 ? at + run : close + run;
       if (close !== -1) prose.fill(false, at, end);
       at = end;
-    } else if (char === "<" && /[A-Za-z/!?]/.test(text.charAt(at + 1))) {
+    } else if (char === "<") {
       const end = htmlEnd(text, at);
       if (end === -1) {
         at++;
@@ -618,12 +643,14 @@ interface Masked {
 /**
  * Whether a paragraph line, after its indentation, starts with text that could open a block or end
  * the paragraph, so `--write` neither joins it onto the line before nor cuts a line before it, and
- * no sentence starts there: CONTINUATION_BLOCK_START, an HTML block start that may interrupt a
- * paragraph (kinds 1 to 6), or a tag alone on the line (kind 7). Other inline HTML may start it.
+ * no sentence starts there: CONTINUATION_BLOCK_START, RULE_LIKE_LINE, an HTML block start that may
+ * interrupt a paragraph (kinds 1 to 6), or a tag alone on the line (kind 7). Other inline HTML may
+ * start it.
  */
 function startsBlock(text: string): boolean {
   return (
     CONTINUATION_BLOCK_START.test(text) ||
+    RULE_LIKE_LINE.test(text) ||
     HTML_BLOCKS.some(([opens]) => opens.test(text)) ||
     HTML_BLOCK_TAG.test(text) ||
     HTML_TAG_LINE.test(text)
@@ -725,7 +752,9 @@ function wrapLongLine(line: Masked, indent: string): string[] {
  * whole paragraph so a code span or inline HTML a line break cuts in two stays masked. A line
  * stays apart from the one before at a hard break, where that line break is inside a code span or
  * inline HTML, where the line starts with text that could open or interrupt a block, and after a
- * list item that holds only a task box.
+ * line that stands alone. A line stands alone when it is a list item that holds only a task box, a
+ * tag alone on its line, or a RULE_LIKE_LINE: nothing joins onto it, so a second run reads it as
+ * the first did.
  */
 function joinParagraph(source: readonly string[]): Masked[] {
   const mask = proseMask(source.join("\n"));
@@ -737,14 +766,16 @@ function joinParagraph(source: readonly string[]): Masked[] {
     offset += line.length + 1;
     const previous = logical.at(-1);
     const indent = indentLength(line);
+    const above = source[n - 1] ?? "";
     if (
       previous === undefined ||
       HARD_BREAK.test(previous.text) ||
       mask[lineBreak] !== true ||
       startsBlock(line.slice(indent)) ||
-      TASK_BOX_LINE.test(source[n - 1] ?? "") ||
-      // A tag alone on its line stays alone: nothing joins onto it, so a second run reads it so too.
-      HTML_TAG_LINE.test((source[n - 1] ?? "").trimStart())
+      // The line above stands alone.
+      TASK_BOX_LINE.test(above) ||
+      HTML_TAG_LINE.test(above.trimStart()) ||
+      RULE_LIKE_LINE.test(above)
     ) {
       logical.push({ text: line, prose });
       continue;
@@ -828,8 +859,9 @@ interface ParsedNode {
 
 /**
  * A parsed node as it renders: positions dropped, the looseness of lists dropped, and whitespace
- * folded in values that run as text (text, inline code, an image's alt text). Code blocks, HTML,
- * inline or not, and link titles keep their values exactly.
+ * folded in values that run as text (text and an image's alt text). Inline code, code blocks, HTML,
+ * inline or not, and link titles keep their values exactly, so a change inside a code span always
+ * refuses.
  */
 function renderedForm(node: ParsedNode, inText: boolean): unknown {
   const form: Record<string, unknown> = {};
@@ -840,9 +872,8 @@ function renderedForm(node: ParsedNode, inText: boolean): unknown {
     if (key === "children") {
       form.children = node.children?.map((child) => renderedForm(child, childrenInText));
     } else if (
-      (key === "value" || key === "alt") &&
+      ((key === "value" && node.type === "text") || key === "alt") &&
       inText &&
-      node.type !== "html" &&
       typeof value === "string"
     ) {
       form[key] = value.replace(WHITESPACE_RUN, " ");
@@ -925,6 +956,21 @@ function renderDifference(parse: Parse, before: string, after: string): string |
     return `${where} would render differently (a ${was?.type ?? "nothing"} became a ${now?.type ?? "nothing"})`;
   }
   return undefined;
+}
+
+/**
+ * Where a second re-layout would change the re-laid-out text again, or undefined when it is a
+ * fixed point. Its rules are meant to leave their own output as it is: a change here means the
+ * first pass misread a construct, so the file is not written.
+ */
+function secondRelayoutDifference(text: string): string | undefined {
+  const again = relayout(text);
+  if (again === text) return undefined;
+  const lines = text.split("\n");
+  const changed = again.split("\n");
+  let line = 0;
+  while (lines[line] === changed[line]) line++;
+  return `a second re-layout would change it again (first difference at line ${line + 1})`;
 }
 
 function screenRows(lines: readonly string[]): number {
@@ -1020,19 +1066,17 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
     const text = await readText(path);
     if (text === undefined) return 2;
     const next = relayout(text);
+    if (next === text) continue;
     const difference = foldedDifference(text, next);
-    const rendering =
-      difference === undefined && next !== text ? renderDifference(parse, text, next) : undefined;
-    if (difference !== undefined) {
-      process.stderr.write(
-        `${path}: refusing to write: the re-layout would change more than whitespace (${difference})\n`
-      );
-      status = 2;
-    } else if (rendering !== undefined) {
-      process.stderr.write(`${path}: refusing to write: ${rendering}\n`);
-      status = 2;
-    } else if (next !== text) {
+    const refusal =
+      difference === undefined
+        ? (renderDifference(parse, text, next) ?? secondRelayoutDifference(next))
+        : `the re-layout would change more than whitespace (${difference})`;
+    if (refusal === undefined) {
       await writeFile(path, next);
+    } else {
+      process.stderr.write(`${path}: refusing to write: ${refusal}\n`);
+      status = 2;
     }
   }
   return status;
@@ -1040,8 +1084,8 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
 
 // `bun scripts/semantic-line-breaks.ts [--write] <file.md>...` prints `file:line: R<n>: <excerpt>`
 // for each finding and exits 1 when there is one; with `--write` it re-lays out each file in place
-// and exits 2, writing nothing for that file, when the result would differ in more than whitespace
-// or would render differently.
+// and exits 2, writing nothing for that file, when the result would differ in more than whitespace,
+// would render differently, or would change again under a second re-layout.
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const write = args[0] === "--write";
