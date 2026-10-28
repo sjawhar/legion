@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -164,6 +165,17 @@ type cgroupRole struct {
 	WorkingSetBytesMean *float64 `json:"working_set_bytes_mean"`
 	WorkingSetBytesMax  *int64   `json:"working_set_bytes_max"`
 	MaxGapS             float64  `json:"max_gap_s"`
+	// Minutes are the role's figures for each whole minute from window_start, in order (cgroupMinutes);
+	// a minute is null when it has a gap over cgroupMaxGap.
+	Minutes []*cgroupMinute `json:"minutes"`
+}
+
+// cgroupMinute is one whole minute of a role's window: its cores (the usage counter's rise over the
+// minute, its ends interpolated as cores_mean's are, over 60 s) and the mean working set of its good
+// samples.
+type cgroupMinute struct {
+	Cores               float64 `json:"cores"`
+	WorkingSetBytesMean float64 `json:"working_set_bytes_mean"`
 }
 
 // mergeCgroup reduces every sampled role's samples to its figures over the window from ws to we.
@@ -272,7 +284,48 @@ func summarizeCgroupRole(rs *roleSamples, ws, we time.Time) cgroupRole {
 			r.CoresPeak5s = &peak
 		}
 	}
+	r.Minutes = cgroupMinutes(good, cut, ws, we)
 	return r
+}
+
+// cgroupMinutes is the figures of each whole minute from ws to we over the good samples (cut marks
+// the restarts, as restartCuts does). A minute is null when the good samples that span it, from the
+// last one at or before its start to the first at or after its end, hold two consecutive ones over
+// cgroupMaxGap apart, or when no good sample brackets one of its ends: its figures would rest on
+// the samples around a gap, not on samples in it.
+func cgroupMinutes(good []cgroupSample, cut []bool, ws, we time.Time) []*cgroupMinute {
+	out := make([]*cgroupMinute, int(we.Sub(ws)/time.Minute))
+	for m := range out {
+		from := ws.Add(time.Duration(m) * time.Minute)
+		to := from.Add(time.Minute)
+		lo := sort.Search(len(good), func(i int) bool { return good[i].At.After(from) }) - 1
+		hi := sort.Search(len(good), func(i int) bool { return !good[i].At.Before(to) })
+		if lo < 0 || hi == len(good) {
+			continue
+		}
+		// With both ends bracketed and no gap over cgroupMaxGap, at least one good sample lies in the
+		// minute (from its start, inclusive, to its end), so the working-set mean has a sample.
+		span := good[lo : hi+1]
+		gap := false
+		var wsSum float64
+		n := 0
+		for i := range span {
+			if i > 0 && span[i].At.Sub(span[i-1].At) > cgroupMaxGap {
+				gap = true
+				break
+			}
+			if s := &span[i]; !s.At.Before(from) && s.At.Before(to) {
+				wsSum += float64(s.workingSet())
+				n++
+			}
+		}
+		if gap {
+			continue
+		}
+		usec, _ := counterBetween(span, cut[lo:hi+1], from, to, usageUsec)
+		out[m] = &cgroupMinute{Cores: usec / 1e6 / time.Minute.Seconds(), WorkingSetBytesMean: wsSum / float64(n)}
+	}
+	return out
 }
 
 // restartCuts marks, for each good sample after the first, whether a restart lies between it and
