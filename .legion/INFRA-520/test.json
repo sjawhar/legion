@@ -2,63 +2,62 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T17:00:00Z",
-  "round": 9,
-  "headTested": "c54255a0bab80bc5b1f01c09355526eee0ff75ca (code head df1f30f5568f)",
-  "ruleTested": "dispatch://INFRA-520/comment/0c005b9d-63fa-4719-a3ae-28600dbe8c70 and the architect's 15:58Z decision: a command the check does not reduce counts as reading every Go file of the repository, and go_notices and envoy_smoke must select any Go change or be rewritten into reduced forms.",
-  "previousFailures": "Round 8's finding is fixed. df1f30f5 replaces the module fallback with every_go_file: every .go file plus every go.mod, go.sum, go.work and go.work.sum of the repository. My red case (71dfada1) passes.",
-  "ci": "CI run 40723377210 at df1f30f5 (created 16:10:43Z) was queued at 16:55Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it.",
+  "completed": "2026-10-28T18:50:00Z",
+  "round": 10,
+  "headTested": "e3044b12bfa583384a1103a214353c9576237e19 (code head 757229848e8c)",
+  "previousRound": "Review round 2 (review.json at 3ed7e4d4) asked for six things: the fallback over every file under a Go module, envoy_go and envoy_smoke narrow again through exact script entries, a step-level change falling to everything, -race read, README, and docs-pages' bounds. 75722984 answers all six. 44544200 merges main up to 53f39ba0 (#2300).",
+  "ci": "CI run 40741975291 at 75722984 (created 18:06:16Z) was queued at 18:45Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it. Main's #2233 reds are not this pull request's (controller, dispatch://INFRA-520/comment/6def465e-6c18-472c-b6d1-998ffd76ab1f).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At c54255a0. check-ci-filters.test.sh: 81 passed, 0 failed, including my red cases from rounds 3 to 8 (5b6fb964, 0c15655f, 0f243125, dc1e05b6, 71dfada1). check-ci-filters.sh on the tree exits 0: 24 gates (envoy-go 2653 files, envoy-smoke 2029, the lint notices step 2103), and docs-pages.yaml's on.push.paths equals the docs filter. check-image-trigger-paths.sh passes (5 image builds), and its tests print 991 passed. ci-ok.test.sh: 42 passed. The ci.yaml change adds an any_go_change anchor (`**/*.go`, `**/go.mod`, `**/go.sum`, `**/go.work`, `**/go.work.sum`) to envoy_go and go_notices, and the same five globs written out in envoy_smoke (check-image-trigger-paths.sh reads that filter as plain globs). With workflow_paths.PathsFilter under some-with-excludes, go_notices, envoy_smoke and envoy_go each match new.go at the root, packages/daemon/internal/zz/x.go, packages/envoy/infra/core/x_test.go, scripts/tool/main.go, packages/envoy/infra/go.sum, go.work.sum and .github/x/y.go. No file is missed."
+    "how": "At e3044b12. check-ci-filters.test.sh: 113 passed, 0 failed, including every tester red case from rounds 3 to 8. check-ci-filters.sh on the tree exits 0: 24 gates (envoy-go 1941 files, envoy-smoke 179), and docs-pages.yaml's on.push.paths equals the docs filter. check-image-trigger-paths.sh passes (5 image builds). ci-ok.test.sh: 42 passed. actionlint v1.7.7 on ci.yaml exits 0. With workflow_paths.PathsFilter, envoy_go matches .github/go-release-targets.json, scripts/go-third-party-notices.sh, the listener and envoy-infra files, and not packages/daemon/internal/zz/x.go. envoy_smoke matches the envoy-infra plugin's command and not the daemon file. Both are narrow again. The exact entries (ci_job_reads.py:314-330, 559-568, 651-654) pin envoy-go's unit-test and pack scripts and envoy-smoke's schema script whole. Their Runs (./... with ./internal/dispatch/api for the unit tests; ./cmd/listener per architecture in go-release-targets.json with GOOS/GOARCH; ./cmd/pulumi-resource-envoy-infra) cover what each script compiles. #2300's merged change to the deleted envoy-and-contracts.yaml (pi-legion's NATS service and LEGION_TEST_NATS_URL) is in ci.yaml's pi-legion job (nats:2.10@sha256:5498ba57…, LEGION_TEST_NATS_URL nats://127.0.0.1:4222). README.md:166 names docs-pages.yaml. docs-pages.yaml:195-196 and docs/site/README.md:13 state the 3,000-file and 100-pending bounds. GitHub reports #2316 MERGEABLE."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Filter drift, conservative rule: a command the check does not reduce falls wide, so moving it into another module can only fail the check",
+      "criterion": "Filter drift, conservative rule: a step-level change around a simple go line, and any edit to a pinned script, fall to everything",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the command ci.yaml's ci-filters job runs",
-      "command": "ci.yaml:1443 (test job, 'Test the Go daemon', working-directory packages/daemon) changed to `cd ../envoy && go test -count=1 -timeout 20m ./...`, then `PATH=<venv with PyYAML>:$PATH .github/scripts/check-ci-filters.sh`, then reverted",
-      "observed": "exit 1, with 20 errors like '::error file=packages/envoy/cmd/agent-secrets-devrelay/main.go::test reads packages/envoy/cmd/agent-secrets-devrelay/main.go, which its filter test does not match … job test step \"Test the Go daemon\" runs `cd ../envoy && go test -count=1 -timeout 20m ./...`, which this check does not reduce …'. The unmodified tree exits 0 with 24 gates",
-      "headSha": "df1f30f5568f",
-      "negativeControl": "At 10c4560f (module fallback) the same edit exited 0 ('test: 3434 files, 0 uncovered')"
+      "command": "Five ci.yaml edits, each reverted after, then `PATH=<venv with PyYAML>:$PATH .github/scripts/check-ci-filters.sh`: (1) daemon-go-postgres-16's step as `run: |` with `cd ../envoy` before the unchanged go line (the reviewer's probe); (2) `shell: bash --noprofile --norc -eo pipefail {0}` on 'Test the Go daemon'; (3) envoy-go's pinned unit-test script with `../../packages/daemon/...` added to its go list; (4) `env: GOFLAGS: -tags=probe` on that step; (5) that step's working-directory moved to packages/envoy/infra",
+      "observed": "Each exits 1 with 22 to 24 named files, e.g. (1) 'daemon-go-postgres-16 reads packages/envoy/.changes/unreleased/….yaml, which its filter daemon_go_postgres_16 does not match …'; (3) 'envoy-go reads packages/daemon/.gitignore … step \"Unit test envoy Go package\"'s pinned script, which this check does not reduce (the step's script is not the pinned text), so it counts as reading every …'; (4) '… (step \"Unit test envoy Go package\"'s env sets GOFLAGS) …'; (5) '… (its step runs in packages/envoy/infra, the entry's in packages/envoy) …'. The unmodified tree exits 0",
+      "headSha": "757229848e8c",
+      "negativeControl": "At a87f1fec the reviewer's probe (1) exited 0 ('daemon-go-postgres-16: 3003 files, 0 uncovered'). The non-.go files now named (a .changes yaml, .gitignore) show the fallback covers every file under a Go module, not only .go files"
+    },
+    {
+      "criterion": "Filter drift: a -race go line's closure includes the files the race build constraint compiles in",
+      "surface": ".github/scripts/check-ci-filters.sh on the repository tree",
+      "command": "packages/envoy/racehelper/h.go plus packages/daemon/internal/record/zz_race_test.go (//go:build race, importing github.com/sjawhar/envoy/racehelper), then check-ci-filters.sh, then both files removed",
+      "observed": "exit 1: '::error file=packages/envoy/racehelper/h.go::test reads packages/envoy/racehelper/h.go, which its filter test does not match … \"Test the concurrent packages under the race detector\": go test -count=1 -race ./interna…'",
+      "headSha": "757229848e8c",
+      "negativeControl": "The reviewer recorded exit 0 for the same probe at a87f1fec ('test: 3435 files, 0 uncovered')"
     },
     {
       "criterion": "Filter drift: the push-only docs workflow's paths are held equal to the docs filter",
-      "surface": ".github/scripts/check-ci-filters.sh on the tree, with .github/workflows/docs-pages.yaml",
-      "command": "docs-pages.yaml's push path `scripts/third-party-notices.ts` renamed to `scripts/third-party-notices-renamed.ts`, check-ci-filters.sh, reverted",
-      "observed": "exit 1: on.push.paths lacks scripts/third-party-notices.ts, which the docs filter has, and has scripts/third-party-notices-renamed.ts, which the filter lacks. The unmodified tree reports the paths equal to the filter",
-      "headSha": "e1b679415f75",
-      "negativeControl": "the renamed path is the negative control itself; the unmodified file passes"
+      "surface": ".github/scripts/check-ci-filters.sh with .github/workflows/docs-pages.yaml",
+      "command": "docs-pages.yaml's push path scripts/third-party-notices.ts renamed (round 7, e1b67941); at e3044b12 the unmodified tree reports 'every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'",
+      "observed": "The renamed path fails the check, naming the missing and the extra pattern. The unmodified tree passes",
+      "headSha": "757229848e8c",
+      "negativeControl": "the renamed path"
     },
     {
       "criterion": "Final job semantics and re-run safety",
       "surface": ".github/scripts/ci-ok.sh with ci.yaml's SELECTED_BY",
-      "command": "9 crafted NEEDS cases (round 3), and ci-ok.test.sh at c54255a0 (42 passed)",
-      "observed": "A selected job left skipped (the failed-only re-run case), changes failed, lint failed, an unselected job cancelled, and a draft each fail. Nothing selected, a selected job that succeeded, and a merge group with worker_image skipped each pass",
+      "command": "9 crafted NEEDS cases (round 3); ci-ok.test.sh at e3044b12 (42 passed)",
+      "observed": "A selected job left skipped, changes failed, lint failed, an unselected job cancelled, and a draft each fail. The pass cases pass",
       "headSha": "8f85e3ef6c14d0fff4e62a2da2624dd52d8803c0",
       "negativeControl": "'::error::envoy-go ended skipped, but changes selected it …'"
     },
     {
-      "criterion": "2. A change to one file selects exactly the jobs that read it",
-      "surface": "GitHub Actions, scratch pull request #2393",
-      "command": "https://github.com/sjawhar/legion/actions/runs/40486662393 (changes log)",
-      "observed": "'Filter envoy_go_race = true', 'Filter typecheck = false'; exactly the jobs PathsFilter predicts",
-      "headSha": "8adfe9cab8bcb728080d27a2397c2f5959a87a0b",
-      "negativeControl": "the pre-port filter selects every job but envoy_go_race for that file"
-    },
-    {
-      "criterion": "A closed pull request cancels its waiting CI run",
-      "surface": "GitHub Actions, scratch pull request #2450",
-      "command": "https://github.com/sjawhar/legion/actions/runs/40671505592; gh pr close 2450",
-      "observed": "'CI (closed pull request)' run 40671584176 started 2 s after the close, and the CI run ended cancelled with no job on a runner",
+      "criterion": "2. A change to one file selects exactly the jobs that read it; a closed pull request cancels its waiting run",
+      "surface": "GitHub Actions, scratch pull requests #2393 and #2450",
+      "command": "https://github.com/sjawhar/legion/actions/runs/40486662393 (changes log); https://github.com/sjawhar/legion/actions/runs/40671505592 and gh pr close 2450",
+      "observed": "#2393 selected exactly the jobs PathsFilter predicts. #2450's CI run ended cancelled 2 s after the close, with no job on a runner",
       "headSha": "8f85e3ef6c14d0fff4e62a2da2624dd52d8803c0",
-      "negativeControl": "#2316's own queued run in another group stayed queued"
+      "negativeControl": "the pre-port filter selects every job but envoy_go_race for #2393's file; #2316's own queued run stayed queued through #2450's close"
     }
   ],
   "notProven": [
-    "No CI run of a #2316 head has completed: run 40723377210 at df1f30f5 is queued. Main's #2233 reds are not this pull request's (controller, comment 6def465e).",
+    "No CI run of a #2316 head has completed: run 40741975291 at 75722984 is queued.",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
-    "The every-Go-file fallback counts .go and module files, as decided. A command moved by a cd into another module also reads that module's non-Go files (testdata, embedded files, fixtures read through ..), which the fallback does not count. A change to only such a file would not select the job. This is the decided rule's boundary, not a departure from it."
+    "The Runs of an exact script entry are kept by hand. The check proves the filter covers them, and that any change to the script falls to everything, but not that the Runs name all an unchanged script compiles. I read the three scripts against their Runs and found them complete."
   ]
 }
