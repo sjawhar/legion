@@ -2,56 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T10:20:00Z",
-  "round": 5,
-  "headTested": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c (code head 1e673f40; meta.json build_commit bdc451d3, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod. The pod had been replaced, so I built a fresh LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120, /legion/scratch/tmp/lt-tester.env) with the one run-step.sh command: setup, installs, initdb, seed at migration 129 in 1,113 s. box_busy_before was 0.8-0.9% on the steps read. The stack is stopped; the seed is kept.",
+  "completed": "2026-10-28T12:00:00Z",
+  "round": 6,
+  "headTested": "0ad55022016a6eca87857f78b9d37dd06ae8a704 (code head d32d754f, the forward merge of main; meta.json build_commit 0ad55022, build_dirty false)",
+  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120). I reseeded with the merged build: stack.sh seed --force, migration 134, 1,043 s. box_busy_before was 1.1-3.7%. The stack is stopped; the seed is kept.",
+  "rebaseRecheck": "Unchanged-diff fingerprint 1e673f40 -> d32d754f: 4d6cb22956731f04b09bf349b53bb0638582f381b9be08a7f10b55ed78df85c9 -> 07cabb65e96b47f28252e2a8f4cf77361d83cd9209e5fcfdc8da7e448c2d7fad, changed. A diff of the two branch diffs shows one difference: the packages/envoy/CHANGELOG.md entry moved into packages/envoy/.changes/unreleased/pr2369-Added-20261028-102101.yaml, main's changie format. No code line differs. Because the fingerprint changed, and the merge brought main's Dispatch (migrations 0130-0134, all plain SQL in one migration transaction), which the harness builds and measures, I ran a full real-surface round, not only the bare gates.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's two foreign runs: -pg naming a database without the trigger, and -pg unreachable. I checked the exit, the marks in every table, meta.json and a token scan. Then smoke, a 1x step, routes-alt (no writes, so no commit rows to read), a killed Dispatch, the negative controls and a 60 s series, all on my own fresh stack. The red test commits_unread_test.go is unchanged since my commit a4e846c7; the implementer reports it passing, and CI has not run it at this head (failure 1)."
+    "how": "I confirmed MERGEABLE, recomputed both fingerprints and diffed the two branch diffs: the only difference is the changelog fragment, as the implementer reported. I re-ran its smoke step after reseeding at the merged build, then the rest of A1-A6, the stack-exit failure, the unread-commit fix, the run lock and the negative controls."
   },
-  "failures": [
-    {
-      "criterion": "The head can merge and carries CI: GitHub runs the required checks and envoy-go (which runs the red tests) only on a head that merges cleanly with main",
-      "evidence": "gh pr view 2369 --json mergeable -> CONFLICTING at head bdc451d3, read at 09:2xZ and again at 10:2xZ on 2026-10-28. gh api commits/<sha>/check-runs -> zero check runs at code head 1e673f40 and at handoff head bdc451d3. Since the branch's last merge of main, main has changed packages/envoy/CHANGELOG.md (+203/-), packages/envoy/AGENTS.md and .github/workflows/envoy-and-contracts.yaml, all of which this branch edits. The architect agreed (Envoy, 09:25Z) to complete as fail naming the conflict, so the implementer merges forward. The next round compares the unchanged-diff fingerprints and runs the bare gates."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Round-4 failure: a step whose commit rows were not read shows '-' with a mark, never a measured zero, and fails",
-      "surface": "stack.sh loadgen run -allow-foreign and loadgen tables on the real local stack",
-      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign <all eight flags for the local stack> -pg 'postgres://postgres@127.0.0.1:25432/postgres?sslmode=disable' -nats-server-name <stack name> -name foreign-notrigger -events 1 -sessions 10 -requests 2 -duration 30s -warmup 5s -grace 5s; loadgen tables; then the same with -pg 'postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable' as foreign-unreach",
-      "observed": "foreign-notrigger rc=1: 'loadgen run: the run's commit rows were not read (summary.json events.commits_error: read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation \"loadtest.event_commits\" does not exist (SQLSTATE 42P01)); the step's committed, receipt and de[livery columns do not measure the load]'. Events row '| foreign-notrigger (commit rows not read) | ... | 1.00 / 1.03 / - | 0 / 0 | - | - | - | ...'; kinds '(- / 1)', '(- / 8)', '(- / 9)', '(- / 8)', '(- / 5)'; Resources and SSE rows marked, with 'Dispatch CPU-s per operation' '-'; the note in 4 tables. The lock, ungranted and xid tables are unmarked with real values, because their reads on that database worked. foreign-unreach rc=1, same commit mark; Resources '(commit rows not read) (7 failed reads)'; lock, ungranted and xid rows '(1 failed reads)' with '-' cells; meta.json postgres_version '' and postgres_version_error 'failed to connect ...'. Neither run left either token in any step file or in its output.",
-      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
-      "negativeControl": "smoke-r5 and step-1x-r5 on the stack's own database: exit 0, commits_error null, no 'not read' or 'failed reads' text in TABLES.md; routes-alt-r5 (events 0, so no markers to read): exit 0, commits_error null, no mark"
+      "criterion": "Tester round-5 failure: the head merges with main and its own diff is unchanged in code",
+      "surface": "GitHub pull request #2369; jj fingerprint per skill legion-worker/references/conflicts-and-rewrites.md",
+      "command": "gh pr view 2369 -R sjawhar/legion --json mergeable,mergeStateStatus; the unchanged-diff fingerprint at 1e673f40 and d32d754f; diff of the two fingerprinted branch diffs",
+      "observed": "MERGEABLE (merge state BLOCKED, awaiting review and checks); fingerprint 4d6cb229... -> 07cabb65...; the only difference is CHANGELOG.md's entry replaced by .changes/unreleased/pr2369-Added-20261028-102101.yaml. CI at d32d754f when read: changes, lint, typecheck and pr-title success; test in progress; envoy-go, envoy-e2e-local and envoy-smoke queued. CI steps for run-step.test.sh and common.test.sh are still in envoy-and-contracts.yaml after the merge (lines 1118, 1121)",
+      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
+      "negativeControl": "at the previous head bdc451d3 GitHub reported CONFLICTING and ran no checks at all"
     },
     {
-      "criterion": "A1/A3 at this head: five kinds, N sessions on agent and issue topics, delivery from arrival and from commit",
-      "surface": "packages/envoy/loadtest CLI, fresh stack built and seeded by run-step.sh",
-      "command": "run-step.sh smoke-r5 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20 (from an empty LOADTEST_ROOT)",
-      "observed": "done in 1,375 s, the seed included; 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered; receipts 865/865; 50 registered; delivery p50/p99 from arrival 377/1,335 ms, from commit 36/424; clock_anomalies 0; lock, sampler and xid read errors 0; Postgres version 16.2 recorded; xids 7.6/s",
-      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
-      "negativeControl": "--event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1; events max id 10004 before and after"
+      "criterion": "A1/A3 on the merged build: seed through Dispatch, five kinds, N sessions, delivery from arrival and from commit",
+      "surface": "packages/envoy/loadtest CLI",
+      "command": "stack.sh setup && stack.sh start && stack.sh seed --force; run-step.sh smoke-r6 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20",
+      "observed": "seed migration 134, 1,043 s, 4 projects / 1,000 issues / 8,000 comments / 10,004 events; smoke-r6 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, 50 registered, delivery p50/p99 from arrival 379/1,560 ms, from commit 33/423, clock_anomalies 0, commits_error null, all read-error counts 0, 179 SSE frames, no mark in TABLES.md",
+      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
+      "negativeControl": "--event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1; route mix POST on line 3 -> 'line 3: method \"POST\" is refused', exit 1; events max id 10004 before and after"
     },
     {
-      "criterion": "A4 and the stack-exit failure at this head",
+      "criterion": "A4 on the merged build: the 1x step reproduces the first knee",
       "surface": "same",
-      "command": "run-step.sh step-1x-r5 --events 4 --sessions 400 --requests 60; run-step.sh killed-r5 --events 1 --sessions 20 --requests 5 --duration 60s with kill -KILL <stack.json pids.dispatch> 45 s into the window",
-      "observed": "step-1x-r5 exit 0: lock held 100%, waiters p50 44, 1.58 of 3.99 events/s committed, 1,425/1,425 receipts. killed-r5 EXIT=1: 'dispatch (pid 13022) exited during the step ...', row 'killed-r5 (dispatch exited)'",
-      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
-      "negativeControl": "route-mix POST on line 3 -> 'line 3: method \"POST\" is refused', exit 1; -url $DISPATCH_URL -> '-url differs from stack.json ... refused', exit 1"
+      "command": "run-step.sh step-1x-r6 --events 4 --sessions 400 --requests 60; run-step.sh step-1x-report-mix-r6 ... --event-mix report-2026-10-27; the series' step-1x",
+      "observed": "step-1x-r6: lock held 100%, waiters p50 45, 1.29 of 3.99 events/s, receipts 1,165/1,165; series 1x: held 100%, waiters 43, 1.19; report mix: held 100%, waiters 48, 2.90 of 3.83 (root report step-1x 2.89 of 4.12)",
+      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
+      "negativeControl": "the series' step-0.25x: lock held 8.7%, waiters p50 0, 0.98 of 0.98 committed"
     },
     {
-      "criterion": "A2, A5, A6 at this head",
+      "criterion": "Earlier fixes on the merged build: a stack exit fails the step, unread commit rows are marked, one run per root, the guard refuses production",
+      "surface": "same",
+      "command": "run-step.sh killed-r6 ... with kill -KILL <pids.dispatch> 45 s into the window, and run-step.sh conc-r6 during it; stack.sh loadgen run -allow-foreign with every flag for the local stack and -pg .../postgres (no trigger); stack.sh loadgen run -allow-foreign with -url $DISPATCH_URL -listener $ENVOY_URL and the stack's tokens",
+      "observed": "killed-r6 EXIT=1 'dispatch (pid 32578) exited during the step ...', row '(dispatch exited)'; conc-r6 refused 'in use by another run (pid 32126 ...: bash packages/envoy/loadtest/run-step.sh killed-r6 ...)'; foreign-notrigger rc=1, rows '(commit rows not read)' with '1.00 / 1.03 / -' and '(- / n)'; production run rc=1 'guard: dispatch check failed ... answered 401'; no token in any step file or output",
+      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
+      "negativeControl": "production Dispatch, the party the guard must refuse: refused with 401 before any write; -url $DISPATCH_URL without -allow-foreign refused before any connection"
+    },
+    {
+      "criterion": "A2, A5, A6 on the merged build",
       "surface": "same; README.md",
-      "command": "run-series.sh --duration 60s; run-step.sh routes-alt-r5 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series, smoke-r5 and foreign-unreach TABLES.md searched in backticks in README.md",
-      "observed": "series-20261028T100014Z exit 0, six complete step directories, 8 tables, no commits_error, 1x held 100%; routes ['other GET /api/v1/projects'], 294/294 2xx; 47 headers ok, 0 missing; README names '(commit rows not read)' in 9 places",
-      "headSha": "bdc451d347ef0b97ec376e00571fd82e11a0ba5c",
-      "negativeControl": "run-series.sh's own step runs pass the run lock; a series step with no commit error is not marked"
+      "command": "run-series.sh; run-step.sh routes-alt-r6 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series, smoke-r6 and foreign-notrigger TABLES.md searched in backticks in README.md",
+      "observed": "series-20261028T112009Z exit 0, one build line, all six steps build 0ad55022, each with summary.json, TABLES.md, cpu.pprof, heap.pprof, 8 tables, lock held 9%, 31%, 100%, 94%, 0%, 69%, no commits_error, no stack exit; routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0; 47 headers, 0 missing",
+      "headSha": "0ad55022016a6eca87857f78b9d37dd06ae8a704",
+      "negativeControl": "run-step.sh during a running step refused (conc-r6, above)"
     }
   ],
   "observations": [
-    "No defect found in the round-4 fix. The only failure is the merge conflict, and the CI it blocks."
+    "1x committed on the merged build: 1.29 and 1.19 events/s, lock held 100%; within the spread of earlier rounds (0.23-1.95)."
   ]
 }
