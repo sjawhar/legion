@@ -204,6 +204,9 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
 	}
+	doc := func(blocks ...*Node) *Node {
+		return &Node{Type: "doc", Children: blocks}
+	}
 	definition := func(label string) *Node {
 		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": label}, Children: []*Node{paragraph("x")}}
 	}
@@ -215,25 +218,17 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 		name string
 		doc  func(int) *Node
 	}{
-		{"a run of *", func(size int) *Node {
-			return &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("*", size))}}
-		}},
-		{"a run of _", func(size int) *Node {
-			return &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("_", size))}}
-		}},
-		{"a run of ~", func(size int) *Node {
-			return &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("~", size))}}
-		}},
-		{"[^a before one ] with no footnote", func(size int) *Node { return &Node{Type: "doc", Children: []*Node{paragraph(labels(size))}} }},
+		{"a run of *", func(size int) *Node { return doc(paragraph(strings.Repeat("*", size))) }},
+		{"a run of _", func(size int) *Node { return doc(paragraph(strings.Repeat("_", size))) }},
+		{"a run of ~", func(size int) *Node { return doc(paragraph(strings.Repeat("~", size))) }},
+		{"[^a before one ] with no footnote", func(size int) *Node { return doc(paragraph(labels(size))) }},
 		{"[^a before one ] with a short label defined", func(size int) *Node {
-			return &Node{Type: "doc", Children: []*Node{paragraph(labels(size)), definition("a")}}
+			return doc(paragraph(labels(size)), definition("a"))
 		}},
 		{"[^a before one ] with a long label defined", func(size int) *Node {
-			return &Node{Type: "doc", Children: []*Node{paragraph(labels(size)), definition(strings.Repeat("b", 1000))}}
+			return doc(paragraph(labels(size)), definition(strings.Repeat("b", 1000)))
 		}},
-		{"line feeds", func(size int) *Node {
-			return &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("a\n", size/2))}}
-		}},
+		{"line feeds", func(size int) *Node { return doc(paragraph(strings.Repeat("a\n", size/2))) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			growsLinearly(t, "rendering "+test.name, []int{renderFullTarget / growthStep, renderFullTarget}, linearSlack, func(size int) (time.Duration, error) {
