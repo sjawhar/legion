@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-546",
+  "completed": "2026-10-28T15:22:57Z",
+  "round": 6,
+  "reviewedHead": "pushed with this handoff, above 015e5616ddd3b2f2520975776425401d0b74666e",
+  "codeHead": "07b2cc7c310dcd07c9bb03d7175d672a7082ef6d",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "whyNewRound": "After retro (c14bc96d, d63659db), main was merged forward on a GitHub conflict (07b2cc7c). The fingerprint against my round-5 approval f5bf811c changed (9eb94a30... -> a47a7941...), in one line of .dispatch/architecture/envoy-listener.md, so this is a new round, with the thermonuclear pair run again.",
+  "verified": "The merge resolution is byte-identical to git merge-tree except the two conflicted docs. Each of those keeps main's text and the PR's: the AGENTS.md CI-record bullet is main's, the duplicate-window bullet is the PR's, and envoy-listener.md carries both sentences. Main's runtime changes in overlapping files leave the PR's behaviour intact. The outbox settle switch still backs off ErrStreamFull and releases ErrNotStored-wrapping-ErrUnavailable, never dead-letters. The cistore summary loop still opens envoy_ci_state through EnsureKeyValue and retries a non-ErrRefused publish failure on the next tick. Keeper wiring in both programs is unchanged. The changie fragments render under main's .changie.yaml (changie v1.26.0).",
+  "ci": "At code head 07b2cc7c (compare to 015e5616: handoffsOnly true), read 2026-10-28T15:22Z: lint, typecheck, test success (pr-title has one cancelled run of an earlier event); envoy-go, envoy-go-race, envoy-smoke success. Not required and not this diff: envoy-infra-go fails TestDispatchConnectionsPerPodIsTheServers (83 vs 84), which is identical at main's 08572e01, the fork point (main has since fixed it, now 86, in files this PR does not touch). dispatch fails 3 Playwright e2e tests (mermaid timing, recipients-claim); this merge and the PR touch no packages/dispatch file.",
+  "thermonuclear": "At 015e5616 (code 07b2cc7c): deep-review APPROVE, no finding (go build, go vet, cistore, bus and cmd/listener tests pass); code-quality APPROVE, no finding (testnats and cistore tests pass).",
+  "keyFindings": []
+}
