@@ -2,27 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-28T16:07:00Z",
-  "decision": "changes_requested",
-  "round": 10,
-  "headReviewed": "28dbd8954f54a93f227bb8ef9e3abbf27a735afc",
-  "codeHead": "233a8d614b19",
-  "previousReview": "5684279185 (APPROVE at 804737c8)",
-  "fingerprint": "847de598bf335cd0b164a6c095fe5b9d2be3c89d2c8ea634fc68dae9c52045e1 (804737c8) -> d44f78a64e7eeb0e04dfa02ea39aba7a853a9471fc2a2868ef93c8ebe45989af (28dbd895): changed, so a new round. The two PR diffs differ in: the migration renumber 0135 -> 0136, rebuild.go's merged doc comment, the slices import now from main, and the proof-editor AGENTS.md counts.",
+  "completed": "2026-10-28T19:04:00Z",
+  "decision": "approved",
+  "round": 11,
+  "scope": "The architect set round 11 to drop the committed packages/claude-envoy/dist and legion changes, correct the Size note, and plan #2423's post-merge step; approve once dist and legion match main and CI passes at the code head.",
+  "headReviewed": "c141c24df9fd4963f5cf6958ec4daeabb31d82a3",
+  "codeHead": "20b70d81f75e",
+  "previousReview": "5685840104 (REQUEST_CHANGES at 95a52c1f)",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "localRuns": "go build and vet clean; pmdoc (CI=1, engine included), docs, api, refs and store tests filtered to the PR's areas pass; contracts 112, envoy-client dispatch-execute 273 and proof-editor 161 pass; check-dist under Bun 1.4.4 matches.",
-  "mainInteraction": "#2361 (CommonMark escapes) does not touch directive.go, and the editor decodes directive attributes in HTML-attribute mode, so the PR's html.UnescapeString id decoding stays right. #2233's closed-issue index path keeps pointers (the deep review's scratch test). 0135_server_processes touches no graph table, no main migration restates graph_edges, and main added no edge kind. rebuild.go's merge is comment-only, and the closed-issue seed path and refuseBlockPointers never run on the same rebuild.",
-  "ci": "CI head 233a8d61 (compare to 28dbd895: handoffsOnly true, 2 files): all checks were queued at 15:45Z. A request for changes does not wait on CI.",
+  "items": "20b70d81 changes only dist/dispatch.js, envoy-channel.js and session-hook.js, restoring them byte-for-byte to the merge base's main (690c0136): `git diff 690c0136 20b70d81 -- packages/claude-envoy/dist packages/claude-envoy/legion` is empty, so the PR carries no dist or legion change. (Main's rebuild workflow has since committed newer bundles; the PR's diff against its merge base still carries none.) The pr2394 claude-envoy fragment is kept. The Size note says dist and legion match main. The Production line names the Rebuild Claude Envoy plugin run after the merge and bun run check-dist at the commit it lands. No source changed.",
+  "thermonuclear": "Not run: the round's diff restores generated bundles to main's bytes and changes no source or runtime code.",
+  "ci": "Every latest check-run at code head 20b70d81 (compare to c141c24d: handoffsOnly true, 2 files) completed success or skipped, including the required lint, typecheck, test and pr-title, except dispatch. The Worker Image build first failed in its TLS probe (chromium killed probing an emSign test endpoint); the PR touches no worker-image file, and one rerun passed. dispatch fails on e2e/mermaid.e2e.ts:194 (four browsers) and e2e/recipients-claim.e2e.ts:310: main's dispatch job fails on the same rows (jobs 122936131980 at 1072ddf9 and 122934645482 at 139c61b3), so they are main's (fixes: INFRA-138's tree and #2324), as the architect noted.",
   "threads": "18, all resolved; no new thread.",
-  "bodyEdit": "The reviewer corrected the PR body's 'Look at first' line to migration 0136.",
-  "fileSize": "api/server.go is now 1001 lines (main took it from 970 to 999; the PR adds 2). Accepted: writeHandlerError is the API's single error-to-status map, and this PR's branch belongs in it beside the other pmdoc sentinels.",
-  "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 28dbd895. Medium: the merge kept the PR's built packages/claude-envoy/dist changes, which main's #2423 (78d5f6b61, inside the merge) forbids. Minor: the body's 'Look at first' named 0135 (fixed by the reviewer).",
-    "codeQuality": "Verdict: CHANGES at 28dbd895. server.go crosses 1000 lines (accepted, see fileSize). Merge resolution and main interaction are sound."
-  },
-  "keyFindings": [
-    {"severity": "important", "file": "packages/claude-envoy/dist", "description": "Main's #2423 (78d5f6b61, which merge 233a8d61 brought in) says a pull request never commits dist/ or legion/, a PR carrying such changes drops them at its next merge of main with `jj restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion`, and a reviewer asks for any such change to be dropped (packages/claude-envoy/AGENTS.md:151-163). The PR still changes dist/dispatch.js, envoy-channel.js and session-hook.js (+295 each). Drop them; keep the .changes fragment. Update the body's Size note, and plan the production check #2423 requires: the post-merge rebuild run and commit, and `bun run check-dist` there."}
-  ]
+  "mergeability": "GitHub now reports CONFLICTING against main: packages/envoy/internal/dispatch/docs/reference_excerpts.go and refs/blocks.go conflict with main's #2451 (git merge-tree). The next conflict merge gets the fingerprint check.",
+  "migrations": "Main's highest is 0135_server_processes; the PR's 0136_block_pointer_links is free. #2463 is still open.",
+  "keyFindings": []
 }
