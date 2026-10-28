@@ -2,27 +2,36 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-546",
-  "completed": "2026-10-28T13:24:31Z",
-  "round": 8,
+  "completed": "2026-10-28T16:02:47Z",
+  "round": 9,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
   "answers": {
-    "mainConflict": "GitHub reported the head CONFLICTING after main moved to 08572e0147b6 (#2367). Merged main forward at 07b2cc7c310d. Conflicts: .dispatch/architecture/envoy-listener.md keeps main's CI summary loop sentence and this PR's sentence; packages/envoy/AGENTS.md keeps main's CI record bullet and this PR's duplicate-window bullet; packages/envoy/infra/go.work.sum is main's copy. Fingerprint 9eb94a30216d2528 -> a47a794122daacbf, differing only in that envoy-listener.md line (comment 6470160094). GitHub reports MERGEABLE."
+    "mainConflict": "Review round 6 approved at e283ffaf; main moved to 690c013674e0 (#2390 background-connecting Dispatch clients, ConnectOption as an interface; #2429). Merged forward at eaca35818b58 (jj new, no rebase). nats.go: main's generic parseConnectOptions with the keepInterval default; WithStreamMaxBytes, WithKeptBuckets, withKeepInterval as clientOptions; newClient uses opts.streamConfig() for both install and ensureStreamOnce and starts the keeper on both paths. cmd/dispatch/main.go: serverClient(dispatchStreamOptions(boot, env)...). redeliver.go: main's lazy Open passes the replica count. Two cmd/dispatch tests call sweeper.Open(). Docs and two fragments: a server's refusal no longer stops Dispatch, which logs 'envoy nats reconnect hook failed' naming the setting. Fingerprint a47a794122daacbf -> 82c154a62e86b1b7 (resolution record: comment 6473997548). GitHub reports MERGEABLE."
   },
   "proof": [
     {
-      "criterion": "On the tree merged with main, the stream and buckets reach the replica count, keep the byte limit, DiscardNew and envoy_stream_id across listener and Dispatch starts; an operator's raise stands; a full stream refuses and keeps what it holds",
+      "criterion": "On the tree merged with main, the stream and buckets reach the replica count, keep the byte limit, DiscardNew and envoy_stream_id across listener and Dispatch (now background-connecting) starts; an operator's raise stands; a full stream refuses and keeps what it holds",
       "surface": "Real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes and one standalone v2.15.1 server, read with natscli v0.5.1",
-      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log https://github.com/sjawhar/legion/pull/2362#issuecomment-6470160094)",
-      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one id, buckets and durable at 3; P2 unchanged at setting 1; P5 a 50 GiB operator raise stood 40 s, a lowering to 1000000 was raised back; P3 Dispatch restores subjects 5 -> 8 keeping copies, limit and id; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
-      "headSha": "07b2cc7c310dcd07c9bb03d7175d672a7082ef6d",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 on a 29 GB store -> exit 1 'insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 refused at load"
+      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log https://github.com/sjawhar/legion/pull/2362#issuecomment-6473997548)",
+      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one id, buckets and durable at 3; P2 unchanged at setting 1; P5 a 50 GiB operator raise stood 40 s, a lowering to 1000000 was raised back; P3 envoy-dispatch (background connect) reached 'dispatch: listening' and its first-connection reconcile restored subjects 5 -> 8 keeping copies, limit and id; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
+      "headSha": "eaca35818b582a0fe044ef4146b5f46debef2bfd",
+      "negativeControl": "Standalone v2.15.1: listener ENVOY_NATS_REPLICAS=3 -> exit 1 naming the setting; ENVOY_STREAM_MAX_BYTES=44023414784 -> exit 1 'insufficient storage resources available'; envoy-dispatch with that limit keeps serving and logs 'envoy nats reconnect hook failed ... ENVOY_STREAM_MAX_BYTES=44023414784: nats: insufficient storage resources available' at each retry"
+    },
+    {
+      "criterion": "The cluster and keeper tests stay reliable under -race on the merged tree",
+      "surface": "internal/bus keeper/cluster tests (3 processes) and internal/dispatch/delivery built with -race, run at once, GOMAXPROCS=2",
+      "command": "bash /legion/scratch/tmp/race546/race-load.sh",
+      "observed": "850 PASS, 0 FAIL, no data race reported.",
+      "headSha": "eaca35818b582a0fe044ef4146b5f46debef2bfd",
+      "negativeControl": "Before round 5's harness fix the same load left 29 of 1,920 cluster starts stuck"
     }
   ],
   "filesChanged": [
-    "07b2cc7c310d (merge of main@origin 08572e0147b6): .dispatch/architecture/envoy-listener.md and packages/envoy/AGENTS.md conflicts resolved with both sides; packages/envoy/infra/go.work.sum as on main"
+    "eaca35818b58 (merge of main@origin 690c013674e0): packages/envoy/internal/bus/nats.go, keeper.go, keeper_test.go, stream_replicas_test.go; cmd/dispatch/main.go, redeliver.go, settings.go, settings_test.go, stream_replicas_test.go; packages/envoy/AGENTS.md, cmd/dispatch/AGENTS.md; packages/envoy/.changes/unreleased/pr-2362-replica-count.yaml and pr-2362-stream-byte-limit.yaml"
   ],
   "trickyParts": [
-    "The approved diff is unchanged except one doc line that now also carries main's new sentence; Go suites (bus, testnats, config, cistore, integration, webhook, dispatch delivery/redeliver/outbox, cmd/dispatch, cmd/listener with four Docker-only tests skipped, infra core/aws/render) green on the merged tree"
+    "Main's #2390 moved the owning client's stream reconcile into a first-connection hook for background clients; the keeper starts on both paths and skips passes until connected",
+    "A server refusal now leaves Dispatch serving (logged and retried) instead of stopping it; the listener still stops"
   ],
   "deviations": [],
   "openQuestions": []
