@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T14:40:17Z",
+  "completed": "2026-10-28T15:11:47Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+  "headSha": "e105aef3e0445029a3f48602ee8de2d3fdf55df2",
   "proof": [
+    {
+      "criterion": "Review round 5, thread PRRT_kwDORFy7ds6xLgkd (and PRRT_kwDORFy7ds6xKae8): a hub server's restart in the live test keeps the ports it has, so the exporters and the urls snapshot stay right; only a first start draws new ports when one is taken.",
+      "surface": "TestClusteredNatsHubCluster: three nats-server v2.15.1 processes with the real reloader and exporter on the helm render, under a throwaway go test -overlay that holds envoy-nats-0's first client port on 0.0.0.0 for the whole test and holds the (b)-restarted server's client port for 2 s before its restart",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -overlay <overlay> -tags natslive -run 'TestClusteredNatsHubCluster$' -v -timeout 30m ./gcp/ ; and the unmodified TestClusteredNatsHub(Chart|Cluster) natslive run and the unit lane",
+      "observed": "Overlay run ok (43.9 s). envoy-nats-0 came up on new ports. envoy-nats-2 restarted in (b) on its own ports [32924 24813 40133] after the holder let go. Phase (c) exporters showed 3/2/1 series and phase (d) kept cid 28 with 0 reconnects. The unmodified natslive run is ok (97.2 s). gofmt, vet and go test ./gcp/ ./core/ ./provider/ are ok (TestDispatchConnectionsPerPodIsTheServers skipped: it is main's).",
+      "headSha": "e105aef3e0445029a3f48602ee8de2d3fdf55df2",
+      "negativeControl": "The same overlay on the 16234e5e test -> 'the restart keeps its ports' fails: expected [49314 30976 30136], actual [16726 37769 36928]."
+    },
     {
       "criterion": "Review round 4, thread PRRT_kwDORFy7ds6xKae8: the live test's hub servers get distinct ports, and a start that finds a port taken retries on new ones, so the natslive lane cannot fail at random on a port collision.",
       "surface": "TestClusteredNatsHubCluster: three nats-server v2.15.1 processes with the real reloader and exporter on the helm render",
@@ -105,7 +113,8 @@
     "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md: what rolls the pods; the listener build INFRA-557's take-over requires (round 3)",
     "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md, gcp/clusteredhub_kube.go (comment), gcp/clusteredhub_kube_test.go, gcp/clusteredhub_live_test.go: review round 2 text fixes and the no-session-user depends-on pin (round 4)",
     "Round 5 (merge only): packages/envoy/.changes/unreleased/pr2371-Added-*.yaml (changie fragments; CHANGELOG.md as the base's), gcp/clusteredhub_autopilot.go (the clustered hub's Autopilot size and priority-class rules, moved out of dispatch.go, which is now the base's), gcp/clusteredhub_live_test.go (loopbackPort replaces the removed cmdtest.FreeTCPPort), infra/AGENTS.md layout row, the workflow comment.",
-    "Round 6: gcp/clusteredhub_live_test.go (loopbackPorts pool, servers' args built per start, ports redrawn on retry), gcp/clusteredhub_autopilot.go (clusteredHubPodMinCPU 250m), gcp/clusteredhub.go (comment), gcp/clusteredhub_refusals_test.go, gcp/clusteredhub_test.go, README.md sizing text."
+    "Round 6: gcp/clusteredhub_live_test.go (loopbackPorts pool, servers' args built per start, ports redrawn on retry), gcp/clusteredhub_autopilot.go (clusteredHubPodMinCPU 250m), gcp/clusteredhub.go (comment), gcp/clusteredhub_refusals_test.go, gcp/clusteredhub_test.go, README.md sizing text.",
+    "Round 7: gcp/clusteredhub_live_test.go (a restart keeps its ports; comments on start, startBound and loopbackPorts)."
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -120,11 +129,12 @@
     "Plan 1.3 item 6 puts the advertiser and preStop scripts in the ConfigMap; the shared tailnet_service.go renders them inline for /bin/sh -c, so the ConfigMap holds serve.json alone.",
     "natsReplicas is refused without tailnet (it renders only into the tailnet listener: the owned-input rule); the tailnet pod's total is held to Autopilot's floors like the hub pod's.",
     "Round 2: legion/INFRA-546@origin (5fbe7ca51666) merged forward because GitHub reported the pull request CONFLICTING; the only resolution is packages/claude-envoy/dist/envoy-channel.js taken as the base has it (comment https://github.com/sjawhar/legion/pull/2371#issuecomment-6436308171).",
-    "Round 5: the old Changed changelog entry (gcp:Dispatch's refusals as core.InputError) is dropped, since the base's #2368 rewrote gcp:Dispatch's sizing and this PR no longer changes dispatch.go."
+    "Round 5: the old Changed changelog entry (gcp:Dispatch's refusals as core.InputError) is dropped, since the base's #2368 rewrote gcp:Dispatch's sizing and this PR no longer changes dispatch.go.",
+    "Round 7: the reviewer's cleanup (drop loopbackPorts.mu) is not done: the INFRA-14 architect narrowed this round to the restart finding alone."
   ],
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 6,
-  "reviewRound": 4
+  "round": 7,
+  "reviewRound": 5
 }
