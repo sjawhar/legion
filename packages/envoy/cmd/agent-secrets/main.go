@@ -9,11 +9,14 @@
 // Manager) under the person's own cloud sign-in and then ask the broker to reread what they wrote.
 //
 // Every answer and every refusal about a secret names where it came from (source.go): the broker
-// AGENT_SECRETS_URL names, by host, and that broker's store, where its settings give one. This
+// AGENT_SECRETS_URL names, and the kind of that broker's store, where its settings give one. This
 // CLI reads no local secrets file, and another secrets CLI on the same machine can answer the
 // same NAME from a store of its own, so the injection form writes one line to stderr before it
-// execs — the names it injected and their source, never a value — and the status and secret
-// forms print that source beside what they report.
+// execs — the names it injected and their source, never a value — and the status forms print
+// that source beside what they report. None of those lines names the broker's host or the store's
+// account, region or project, since they are quoted wherever an agent's output is; the secret
+// forms, which a person runs under their own cloud sign-in, name the account or project they
+// write to. No form prints a credential AGENT_SECRETS_URL carries (internal/redact).
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -371,15 +374,19 @@ func refuse(stderr io.Writer, prefix string, src source, err error) {
 // AGENT_SECRETS_URL named it, and whether the host does not resolve or nothing answered - and
 // takes no source trailer: the broker refused nothing, so a trailer saying it was asked would
 // read as an answer it gave, and the store behind it could not be read either. Likewise, a local
-// helper failure names its socket: no broker request could begin without its signature.
+// helper failure names its socket: no broker request could begin without its signature. A
+// refusal made before any call (refusedBeforeCall) takes no trailer either.
 func refusalText(src source, err error) string {
 	var unreached *unreachableError
 	var helperFailure *helperError
+	var notSent *refusedBeforeCall
 	switch {
 	case errors.As(err, &unreached):
 		return unreached.Error()
 	case errors.As(err, &helperFailure):
 		return helperFailure.Error()
+	case errors.As(err, &notSent):
+		return notSent.Error()
 	default:
 		return err.Error() + src.asked()
 	}
@@ -635,7 +642,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				if code == "" {
 					code = "UNKNOWN"
 				}
-				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL).brokerAt(), refused.Status, code, refused.Message)
+				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL), refused.Status, code, refused.Message)
 				return exitRenewRefused
 			}
 			if tokenErr != nil {
@@ -1013,8 +1020,9 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// The one line the injected command's own output is preceded by: which names this process
-	// puts in its environment, and the store they came from, never a value. A reader of the
-	// command's log can tell these values from another secrets CLI's for the same names.
+	// puts in its environment, and that this CLI's broker and a store of which kind gave them,
+	// never a value. A reader of the command's log can tell these values from another secrets
+	// CLI's for the same names.
 	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src())
 	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
