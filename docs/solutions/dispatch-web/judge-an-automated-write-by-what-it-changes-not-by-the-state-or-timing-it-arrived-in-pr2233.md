@@ -10,9 +10,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # Judge an automated write by what it changes, not by the state or timing it arrived in

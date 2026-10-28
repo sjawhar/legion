@@ -8,14 +8,11 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A hand-kept count merges with no conflict when both sides write the same new number
 
-Extends docs/solutions/envoy/a-new-duty-exclusive-caller-raises-lease-pool-size-and-a-shortfall-is-silent-INFRA-158.md.
+Extends docs/solutions/envoy/a-new-duty-exclusive-caller-raises-lease-pool-size-and-a-shortfall-is-silent-pr2233.md.
 
 - After a merge in which both sides added an item to the same list, recount every hand-kept count of
   that list from the code, whether or not the merge conflicted: a constant such as `leasePoolSize`,

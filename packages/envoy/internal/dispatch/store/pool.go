@@ -263,7 +263,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
 // block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
 // delivery reconcile, the edit-notice sweep, the repair of closed and reopened issues' asks
-// (INFRA-158, api.RunIssueAskRepair) and one per delivery durable for the consumers'
+// (api.RunIssueAskRepair) and one per delivery durable for the consumers'
 // reconciliation (delivery.consumerLease, a name each for delivery-events and delivery-jobs) -
 // taken by eleven callers, since each delivery intake takes its own durable's name from a bind
 // poll of its own, so eleven callers can be inside Exclusive at once. Eleven connections are

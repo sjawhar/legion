@@ -56,10 +56,6 @@
   addition.
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
-- `withdrawn`, a third `AskResolution.kind` beside `retracted` and `resolved`, which the ask event
-  payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
-  an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
-  still takes only `retracted` and `resolved`, so no caller can write one (INFRA-158).
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
   session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
   token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
@@ -220,13 +216,6 @@
 
 ### Changed
 
-- `shortSessionId` reads the Legion daemon's write identity, a session id beginning
-  `legion-daemon:`, whole rather than as `session:` and its first 8 characters, which name nobody,
-  so the shared actor label names the daemon that closed an issue. `dispatch_issue_update`'s
-  description says closing an issue withdraws its open asks and reopening it brings them back, and
-  `dispatch_resolve_ask`'s says a closed issue's asks were withdrawn by its close, that only
-  Dispatch writes `withdrawn`, and that an ask on a closed issue is `409 ISSUE_CLOSED` until the
-  issue reopens (INFRA-158).
 - `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
   `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
   question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the

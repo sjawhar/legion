@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/api
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A state that switches off a background duty does its last run at the transition, and a durable sweep covers what arrives after

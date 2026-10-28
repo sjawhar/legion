@@ -10,9 +10,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # Replay the real server's frame order before fixing an interleaving, yours or a reviewer's

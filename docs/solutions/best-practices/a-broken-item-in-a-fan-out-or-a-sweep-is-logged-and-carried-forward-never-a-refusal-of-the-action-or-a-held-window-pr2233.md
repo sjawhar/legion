@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/api
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A broken item in a fan-out or a sweep is logged and carried forward, never a refusal of the action or a held window

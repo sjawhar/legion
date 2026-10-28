@@ -74,11 +74,6 @@
 
 ### Changed
 
-- The bundled `dist/` and `legion/` were regenerated for INFRA-158: the contracts' ask payload
-  schema parses the `withdrawn` resolution kind an issue's close writes, the actor label reads a
-  `legion-daemon:` session id whole, the `dispatch_issue_update` and `dispatch_resolve_ask`
-  descriptions say a close withdraws an issue's open asks and a reopen brings them back, and the
-  plugin's copies of the `legion-controller` and `legion-worker` skills say the same.
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:

@@ -632,7 +632,7 @@ reconciles them, and marks the restored asks' copies owed the same way, so a rew
 the earlier release writes during the roll is undone by that document's next settlement on this
 release, which also writes the decided wording back into the block and settles its copies again.
 
-A close by a release before INFRA-158 left its issue's asks open, and a reopen by one left the
+A close by a release before the withdrawal left its issue's asks open, and a reopen by one left the
 asks a close withdrew resolved. No migration writes the withdrawals, since the census refuses one
 that rewrites rows (Pre-deploy census, below); code repairs them instead (`api.RepairIssueAsks`).
 Every boot runs a pass, bounded at 30 s, and then every 10 minutes (`api.IssueAskRepairInterval`)

@@ -2187,7 +2187,7 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
 canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
 from and that ask's document.
 
-An issue's close withdraws its open asks (INFRA-158). Every close - a person's Close or board
+An issue's close withdraws its open asks. Every close - a person's Close or board
 drag, `dispatch issue-update --status done`, the Legion daemon's close when a pull request merges,
 all through `PATCH /api/v1/issues/{key}` - first runs the settlement each document of the issue
 owes (`settleIssueBeforeClose`), so a decision block written seconds before is an ask credited to

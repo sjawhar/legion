@@ -8,9 +8,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/docs
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # Test a pure matcher against generated edit histories, not one database test per edge case

@@ -8,9 +8,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/store
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A new duty.Exclusive caller raises leasePoolSize, and a shortfall is silent

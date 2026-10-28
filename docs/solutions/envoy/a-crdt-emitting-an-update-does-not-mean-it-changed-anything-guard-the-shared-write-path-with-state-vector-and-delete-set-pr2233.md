@@ -10,9 +10,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/docs
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A CRDT emitting an update does not mean it changed anything: guard the shared write path with the state vector and the delete set

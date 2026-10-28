@@ -229,9 +229,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- The `legion-controller` skill's daily-report reference and the `legion-worker` skill's findings
-  reference this plugin ships say a closed issue's close withdrew its open asks and a reopen brings
-  them back, where they said Dispatch hides them or takes them out of the Inbox (INFRA-158).
 - `legion-worker/references/findings.md`: a finding ask names what went wrong, where and to whom,
   with the numbers, and what each option does to whom, in up to 2,000 characters; only evidence
   the decision does not need goes to the cited comment.

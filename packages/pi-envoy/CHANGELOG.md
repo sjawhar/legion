@@ -335,10 +335,6 @@
 
 ### Changed
 
-- `dispatch issue-update --help` says closing an issue withdraws its open asks (record kind
-  `withdrawn`, naming the closer, written only by Dispatch) and a reopen brings back exactly those,
-  and `dispatch resolve-ask --help` says an ask on a closed issue is refused (`409 ISSUE_CLOSED`)
-  until the issue reopens (INFRA-158).
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
   passing (a test, review, check or proof) also says, in that sentence, what the pass does not

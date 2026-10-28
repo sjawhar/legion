@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A Yjs client's updates are one clock chain: store, drop and restore them as an ordered prefix

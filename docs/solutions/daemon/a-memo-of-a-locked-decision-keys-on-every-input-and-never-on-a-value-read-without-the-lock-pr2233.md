@@ -8,9 +8,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/docs
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # A memo of a locked decision keys on every input, and never on a value read without the lock

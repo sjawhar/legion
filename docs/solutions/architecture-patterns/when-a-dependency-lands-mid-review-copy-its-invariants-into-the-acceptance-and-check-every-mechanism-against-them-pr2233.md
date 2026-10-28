@@ -8,9 +8,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/docs
-related_issues:
-  - "INFRA-158"
-  - "sjawhar/legion#2233"
 ---
 
 # When a dependency lands mid-review, copy its invariants into the acceptance and check every mechanism against them
