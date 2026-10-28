@@ -343,7 +343,10 @@ pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
   flock 9 && cd "$pg" || exit 1
   # Ask the socket, never pg_ctl status: each role of an issue pod has its own PID namespace, so
   # postmaster.pid names a process only in the role that started the server.
-  if pg_isready -q -h "$pg" -U postgres; then echo "$pg/.s.PGSQL.5432"; exit 0; fi
+  if python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])' "$pg/.s.PGSQL.5432" 2>/dev/null; then
+    echo "$pg/.s.PGSQL.5432"
+    exit 0
+  fi
   if [ -e data/postmaster.pid ]; then
     echo "no server answers on $pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove $pg" >&2
     exit 1
