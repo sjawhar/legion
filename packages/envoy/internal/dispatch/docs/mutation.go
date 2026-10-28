@@ -20,7 +20,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 type versionWrite struct {
@@ -65,8 +64,10 @@ func recoverMutation(room string, err *error) {
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
 // does not commit never reaches the room, a browser or a version's authors. It returns
-// websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
-// ErrServiceUnavailable when the room its slot is on failed before its append.
+// websocket.ErrNoChanges, as the room's Apply does for a write that wrote nothing, when mutate
+// left the fork as it was, even through a transaction: ygo hands the fork's observers an update
+// for every transaction, one that changes nothing included. It returns ErrServiceUnavailable when
+// the room its slot is on failed before its append.
 //
 // mutate is handed the fork and current, the fork's tree as the operation starts, which applyLive
 // reads anyway to weigh the write against: every mutate starts from it (startTree, editTree) rather
@@ -126,6 +127,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		}
 		return startErr
 	}
+	// What says the write changed the fork is the fork itself, read on either side of mutate: its
+	// state vector and its delete set, since a deletion advances no clock (forkHeld). The updates
+	// the fork emits cannot say it, for they include one for a transaction that changes nothing.
+	wasClocks, wasDeletes := fork.StateVector(), crdt.DeleteSetFromDoc(fork)
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
 		updates = append(updates, append([]byte(nil), update...))
 	})
@@ -138,6 +143,13 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	unsubscribe()
 	if mutateErr != nil {
 		return joinedSchemaError(mutateErr, start)
+	}
+	// A write whose transactions changed nothing writes nothing. Appended, its empty update would
+	// refresh the anchors and mark the document owing a settlement again (markUpdateOwed), which
+	// every repair pass over a closed issue would then sweep. Its updates are dropped, so the fork,
+	// which it left as it was, is kept.
+	if len(updates) > 0 && forkHeld(wasClocks, wasDeletes, fork) {
+		updates = nil
 	}
 	if len(updates) == 0 {
 		return websocket.ErrNoChanges
@@ -217,7 +229,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	write.updates = append(write.updates, update)
 	write.versions = append(write.versions, version)
 	recorded = true
-	if contentChanged {
+	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
+	// pending author and leaves the document's latest edit source as it was.
+	if contentChanged && !isLifecycleWrite(ctx) {
 		s.creditLiveWrite(write, actor)
 		maps.DeleteFunc(added, func(id string, _ struct{}) bool {
 			_, excluded := write.renamedAskBlockIDs[id]
@@ -707,11 +721,21 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
+	_, open, err := lockArtifactOwner(ctx, tx, artifactID)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if !open {
+		return VersionResult{}, ErrIssueClosed
+	}
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
 		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
 	if err != nil {
+		return VersionResult{}, err
+	}
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
@@ -1181,6 +1205,11 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	if err != nil {
 		return VersionResult{}, err
 	}
+	// A person's credit in this version opens the edit notice: the owner lock this transaction
+	// holds keeps the sweep's lock order (sendEditNotice).
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
+		return VersionResult{}, err
+	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
 }
 
@@ -1456,11 +1485,11 @@ type versionWriteResult struct {
 
 // renderedTree is a document tree with its canonical markdown and each identified block's byte
 // range in that markdown, all from one render (pmdoc.RenderWithBlockOffsets), so a version write
-// stores the markdown and cuts its mentions' excerpts from that render rather than rendering the
-// tree again for them. An upload that changes the document still renders it twice: ReplaceText
-// renders the replacement to tell whether it changes anything, and applyLive renders the fork it
-// leaves; the excerpts are cut from applyLive's render, which IndexDocumentReferences checks is
-// the version's markdown.
+// stores the markdown and indexes its blocks and cuts its mentions' excerpts from that render
+// rather than rendering the tree again for them. An upload that changes the document still renders
+// it twice: ReplaceText renders the replacement to tell whether it changes anything, and applyLive
+// renders the fork it leaves; the blocks and excerpts are cut from applyLive's render, which
+// IndexDocumentReferences checks is the version's markdown.
 type renderedTree struct {
 	tree     *pmdoc.Node
 	markdown string
@@ -1468,10 +1497,10 @@ type renderedTree struct {
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
-// version writes index references, move open approval asks to the new version, carry a human's
-// approval to the version his answer to a decision block writes (carryApproval), refresh anchors,
-// and retain their author capture until the enclosing transaction commits. A nil write records no
-// version but keeps a transactional tree mutation's anchors in the same path.
+// version writes index references and blocks, move open approval asks to the new version, carry a
+// human's approval to the version his answer to a decision block writes (carryApproval), refresh
+// anchors, and retain their author capture until the enclosing transaction commits. A nil write
+// records no version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID string, rendered renderedTree, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
 	markdown, tree := rendered.markdown, rendered.tree
 	if write == nil {
@@ -1503,13 +1532,11 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
+	// The version's references, its mentions' excerpts and its blocks are indexed from the render
+	// this version's markdown came from, in its own transaction, so GET /api/v1/references serves
+	// them without rendering the document.
+	changes, err := s.indexDocument(ctx, tx, artifactID, version.Number, version.CreatedAt, markdown, rendered)
 	if err != nil {
-		return versionWriteResult{}, err
-	}
-	// The mentions' excerpts are cut from the render this version's markdown came from, in its own
-	// transaction, so GET /api/v1/references serves them without rendering the document.
-	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, rendered); err != nil {
 		return versionWriteResult{}, err
 	}
 	// The open approval request follows the document version without leaving its thread or opening

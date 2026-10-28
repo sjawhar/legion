@@ -91,7 +91,7 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
 number is the one `DaemonAPIVersion` declares, last bumped by contract 41's controller start
-command (INFRA-511: `legion controller start` ends the operator's Oh My Pi command line with
+command (`legion controller start` ends the operator's Oh My Pi command line with
 `/legion-controller-start`, and this plugin sends the controller's start message from that
 command, never from `session_start`; "The controller's start turn" below), after contract 40's
 `awaiting_person` phase and strict `waitingOn` issue view on `GET /legion/v1/state` (a root that

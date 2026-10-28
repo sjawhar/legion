@@ -174,7 +174,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	frames := receiveAsSession(t, client, holderID)
 	// The old task reads the claim from the role bucket and the holder from its session cache, which
 	// can trail the bucket and not yet hold the session the replacement just registered; it then reads
-	// the holder from the session bucket itself (roleHolderSession), so its first lookup answers the
+	// the holder from the session bucket itself (liveSessionEntry), so its first lookup answers the
 	// claim rather than releasing it as lapsed.
 	if status, answer := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, ""); status != http.StatusOK {
 		t.Fatalf("the old task's lookup of %s right after the replacement accepted %s's claim: status %d %s, want 200", role, holderID, status, answer)
@@ -391,7 +391,8 @@ var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_S
 
 // seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit whose
 // checks finished a minute ago and have not settled, so any summary loop reading the bucket settles
-// it on its next tick. It returns the bucket and the record's key.
+// it at its first pass after the record reaches its cache, on the next tick of the loop's grid. It
+// returns the bucket and the record's key.
 func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
 	t.Helper()
 	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})

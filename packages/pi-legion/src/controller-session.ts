@@ -315,7 +315,7 @@ export function createControllerSession(deps: {
         startHandedOver = true;
         return;
       }
-      if ("isIdle" in context && !context.isIdle()) {
+      if (context.isIdle?.() === false) {
         pi.sendUserMessage(startMessage, { deliverAs: "followUp" });
       } else {
         markStartupTurnSent(sessionID);

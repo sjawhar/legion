@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -384,7 +385,7 @@ func TestValidateListenerAPIAuth(t *testing.T) {
 			if tc.oidc {
 				configured = verifier
 			}
-			err := validateListenerAPIAuth(tc.listenHost, tc.apiToken, tc.allowUnauthenticated, configured)
+			err := validateListenerAPIAuth(config.Service{ListenHost: tc.listenHost}, tc.apiToken, tc.allowUnauthenticated, configured)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("validateListenerAPIAuth(%q, token set: %t, allow unauthenticated: %q, verifier set: %t) error = %v, want error: %t", tc.listenHost, tc.apiToken != "", tc.allowUnauthenticated, configured != nil, err, tc.wantError)
 			}

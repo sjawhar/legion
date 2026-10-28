@@ -373,7 +373,7 @@ package api
 // on main before this change, so this change takes the number above it, as the collision note
 // says.)
 //
-// 41: INFRA-511 -- `legion controller start` passes `/legion-controller-start`
+// 41: `legion controller start` passes `/legion-controller-start`
 // (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
 // controller's start message from that extension command rather than from session_start: Oh My Pi
 // drains every session_start send at the end of its startup, so the start turn ran inside the

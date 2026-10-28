@@ -24,9 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,12 +36,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -77,10 +84,11 @@ func newPair(t *testing.T) *dispatchPair {
 	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
 }
 
-// start starts both processes on the pair's database and NATS, each on a free port and in a home
-// of its own, both carrying multiprocessSigningKey, and returns once each answers /healthz. The
-// two are started together rather than one after the other: several rows are about what the two
-// do when their loops fire at the same moment, which a staggered start would hide.
+// start starts both processes on the pair's database and NATS, each on a port held for it from the
+// moment the kernel chose it (startDispatchProcessWith) and in a home of its own, both carrying
+// multiprocessSigningKey, and returns once each answers /healthz. The two are started together
+// rather than one after the other: several rows are about what the two do when their loops fire at
+// the same moment, which a staggered start would hide.
 func (p *dispatchPair) start(t *testing.T, env map[string]string) {
 	t.Helper()
 	options := dispatchOptions{NATSURL: p.nats, SigningKey: multiprocessSigningKey, Env: env}
@@ -1080,6 +1088,143 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillClose(t *testing.T) {
 	}
 }
 
+// ───── the asks of a closed issue ──────────────────────────────────────────
+
+// A browser connected to B's room writes a decision block into a document of an issue A has just
+// closed. A's close, and the sweep it runs once its rooms are closed, reach only A's rooms
+// (SetIssueClosed), so B's room still takes the write: the block is stored, and the document owes a
+// settlement no process runs while the issue is closed, so the block would read open, with no ask,
+// for as long as the issue stays closed. One repair pass, run as the interval runs it - from
+// another process on the same database, bounded to the documents marked owing a settlement since a
+// moment before the close - gives the issue the close's final sweep: the block reads resolved in
+// the durable document, and in B's room once B has reloaded it.
+func TestTheRepairSweepResolvesADecisionBlockWrittenOnTheOtherProcessAfterTheClose(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SWP")
+	pair.a.createProject(t, project, "Swept after the close")
+	issueKey, artifactID := pair.a.createIssueIn(t, project, "Closed on A, written on B", "Context")
+
+	editor := pair.b.openEditor(t, artifactID, "Context\n")
+	// The tab's sync and the issue's creation each leave a settlement owed, which B and A settle
+	// within their settle delay; the close is to find the document settled.
+	waitForSettlementOwed(t, pair.database, artifactID, false)
+	var markedSince time.Time
+	if err := pair.database.Pool.QueryRow(context.Background(), `select statement_timestamp()`).Scan(&markedSince); err != nil {
+		t.Fatalf("read the database's clock: %v", err)
+	}
+	pair.a.call(t, http.MethodPatch, "/api/v1/issues/"+issueKey, `{"status":"done"}`, http.StatusOK)
+	if settlementOwed(t, pair.database, artifactID) {
+		t.Fatal("A's close left the document owing a settlement, so this row could not tell B's write from it")
+	}
+
+	const block = ":::ask{#written-on-b urgency=\"low\" multiple=\"false\"}\nWritten on B after the close?\n:::\n"
+	head := storedHead(t, pair, artifactID)
+	appendBlock(t, editor, block)
+	// B stores the tab's update, which marks the document owing a settlement again.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if storedHead(t, pair, artifactID) > head && settlementOwed(t, pair.database, artifactID) &&
+			settlementMarkedAt(t, pair.database, artifactID).After(markedSince) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B never stored its tab's block: stored head %d (was %d), settlement owed %v\nB:\n%s",
+				storedHead(t, pair, artifactID), head, settlementOwed(t, pair.database, artifactID), pair.b.Output.String())
+		}
+	}
+	const written = `:::ask{#written-on-b urgency="low" multiple="false" state="open"}`
+	if text := pair.b.documentText(t, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("B's room does not hold the block its tab wrote:\n%s", text)
+	}
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("the durable document does not hold the block B's tab wrote:\n%s", text)
+	}
+
+	logs := captureDefaultLog(t)
+	broker := events.NewBroker()
+	documents := docs.New(docs.Deps{Store: pair.database, Events: broker})
+	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	repair, err := api.RepairIssueAsks(store.WithTransactionTracking(context.Background()),
+		api.Deps{Store: pair.database, Docs: documents, Events: broker}, &markedSince)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if repair.Swept != 1 || repair.Withdrawn != 0 || repair.Restored != 0 {
+		t.Fatalf("repair = %+v, want the one block B's tab wrote swept", repair)
+	}
+	logged := logs.String()
+	if !slices.ContainsFunc(strings.Split(logged, "\n"), func(line string) bool {
+		return holdsAll(line, `msg="dispatch: repaired the asks of an issue"`, "issue="+issueKey, "swept=1")
+	}) {
+		t.Fatalf("the repair logged no line sweeping one block of %s:\n%s", issueKey, logged)
+	}
+	const resolved = `:::ask{#written-on-b urgency="low" multiple="false" state="resolved"}`
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, resolved) {
+		t.Fatalf("the durable document after the repair:\n%s\nwant it to hold %s", text, resolved)
+	}
+	// The repair's write leaves B's room behind the durable head, which B closes; a reader then
+	// reads the document B loads again.
+	select {
+	case <-editor.Ended:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("B's room never closed behind the repair's write:\nB:\n%s", pair.b.Output.String())
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		text := pair.b.documentText(t, artifactID)
+		if strings.Contains(text, resolved) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B serves the document without the swept block after reloading it:\n%s", text)
+		}
+	}
+}
+
+// appendBlock appends markdown's blocks to the end of the editor's document in one keystroke's
+// transaction, and sends the room the update it made.
+func appendBlock(t *testing.T, editor *docstest.Peer, markdown string) {
+	t.Helper()
+	typed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			changeErr = err
+			return
+		}
+		tree.Children = append(tree.Children, typed.Children...)
+		changeErr = pmdoc.Update(txn, fragment, tree)
+	}); err != nil || changeErr != nil {
+		t.Fatalf("the editor's edit: %v %v", err, changeErr)
+	}
+}
+
+// durableText is the document as its stored updates hold it: read by a document service of this
+// test's own, which holds no room of it until this read loads one from the store.
+func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
+	t.Helper()
+	reader := docs.New(docs.Deps{Store: pair.database})
+	defer func() { _ = reader.Shutdown(context.Background()) }()
+	text, err := reader.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the durable document %s: %v", artifactID, err)
+	}
+	return text
+}
+
+// captureDefaultLog records what the default logger writes until the test ends.
+func captureDefaultLog(t *testing.T) *storetest.LockedLog {
+	t.Helper()
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
 // ───── the leased maintenance loops ────────────────────────────────────────
 
 // The two lines duty.Exclusive writes, which every leased loop reports its pass through.
@@ -1126,11 +1271,12 @@ func requireLeasedOnce(t *testing.T, pair *dispatchPair, lease string) {
 	}
 }
 
-// lockTables holds every table named in exclusive mode in a transaction of the test's own, as a
-// writer that is taking its time would, and rolls it back when the test ends if the test has not.
-// A maintenance pass whose first statement writes one of them waits there, inside its lease, which
-// is the moment the lease is about: both processes' loops firing while one is still in its pass.
-func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
+// lockTables holds every table named in mode (`exclusive`, or `access exclusive`) in a transaction
+// of the test's own, as a writer that is taking its time would, and rolls it back when the test
+// ends if the test has not. A maintenance pass whose first statement writes one of them - or, in
+// access exclusive mode, reads one - waits there, inside its lease, which is the moment the lease
+// is about: both processes' loops firing while one is still in its pass.
+func lockTables(t *testing.T, database *store.Store, mode string, tables ...string) pgx.Tx {
 	t.Helper()
 	ctx := context.Background()
 	gate, err := database.Pool.Begin(ctx)
@@ -1139,7 +1285,7 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 	}
 	t.Cleanup(func() { _ = gate.Rollback(context.Background()) })
 	for _, table := range tables {
-		if _, err := gate.Exec(ctx, "lock table "+table+" in exclusive mode"); err != nil {
+		if _, err := gate.Exec(ctx, "lock table "+table+" in "+mode+" mode"); err != nil {
 			t.Fatalf("hold %s: %v", table, err)
 		}
 	}
@@ -1153,19 +1299,29 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
+// Four of the nine leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
+// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
-// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake.
+// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
+// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
+// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
+// their passes ever overlap is a coin toss no test should turn into a flake; and edit-notices'
+// period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
 	// refs is where the reference-excerpt reconciliation's first statement writes
 	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "refs", "write_suggestions")
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions")
+	// The block-index reconciliation's first statements read document_block_versions and
+	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
+	// their own, released as soon as the other process has found the lease held: that pass's
+	// interval is 30 s, so released with the gate above - a minute in, when the suggestion sweep's
+	// first tick lands - the other process's own next tick could land beside the release and make
+	// the next period's pass before this row counts the first.
+	blockGate := lockTables(t, pair.database, "access exclusive", "document_block_versions", "block_grammar_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
@@ -1176,6 +1332,20 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
 	}
+
+	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
+		t.Fatalf("no block-index pass reached the document_block_versions lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
+			pair.a.Output.String(), pair.b.Output.String())
+	}
+	waitForLease(t, pair, leaseSkipped, "block-index", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "block-index") + countLease(pair.b, leaseRan, "block-index"); ran != 0 {
+		t.Errorf("a block-index pass reported running %d times while the one holding the lease is still inside the document_block_versions lock", ran)
+	}
+	if err := blockGate.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the tables the block-index pass is waiting on: %v", err)
+	}
+	waitForLease(t, pair, leaseRan, "block-index", 60*time.Second)
+	requireLeasedOnce(t, pair, "block-index")
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
 	// lists the App webhook's failed deliveries before it writes anything.
@@ -1196,8 +1366,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
+		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",

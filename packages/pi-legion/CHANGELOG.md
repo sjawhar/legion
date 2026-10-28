@@ -3,7 +3,7 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -53,9 +53,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
   is a spec, for each factual claim. The architect verifies with a command, or removes, each claim
   either review marks unverified, and the request's `--summary` ends with one sentence that gives
-  both reviews' results. The root and sub-architect role prompts say the same. Self-review alone
-  did not stop false claims: an architect requested approval, then again minutes later because a
-  claim was false.
+  both reviews' results. The root and sub-architect role prompts say the same. `legion-architect`'s
+  template and example of that sentence also say what the reviews do not show, as
+  `dispatch-writing-specs` requires of a sentence that cites a gate: no open gap, every claim
+  verified, and neither shows that the design works once built. Self-review alone did not stop
+  false claims: an architect requested approval, then again minutes later because a claim was
+  false.
 - `plan-reviewer` reviews a spec as well as a plan. In its spec mode it checks each factual claim
   against the code, the docs or a read-only command, and marks each claim verified, false or
   unverified, with the file and line or the command and its output. It also checks that the spec
@@ -140,6 +143,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   takes its own next issue, but it changes no admission; the reference used to have the controller
   set priority and rank together so that "highest priority, then board rank" produced the plan's
   order (INFRA-188).
+
+- The skill-scenario rig has an `askgate` scenario. It seeds an issue whose one
+  comment is the person's and gives a plain session one of three prompts, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names (`facts`, `link` or `upload`). An askgate run's directory is
+  `askgate-<case>-<label>-<n>`, so the batches of the three cases keep their own runs, and
+  `rig.sh score askgate` counts each case and label on its own. `score.ts` reads AskGate's
+  verdicts from the transcript. `rig.sh profile` takes `--envoy-json <file>` and merges that object
+  into the envoy.json the label's sessions read, so a label can turn AskGate off. A `dispatch`
+  call with `--help` or `--dry-run` sends nothing, and AskGate does not review it. A call that
+  AskGate refused as unreadable got no model review. The score reads neither of these calls as a
+  verdict of the gate. A `link` run passes only when AskGate allowed its ask on a verdict: a
+  timeout, an error, a skip, an override or no entry is no review, so it fails. A `facts` run reads
+  the refused call's own gate entry, and its reason must name failure 12 (`Content 12`) and both
+  facts. The refusal text is not read for them, because it quotes the question for every failure.
+  The `link` prompt asks a choice that the person's comment leaves open, with a
+  link to that comment, because an ask whether to do what the person asked fails AskGate's rule
+  authority 6. The seeded issue's title, "Release and nightly job settings", fits the write of
+  each case.
 - Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
   container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
   generation in Linux namespaces of its own (`legion launcher role-init`), and
@@ -207,6 +228,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- `legion-worker/references/findings.md`: a finding ask names what went wrong, where and to whom,
+  with the numbers, and what each option does to whom, in up to 2,000 characters; only evidence
+  the decision does not need goes to the cited comment.
+
+- `legion-architect/references/decomposition.md`: a child issue's spec is written as
+  `dispatch-writing-specs` says, scaled to the child (its outline, a proposed answer to each point,
+  terms explained, no item number from another document, no root text that does not apply to the
+  child), in place of the bare `<acceptance criteria, scope, and context>` placeholder, which never
+  pointed to that skill. Before `dispatch issue` creates each child, the architect has a fresh
+  `plan-gap-analyst` check its spec against `dispatch-writing-specs` and fixes what it flags.
 
 - The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
   accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
@@ -851,58 +883,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
-- Daemon API contract 41 and plugin interface version 4 (INFRA-511): the operator's controller
-  start turn runs after Oh My Pi's startup, where the operator sees it, can type during it and can
-  interrupt it with Esc, and it is the session's first turn, ahead of any Envoy card or Legion
-  notice. The extension sent the start message (`LEGION_CONTROLLER_START_MESSAGE`) from its
-  `session_start` claim, and Oh My Pi holds every send a `session_start` handler makes and drains
-  them at the end of its startup, so the whole start turn ran inside the startup wait: the TUI
-  showed no start message and no busy row, Enter did not take typed text, and Esc did nothing. And
-  an Envoy card is a steer that starts its own turn, so with the role claimed during startup a card
-  on the role's lane, or a notice on the controller topic, could start its turn ahead of the start
-  message. The operator's controller now claims nothing at `session_start`: `legion controller
-  start` ends Oh My Pi's command line with `/legion-controller-start`, which Oh My Pi runs once its
-  startup is over and its TUI listens, and that new extension command runs the whole claim — the
-  start message read first, then the daemon's state and `claims/register` — and sends the start
-  message once the registration is in, right before the Envoy role claim and the controller-topic
-  subscription, so neither can deliver anything ahead of it (a card the listener forwards as soon
-  as it records the role can reach the session before the role claim's answer does), as a
-  follow-up when the operator already started a turn. The session is the controller to the
-  `legion` tool from its registration on, so the start turn's `read_state` and `set_status` work
-  while the role claim runs and after it fails. A send to an idle session names the session
-  current at the send in the plugin interface's new `startupTurn` (`{session, sentAt}` or
-  undefined) right before the send; a follow-up behind the operator's turn sets nothing, since that
-  run's one `agent_start` has already fired. A refusal anywhere in that claim is logged and shown
-  as one warning naming the refusal and `/legion-claim-controller`: refused before the send, that
-  command claims again and sends the start message once its claim succeeds; refused after it (the
-  role claim or the subscription), the warning says the start message was sent and the start turn
-  has the registration, and that command claims the role and its wakes again, sending nothing
-  more. Run again after a successful claim, or in any other session, the command says there is
-  nothing to do; run again once the start message is sent while the last claim that registered
-  (the one that sent it, or a later one) did not finish, it names `/legion-claim-controller` and
-  claims nothing. A `/new` while the command's claim runs stops that claim at its registration,
-  before the send, with no warning: the session change's re-claim registers the new session, sends
-  the start message there, and shows an info notice saying so. A claim that has to wait for one in
-  flight says so in one notice. A claim from `/legion-claim-controller` or a re-claim after a
-  session change sends the start message the same way when it is still unsent, and the message
-  still goes out once per process. A re-claim after a session change refused past its own
-  registration warns that the session keeps that registration; one refused before it warns that
-  the session has no controller grant. A re-claim that has to wait says so at once, while the
-  `/new` waits on it. Its refusal and that hand-over go to the host's extension widget
-  (`legion-controller-claim`), which Oh My Pi's `/new` leaves up when it resets the transcript
-  after the session_switch handlers return, a subagent view focused or not, until the session's
-  next run or a later claim that succeeds takes it down, so the operator
-  sees them. The session's first `agent_start` and its `session_shutdown` clear the mark. The
-  daemon-launched controller still claims at `session_start`, sends no start message of its own and
-  sets the mark, with `sentAt` now, right before `claims/ready`, after which the daemon delivers its
-  start prompt. `legion controller start` refuses a stdin that is not a terminal, right after the
-  operator token file's check and before any probe or mint: given the positional word and no
-  terminal, Oh My Pi would run headless print mode, running the start command after the mint
-  revoked the running controller. A pi-legion before 41 under this CLI would send from
-  `session_start` and then get the word as a prompt, and this plugin under an earlier CLI would
-  never claim the controller nor send the start, so the controller probe refuses either pair before
-  the mint. Install this release's pair with a `legion` built from the same commit.
-
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
   any fact and names the current run's queued task, so the worker ends the turn and calls
@@ -920,6 +900,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
+- Each skill-scenario run has a Dispatch of its own: a database named after the run in the batch's
+  Postgres, and a Dispatch server on it, which the run seeds, captures from and stops when it
+  ends. Before, the runs of a batch shared one Dispatch server. `dispatch search` searches every
+  project of its server, so in one askgate `facts`/`off` batch a run found the four other runs'
+  identical asks and did not post its own. Each run records its Dispatch in `dispatch.json`, and
+  `rig.sh score` does not score a run that records none or that names one database in one Postgres
+  with another run. A brainstorm batch now takes any number of runs.
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It
