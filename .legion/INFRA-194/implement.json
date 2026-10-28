@@ -2,72 +2,70 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-194",
-  "completed": "2026-10-28T09:20:00Z",
-  "round": "review round 1: the A1 empty-answer finding (Medium) and seven Minor findings, all fixed in 186e6b465a2821a886450c5e9ddb7903ff0737d1",
+  "completed": "2026-10-28T09:40:00Z",
+  "round": "review round 2: 408/429 reported as transport again (finding) and four Minor findings, fixed in 8ab6478192f2b29d3eea1e494e9ac9eae0cec369; round 1 fixed in 186e6b465a2821a886450c5e9ddb7903ff0737d1",
   "proof": [
     {
       "criterion": "Deployed build: production carries INFRA-393's merge f45fd5095930372b4150e9289aefe35484883531",
       "surface": "production Dispatch GET /healthz (the script's build line) and the GitHub compare API",
       "command": "bun scripts/dispatch/meaning-search-check.ts … (build line); gh api repos/sjawhar/legion/compare/f45fd5095930372b4150e9289aefe35484883531...9b92ac14351a926361c982edb7953e0325fab0de --jq .status",
-      "observed": "2026-10-28T09:12:13Z: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true'. The compare printed ahead (ahead_by 46, behind_by 0). PR #2200 comment 6465104333.",
-      "headSha": "186e6b465a2821a886450c5e9ddb7903ff0737d1",
+      "observed": "2026-10-28T09:30:26Z: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true'. The compare printed ahead (ahead_by 46, behind_by 0). PR #2200 comment 6465452056.",
+      "headSha": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
       "negativeControl": "Before run, 2026-10-25T16:50:19Z, at bc359229: build 35efd326b66aea9ee2476396dabab7f7685fdbf3, schema 114, predates INFRA-393's merge; the coverage route answered not-found there."
     },
     {
       "criterion": "A1: a search answer is not degraded to keyword-only ranking, and only an answer that shows meaning search ran passes",
       "surface": "production Dispatch: GET /api/v1/search through the script, and the dispatch CLI",
       "command": "bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' …; dispatch search --query 'meaning search'",
-      "observed": "2026-10-28T09:12:13Z: 'A1 degraded=no results=20 pass'. At 09:12:29Z the literal CLI search exited 0 and printed no 'Searched by keyword only' line (grep count 0).",
-      "headSha": "186e6b465a2821a886450c5e9ddb7903ff0737d1",
-      "negativeControl": "2026-10-28T09:12:47Z, stopword-only --a1-query 'the': 'A1 degraded=no results=0 unavailable: no-results', 'result unavailable exit=2' (at bc359229 the same answer judged pass, the review's finding). Before run, 2026-10-25T16:50:19Z: 'A1 degraded=yes results=20 fail', and the CLI printed the keyword-only line once."
+      "observed": "2026-10-28T09:30:26Z: 'A1 degraded=no results=20 pass'. The literal CLI search then exited 0 and printed no 'Searched by keyword only' line (grep count 0).",
+      "headSha": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
+      "negativeControl": "2026-10-28T09:30:36Z, stopword-only --a1-query 'the': 'A1 degraded=no results=0 unavailable: no-results', 'result unavailable exit=2'. Before run, 2026-10-25T16:50:19Z: 'A1 degraded=yes results=20 fail', and the CLI printed the keyword-only line once."
     },
     {
       "criterion": "A2: a query that shares no word with an issue finds that issue's own row in the top five",
       "surface": "production Dispatch GET /api/v1/search?q=<query>&limit=5, with lexemes from a throwaway Postgres 16.2 (pgserver 0.1.4, unix socket under $TMPDIR)",
       "command": "bun scripts/dispatch/meaning-search-check.ts --pair 'INFRA-43=<pre-registered query>' --pair 'INFRA-30=<pre-registered query>' --pair 'INFRA-32=<pre-registered query>' --lexeme-database \"$TMPDIR/infra194/pg/.s.PGSQL.5432\" … (queries as in scripts/dispatch/README.md)",
-      "observed": "2026-10-28T09:12:13Z: 'A2 INFRA-43 shared=0 position=1 pass', 'A2 INFRA-30 shared=0 position=none fail', 'A2 INFRA-32 shared=0 position=none fail', 'A2 pass (pairs passed 1 of 3)'. Same verdicts as at bc359229 at 08:40:03Z.",
-      "headSha": "186e6b465a2821a886450c5e9ddb7903ff0737d1",
-      "negativeControl": "2026-10-28T09:12:47Z: the INFRA-43 query plus one word of its title gave 'A2 INFRA-43 shared=1 position=1 fail', exit 1; a 1200-character query (over search's 1000-character cap) gave 'A2 INFRA-43 unavailable: refused', exit 2; no --lexeme-database gave 'shared=unchecked position=1 unavailable: lexeme-database', exit 2. Before run: all three pairs 'shared=0 position=none fail'."
+      "observed": "2026-10-28T09:30:26Z: 'A2 INFRA-43 shared=0 position=1 pass', 'A2 INFRA-30 shared=0 position=none fail', 'A2 INFRA-32 shared=0 position=none fail', 'A2 pass (pairs passed 1 of 3)'. Same verdicts at 186e6b46 (09:12:13Z) and bc359229 (08:40:03Z).",
+      "headSha": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
+      "negativeControl": "2026-10-28T09:30:36Z: the INFRA-43 query plus one word of its title gave 'A2 INFRA-43 shared=1 position=1 fail', exit 1; a 1200-character query (over search's 1000-character cap) gave 'A2 INFRA-43 unavailable: refused', exit 2; no --lexeme-database gave 'shared=unchecked position=1 unavailable: lexeme-database', exit 2. Before run: all three pairs 'shared=0 position=none fail'."
     },
     {
       "criterion": "A3: every item has a current vector from the configured model, none lacking and none failed",
       "surface": "production Dispatch GET /api/v1/search/coverage (INFRA-393)",
       "command": "bun scripts/dispatch/meaning-search-check.ts --coverage --expect-model \"$(cat $TMPDIR/infra194/expect-model)\" --coverage-wait 600. The identity is azure:<endpoint host>/embed-v-4-0, built from agent-infra a133f425's dispatch/Pulumi.prod.yaml and passed only at run time.",
-      "observed": "2026-10-28T09:12:13Z: 'A3 identity=match place=azure items=43001 current=43001 lacking=0 oldest_lacking_s=none failed=0 reads=2 pass'. The first read caught a write in flight. Every kind (issue 2600, document 6271, comment 29525, ask 1971, message 2634) had lacking=0 and failed=0. The full run exited 0 ('result pass exit=0').",
-      "headSha": "186e6b465a2821a886450c5e9ddb7903ff0737d1",
-      "negativeControl": "2026-10-28T09:12:47Z, --expect-model 'azure:wrong.example/embed-v-4-0' gave 'A3 identity=mismatch place=azure … fail', exit 1. Before run: 'A3 unavailable: not-found reads=1', exit 2."
+      "observed": "2026-10-28T09:30:26Z: 'A3 identity=match place=azure items=43077 current=43077 lacking=0 oldest_lacking_s=none failed=0 reads=1 pass'. Every kind (issue 2601, document 6279, comment 29585, ask 1971, message 2641) had lacking=0 and failed=0. The full run exited 0 ('result pass exit=0').",
+      "headSha": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
+      "negativeControl": "2026-10-28T09:30:36Z, --expect-model 'azure:wrong.example/embed-v-4-0' gave 'A3 identity=mismatch place=azure … fail', exit 1. Before run: 'A3 unavailable: not-found reads=1', exit 2."
     },
     {
-      "criterion": "Output hygiene and failure categories: no private host, name, URL, token or identity in the output; each failure maps to a fixed category",
-      "surface": "the captured stdout and stderr of the production runs",
-      "command": ".github/scripts/check-private-names.sh \"$TMPDIR/infra194/r2/after.out\" \"$TMPDIR/infra194/r2/neg.out\" \"$TMPDIR/infra194/r2/neg-auth.out\"",
-      "observed": "Exit 0 on every file. A wrong token printed only 'A1 unavailable: auth'; an empty token file printed only 'unavailable: config'; the 400 refusal printed only 'unavailable: refused'. The PR comment and the PR body passed the same scan before they were posted.",
-      "headSha": "186e6b465a2821a886450c5e9ddb7903ff0737d1",
-      "negativeControl": "The same runs with a wrong token, an empty token file and an over-long query: each exited 2 with a category line alone, and no URL or body was printed."
+      "criterion": "Output hygiene and failure categories: no private host, name, URL, token or identity in the output; a 5xx/408/429 is transport, any other 4xx but 401/403/404 is refused",
+      "surface": "the script end to end: production Dispatch, and a local server standing in for a gateway (a production gateway timeout cannot be made on demand)",
+      "command": "DISPATCH_URL=http://127.0.0.1:<port> DISPATCH_TOKEN_FILE=<file> bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' --coverage --expect-model X --coverage-wait 0, against a Bun.serve answering 429, then 408, then 400 with an HTML body; .github/scripts/check-private-names.sh on every output",
+      "observed": "429 and 408: 'build unavailable: transport', 'A1 unavailable: transport', 'A3 unavailable: transport reads=1', exit 2. 400: the same three lines with 'refused', exit 2. On production a 1200-character query gave 'A2 INFRA-43 unavailable: refused', a wrong token 'A1 unavailable: auth', an empty token file 'unavailable: config'. check-private-names exited 0 on every output, the PR comment and the PR body.",
+      "headSha": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
+      "negativeControl": "At 186e6b46 (review round 2) the same 429 and 408 were reported refused; the unit test rows for 429 and 408 and a coverage HttpStatusError(429) test now pin transport. The non-JSON test drives the real readJson through a local server and failed when readJson was made to throw on bad JSON (reverted)."
     }
   ],
   "filesChanged": [
     "scripts/dispatch/meaning-search-check.ts",
     "scripts/dispatch/__tests__/meaning-search-check.test.ts",
-    "scripts/dispatch/README.md"
+    "scripts/dispatch/README.md",
+    "packages/envoy-client/src/dispatch-http.ts (export transientStatus only)"
   ],
   "trickyParts": [
     "A1: Dispatch answers a query with no tsquery node with an empty answer and no degraded before it checks for an embedder (packages/envoy/internal/dispatch/api/search.go runSearch on main). So degraded means fail whatever the count, a non-empty answer without it passes, and an empty answer without it is unavailable (no-results).",
     "errorCategory: 401/403 auth, 404 not-found, any other 4xx refused, everything else transport.",
-    "The review's cleanups (sharedCount, checkA2/checkA3, one catch-all, no MalformedAnswer, no exitCode) keep every pre-existing output line the same; all earlier A2 and A3 tests pass unchanged except one build test that relied on an empty A1 answer passing, which now returns one result."
+    "The review's cleanups (sharedCount, checkA2/checkA3, one catch-all, no MalformedAnswer, no exitCode) keep every pre-existing output line the same; all earlier A2 and A3 tests pass unchanged except one build test that relied on an empty A1 answer passing, which now returns one result.",
+    "errorCategory checks the client's own transientStatus (5xx, 408, 429) before 401/403, 404 and other-4xx, so the two rules cannot drift; it applies to DispatchServiceError, DispatchGatewayError and readJson's HttpStatusError alike."
   ],
   "deviations": [
-    "The after run came before INFRA-394's issue closed, on the architect's go (Envoy 772e97a1), because its deploy landed outside Legion (theorem-labs/agent-infra#453)."
+    "The after run came before INFRA-394's issue closed, on the architect's go (Envoy 772e97a1), because its deploy landed outside Legion (theorem-labs/agent-infra#453).",
+    "Review round 2 declined finding (the reviewer's own call): merging checkCoverage into checkA3; nothing changed for it."
   ],
   "threads": [
-    "PRRT_kwDORFy7ds6xDI-y fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI-8 fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI_A fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI_D fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI_L fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI_S fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI_W fixed in 186e6b46, resolved",
-    "PRRT_kwDORFy7ds6xDI_b fixed in 186e6b46, resolved"
+    "Round 1: PRRT_kwDORFy7ds6xDI-y, _A, _D, _L, _S, _b accepted by the reviewer in round 2",
+    "PRRT_kwDORFy7ds6xDI-8 and PRRT_kwDORFy7ds6xDI_W unresolved in round 2, fixed in 8ab64781 and resolved again",
+    "Round 2: PRRT_kwDORFy7ds6xDjDY, PRRT_kwDORFy7ds6xDjDl, PRRT_kwDORFy7ds6xDjDr, PRRT_kwDORFy7ds6xDjD1, PRRT_kwDORFy7ds6xDjD9 fixed in 8ab64781 and resolved"
   ],
   "openQuestions": []
 }
