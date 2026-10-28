@@ -2,15 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-605",
-  "completed": "2026-10-28T16:30:00Z",
+  "completed": "2026-10-28T18:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2445",
   "proof": [
+    {
+      "criterion": "Tester round 2's ping defects are fixed: a process with nothing the head tracker protects sends no dispatch_doc_ping, and the deployment's idle cost is about one ping a second in total, not one per process",
+      "surface": "Dispatch's Go suites against a real Postgres 17.11 in the issue pod, and real envoy-dispatch processes (2 and 4) on one database of INFRA-589's load stack, idle 60 s, pings counted on a separate LISTEN connection",
+      "command": "go test -count=2 -run 'TestAServiceWithNothingTheTrackerProtectsSendsNoPing|TestFourServicesHoldingSomethingSendAboutOnePingASecondBetweenThem|TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen|TestACachedColdReadNeedsNoDatabaseReadWhileTheTrackerTrustsIt' -v ./internal/dispatch/docs/; then idle.sh <base|head> <db> <2|4> 60 <none|read> (base legion/INFRA-589 9692d2fd, head 218146f0); whole docs, api, cmd/dispatch, store, events, pglisten, loadtest, multiprocess and race docs lanes",
+      "observed": "the tester's test passes unmodified (0 pings); 4 services holding a cached read sent 10 pings in 12 s (0.83/s); half-open read fresh in about 3 s; idle real processes: nothing held 0 pings/min on 2 and 4 processes (round 2: 118 and 240), read held 46 and 53 pings/min (base 0), Dispatch CPU +0.06 to +0.18 s/min, Postgres within noise (https://github.com/sjawhar/legion/pull/2445#issuecomment-6475562321); docs ok 595.3 s, api ok 849.4 s, multiprocess ok 322.8 s, race docs ok 1167.2 s, the rest ok",
+      "headSha": "218146f09296009d8c70e73ec1e5cd337c848d94",
+      "negativeControl": "at the tester's commit 30366da2 on f137a4d4: 'a service with no room, no cached read, no preload and no tracker entry sent 4 pings on dispatch_doc_ping'; round 2's head idle sent 118 and 240 pings a minute for 2 and 4 processes"
+    },
     {
       "criterion": "Tester round 1's two defects are fixed: the room and connection caps hold for sockets that open at once and refuse with 503 only (DR-16); the head tracker is not trusted on a half-open LISTEN connection, so a cold read sees another process's committed write within the 10 s bound (DR-08)",
       "surface": "Dispatch's Go suites in internal/dispatch/docs against a real Postgres 17.11 in the issue pod: ten real document websockets opened at once through the service's ServeHTTP, and two Services on one database with the reader's LISTEN connection behind a TCP proxy that goes silent without closing",
       "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=5 -run TestConcurrentSocketOpensStayWithinTheCapsAndAreRefusedWith503 ./internal/dispatch/docs/ ; go test -count=3 -v -run TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen ./internal/dispatch/docs/ ; then the whole docs (ok 584.6 s) and api (ok 827.9 s) packages, cmd/dispatch, store, events, pglisten, loadtest, -tags multiprocess ./cmd/dispatch (ok 281.5 s), and -race ./internal/dispatch/docs/ (ok 1124.7 s)",
       "observed": "the tester's two red tests pass unmodified: caps 5/5 (and under -race); half-open 3/3, the write seen 2.95 s after it committed each run (bound 10 s); every lane above ok",
-      "headSha": "2fdeabab72111f512696671e0bc5fea14e45c1ad",
+      "headSha": "218146f09296009d8c70e73ec1e5cd337c848d94",
       "negativeControl": "at the tester's commits on 411492d8 both tests fail: '10 sockets opened at once on 10 documents: 10 admitted and 10 rooms live, want at most the room cap of 2', '... the rest answered map[401:7]', and 'the reader still reads \"Write 0.\\n\" 10.006s after the other service's write committed while its LISTEN connection was half-open, want \"Write 1.\\n\" within 10s'"
     },
     {
@@ -18,7 +26,7 @@
       "surface": "Dispatch's Go suites in internal/dispatch/docs, api and cmd/dispatch against a real Postgres 17.11 (ICU template1) in the issue pod",
       "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -timeout 45m ./internal/dispatch/docs/ ; go test -count=1 -timeout 55m ./internal/dispatch/api/ ; go test -count=1 ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/events/ ./internal/pglisten/ ./loadtest/ ; go test -tags multiprocess ./cmd/dispatch ; go test -race ./internal/dispatch/docs/ ./internal/dispatch/api/",
       "observed": "all ok at c0e85657 (docs 716.8 s, api 1015.3 s, multiprocess 327.2 s, race docs 1593.7 s, race api 1656.1 s); the head 59a3aeae changes only loadtest/ and INFRA-589's files beyond it, whose loadtest tests pass there. The 14 red tests pass: 20 queued updates in 1 transaction of 3 round trips with 0 shared-pool connections; 0 evictor head reads for 100 own updates and 10 live writes; 0 rooms-pool reads for 100 cached cold reads; at most 3 settlement wake-ups for a 500 ms lag; 1 lock statement at shutdown; 1 issue read and 1 caller read and 0 room walks per socket open; 0/1 renders warm/cold; 4 round trips under the commit-order lock for 20 changed anchors; class shares ygo's slice; losing preload released; read budget 256 MiB/1 GiB/64 MiB; /debug/vars dispatch_rooms names 2 rooms and 2 connections; round 2 re-ran every lane at 2fdeabab: docs ok 584.6 s, api ok 827.9 s, multiprocess ok 281.5 s, race docs ok 1124.7 s",
-      "headSha": "2fdeabab72111f512696671e0bc5fea14e45c1ad",
+      "headSha": "218146f09296009d8c70e73ec1e5cd337c848d94",
       "negativeControl": "the same tests at the test commits on the base (pklruqkq, wuzuoumx over c3d09eec) fail for the reason each tests: '20 queued updates committed in 20 transactions ... 10 round trips ... 20 connections of the shared request pool', 'the evictor read the document's head 101 times ... want 0', '100 cold reads ... took 100 connections of the rooms pool', 'the settlement woke 361 times ... want at most 3', 'sent 46 lock statements ... want 1', 'a cold open read the document's issue 4 times', '20 changed anchors made 175 round trips ... against 4'"
     },
     {
@@ -26,7 +34,7 @@
       "surface": "INFRA-589's committed load reproduction (packages/envoy/loadtest) on the issue pod: local Postgres 16 via the latency proxy, NATS, the Envoy listener and Dispatch built from each tree, same seed, 5 runs per side per step",
       "command": "LOADTEST_SRC=<tree> packages/envoy/loadtest/run-step.sh <step>-<before|after>-<n> for editors-1x-over-0.25x (--events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10), editors-10x-over-0.25x (--editors 200 --editor-docs 100), 1x (--events 4 --sessions 400 --requests 60 --editors 20 --editor-docs 10), 10x (--events 40 --sessions 4000 --requests 600 --editors 200 --editor-docs 100); before = legion/INFRA-589 9692d2fd with this branch's loadtest/, after = 59a3aeae; all 46 runs and MEDIANS.md at dispatch://INFRA-605/artifact/infra605-loadtest-runs-tar-gz (version 3)",
       "observed": "medians: editors-1x-over-0.25x room round trips per editor update 9.51 -> 2.98, connections held by rooms p99 9 -> 4, shared-pool share 100% -> 32%, durable p50 60 -> 73 ms, p99 264 -> 157 ms, REST unchanged; 1x+editors acknowledged 5,356 -> 7,193 of 7,193, relay p50 58,291 -> 34 ms, durable p50 33,062 -> 173 ms, markers stored 3% -> 100%, but REST 2xx 100% -> 78% from render CPU (renderedReplica.observe 17.6 s -> 31.6 s per window); editors-10x-over-0.25x acknowledged 25,493 -> 50,683, markers stored 0% -> 72%, rooms' connections p50 38 -> 11, 75.8 updates per batch, REST 2xx 73% -> 52%; 10x both builds 0.01% 2xx, no editor connects",
-      "headSha": "59a3aeae1864e6704815fd3f81677e8120a641b2",
+      "headSha": "218146f09296009d8c70e73ec1e5cd337c848d94",
       "negativeControl": "1x REST mix with no editors (1x-rest-only, 3 runs per side): 100% 2xx on both builds, p50 42 / 41 ms, p99 442 / 466 ms, event-lock hold 79 ms both, so the REST drop with editors is the editors' rendering, not the change's database path; and the before build's /debug/vars answers 404, so the batch columns read 'not served by this build' there"
     }
   ],
@@ -42,7 +50,8 @@
     "tests: docs room_appends_test.go, head_tracker_test.go, settlement_wait_test.go, socket_admission_test.go, room_memory_test.go, anchor_refresh_test.go (new), and wrappers in shutdown_test.go, service_test.go, room_recovery_test.go, interleaved_peers_test.go, anchor_blocks_test.go; api socket_admission_test.go, live_write_test.go, server_test.go; cmd/dispatch dispatch_rooms_test.go, shutdown_test.go, settings_test.go; store pool_test.go; events broker_test.go; loadtest pgwire_test.go, editors_test.go, tables_test.go, guard_test.go",
     ".dispatch/architecture/dispatch-docs.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/CHANGELOG.md",
     "dispatch://INFRA-514/artifact/architecture-review-md versions 7 and 8 (a Done line under each of DR-03, DR-04, DR-08, DR-10, DR-11, DR-14, DR-16, and the DR-02 measurement)",
-    "round 2: docs/roomstate.go, docs/websocket.go, docs/service.go, docs/testhooks.go (slot reservations); docs/head_tracker.go, docs/stale_room.go, docs/head_tracker_test.go (trust window, ping, unit test); packages/envoy/.changes/unreleased/pr2445-Fixed-20261028-150000.yaml (changie fragment; CHANGELOG.md restored to the base); room_appends.go and loadtest/README.md (issue keys removed); AGENTS.md, cmd/dispatch/README.md, .dispatch/architecture/dispatch-docs.md"
+    "round 2: docs/roomstate.go, docs/websocket.go, docs/service.go, docs/testhooks.go (slot reservations); docs/head_tracker.go, docs/stale_room.go, docs/head_tracker_test.go (trust window, ping, unit test); packages/envoy/.changes/unreleased/pr2445-Fixed-20261028-150000.yaml (changie fragment; CHANGELOG.md restored to the base); room_appends.go and loadtest/README.md (issue keys removed); AGENTS.md, cmd/dispatch/README.md, .dispatch/architecture/dispatch-docs.md",
+    "round 3: docs/stale_room.go (hold gate, jittered quiet window), docs/head_tracker.go (doc), docs/head_tracker_test.go (4-service ping test), AGENTS.md, .dispatch/architecture/dispatch-docs.md, cmd/dispatch/README.md, the changie fragment (cost statement)"
   ],
   "trickyParts": [
     "A batch is the call's own update and the run queued after it, decided under the room's state lock before the store call and only shrunk after the document lock (a member another batch stored is dropped); every committing transaction marks what it stored before it releases the locks, and an update stored alone is a batch of one with the same protocol, so no update is stored twice (TestALoneUpdateAndABatchHoldingItStoreItOnce, three orders).",
@@ -51,7 +60,8 @@
     "Own writes end in the head tracker through store.AfterCommit before the committing call returns, so a process reads its own writes; a transaction the pool did not open marks the document untrusted until its next head notification.",
     "Shutdown: browser appends no longer strand a shared connection on a dead database, which exposed a pre-existing hang: pool.Close waited forever on a connection taken after the drain saw the pools idle. closePool now follows the drain's silent-probe rule, with the health pool closed last.",
     "Socket caps are reservations: ServeHTTP claims a connection slot by compare-and-swap and a room slot in roomSlots (one slot per room however many sockets share it) before the load; the load takes over the reserved room slot, the unload or the socket's end frees it, and authorize no longer checks a cap, so the cap answers 503 before the upgrade and never 401.",
-    "Head-tracker trust needs a recent delivery: headTrustWindow 3 s since the LISTEN connection last delivered anything, computed at each call; the evictor pings dispatch_doc_ping from the shared pool after each quiet second (headPingAfter), bounded at 1 s, so a saturated pool lets trust lapse and reads fall back to the store."
+    "Head-tracker trust needs a recent delivery: headTrustWindow 3 s since the LISTEN connection last delivered anything, computed at each call; the evictor pings dispatch_doc_ping from the shared pool after each quiet second (headPingAfter), bounded at 1 s, so a saturated pool lets trust lapse and reads fall back to the store.",
+    "The ping is gated on Service.holdsWhatTheTrackerProtects (resident rooms, read-cache entries, tracker entries, a preload) and fires after headPingAfter plus a jitter in [0, headPingAfter) redrawn on every delivery and ping, so the first holder to fire resets the rest; the gap between pings while anyone holds something stays under 2 s plus a delivery, inside the 3 s trust window."
   ],
   "deviations": [
     "DR-10 (in spec v2, not in the approved plan) is done here for its write half; the architect was told and did not object; the walk stays INFRA-512's.",
@@ -70,10 +80,11 @@
     "INFRA-514's architect holds the merge until INFRA-512's per-keystroke render fix (DR-02) is on main; then main is merged forward and steps 1x and editors-10x-over-0.25x are re-run, 5 runs per side, with both numbers in the PR body.",
     "The shutdown budget can exceed the stop grace (pre-existing on main); INFRA-592 takes it by the architect's decision.",
     ".legion/INFRA-589/ handoffs arrive with the harness merge; INFRA-589's retro removes them on main before this branch is merged forward.",
-    "INFRA-556 changed the agreed gate to take each update's observed time; whichever merges second adopts it."
+    "INFRA-556 changed the agreed gate to take each update's observed time; whichever merges second adopts it.",
+    "INFRA-636 (write phase as one pipelined batch) and INFRA-707 (one queuedClass mark, flushThrough) agreed contracts with this branch; whichever merges second adapts."
   ],
   "discoveredComplexity": [
     "With database throttling of typing gone, DR-02's per-keystroke whole-document render is the next limit for editing load on 2 cores (render CPU 17.6 s -> 31.6 s per window at 1x; two thirds of Dispatch CPU at 200 editors)."
   ],
-  "round": 2
+  "round": 3
 }
