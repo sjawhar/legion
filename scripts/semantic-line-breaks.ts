@@ -742,7 +742,9 @@ function joinParagraph(source: readonly string[]): Masked[] {
       HARD_BREAK.test(previous.text) ||
       mask[lineBreak] !== true ||
       startsBlock(line.slice(indent)) ||
-      TASK_BOX_LINE.test(source[n - 1] ?? "")
+      TASK_BOX_LINE.test(source[n - 1] ?? "") ||
+      // A tag alone on its line stays alone: nothing joins onto it, so a second run reads it so too.
+      HTML_TAG_LINE.test((source[n - 1] ?? "").trimStart())
     ) {
       logical.push({ text: line, prose });
       continue;
