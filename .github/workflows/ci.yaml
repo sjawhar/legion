@@ -19,10 +19,11 @@ name: CI
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
 # here (`cache: false` on every step). The jobs that cache Go restore one of five families with
-# actions/cache/restore: go-daemon (typecheck, test, pi-legion), go-docs (docs, and the build job of
-# docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and
-# go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its job's
-# setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads only the
+# actions/cache/restore: go-daemon (typecheck, test, pi-legion, and daemon-go-postgres-16, which
+# saves none), go-docs (docs, and the build job of docs-pages.yaml, which saves it), go-envoy
+# (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each
+# family keeps one entry, keyed on the Go version its job's setup-go installed, so it is refreshed
+# only when Go is bumped. A go.sum change downloads only the
 # changed modules, and Go's build cache is content-addressed, so a stale entry costs a run only
 # what changed; a key on the go.sum files left a whole entry, up to a gigabyte, per change for
 # seven days. Only a run off main falls back, when the exact key misses, to the family's newest
@@ -76,6 +77,7 @@ jobs:
     outputs:
       typecheck: ${{ steps.filter.outputs.typecheck }}
       test: ${{ steps.filter.outputs.test }}
+      daemon_go_postgres_16: ${{ steps.filter.outputs.daemon_go_postgres_16 }}
       docs: ${{ steps.filter.outputs.docs }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
       contracts: ${{ steps.filter.outputs.contracts }}
@@ -87,11 +89,13 @@ jobs:
       dispatch: ${{ steps.filter.outputs.dispatch }}
       claude_envoy: ${{ steps.filter.outputs.claude_envoy }}
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
+      dispatch_go_postgres_16: ${{ steps.filter.outputs.dispatch_go_postgres_16 }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
       broker_multiprocess: ${{ steps.filter.outputs.broker_multiprocess }}
+      broker_go_postgres_16: ${{ steps.filter.outputs.broker_go_postgres_16 }}
       envoy_smoke: ${{ steps.filter.outputs.envoy_smoke }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       go_notices: ${{ steps.filter.outputs.go_notices }}
@@ -351,6 +355,39 @@ jobs:
               - '.github/actions/install-jj/**'
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
+            # What `go test ./...` in packages/daemon reads, for the two jobs that run it: test
+            # ("Test the Go daemon") and daemon-go-postgres-16. The packages it compiles, the
+            # Dispatch server internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what
+            # its tests read outside the daemon: contracts' fixtures
+            # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
+            # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
+            # bundles contracts and envoy-client, stages skills/ and writes their notices,
+            # pi-legion's src/phase-stall.ts internal/claudebridge/bridge_test.go:813-817 runs, the
+            # GitHub App helper internal/api/real_github_test.go:88 sources, and the examples and
+            # docs its tests hold to the code (cmd/legion/config_example_test.go:24,
+            # internal/config/controller_test.go:179, internal/config/kubernetes_test.go:1322,
+            # internal/runtime/sandbox/reclaim_doc_test.go:144). The root manifest, lockfile and
+            # patches the packs resolve through are bun_install's.
+            daemon_go_tests: &daemon_go_tests
+              - *go_workspace
+              - 'packages/daemon/**'
+              - *daemon_envoy_deps
+              - *dispatch_server
+              # The testdata of envoy's internal/contracts, which the daemon compiles.
+              - 'packages/envoy/internal/contracts/**'
+              - 'packages/contracts/**'
+              - 'packages/envoy-client/**'
+              - 'packages/pi-envoy/**'
+              - 'packages/pi-legion/**'
+              - 'packages/pi-shared/**'
+              - 'scripts/pi-plugin-prepack.sh'
+              - 'scripts/third-party-notices.ts'
+              - 'skills/**'
+              - 'scripts/e2e/lib/github-apps.sh'
+              - 'deploy/kubernetes/daemon/controller.yaml.example'
+              - 'deploy/kubernetes/daemon/legion.yaml.example'
+              - 'deploy/kubernetes/operator-route/pod.yml'
+              - 'docs/kubernetes.md'
 
             # `go vet -tags e2e ./...` in packages/daemon.
             typecheck:
@@ -364,47 +401,23 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *biome
-              - *go_workspace
-              - 'packages/daemon/**'
-              - *daemon_envoy_deps
-              - *dispatch_server
+              - *daemon_go_tests
               # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
               - *listener_command
-              - 'packages/envoy/internal/contracts/**'
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
               # checker sources them).
               - '.github/scripts/*'
-              - 'scripts/third-party-notices.ts'
               - 'scripts/third-party-notices.test.ts'
               - 'scripts/sessions-import-pods.sh'
               - 'scripts/sessions-import-pods.test.sh'
               # `bun test scripts/e2e/lib` scans scripts/e2e/*.sh (lib/script-functions.test.ts:101-104),
               # and the Stage 1 proof sources lib/rig.sh (with port-file.sh and held-port.py) and runs
-              # built-from.sh.
+              # built-from.sh. The e2e libraries and the census script import contracts and
+              # envoy-client, which daemon_go_tests names.
               - 'scripts/e2e/**'
               - 'scripts/dispatch/**'
               - 'scripts/github-apps/**'
-              # The e2e libraries and the census script import contracts and envoy-client, and the
-              # daemon's tests read contracts' fixtures (internal/api/state_golden_test.go:27,
-              # internal/intake/intake_test.go:698).
-              - 'packages/contracts/**'
-              - 'packages/envoy-client/**'
-              # internal/daemon/promptreferences_omp_test.go:132 packs both Oh My Pi plugins, whose
-              # prepack stages skills/ and writes their notices, and
-              # internal/claudebridge/bridge_test.go:813-817 runs pi-legion's src/phase-stall.ts.
-              - 'packages/pi-envoy/**'
-              - 'packages/pi-legion/**'
-              - 'packages/pi-shared/**'
-              - 'scripts/pi-plugin-prepack.sh'
-              - 'skills/**'
-              # Examples and docs the daemon's tests hold to the code: cmd/legion/config_example_test.go:24,
-              # internal/config/controller_test.go:179, internal/config/kubernetes_test.go:1322,
-              # internal/runtime/sandbox/reclaim_doc_test.go:144.
-              - 'deploy/kubernetes/daemon/controller.yaml.example'
-              - 'deploy/kubernetes/daemon/legion.yaml.example'
-              - 'deploy/kubernetes/operator-route/pod.yml'
-              - 'docs/kubernetes.md'
               # The tools the job installs: jj, mise and Oh My Pi, uv, changie, and the NATS images.
               - *omp_install
               - '.github/actions/install-uv/**'
@@ -413,6 +426,16 @@ jobs:
               # changelog-fold.test.sh copies pi-legion's changie config and changelog (its line 53).
               - 'packages/pi-legion/.changie.yaml'
               - 'packages/pi-legion/CHANGELOG.md'
+            # daemon-go-postgres-16: the test job's "Test the Go daemon" step on Postgres 16, its
+            # frozen Bun install, and the tools it installs for it (jj, mise and Oh My Pi, uv, and
+            # the NATS images).
+            daemon_go_postgres_16:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *daemon_go_tests
+              - *omp_install
+              - '.github/actions/install-uv/**'
+              - '.github/actions/pull-test-images/**'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-pages.yaml builds and publishes main's
             # site on the pushes this same list selects: its on.push.paths, which check-ci-filters.sh
@@ -677,6 +700,25 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
+            # `go test ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/...` in
+            # packages/envoy, on production's Postgres 16.
+            dispatch_go_postgres_16:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *go_workspace
+              # Its tests walk every source file under packages/envoy
+              # (internal/dispatch/api/lock_level_test.go:120-133,
+              # internal/dispatch/store/search_text_test.go:102-120).
+              - 'packages/envoy/**'
+              # pmdoc's tests run pmdoc/gen, which imports the editor
+              # (internal/dispatch/pmdoc/update_test.go:236-239, render_readback_test.go:32).
+              - 'packages/proof-editor/**'
+              # internal/dispatch/api/delivery_live_diff_test.go:965,
+              # internal/dispatch/docs/approval_carry_test.go:26.
+              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/decision-blocks/**'
+              # The image pull before its tests, of tests3.Image (internal/tests3/seaweedfs.go).
+              - '.github/actions/pull-test-images/**'
             # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
             # packages/envoy), the envoy packages its tests compile, and the Dispatch server and
             # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
@@ -727,8 +769,9 @@ jobs:
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
-            # cmd/broker/outage_test.go:317-318 builds.
-            broker_multiprocess:
+            # cmd/broker/outage_test.go:317-318 builds. broker_go_postgres_16 names it whole, since
+            # its job runs the same command.
+            broker_multiprocess: &broker_multiprocess
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/cmd/broker/*'
@@ -762,6 +805,19 @@ jobs:
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/redact/*'
+            # broker-go-postgres-16: broker-multiprocess's command on Postgres 16, and before it
+            # `go test ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/...
+            # ./internal/broker/...` in packages/envoy.
+            broker_go_postgres_16:
+              - *broker_multiprocess
+              - 'packages/envoy/cmd/agent-secrets/**'
+              - 'packages/envoy/cmd/agent-secrets-devrelay/**'
+              - 'packages/envoy/cmd/broker/**'
+              - 'packages/envoy/internal/broker/**'
+              # Test helpers the broker's tests import.
+              - 'packages/envoy/internal/explaintest/*'
+              - 'packages/envoy/internal/goroutinetest/*'
+              - 'packages/envoy/internal/pgmigrate/pgmigratetest/*'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
@@ -1197,7 +1253,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1390,6 +1446,98 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+  # Production's Cloud SQL instance runs Postgres 16 until it moves to 18, and it also holds the
+  # Legion daemon's databases, so until then the daemon's Go suite also runs here on the
+  # pgvector-on-16 image production's database matches; delete this job, with its filter, its
+  # ci-ok entries and its gate in .github/scripts/ci_job_reads.py, once production runs Postgres
+  # 18. Its steps are the ones the test job's "Test the Go daemon" step needs, copied from that
+  # job: Bun and the workspace (the plugin-pack and pi-legion transition-table tests run bun), Go,
+  # tmux, jj, Oh My Pi, uv, the NATS images and user namespaces.
+  daemon-go-postgres-16:
+    name: Daemon Go suite on production's Postgres 16 (until production runs Postgres 18)
+    needs: changes
+    if: needs.changes.outputs.daemon_go_postgres_16 == 'true'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The daemon's unit tests' Postgres and the broker rig its agentsecrets contract tests drive.
+      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The runner VM is discarded after the job, so Ryuk would only be one more image pull.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache: false
+
+      # go-daemon, which typecheck and test save on a push to main, restored only.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
+
+      # The tmux runtime's tests drive a real tmux server, and the daemon refuses to start without it.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      # The workspace and boundary tests drive the worker image's jj; install-omp uses its mise.
+      - uses: ./.github/actions/install-jj
+
+      # internal/podsafety and the pod agent's argv test run the pinned Oh My Pi (.omp-pin).
+      - uses: ./.github/actions/install-omp
+
+      # internal/runtime/sandbox's uv link-mode test runs the worker image's uv.
+      - uses: ./.github/actions/install-uv
+
+      # testnats.Image and Envoy's HubImage, pulled first for the reason the action gives.
+      - name: Pull the NATS test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/daemon/internal/testnats/nats.go Image
+            packages/envoy/internal/testnats/nats.go HubImage
+
+      # internal/launcher's role-namespace tests need unprivileged user namespaces (see the test job).
+      - name: Allow unprivileged user namespaces (the launcher's role-namespace tests)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+
+      # The server's version and the pgvector version it offers, read from the service itself.
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+
+      - name: Test the Go daemon on Postgres 16
+        run: go test -count=1 -timeout 20m ./...
+        working-directory: packages/daemon
+
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
   # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order,
@@ -1404,7 +1552,7 @@ jobs:
     # truncate.
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1740,7 +1888,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1884,7 +2032,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1925,6 +2073,11 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
+      # The server's version and the pgvector version it offers, read from the service itself, so
+      # the run shows which Postgres the tests below ran on.
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
       # reason the action gives.
@@ -1990,6 +2143,57 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+  # Production Dispatch runs Postgres 16 until its Cloud SQL instance moves to 18, so until then
+  # Dispatch's Go suite also runs here on the pgvector-on-16 image production's database matches;
+  # delete this job, with its filter, its ci-ok entries and its gate in
+  # .github/scripts/ci_job_reads.py, once production runs Postgres 18. The packages are Dispatch's
+  # server, its internal packages and the migrations. Their NATS runs in the test process
+  # (internal/testnats); the one container they start is internal/dispatch/files' S3 server,
+  # tests3.Image, pulled first for the reason .github/actions/pull-test-images gives. pmdoc's tests
+  # shell out to the generated TypeScript fixtures, so Bun is set up as in envoy-go.
+  dispatch-go-postgres-16:
+    name: Dispatch Go suite on production's Postgres 16 (until production runs Postgres 18)
+    needs: changes
+    if: needs.changes.outputs.dispatch_go_postgres_16 == 'true'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # internal/dispatch/api's broker contract test skips without it, as in envoy-go.
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+      - name: Pull test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/envoy/internal/tests3/seaweedfs.go Image
+      - name: Unit test Dispatch's Go packages on Postgres 16
+        run: go test ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/...
+        working-directory: packages/envoy
 
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
@@ -2083,7 +2287,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2127,7 +2331,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2166,7 +2370,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2213,7 +2417,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2233,6 +2437,52 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the secrets broker
+        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
+        working-directory: packages/envoy
+
+  # Production's Cloud SQL instance runs Postgres 16 until it moves to 18, and it also holds the
+  # secrets broker's database, so until then the broker's Go suite also runs here on the
+  # pgvector-on-16 image production's database matches; delete this job, with its filter, its
+  # ci-ok entries and its gate in .github/scripts/ci_job_reads.py, once production runs Postgres
+  # 18. The packages are every one whose tests reach BROKER_TEST_DATABASE_URL (through storetest,
+  # the rig, or the variable itself) but internal/dispatch/api, which dispatch-go-postgres-16 runs:
+  # the broker binary, the agent-secrets CLI and its dev relay, and the broker's internal tree.
+  # Then the two-process tests, as broker-multiprocess runs them. None starts a container or runs
+  # Bun, so the job sets up Go alone, as broker-multiprocess does.
+  broker-go-postgres-16:
+    name: Broker Go suite on production's Postgres 16 (until production runs Postgres 18)
+    needs: changes
+    if: needs.changes.outputs.broker_go_postgres_16 == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+      - name: Unit test the secrets broker's Go packages on Postgres 16
+        run: go test -count=1 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/... ./internal/broker/...
+        working-directory: packages/envoy
+      - name: Two-process tests of the secrets broker on Postgres 16
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
 
@@ -2484,6 +2734,7 @@ jobs:
       - lint
       - typecheck
       - test
+      - daemon-go-postgres-16
       - docs
       - contracts
       - envoy-plugin
@@ -2494,11 +2745,13 @@ jobs:
       - dispatch
       - claude-envoy
       - envoy-go
+      - dispatch-go-postgres-16
       - envoy-infra-go
       - envoy-go-race
       - dispatch-memory
       - dispatch-multiprocess
       - broker-multiprocess
+      - broker-go-postgres-16
       - envoy-smoke
       - envoy-e2e-local
       - ci-filters
@@ -2518,6 +2771,7 @@ jobs:
             {
               "typecheck": "typecheck",
               "test": "test",
+              "daemon-go-postgres-16": "daemon_go_postgres_16",
               "docs": "docs",
               "contracts": "contracts",
               "envoy-plugin": "envoy_plugin",
@@ -2528,11 +2782,13 @@ jobs:
               "dispatch": "dispatch",
               "claude-envoy": "claude_envoy",
               "envoy-go": "envoy_go",
+              "dispatch-go-postgres-16": "dispatch_go_postgres_16",
               "envoy-infra-go": "envoy_infra_go",
               "envoy-go-race": "envoy_go_race",
               "dispatch-memory": "dispatch_memory",
               "dispatch-multiprocess": "dispatch_multiprocess",
               "broker-multiprocess": "broker_multiprocess",
+              "broker-go-postgres-16": "broker_go_postgres_16",
               "envoy-smoke": "envoy_smoke",
               "envoy-e2e-local": "envoy_e2e_local",
               "ci-filters": "ci_filters",
