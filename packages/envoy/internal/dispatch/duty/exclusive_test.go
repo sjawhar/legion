@@ -284,13 +284,13 @@ func (s slowLeases) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 }
 
 // A lone loop's ticks come one period apart, and each must run: no other process has served
-// either period. Here the first tick is due 200 ms before a period boundary on the database's
-// clock and its lease takes 400 ms, so the query that reads its period runs 200 ms into the next
-// one; the second tick is due exactly one period after the first and takes its lease at once.
-// Read by the moment its query ran, the late first tick serves the second tick's period and the
-// second is refused - an interval of the loop's work that no process did, which is how
-// TestALoneRunnerMakesAPassOnEveryTick lost one tick in ten. Read by when it was due, each tick
-// serves its own period.
+// either period. Here the first tick is due 200 ms before a period boundary on this process's
+// clock, the clock Exclusive buckets a due time on, and its lease takes 400 ms, so the query that
+// reads its period runs 200 ms into the next one; the second tick is due exactly one period after
+// the first and takes its lease at once. Read by the moment its query ran, the late first tick
+// serves the second tick's period and the second is refused - an interval of the loop's work that
+// no process did, which is how TestALoneRunnerMakesAPassOnEveryTick lost one tick in ten. Read by
+// when it was due, each tick serves its own period.
 func TestExclusiveCountsALateTickInThePeriodItWasDueIn(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
@@ -299,7 +299,7 @@ func TestExclusiveCountsALateTickInThePeriodItWasDueIn(t *testing.T) {
 	const period = time.Second
 	const early, delay = 200 * time.Millisecond, 400 * time.Millisecond
 
-	due := beforeNextBoundary(t, database, period, early)
+	due := beforeNextBoundary(t, period, early)
 	time.Sleep(time.Until(due))
 	if !Exclusive(ctx, slowLeases{Leases: leases, delay: delay}, name, due, period, func(context.Context) {}) {
 		t.Fatal("the first tick did not run, so this row measures nothing")
@@ -314,19 +314,11 @@ func TestExclusiveCountsALateTickInThePeriodItWasDueIn(t *testing.T) {
 }
 
 // beforeNextBoundary is the moment on this process's clock that lies before ahead of a period
-// boundary on the database's clock, the first such moment still at least 100 ms away. The
-// database read its clock somewhere inside the round trip, so the round trip's midpoint stands
-// for that reading; the offset that leaves is half a round trip at most, far inside before.
-func beforeNextBoundary(t *testing.T, database *store.Store, period, before time.Duration) time.Time {
+// boundary of that clock - the clock Exclusive buckets a tick's due time on (periodBoundary) - the
+// first such moment still at least 100 ms away.
+func beforeNextBoundary(t *testing.T, period, before time.Duration) time.Time {
 	t.Helper()
-	sent := time.Now()
-	var dbNow time.Time
-	if err := database.Pool.QueryRow(context.Background(), `select clock_timestamp()`).Scan(&dbNow); err != nil {
-		t.Fatalf("read the database's clock: %v", err)
-	}
-	local := sent.Add(time.Since(sent) / 2)
-	boundary := time.Unix(0, (dbNow.UnixNano()/period.Nanoseconds()+1)*period.Nanoseconds())
-	due := local.Add(boundary.Sub(dbNow) - before)
+	due := periodBoundary(time.Now(), period).Add(period - before)
 	for time.Until(due) < 100*time.Millisecond {
 		due = due.Add(period)
 	}

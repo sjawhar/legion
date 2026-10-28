@@ -13,8 +13,8 @@ import (
 )
 
 // slowWrites is a database connection whose every write waits delay first while slow is set: a
-// loaded process descheduled, or a network path that stalls, between taking a tick's elapsed time
-// and the database reading its clock.
+// loaded process descheduled, or a network path that stalls, between the tick and the database
+// answering its period query.
 type slowWrites struct {
 	net.Conn
 	slow  *atomic.Bool
@@ -29,12 +29,13 @@ func (c slowWrites) Write(b []byte) (int, error) {
 }
 
 // A lone loop's ticks come one period apart, and each must run. Here the first tick is due 50 ms
-// before a period boundary on the database's clock and every write on its lease connection stalls
-// 100 ms - among them the ones that carry the period query, after Exclusive has measured how long
-// ago the tick was due - so the database's now() less that measure lands past the boundary. The
-// second tick, due exactly one period later, stalls on nothing and lands in the same period, which
-// the first has recorded as served: a lone loop loses that period, the defect
-// TestExclusiveCountsALateTickInThePeriodItWasDueIn covers for a delay before the measure.
+// before a period boundary on this process's clock, the clock Exclusive buckets a due time on, and
+// every write on its lease connection stalls 100 ms - among them the ones that carry the period
+// query - so any moment read at the database, the database's now() less a duration measured
+// before the query included, lands past the boundary. The second tick, due exactly one period
+// later, stalls on nothing; read by such a moment it lands in the period the first has recorded
+// as served, and a lone loop loses that period, the defect
+// TestExclusiveCountsALateTickInThePeriodItWasDueIn covers for a delay before the query.
 func TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -58,7 +59,7 @@ func TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn(t *test
 	}
 	t.Cleanup(leases.Close)
 
-	due := beforeNextBoundary(t, database, period, early)
+	due := beforeNextBoundary(t, period, early)
 	time.Sleep(time.Until(due))
 	slow.Store(true)
 	ran := Exclusive(ctx, leases, name, due, period, func(context.Context) {})

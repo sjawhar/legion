@@ -52,13 +52,13 @@ const (
 // boundary read at the moment the gate runs carries every delay before it in: a tick due just
 // before a boundary whose lease took longer than the time left lands in the next period, and the
 // next tick, on time one period later, finds that period served and is refused - a lone loop
-// losing a period (INFRA-523; measured: ran 9 skipped 1 over ten one-second ticks). Subtracting
-// the time since due from the database's now() only narrows that to whatever stalls between the
+// losing a period (measured: ran 9 skipped 1 over ten one-second ticks). The database's now() less
+// a duration measured before the query has the same fault, narrowed to whatever stalls between the
 // measure and the database reading its clock (a descheduled or paused process, a slow socket
-// write): a tick due within that stall of a boundary still landed in the next period (the
-// INFRA-523 tester's TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn). Taken
-// from due alone, a lone loop's ticks one period apart are always in consecutive periods,
-// whatever any tick's delay, and no tolerance constant has to be chosen to make that true.
+// write): a tick due within that stall of a boundary lands in the next period
+// (TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn). Taken from due alone, a
+// lone loop's ticks one period apart are always in consecutive periods, whatever any tick's delay,
+// and no tolerance constant has to be chosen to make that true.
 //
 // The period is stored and compared beside the boundary because a boundary means nothing on
 // another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
@@ -83,11 +83,11 @@ const (
 // and two passes stand up to two periods apart, once (measured against Postgres: one process
 // 300 ms ahead ticking at x.7 s, the other at x.9 s, a one-second period - the first's last pass
 // at 19.7 s recorded period 20, and the other's tick at 20.9 s was refused). A clock stepped back
-// by X skips at most ceil(X / period) ticks. The alternative this replaced, the database's clock
-// read at the gate, held the clocks equal but let the gate's own delay decide the period, which
-// costs a lone loop a period on any host. The boundary crosses as a timestamp and the period as
-// the whole number of nanoseconds a Go duration is, stored and compared as that integer: a scale
-// equality decided by a float's rounding would be the scale defect above in a new coat.
+// by X skips at most ceil(X / period) ticks. The database's clock, read at the gate, would hold
+// the clocks equal but let the gate's own delay decide the period, which costs a lone loop a
+// period on any host. The boundary crosses as a timestamp and the period as the whole number of
+// nanoseconds a Go duration is, stored and compared as that integer: a scale equality decided by a
+// float's rounding would be the scale defect above in a new coat.
 const (
 	readPeriod = `select exists (
 			select 1 from duty_passes
