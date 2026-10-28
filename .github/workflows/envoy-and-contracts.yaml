@@ -1104,10 +1104,11 @@ jobs:
             packages/envoy/internal/tests3/seaweedfs.go Image
       # The API package owns the largest set of Postgres-backed tests. Running it with the other
       # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module.
+      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
+      # default ten minutes (523 s on a workstation), so it gets 20.
       - name: Unit test envoy Go package
         run: |
-          go test ./internal/dispatch/api
+          go test -timeout 20m ./internal/dispatch/api
           go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
@@ -1203,8 +1204,11 @@ jobs:
         with:
           consts: |
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # The API package runs first and alone, with 20 minutes, for envoy-go's reasons above.
       - name: Unit test Dispatch's Go packages on Postgres 16
-        run: go test ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/...
+        run: |
+          go test -timeout 20m ./internal/dispatch/api
+          go list ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/... | grep -v '/internal/dispatch/api$' | xargs go test
         working-directory: packages/envoy
 
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
