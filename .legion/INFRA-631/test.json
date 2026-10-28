@@ -2,60 +2,65 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T11:50:00Z",
-  "round": 8,
-  "headTested": "c8ba218dea1e80af50811552cec4062538940c03",
+  "completed": "2026-10-28T12:30:00Z",
+  "round": 9,
+  "headTested": "9f818b4e4dac8e8c4791ee579ccb685030b6e81e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at c8ba218d (code head 74b63566, a merge of main 0a921021): checker exit 0 on both guides; `restructure.ts --strict` on main 0a921021's files byte-identical to head; the two new split anchors start items at head (AGENTS.md:2850 and :2865) and the --structural-only output is folded-equal to the head guide; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 30 pass, my tests unchanged."
+    "how": "Re-ran at 9f818b4e (code head c2a08196): checker exit 0 on both guides; `restructure.ts --strict` on main 0a921021's and on current main eb21e78d's files byte-identical to head (the guides are unchanged on main since 0a921021); `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 36 pass, my tests unchanged."
   },
-  "roundSevenFailure": "fixed: `Intro line:\\n<tag>\\nvalue\\n</tag>\\nMore text here.` is left as it is by --write and a second run changes nothing; over the whole repository the first and second --write now give the same files (diff -rq: 0), packages/pi-envoy/extensions/askgate/askgate-request.md included.",
+  "reviewFindings": {
+    "a < that opens no CommonMark tag": "fixed: `See <K, V=\"x > `code\" > here \\nand` then more.` and the <code> variant are left as they are; a valid tag split over lines (`<a\\nhref=\"y\">`), a `<` inside a code span, an email and a URI autolink, a URI with a space and an unclosed comment are read as CommonMark reads them (cmark-gfm rendering unchanged)",
+    "inline code compared exactly": "fixed: `See [a](b `c d) e \\nf` g.` is refused (exit 2, naming the block), file unchanged",
+    "rule-like lines and idempotence": "fixed: `Intro text\\n:\\nmore text` and `-=` are left as they are; the round-8 checker c8ba218d gives `Intro text\\n: more text` then `Intro text : more text`",
+    "frontMatterEnd comment": "corrected"
+  },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
-      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, plus an independent paragraph-level scanner",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?  (and the Python scanner: fences removed; code spans, inline HTML and link destinations masked per paragraph; boundary '[.!?][closers]* +[A-Za-z0-9`[(\"*_<|#>]' not after an abbreviation)",
-      "observed": "exit 0, no output; the scanner finds 0 two-sentence lines in either guide; --write on copies of both guides changes nothing",
-      "headSha": "c8ba218dea1e80af50811552cec4062538940c03",
-      "negativeControl": "the same command on main 0a921021's old-layout files exits 1: AGENTS 1613 R1 / 101 R2 / 9 R3, README 553 R1 / 23 R2 / 1 R3"
+      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, plus an independent paragraph-level scanner (round 8, guides unchanged since)",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?",
+      "observed": "exit 0, no output; --write on copies of both guides changes nothing; the independent scanner found 0 two-sentence lines in these same bytes at c8ba218d",
+      "headSha": "9f818b4e4dac8e8c4791ee579ccb685030b6e81e",
+      "negativeControl": "the same command on main eb21e78d's old-layout files exits 1"
     },
     {
       "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
       "surface": "restructure.ts as the reviewer re-runs it, compared with the guides at head",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <0a921021 AGENTS.md> <out> <0a921021 README.md> <out>; cmp with head; --structural-only on AGENTS.md, folded-compared with head",
-      "observed": "byte-identical to head; the structural output (named edits only, old layout) is folded-equal to head, so the re-layout changed only whitespace; the named edits themselves were classified hunk by hunk in round 2 (AGENTS 117, README 345 hunks, 0 left over; 10 converted tables matching cell for cell) and restructure.ts has since added only split anchors, each starting an item at its anchor sentence (AGENTS.md:2850, :2865)",
-      "headSha": "c8ba218dea1e80af50811552cec4062538940c03",
-      "negativeControl": "restructure.ts --strict exits 1 and writes nothing when an anchor is missing (the implementer's control, re-run round 2); the folded comparison reports a one-word change (round 2)"
+      "command": "bun .legion/INFRA-631/restructure.ts --strict <main AGENTS.md> <out> <main README.md> <out> for main 0a921021 and eb21e78d; cmp with head",
+      "observed": "byte-identical to head for both; the --structural-only output was folded-equal to head at c8ba218d (same bytes), and the named edits were classified hunk by hunk in round 2 (AGENTS 117, README 345, 0 left over; 10 tables cell for cell)",
+      "headSha": "9f818b4e4dac8e8c4791ee579ccb685030b6e81e",
+      "negativeControl": "restructure.ts --strict exits 1 and writes nothing when an anchor is missing (round 2)"
     },
     {
       "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
       "surface": "git merge-tree --write-tree on branches made from the new-layout files with the committed patches",
-      "command": "TMPDIR=$TMPDIR/infra631-test8/own/rp bash .legion/INFRA-631/replay/run.sh",
-      "observed": "exit 0, 11/11 PASS: 5e45356e68aa, 4671996e14fd, 56d31191f8f1, 949ebe03bd4e clean; 5aee84d6930e and 125a3bfb0484 conflict as classified; append(a) and append(b) clean. Round 1's own ports: 6112adc201ea, e26a66480011, 26a15dcf333e clean",
-      "headSha": "c8ba218dea1e80af50811552cec4062538940c03",
+      "command": "TMPDIR=$TMPDIR/infra631-test9/own/rp bash .legion/INFRA-631/replay/run.sh",
+      "observed": "exit 0, 11/11 PASS; four real different-sentence pairs and both added-item demos merge clean, the two same-or-adjacent pairs conflict as classified; round 1's own ports 6112adc201ea, e26a66480011, 26a15dcf333e clean",
+      "headSha": "9f818b4e4dac8e8c4791ee579ccb685030b6e81e",
       "negativeControl": "append(c), two items at one point of Routes, conflicts; same-sentence controls 728b5e297fb5 and 4440fc7b57a2 conflict; every clean pair conflicts on the old layout"
     },
     {
       "criterion": "4. Every citation of a moved section still resolves, and the porting recipe in the PR body works.",
-      "surface": "the recipe driven literally, including its refusal branch (rounds 3 and 7), and the head's position words",
-      "command": "recipe steps 1-8 on 73 open-PR file runs (round 3); step 4's refusal branch on main's README plus `- a\\n  - -` (round 7; restructure.ts pin 4732cf44 unchanged except the two split anchors added after it)",
-      "observed": "66 of 73 runs merge with no conflict and none loses a line; the refusal branch writes ours.new, names its block's line, and steps 5 and 7 then exit 0; position words resolve at head",
-      "headSha": "c8ba218dea1e80af50811552cec4062538940c03",
+      "surface": "the recipe driven literally (rounds 3 and 7); restructure.ts unchanged since round 8",
+      "command": "recipe steps 1-8 on 73 open-PR file runs (round 3); step 4's refusal branch (round 7)",
+      "observed": "66 of 73 runs merge with no conflict, none loses a line; the refusal branch writes ours.new and names its block's line; position words resolve at head",
+      "headSha": "9f818b4e4dac8e8c4791ee579ccb685030b6e81e",
       "negativeControl": "--write with no node_modules prints 'run `bun install`', exit 2, file unchanged"
     },
     {
       "criterion": "Tool contract: --write changes only whitespace, never front matter, never how GitHub renders a file, and a second run changes nothing.",
       "surface": "scripts/semantic-line-breaks.ts --write on copies of every tracked .md file, compared with cmark-gfm and PyYAML, run twice",
-      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,191 files) copied to $TMPDIR/infra631-test8/work; xargs bun <checkout>/scripts/semantic-line-breaks.ts --write; fm.py; cm.py (cmarkgfm 2024.11.20, whitespace kept inside pre/code/textarea/kbd/samp/tt); then copied to work2 and --write again; diff -rq work work2",
-      "observed": "1,118 written, 4 refused (pmdoc corpus hazards); 0 of 827 front matter blocks changed (6 unparseable before and after); cmark-gfm rendering equal for all but docs/kubernetes.md, whose only difference is the </p> a loose list adds before the <dir> block main already has; first vs second run: 0 files differ; 46 crafted inputs (rounds 4-7) left as they are or rendering the same",
-      "headSha": "c8ba218dea1e80af50811552cec4062538940c03",
-      "negativeControl": "the round-7 checker (4ff8c3c0) changes `Intro line:\\n<tag>\\nvalue\\n</tag>\\nMore text here.` again on a second run; the head's leaves it as it is"
+      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,191 files) copied to $TMPDIR/infra631-test9/work; xargs bun <checkout>/scripts/semantic-line-breaks.ts --write (32.8 s); fm.py; cm.py (cmarkgfm 2024.11.20, whitespace kept inside pre/code/textarea/kbd/samp/tt); copy to work2, --write again, diff -rq",
+      "observed": "1,118 written, 4 refused (pmdoc corpus hazards); 0 of 827 front matter blocks changed; cmark-gfm rendering equal for all but docs/kubernetes.md's loose-list </p> before the <dir> block main already has; first vs second run: 0 files differ; 58 crafted inputs (rounds 4-9, the review's included) left as they are, refused, or rendering the same, each idempotent",
+      "headSha": "9f818b4e4dac8e8c4791ee579ccb685030b6e81e",
+      "negativeControl": "the round-8 checker (c8ba218d) turns `Intro text\\n:\\nmore text` into `Intro text\\n: more text` and then `Intro text : more text`; the head leaves it as it is"
     }
   ],
   "verified": [
-    "CI: no check run exists yet for c8ba218d at 11:41Z; mergeable against main 0a921021."
+    "CI read at 12:20Z: the handoff head 9f818b4e carries skip-checks; at the code head c2a08196 lint, test, typecheck, build x2 and changes are queued, pr-title queued. Mergeable against main eb21e78d."
   ],
   "notes": [
     "Not counted, as before: README Identity list split halves read as identity modes (disclosed deviation)."
