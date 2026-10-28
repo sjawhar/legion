@@ -151,6 +151,39 @@ func TestLeaseTakesAnAbsentRecordAndStartsServiceSince(t *testing.T) {
 	}
 }
 
+// overwrittenTakeKV is the listener state bucket as a standby sees it when another pod's write
+// lands on the key right after its Create, before it reads that write back.
+type overwrittenTakeKV struct {
+	natsgo.KeyValue
+}
+
+func (k overwrittenTakeKV) Create(key string, value []byte) (uint64, error) {
+	revision, err := k.KeyValue.Create(key, value)
+	if err == nil {
+		_, err = k.KeyValue.Put(key, []byte(`{"holder":"pod-b","boot":"fedcba9876543210"}`))
+	}
+	return revision, err
+}
+
+// A take whose read back by key finds another revision than its write does not hold the lease:
+// another pod wrote first. The standby reads the record again at once, and finds pod-b's.
+func TestLeaseTakeOverwrittenBeforeItsReadBackIsNotHeld(t *testing.T) {
+	kv := leaseBucket(t)
+	a := testLease(bus.KeyValue{KeyValue: overwrittenTakeKV{KeyValue: kv.KeyValue}}, "pod-a", productionLeaseConfig(), newFakeLeaseClock().now)
+	if wait := a.step(); wait != 0 {
+		t.Fatalf("step after an overwritten take waits %s, want 0: read the record again at once", wait)
+	}
+	if status := a.Status(); status.Holding || status.Term != 0 {
+		t.Fatalf("status = %+v, want not holding, no term", status)
+	}
+	if drainChanges(a) {
+		t.Fatal("the overwritten take signalled a change")
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-b" {
+		t.Fatalf("record = %+v, want pod-b's write", record.leaseFields)
+	}
+}
+
 // A standby takes an unreleased record nobody renews only once the revision it saw has stayed
 // unchanged for a full ttl on its own clock, and reports it taken over an expired record, a term
 // that must settle, which its acquiring write marks unsettled.

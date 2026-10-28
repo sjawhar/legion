@@ -50,7 +50,11 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //     at a time and can create, change or delete nothing;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
 //     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
-//     create and delete, and their flow-control replies;
+//     create and delete, and their flow-control replies. The writes to the listener state bucket
+//     are the machine's own keys alone: its delivery lease (bus.ListenerLeaseKey), its delivery
+//     ledger (bus.ListenerLedgerPrefix) and every session's last-seen record
+//     (bus.LastSeenPrefix), so one machine's user cannot take or clear another machine's lease or
+//     ledger;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
@@ -68,6 +72,11 @@ func ListenerPermissions(machineID string) Permissions {
 		jsAPI + "INFO",
 	}
 	for _, bucket := range listenerBuckets {
+		if bucket == bus.ListenerStateBucket {
+			publish = append(publish, bucketPermissions(bucket,
+				bus.ListenerLeaseKey(machineID), bus.ListenerLedgerPrefix(durable)+">", bus.LastSeenPrefix+">")...)
+			continue
+		}
 		publish = append(publish, bucketPermissions(bucket)...)
 	}
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
@@ -79,19 +88,26 @@ func ListenerPermissions(machineID string) Permissions {
 
 // bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
 // them: ListenerPermissions lists them for each of listenerBuckets, DispatchPermissions for the
-// redelivery bucket.
-func bucketPermissions(bucket string) []string {
+// redelivery bucket. keys are the key patterns the writes may reach, every key when none is given.
+func bucketPermissions(bucket string, keys ...string) []string {
 	stream := kvStream + bucket
-	return []string{
+	if len(keys) == 0 {
+		keys = []string{">"}
+	}
+	rules := []string{
 		jsAPI + "STREAM.INFO." + stream,
 		jsAPI + "STREAM.CREATE." + stream,
 		jsAPI + "DIRECT.GET." + stream + ".>",
 		jsAPI + "STREAM.MSG.GET." + stream,
-		kvSubjects + bucket + ".>",
-		jsAPI + "CONSUMER.CREATE." + stream + ".>",
-		jsAPI + "CONSUMER.DELETE." + stream + ".>",
-		jsFlow + stream + ".>",
 	}
+	for _, key := range keys {
+		rules = append(rules, kvSubjects+bucket+"."+key)
+	}
+	return append(rules,
+		jsAPI+"CONSUMER.CREATE."+stream+".>",
+		jsAPI+"CONSUMER.DELETE."+stream+".>",
+		jsFlow+stream+".>",
+	)
 }
 
 // DispatchDurables are the fixed durable consumers of the stream that Dispatch's grant lets it

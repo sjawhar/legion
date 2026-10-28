@@ -220,6 +220,12 @@ stops every pod of this build before starting the old one carries no such risk.
 
 The listener's NATS user needs the `envoy_listener` bucket in its grant (`infra/core`
 `ListenerPermissions`, `DispatchPermissions` and `HostPermissions` carry it from this release).
+That grant writes only the machine's own keys, `lease.listener-<machine id>` and
+`delivery.listener-<machine id>.>`, and the `seen.` records. It reads each of its buckets by key, a
+direct get on the key's own subject, and refuses a get by revision, a direct get on the stream's
+bare subject. So the listener reads back each write it must stamp, the lease's acquiring write and
+a session registration in `envoy_sessions`, by key, and counts it as its own only at the revision
+it wrote; another revision there means a newer write landed first.
 A listener whose grant refuses the bucket does not exit: it logs one ERROR, `listener lease
 unavailable: the NATS user lacks the grant for KV bucket envoy_listener; delivering without a
 lease`, and delivers as the machine's one deliverer, receiving from the durable only while no other

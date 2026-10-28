@@ -558,10 +558,11 @@ type seenRecord struct {
 	At int64 `json:"at"`
 }
 
-// lastSeenKey is sessionID's last-seen key in the listener state bucket, `seen.<session token>`,
-// with the session token every key of that bucket names a session by (dedupe.SessionToken).
+// lastSeenKey is sessionID's last-seen key in the listener state bucket, `seen.<session token>`
+// (bus.LastSeenPrefix), with the session token every key of that bucket names a session by
+// (dedupe.SessionToken).
 func lastSeenKey(sessionID string) string {
-	return "seen." + dedupe.SessionToken(sessionID)
+	return bus.LastSeenPrefix + dedupe.SessionToken(sessionID)
 }
 
 // recordSeen records the registration write at revision written as sessionID's last-seen time in
@@ -569,14 +570,16 @@ func lastSeenKey(sessionID string) string {
 // bucket for the server's timestamp, the clock the registration's expiry runs on, and puts it under
 // lastSeenKey, each bucket call waiting no longer than ctx (bus.Bounded). A failure of either logs a
 // WARN and leaves the registration, which is written, as it is: the record keeps the previous
-// write's time. A revision the read no longer finds was replaced by a newer write, which records its
-// own.
+// write's time. The read is by key, a direct get on the key's own subject, which the listener's
+// grant allows; a get by revision is a direct get on the stream's bare subject, which it does not.
+// A read that finds another revision, or no record, means a newer write replaced this one, and
+// that write records its own.
 func (r *SessionRegistry) recordSeen(ctx context.Context, kv bus.KeyValue, sessionID string, written uint64) {
 	if r.seen.KeyValue == nil {
 		return
 	}
-	stored, _, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.GetRevision(sessionID, written) })
-	if errors.Is(err, nats.ErrKeyNotFound) {
+	stored, _, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
+	if errors.Is(err, nats.ErrKeyNotFound) || err == nil && stored.Revision() != written {
 		return
 	}
 	if err != nil {

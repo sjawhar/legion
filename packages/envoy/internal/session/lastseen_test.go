@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // listenerStateBucket opens the listener state bucket over conn, as the listener's lease does.
@@ -142,5 +144,114 @@ func TestARegistrationWhoseLastSeenRecordFailsIsStillWritten(t *testing.T) {
 	}
 	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "session last-seen not recorded") || !strings.Contains(got, errSeenPut.Error()) {
 		t.Fatalf("no WARN naming the failed last-seen record:\n%s", got)
+	}
+}
+
+// A registration through a connection holding exactly the listener's grant
+// (testnats.ListenerGrant, the grant envoy-infra renders) records the session's last-seen time,
+// with no WARN: the registration write is read back by key, a direct get on the key's subject,
+// which the grant allows. A read by revision is a direct get on the session stream's bare subject,
+// which the grant refuses, so the read waited out its budget and no record was written.
+func TestARegistrationUnderTheListenersGrantRecordsItsLastSeen(t *testing.T) {
+	const sessionID = "ses_granted"
+	seed, public := testnats.User(t)
+	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: testnats.ListenerGrant(t, "box-a")})
+	conn, err := testnats.ConnectSeed(t, granted.URL(), seed)
+	if err != nil {
+		t.Fatalf("connect as the listener's user: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	var logs syncBuffer
+	reg, err := OpenSessionRegistry(conn, WithSessionReplicas(1), WithLastSeenBucket(listenerStateBucket(t, conn)),
+		WithSessionLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	if err != nil {
+		t.Fatalf("open the session registry under the listener's grant: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	if err := reg.Put(sessionID, SessionEntry{Port: 4242, MachineID: "box-a"}); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+
+	admin := testnats.Connect(t, granted.AdminURL)
+	t.Cleanup(admin.Close)
+	js, err := admin.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	sessions, err := js.KeyValue(bus.SessionBucket)
+	if err != nil {
+		t.Fatalf("open the session bucket: %v", err)
+	}
+	written, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read %s's registration: %v", sessionID, err)
+	}
+	state, err := js.KeyValue(bus.ListenerStateBucket)
+	if err != nil {
+		t.Fatalf("open the listener state bucket: %v", err)
+	}
+	entry, err := state.Get(lastSeenKey(sessionID))
+	if err != nil {
+		t.Fatalf("read %s's last-seen record: %v\nregistry log:\n%s", sessionID, err, logs.String())
+	}
+	var record seenRecord
+	if err := json.Unmarshal(entry.Value(), &record); err != nil {
+		t.Fatalf("decode %s's last-seen record %q: %v", sessionID, entry.Value(), err)
+	}
+	if want := written.Created().UnixMilli(); record.At != want {
+		t.Fatalf("last seen = %d, want the server's timestamp of the registration write, %d", record.At, want)
+	}
+	if got := logs.String(); strings.Contains(got, "level=WARN") {
+		t.Fatalf("the registry warned under the listener's grant:\n%s", got)
+	}
+}
+
+// A registration write that a newer write replaced before its read back records nothing: the read
+// by key finds the newer revision, and that write records its own time. The newer write's own
+// read back records it.
+func TestALastSeenReadBackThatFindsANewerWriteRecordsNothing(t *testing.T) {
+	const sessionID = "ses_replaced"
+	client := setupNATS(t)
+	var logs syncBuffer
+	state := listenerStateBucket(t, client.Conn)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithLastSeenBucket(state),
+		WithSessionLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	value, err := encodeSessionEntry(SessionEntry{Port: 4242, MachineID: "box-a"})
+	if err != nil {
+		t.Fatalf("encode the registration: %v", err)
+	}
+	kv := reg.watcher.KV()
+	older, err := kv.Put(sessionID, value)
+	if err != nil {
+		t.Fatalf("write the older registration: %v", err)
+	}
+	newer, err := kv.Put(sessionID, value)
+	if err != nil {
+		t.Fatalf("write the newer registration: %v", err)
+	}
+
+	reg.recordSeen(context.Background(), kv, sessionID, older)
+	if entry, err := state.Get(lastSeenKey(sessionID)); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("the replaced write recorded %v, %v; want no last-seen record", entry, err)
+	}
+	reg.recordSeen(context.Background(), kv, sessionID, newer)
+	entry, err := state.Get(lastSeenKey(sessionID))
+	if err != nil {
+		t.Fatalf("read the newer write's last-seen record: %v", err)
+	}
+	written, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the newer registration: %v", err)
+	}
+	var record seenRecord
+	if err := json.Unmarshal(entry.Value(), &record); err != nil || record.At != written.Created().UnixMilli() {
+		t.Fatalf("last-seen record %q (%v), want the newer write's timestamp %d", entry.Value(), err, written.Created().UnixMilli())
+	}
+	if got := logs.String(); strings.Contains(got, "level=WARN") {
+		t.Fatalf("the registry warned:\n%s", got)
 	}
 }

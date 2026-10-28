@@ -331,7 +331,7 @@ func newLease(kv bus.KeyValue, machineID, instance string, cfg leaseConfig, now 
 	_, _ = rand.Read(boot[:]) // crypto/rand.Read never returns an error
 	return &lease{
 		kv:       kv,
-		key:      "lease." + bus.ListenerDurable(machineID),
+		key:      bus.ListenerLeaseKey(machineID),
 		instance: instance,
 		boot:     hex.EncodeToString(boot[:]),
 		cfg:      cfg,
@@ -720,9 +720,12 @@ func (l *lease) poll() time.Duration {
 // previous's boot to previous's own (formerBoots): the acquiring write stamps it with previous's
 // timestamp, the latest server time known before it, and once the write's own timestamp is read
 // back it is stamped with that. The record is renewed at once to store service_since, acquired_at
-// and that stamp. A write whose timestamp cannot be read back is not counted as held: the record
-// then expires as any unreleased one does, and a standby, this one included, takes it after the
-// ttl.
+// and that stamp. The write is read back by key, a direct get on the key's own subject, which the
+// listener's grant allows; a get by revision is a direct get on the stream's bare subject, which
+// it does not. A read back that finds another revision, or no record, means another write landed
+// first: the lease is not held and the record is polled again at once. A write whose timestamp
+// cannot be read back is not counted as held: the record then expires as any unreleased one does,
+// and a standby, this one included, takes it after the ttl.
 func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how leaseAcquisition) time.Duration {
 	start := l.now()
 	l.mu.Lock()
@@ -754,10 +757,10 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 		l.noteFailure("take", err)
 		return l.cfg.standbyPoll
 	}
-	written, err := l.kv.GetRevision(l.key, rev)
-	if err != nil {
+	written, err := l.kv.Get(l.key)
+	if err != nil || written.Revision() != rev {
 		l.seenRev, l.seenAt = rev, l.now()
-		if errors.Is(err, nats.ErrKeyNotFound) {
+		if err == nil || errors.Is(err, nats.ErrKeyNotFound) {
 			return 0
 		}
 		l.noteFailure("read back", err)

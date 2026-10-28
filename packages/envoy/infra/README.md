@@ -2125,8 +2125,12 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `envoy_ci_state` and `envoy_listener` (the machine's delivery lease and the delivery state its
   listeners share, `packages/envoy/cmd/listener/README.md`), the calls nats.go's key-value store
   makes: the info and create of the bucket's stream `KV_<bucket>`, its direct and stream message
-  gets, `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control
-  replies; a listener whose grant lacks `envoy_listener` logs an ERROR naming it and delivers
+  gets, writes to its keys, and its watchers' consumer create and delete and their flow-control
+  replies. The writes are `$KV.<bucket>.>` for every bucket but `envoy_listener`, where they are
+  the machine's own keys alone: its lease `$KV.envoy_listener.lease.listener-<m>`, its delivery
+  ledger `$KV.envoy_listener.delivery.listener-<m>.>`, and every session's last-seen record
+  `$KV.envoy_listener.seen.>`, so one machine's user cannot take or clear another machine's lease
+  or ledger. A listener whose grant lacks `envoy_listener` logs an ERROR naming it and delivers
   without a lease, as its machine's only deliverer;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.

@@ -43,9 +43,27 @@ const (
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 	// ListenerStateBucket holds the state every listener pod of a machine shares: the machine's
-	// delivery lease, keyed lease.<ListenerDurable(machineID)> (cmd/listener).
+	// delivery lease (ListenerLeaseKey, cmd/listener), its delivery ledger (ListenerLedgerPrefix,
+	// internal/dedupe) and every session's last-seen record (LastSeenPrefix, internal/session).
 	ListenerStateBucket = "envoy_listener"
 )
+
+// LastSeenPrefix begins each session's last-seen record in ListenerStateBucket. The listener's
+// grant writes these keys for every session, whichever machine registered it.
+const LastSeenPrefix = "seen."
+
+// ListenerLeaseKey is the key of machine machineID's delivery lease in ListenerStateBucket. The
+// listener's grant writes this key and no other machine's.
+func ListenerLeaseKey(machineID string) string {
+	return "lease." + ListenerDurable(machineID)
+}
+
+// ListenerLedgerPrefix begins each key of the delivery ledger in ListenerStateBucket of the
+// listeners that bind durable (ListenerDurable). The listener's grant writes its own machine's
+// ledger and no other.
+func ListenerLedgerPrefix(durable string) string {
+	return "delivery." + durable + "."
+}
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
 // role lanes and the exception lanes.

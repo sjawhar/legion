@@ -32,7 +32,8 @@ const (
 	// tbEvery is how often a row publishes, each time on the next of its topics in turn.
 	tbEvery = 40 * time.Millisecond
 	// tbLive turns every pod's live lane on, so the topics the stream does not store are delivered
-	// and the live lane's split of the topics from the durable's is under test.
+	// and the live lane's split of the topics from the durable's is under test. Only a host's grant
+	// allows the subscription to every topic it makes, so the rows' pods hold testnats.HostGrant.
 	tbLive = "ENVOY_SUBSCRIBE_ALL_TOPICS=1"
 )
 
@@ -139,7 +140,7 @@ func TestTwoBuildsSkipOrDoubleNoMessage(t *testing.T) {
 
 	t.Run("a build with a stream subject more", func(t *testing.T) {
 		extra := cmdtest.Build(t, "envoy-listener-twobuild", "envoy_twobuild")
-		uri := testnats.URL(t)
+		_, uri := mpStartNATS(t, testnats.HostGrant)
 		serving := mpStartServingPort(t)
 		targets := tbTargets(true)
 		plainA := mpStartPod(t, plain, uri, "pod-a", tbLive)
@@ -181,7 +182,7 @@ func TestTwoBuildsSkipOrDoubleNoMessage(t *testing.T) {
 		if old == "" {
 			t.Skip("ENVOY_LISTENER_OLD_BINARY names no listener built from before INFRA-557")
 		}
-		uri := testnats.URL(t)
+		_, uri := mpStartNATS(t, testnats.HostGrant)
 		serving := mpStartServingPort(t)
 		targets := tbTargets(false)
 		oldA := mpStartPod(t, old, uri, "pod-old", tbLive)

@@ -57,7 +57,8 @@ type KVConfig struct {
 
 // KV is the delivery ledger every pod of one machine shares, the `delivery.` keys of the listener
 // state bucket: one record per (dedupe key, session) pair, under
-// `delivery.<durable>.<first 32 hex of sha256(dedupe key)>.<session token>` (SessionToken).
+// `delivery.<durable>.<first 32 hex of sha256(dedupe key)>.<session token>` (bus.ListenerLedgerPrefix,
+// SessionToken).
 type KV struct {
 	kv     bus.KeyValue
 	prefix string
@@ -75,7 +76,7 @@ func NewKV(kv bus.KeyValue, cfg KVConfig) *KV {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &KV{kv: kv, prefix: "delivery." + cfg.Durable + ".", cfg: cfg}
+	return &KV{kv: kv, prefix: bus.ListenerLedgerPrefix(cfg.Durable), cfg: cfg}
 }
 
 // plainSessionID is a session id that is a KV key token as it stands, short enough to keep every

@@ -276,9 +276,11 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 
 // A user holding ListenerPermissions alone opens the listener state bucket as the listener does,
 // creating it on first use with one value per key and a 10 minute age, finds it on a second open,
-// and takes, renews and releases its machine's delivery lease there, on the 2.10 image and on the
-// hub's. Every allowed operation comes first, so the refused publish after them is the only
-// violation the server logs.
+// and takes, renews and releases its machine's delivery lease there as the listener's lease does:
+// each write read back by key, a direct get on the key's subject, at the revision it wrote. It also
+// writes a session's last-seen record. A write to another machine's lease key is refused, on the
+// 2.10 image and on the hub's. Every allowed operation comes first, so the refused publish after
+// them is the only violation the server logs.
 func TestListenerPermissionsOpenTheListenerStateBucketOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
@@ -296,20 +298,29 @@ func TestListenerPermissionsOpenTheListenerStateBucketOnRealServers(t *testing.T
 			require.NoError(t, err, "open the existing %s bucket", bus.ListenerStateBucket)
 
 			lease := "lease." + bus.ListenerDurable(liveMachineID)
+			readBack := func(revision uint64, what string) {
+				t.Helper()
+				entry, err := kv.Get(lease)
+				require.NoError(t, err, "read back the lease after %s", what)
+				require.Equal(t, revision, entry.Revision(), "the lease read back after %s", what)
+			}
 			taken, err := kv.Create(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`))
 			require.NoError(t, err, "take the lease")
+			readBack(taken, "taking it")
 			renewed, err := kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`), taken)
 			require.NoError(t, err, "renew the lease")
-			_, err = kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef","released":true}`), renewed)
+			readBack(renewed, "renewing it")
+			released, err := kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef","released":true}`), renewed)
 			require.NoError(t, err, "release the lease")
-			entry, err := kv.Get(lease)
-			require.NoError(t, err, "read the lease")
-			require.JSONEq(t, `{"holder":"box-a","boot":"0123456789abcdef","released":true}`, string(entry.Value()))
+			readBack(released, "releasing it")
+			_, err = kv.Put("seen."+liveSession, []byte(`{"at":1}`))
+			require.NoError(t, err, "record a session's last-seen time")
 
-			require.NoError(t, conn.Publish("outside.example", nil))
-			requireViolation(t, conn, errs, `Publish to "outside.example"`)
-			for _, v := range violationsOnceLogged(t, server, "outside.example") {
-				require.Equal(t, "outside.example", v[2], "the server refused what the grant should allow: %s", v[0])
+			otherLease := "$KV." + bus.ListenerStateBucket + ".lease." + bus.ListenerDurable("example-host-b")
+			require.NoError(t, conn.Publish(otherLease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`)))
+			requireViolation(t, conn, errs, `Publish to "`+otherLease+`"`)
+			for _, v := range violationsOnceLogged(t, server, otherLease) {
+				require.Equal(t, otherLease, v[2], "the server refused what the grant should allow: %s", v[0])
 			}
 		})
 	}

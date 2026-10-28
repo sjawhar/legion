@@ -250,11 +250,14 @@ The hub runs one listener for machine `<h>`, so `<h>` has no standby: while the 
 or while a new VM boots, `<h>`'s durable holds its deliveries until the listener is back. The
 listener's user grants the `envoy_listener` bucket, where a listener keeps its machine's delivery
 lease and the delivery state every listener of the machine shares (`ListenerPermissions`, from the
-envoy-infra release that added it; see `packages/envoy/cmd/listener/README.md`). A hub whose users
-an earlier envoy-infra rendered lacks it: a listener image that uses the bucket then logs one
-ERROR naming it and delivers without a lease, as the machine's only deliverer, keeping that state
-in its own process, which for the hub's one listener changes nothing but that a restart forgets
-it. The grant reaches the hub with the update that renders its users again, which replaces the VM.
+envoy-infra release that added it; see `packages/envoy/cmd/listener/README.md`). Each user may write
+only its own machine's lease and delivery ledger there, and the sessions' last-seen records. A hub
+whose users an earlier envoy-infra rendered lacks the bucket: a listener image that uses it then
+logs one ERROR naming it and delivers without a lease, as the machine's only deliverer, keeping
+that state in its own process, which for the hub's one listener changes nothing but that a restart
+forgets it. The grant reaches the hub with the update that renders its users again, which replaces
+the VM. A hub rendered with the bucket's writes not yet scoped to each machine's keys runs this
+listener as it is; the update narrows them.
 A listener elsewhere started with `ENVOY_MACHINE_ID=<h>` would share the hub listener's lease and
 become its standby, or its deliverer, so no other listener takes the hub's `hostname` as its id.
 

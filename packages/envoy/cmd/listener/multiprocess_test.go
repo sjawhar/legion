@@ -7,13 +7,16 @@
 // of two processes delivers from the machine's durable, what happens to the messages one process
 // holds when it is stopped, killed or cut off, and what the other answers meanwhile. Port sessions
 // are one fake serving port (mpServingPort) that counts each completed prompt_async by event id;
-// the machine id is arbitrary (box-a).
+// the machine id is arbitrary (box-a). Every pod connects as the machine's nkey user, holding
+// exactly the grant envoy-infra renders for it (mpStartNATS), so a permissions gap fails the row;
+// the row's own clients connect as the server's admin.
 //
 // The rows use nothing but the binary cmdtest.Build builds, its environment, its HTTP API, NATS,
 // the relay in reconnect_shutdown_test.go and APIs of the internal packages that a build before
-// INFRA-557 (819dc283) has too, so this file compiles there with that relay and cmdtest beside
-// it and each row shows how that build fails. The few places a row has to recognise such a build
-// (a /healthz without "role") say so.
+// INFRA-557 (819dc283) has too, but for testnats' grant fixtures (grant.go and testdata/), so this
+// file compiles there with that relay, cmdtest and those beside it and each row shows how that
+// build fails. The few places a row has to recognise such a build (a /healthz without "role") say
+// so.
 //
 // Its own build tag, and its own CI job, for the reason cmd/dispatch/multiprocess_test.go has
 // its: a row starts two processes and waits out a lease, an ack wait or a 140 s standby, tens of
@@ -29,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -78,11 +82,21 @@ type mpPod struct {
 
 // mpStartPod starts binary as instance of mpMachine, on a loopback port the kernel chose and the
 // test holds until the pod serves on it (cmdtest.HoldPort, inherited as ENVOY_LISTEN_FD), reaching
-// the NATS at natsURL through a relay of its own, with env added to its environment. The pod is
-// killed when the test ends, and its output's tail is logged when the test failed.
+// the NATS at natsURL, which mpStartNATS started, through a relay of its own as mpMachine's
+// granted user, with env added to its environment. The pod is killed when the test ends, and its
+// output's tail is logged when the test failed.
 func mpStartPod(t *testing.T, binary, natsURL, instance string, env ...string) *mpPod {
 	t.Helper()
-	relay := startListenerRelay(t, natsURL)
+	seed, granted := mpSeeds.Load(natsURL)
+	if !granted {
+		t.Fatalf("%s is no NATS server mpStartNATS started: every pod connects as its machine's granted user", natsURL)
+	}
+	server, err := url.Parse(natsURL)
+	if err != nil {
+		t.Fatalf("parse %s: %v", natsURL, err)
+	}
+	server.User = nil
+	relay := startListenerRelay(t, server.String())
 	held := cmdtest.HoldPort(t)
 	cmd := exec.Command(binary)
 	cmd.Env = append([]string{
@@ -91,6 +105,7 @@ func mpStartPod(t *testing.T, binary, natsURL, instance string, env ...string) *
 		"ENVOY_MACHINE_ID=" + mpMachine,
 		"ENVOY_INSTANCE_ID=" + instance,
 		"NATS_URLS=" + relay.relayed,
+		"NATS_NKEY_SEED=" + seed.(string),
 		"ENVOY_API_TOKEN=" + mpToken,
 	}, env...)
 	held.Pass(cmd, "ENVOY_LISTEN_FD")
@@ -101,6 +116,33 @@ func mpStartPod(t *testing.T, binary, natsURL, instance string, env ...string) *
 		}
 	})
 	return pod
+}
+
+// mpSeeds maps the URL each row's own clients reach its NATS server at (mpStartNATS) to the seed
+// of the nkey user every pod of the row connects as.
+var mpSeeds sync.Map
+
+// mpNATS starts the row's NATS server with the listener's grant (mpStartNATS) and returns the URL
+// the row's own clients use.
+func mpNATS(t *testing.T) string {
+	t.Helper()
+	_, uri := mpStartNATS(t, testnats.ListenerGrant)
+	return uri
+}
+
+// mpStartNATS starts a row's NATS server, where every pod the row starts connects as mpMachine's
+// nkey user holding exactly the grant grant reads for mpMachine: testnats.ListenerGrant, the grant
+// envoy-infra renders for a listener, unless the row's pods need another role's (testnats.HostGrant
+// for a pod with ENVOY_SUBSCRIBE_ALL_TOPICS, which only a host's grant allows). It returns the
+// server and the URL the row's own clients (a publisher, a reader) use, as the server's admin,
+// which mpStartPod takes.
+func mpStartNATS(t *testing.T, grant func(testing.TB, string) testnats.Grant) (*testnats.Server, string) {
+	t.Helper()
+	seed, public := testnats.User(t)
+	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: grant(t, mpMachine)})
+	mpSeeds.Store(granted.AdminURL, seed)
+	t.Cleanup(func() { mpSeeds.Delete(granted.AdminURL) })
+	return granted.Server, granted.AdminURL
 }
 
 // mpLinesWithout is output without the two lines the listener logs for every delivery, which would
@@ -787,7 +829,7 @@ func mpTail(text string, n int) string {
 // the server drops the cut pod's interest, and the cut pod's nats.go sends its subscription again
 // on the reconnect, so both deliver and messages arrive twice.
 func TestTwoPodsReconnectInPlaceDeliversEachMessageOnce(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -833,7 +875,7 @@ func TestTwoPodsReconnectInPlaceDeliversEachMessageOnce(t *testing.T) {
 // never reports itself anything but a standby. Before INFRA-557 the standby may bind in the gap,
 // and the reconnected pod's nats.go then subscribes beside it.
 func TestTwoPodsShortDropKeepsTheActivePod(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -904,7 +946,7 @@ func TestTwoPodsStartedTogetherElectOneActivePod(t *testing.T) {
 	binary := cmdtest.Build(t, "envoy-listener")
 	for start := range 20 {
 		passed := t.Run(fmt.Sprintf("start %d", start+1), func(t *testing.T) {
-			uri := testnats.URL(t)
+			uri := mpNATS(t)
 			pods := []*mpPod{mpStartPod(t, binary, uri, "pod-a"), mpStartPod(t, binary, uri, "pod-b")}
 			mpEventually(t, 30*time.Second, "both pods to be ready", func() bool {
 				return (pods[0].active() || pods[0].standby()) && (pods[1].active() || pods[1].standby())
@@ -947,7 +989,7 @@ func TestTwoPodsStartedTogetherElectOneActivePod(t *testing.T) {
 // INFRA-557 the durable's 60 s ack wait holds S's message with the killed pod (and any message the
 // server pushed to it as it died), so those come after the newer ones, and late.
 func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -989,7 +1031,7 @@ func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 // thaws, the old pod delivers none of them again. Before INFRA-557 the server keeps the frozen
 // pod's binding for minutes and the standby cannot bind.
 func TestTwoPodsNodeLossHandsOverInOrderWithin15s(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -1026,7 +1068,7 @@ func TestTwoPodsNodeLossHandsOverInOrderWithin15s(t *testing.T) {
 // event id. Before INFRA-557 the stopping pod keeps the durable bound for ~23 s, through its HTTP
 // shutdown and its NATS drain, so the messages wait.
 func TestTwoPodsGracefulStopDeliversWithin10s(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -1065,7 +1107,7 @@ func TestTwoPodsGracefulStopDeliversWithin10s(t *testing.T) {
 // sessions in every poll; then a SIGTERM of the active pod hands delivery to it. Before INFRA-557
 // the standby exits at 135 s.
 func TestTwoPodsStandbyWaitsPast140s(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -1105,7 +1147,7 @@ func TestTwoPodsStandbyWaitsPast140s(t *testing.T) {
 // 200 active within 10 s, and a second pod started then is 200 standby. Before INFRA-557 the
 // listener answers 200 "starting" with nothing ready, then exits.
 func TestTwoPodsReadinessWaitsForNATS(t *testing.T) {
-	server, uri := testnats.Start(t)
+	server, uri := mpStartNATS(t, testnats.ListenerGrant)
 	server.Stop(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a := mpStartPod(t, binary, uri, "pod-a")
@@ -1153,7 +1195,7 @@ func TestTwoPodsSendThroughTheStandbyDuringATakeover(t *testing.T) {
 		{"SIGKILL", func(t *testing.T, p *mpPod) time.Time { return p.kill(t) }},
 	} {
 		t.Run(stopping.name, func(t *testing.T) {
-			uri := testnats.URL(t)
+			uri := mpNATS(t)
 			a, b := mpStartPair(t, binary, uri)
 			b.relay.delay(500 * time.Millisecond)
 
@@ -1248,7 +1290,7 @@ func TestTwoPodsSendThroughTheStandbyDuringATakeover(t *testing.T) {
 // failed"; both pods come back, one active and one a standby. Before INFRA-557 the standby's
 // pending bind is a subscription the recovery retries and logs that failure for.
 func TestTwoPodsStandbyAcrossANATSRestartLogsNoResubscribeFailure(t *testing.T) {
-	server, uri := testnats.Start(t)
+	server, uri := mpStartNATS(t, testnats.ListenerGrant)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 
@@ -1274,7 +1316,7 @@ func TestTwoPodsStandbyAcrossANATSRestartLogsNoResubscribeFailure(t *testing.T) 
 // own instance, and internal/bus's text lines, which keep Go's positional format, name each pod's
 // NATS client. Before INFRA-557 the records carry only machine_id.
 func TestTwoPodsLogTheirOwnInstance(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	// A dropped link has each pod's client log its disconnect and reconnect in text.
@@ -1479,7 +1521,7 @@ func mpNextException(t *testing.T, subscription *natsgo.Subscription, within tim
 // in the ledger: S is not prompted a second time. Before INFRA-557 each pod remembers only its own
 // deliveries, so the standby prompts S again once the message comes back after the 60 s ack wait.
 func TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -1512,7 +1554,7 @@ func TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered(t *testing.T) {
 // prompt was never answered). Before INFRA-557 the durable's 60 s ack wait keeps the message from
 // the standby past that bound.
 func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -1547,7 +1589,7 @@ func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
 // retry window (ENVOY_UNPLACEABLE_RETRY_WINDOW=0), so each gives the message up, with its
 // no_holder, on the delivery it handles rather than deferring it for a minute first.
 func TestTwoPodsReportARedeliveredNoHolderOnceUnderOneID(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri, "ENVOY_UNPLACEABLE_RETRY_WINDOW=0")
 	publisher := mpConnectPublisher(t, uri)
@@ -1590,7 +1632,7 @@ func TestTwoPodsReportARedeliveredNoHolderOnceUnderOneID(t *testing.T) {
 // fast enough that a role set's eight or so bucket round trips fit the route's 3.5 s budget
 // (sendRequestBudget).
 func TestTwoPodsSendAndRoleSetThroughThePodWhoseCacheTrails(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	b.relay.delay(300 * time.Millisecond)
@@ -1621,7 +1663,7 @@ func TestTwoPodsSendAndRoleSetThroughThePodWhoseCacheTrails(t *testing.T) {
 // through the active pod; and a role set on the standby keeps the newer host recorded through the
 // active pod. Before INFRA-557 the standby wrote its stale copy over each.
 func TestTwoPodsWritesOnThePodWhoseCacheTrailsKeepTheNewerWrite(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	b.relay.delay(300 * time.Millisecond)
@@ -1703,7 +1745,7 @@ func TestTwoPodsRefuseAPodLocalAddressAnotherPodAccepted(t *testing.T) {
 		{"pods on one host", "node-a", "node-a"},
 	} {
 		t.Run(pair.name, func(t *testing.T) {
-			uri := testnats.URL(t)
+			uri := mpNATS(t)
 			a := mpStartPod(t, binary, uri, "pod-a", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_POD_HOSTNAME="+pair.hostA)
 			mpWaitActive(t, a, 30*time.Second)
 			b := mpStartPod(t, binary, uri, "pod-b", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_POD_HOSTNAME="+pair.hostB)
@@ -1763,7 +1805,7 @@ func TestTwoPodsRefuseAPodLocalAddressAnotherPodAccepted(t *testing.T) {
 // counted the claim's grace from its own start, so the pod that started after the claim retained
 // it while the other released it.
 func TestTwoPodsAnswerARoleWhoseHolderLapsedAlike(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a := mpStartPod(t, binary, uri, "pod-a")
 	mpWaitActive(t, a, 30*time.Second)
@@ -1794,7 +1836,7 @@ func TestTwoPodsAnswerARoleWhoseHolderLapsedAlike(t *testing.T) {
 // last-seen time lived in the memory of a pod whose cache had held the session, and the standby
 // reported none.
 func TestTwoPodsReportALapsedHoldersLastSeenAlike(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	publisher := mpConnectPublisher(t, uri)
 	const ttl = 10 * time.Second
@@ -1852,7 +1894,7 @@ func mpTakeoverHolder(t *testing.T, within time.Duration, first, second *mpPod) 
 // nats-server 2.10.29), while the server redelivers each message to that connection every ack
 // wait until MaxDeliver is spent, so a message published meanwhile is never delivered at all.
 func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	c := mpStartPod(t, binary, uri, "pod-c")
@@ -1891,7 +1933,7 @@ func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
 // holds in the order it received it, and the second standby delivers at once, without the hold,
 // so messages published before the take-over reach their session after newer ones.
 func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	c := mpStartPod(t, binary, uri, "pod-c")
@@ -1932,7 +1974,7 @@ func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
 // come back one ack wait (6 s) later, behind them. Without the delay the same happens under load:
 // at a message every 2 ms one message in about three stops arrived 6 s late and out of order.
 func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
@@ -1968,7 +2010,7 @@ func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 // The killed pod is the lease holder whose expired record the new holder took, so its attempt is
 // no live pod's.
 func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
-	uri := testnats.URL(t)
+	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
 	serving := mpStartServingPort(t)
