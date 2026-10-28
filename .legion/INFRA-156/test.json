@@ -2,21 +2,16 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-156",
-  "completed": "2026-10-28T10:15:00Z",
-  "headTested": "97b1e2c8e08555dec564a863e719022c09e70d78",
+  "completed": "2026-10-28T10:35:00Z",
+  "headTested": "bcd5f10156374b6f065fcedc21a8c230c877a719",
   "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
-  "outcome": "No product defect found at 97b1e2c8. The phase goes back to implementing because GitHub reports sjawhar/legion#2394 CONFLICTING with main 460facf5 (packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md), so no CI ran; the architect directed request_backward_move.",
+  "outcome": "Pass. Bare gates: smoke check on a server built from bcd5f101 (t.py 80/80; request-approval on an answered ask with id a b exit 0). CI at code head 10bc21e1 queued when read (lint, typecheck, test, changes, two builds, pr-title); not waited for. GitHub: MERGEABLE. The round-8 real-surface verification at 97b1e2c8 stands.",
   "implementerProof": {
     "verdict": "verified",
     "how": "Drove the same surface independently at 97b1e2c8: its A3 steps are steps 1, 5 and 12 of t.py (80/80), its review-finding-1 steps R1-R7 of t2.py (26/26), and its round-8 fix by approve.sh with the real dispatch CLI at 7c11b41c and at the head (https://github.com/sjawhar/legion/pull/2394#issuecomment-6466244127)."
   },
-  "failures": [
-    {
-      "criterion": "CI green at the head under test (read on GitHub, not rerun)",
-      "evidence": "gh pr view 2394 --json mergeable -> CONFLICTING; git merge-tree --write-tree 97b1e2c8e085 origin/main (460facf5) -> CONFLICT (content) in packages/contracts/CHANGELOG.md and packages/envoy/CHANGELOG.md; no check run at 97b1e2c8 or its code head. Not a product defect: merge main forward. Fingerprint at 97b1e2c8 is 3830ccc1...; equal after the merge means bare gates only."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "Review round 7 finding: dispatch request-approval accepts a document whose answered ask has an id Go writes as id=\"...\" (a b, R&D), and still refuses an open one",
@@ -149,8 +144,9 @@
   ],
   "defectsFoundByBreaking": [],
   "redTests": [],
-  "previousHeadTested": "cdf4f9476cc6708c4e099562325dc9a9988eeb6b",
-  "round": "Review round 7 changes (code 48a891d4): envoy-client request-approval builds its ask opener needles from contracts' typedBlockIdAttribute (shared Go/TS table), one directive.go constant, an AGENTS.md wording fix, claude-envoy dist rebuilt.",
+  "previousHeadTested": "97b1e2c8e08555dec564a863e719022c09e70d78",
+  "round": "rebase re-check 97b1e2c8 -> bcd5f101: fingerprint unchanged, bare gates only (merge 10bc21e1 against main 460facf5 resolved the two CHANGELOG conflicts; migration 0135 still after main's 0134).",
   "limits": "The version-write half of round 6 cannot be driven on a real server: every live write (settlement, every API write) repairs a repeated id before it indexes, so the version write never sees one; only the reconciliation path does, and there 57e13278 and this head write the same correct rows for all three cases. The version-write proof is the implementer's two-path tests in docs/block_pointer_links_test.go, which CI runs.",
-  "fingerprint": "3830ccc1d73a080badf16c3cb266aacc04cbf6b8e41f67ec5998a87d8e4da298"
+  "fingerprint": "3830ccc1d73a080badf16c3cb266aacc04cbf6b8e41f67ec5998a87d8e4da298",
+  "fingerprintCheck": "equal: 3830ccc1d73a080badf16c3cb266aacc04cbf6b8e41f67ec5998a87d8e4da298 at 97b1e2c8 and at bcd5f101 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6466472021)"
 }
