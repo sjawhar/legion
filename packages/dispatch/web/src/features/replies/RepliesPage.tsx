@@ -26,7 +26,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 const PAGE_SIZE = 50;
 
 /** The page's own key beneath the prefix every Replies query shares, so a mark anywhere, and every
- *  event that can move a row (`api/sse.ts`), refreshes every loaded page together. */
+ *  event that can move a row (`api/event-refresh.ts`), refreshes every loaded page together. */
 const PAGE_KEY = [...myRepliesKey, "page"] as const;
 
 function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {

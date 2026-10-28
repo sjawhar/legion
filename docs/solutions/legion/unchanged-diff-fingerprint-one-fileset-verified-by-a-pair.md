@@ -9,7 +9,7 @@ tags:
   - review
   - long-lived-pr
 date: 2026-09-13
-status: active
+status: superseded in part by sjawhar/legion#2423 — a branch no longer carries a rebuilt `dist/` commit and `check-dist` forces no rebuild in a pull request, since main's Rebuild Claude Envoy plugin workflow commits the bundle after each merge; the one-fileset fingerprint, its verification by a pair and the rules for what a rebase may change stand
 module: skills/legion-worker
 related_issues:
   - "LEGION-59"

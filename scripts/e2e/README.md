@@ -835,8 +835,9 @@ real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, w
 inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
 box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
-`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
-`packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
+`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to the run's own copy of the
+claude-envoy plugin, which it builds from this checkout into its work directory
+(`packages/claude-envoy/scripts/build.ts --out`), with `dist/envoy-channel.js` and `legion/` fresh.
 Legion's role Apps resolve as Stage 3's do: the daemon runs `agent-secrets <implement App key> -- …`
 and `agent-secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
 `LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, so each key comes from
