@@ -4,6 +4,10 @@ Shared HTTP transport, tool contract, inbound delivery renderer, and missed-mess
 hosts. pi-envoy and claude-envoy consume these modules rather than maintaining host-specific
 envelope parsers.
 
+This package has no release of its own: `.github/workflows/changelog-fold.yaml` folds its
+changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
+first fold run after they merge.
+
 ## Inbound delivery
 
 `renderInbound(raw, sessionID, subject?)` accepts an additive Envoy envelope and returns a TOON
