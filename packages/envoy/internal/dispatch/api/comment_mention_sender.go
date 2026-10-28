@@ -267,6 +267,18 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 // repeat of a Dispatch key no second time and each host drops it
 // (contracts.DedupeKeyNamesTheUpstreamEvent; DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts
 // states for how long, and where that fails).
+//
+// The outbox counts the same attempts abandoned - a lease old by their claim or, unclaimed, by
+// their creation - and publishes the mentioned session's own-topic copy in place of a mention it
+// held that copy back for (mentionSendLapsed and attempt.leftTo in internal/dispatch/outbox). The
+// two are exclusive per attempt, by its comment_deliveries row: whichever acts first settles it.
+// The outbox settles the attempt failed under the comment's owner lock, which the claim
+// transaction takes first too (claimCommentDeliveryAttempt), so a claim that runs after it finds
+// the attempt settled and sends nothing, and a claim that commits first leaves it claimed just
+// now, which the outbox no longer counts abandoned: it waits on the send instead. So the
+// session gets one copy of the comment through a kill, from the mention or from the outbox, but
+// for a frame the killed process had already handed to the listener: when the outbox settles
+// that attempt, its copy repeats the comment under another dedupe key.
 func (m *mentionSender) recoverStranded() {
 	m.mu.Lock()
 	if m.stoppedLocked() {
@@ -338,7 +350,9 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 // live process's queue out of order; one that waited a lease unsent is stranded (the process
 // stopped, or its queue stalls), and a claim, never older than its attempt, lapses no sooner.
 // Each is sent as its comment's author, the actor its comment.created event names, read once per
-// comment; an attempt whose event cannot be read is logged and left for its author's retry.
+// comment; an attempt whose event cannot be read is logged and left for its author's retry. An
+// attempt the outbox settled abandoned is failed, not pending, so no pass reads it
+// (recoverStranded).
 //
 // The read of the attempts goes through comment_deliveries_pending (migration 0135: created_at
 // where state = 'pending'), so a pass with nothing stranded is that one statement and reads no

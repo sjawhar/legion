@@ -279,8 +279,10 @@ func (s *server) claimCommentDeliveryAttempt(
 			return claimedCommentDelivery{}, err
 		}
 	case initial:
-		// The attempt is already settled: a reply consumed it, or another sender sent it, while
-		// this send was queued, and that terminal row is its outcome.
+		// The attempt is already settled: a reply consumed it, another sender sent it, or the
+		// outbox settled it abandoned and published the session's copy instead (attempt.leftTo in
+		// internal/dispatch/outbox), while this send was queued, and that terminal row is its
+		// outcome.
 		answered, err := loadCommentDelivery(ctx, tx, stored.ID, target.Target, 1)
 		if err != nil {
 			return claimedCommentDelivery{}, err

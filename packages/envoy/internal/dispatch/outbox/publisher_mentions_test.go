@@ -2,11 +2,14 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -313,7 +316,7 @@ func TestAnUnansweredSessionMentionHoldsTheCopiesOfTheSessionItNames(t *testing.
 			}
 			seedDelivery(t, database, commentID, "session:s1", "", tc.delivery)
 			publisher := &recordingPublisher{}
-			err := publish(ctx, Deps{Store: database, Publisher: publisher}, model.Event{
+			err := publish(ctx, Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}, model.Event{
 				ID: 103, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 				Payload: payload, Notify: true, CreatedAt: time.Now(),
 			}, "", routing{route: route}, map[string]struct{}{})
@@ -603,6 +606,153 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 			}
 			if publishedAt(t, database, event.ID) == nil {
 				t.Fatal("published_at is null after the retry")
+			}
+		})
+	}
+}
+
+// TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst: a mention attempt
+// pending past the claim lease is settled by whichever of the outbox and a sender acts on its row
+// first. When the outbox does, the attempt reads failed with its comment.delivery receipt and the
+// route copy it held back is published; a sender that claims it afterwards finds it settled. When
+// a sender's claim commits while the outbox waits to settle it, the attempt is that sender's: it
+// stays pending under the fresh claim, no receipt is written, and the event defers on the send.
+func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t *testing.T) {
+	const (
+		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
+		routeTopic = "notifications.agent.s1"
+	)
+	for _, tc := range []struct {
+		name string
+		// claimFirst takes the attempt's claim, as a sender's claim transaction does, and
+		// commits it only once the outbox waits on the comment's owner lock to settle it.
+		claimFirst bool
+		wantTopics []string
+		wantErr    error
+		wantState  string
+	}{
+		{name: "the outbox acts first", wantTopics: []string{issueTopic, routeTopic}, wantState: "failed"},
+		{
+			name: "a claim commits first", claimFirst: true,
+			wantTopics: []string{issueTopic}, wantErr: errMentionPending, wantState: "pending",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := store.WithTransactionTracking(context.Background())
+			database := storetest.Open(t)
+			seedIssue(t, database, "T-1", nil)
+			commentID := "00000000-0000-0000-0003-000000000001"
+			seedMentionDelivery(t, database, commentID, "s1", "abandoned")
+			event := model.Event{
+				ID: 105, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+				Payload: map[string]any{
+					"id":                          commentID,
+					"mentions":                    mentionsOf("s1"),
+					"suppress_route":              true,
+					"suppressed_route":            "session:s1",
+					"suppressed_route_session_id": "s1",
+				},
+				Notify: true, CreatedAt: time.Now(),
+			}
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+			publishing := func() error {
+				return publish(ctx, deps, event, "", routing{route: new("session:s1")}, map[string]struct{}{})
+			}
+
+			var err error
+			if tc.claimFirst {
+				claim, beginErr := database.Pool.Begin(context.Background())
+				if beginErr != nil {
+					t.Fatalf("begin the claim: %v", beginErr)
+				}
+				defer claim.Rollback(context.Background())
+				if _, err := claim.Exec(context.Background(), `select 1 from issues where key = 'T-1' for no key update`); err != nil {
+					t.Fatalf("lock the comment's owner: %v", err)
+				}
+				if _, err := claim.Exec(context.Background(), `
+					update comment_deliveries set claimed_at = now() where comment_id = $1
+				`, commentID); err != nil {
+					t.Fatalf("claim the attempt: %v", err)
+				}
+				published := make(chan error, 1)
+				go func() { published <- publishing() }()
+				waitFor(t, 10*time.Second, "the outbox waiting on the owner lock to settle the attempt", func() bool {
+					var waiting int
+					if err := database.Pool.QueryRow(context.Background(), `
+						select count(*) from pg_stat_activity
+						where datname = current_database() and wait_event_type = 'Lock'
+					`).Scan(&waiting); err != nil {
+						t.Fatalf("read lock waits: %v", err)
+					}
+					return waiting > 0
+				})
+				if err := claim.Commit(context.Background()); err != nil {
+					t.Fatalf("commit the claim: %v", err)
+				}
+				err = <-published
+			} else {
+				err = publishing()
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("publish returned %v, want %v", err, tc.wantErr)
+			}
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.wantTopics) {
+				t.Fatalf("published topics = %#v, want %#v", got, tc.wantTopics)
+			}
+
+			var state string
+			var failure *string
+			if err := database.Pool.QueryRow(ctx, `
+				select state, error from comment_deliveries where comment_id = $1
+			`, commentID).Scan(&state, &failure); err != nil {
+				t.Fatalf("read the attempt: %v", err)
+			}
+			if state != tc.wantState {
+				t.Fatalf("attempt state = %q, want %q", state, tc.wantState)
+			}
+			rows, err := database.Pool.Query(ctx, `
+				select actor, payload from events where type = 'comment.delivery' and payload ->> 'comment_id' = $1
+			`, commentID)
+			if err != nil {
+				t.Fatalf("read the attempt's receipts: %v", err)
+			}
+			type receipt struct {
+				actor   model.Actor
+				payload model.CommentDeliveryEventPayload
+			}
+			receipts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (receipt, error) {
+				var actor, payload []byte
+				if err := row.Scan(&actor, &payload); err != nil {
+					return receipt{}, err
+				}
+				var r receipt
+				if err := json.Unmarshal(actor, &r.actor); err != nil {
+					return receipt{}, err
+				}
+				return r, json.Unmarshal(payload, &r.payload)
+			})
+			if err != nil {
+				t.Fatalf("decode the attempt's receipts: %v", err)
+			}
+			if !tc.claimFirst {
+				if failure == nil || *failure != mentionAbandonedError {
+					t.Fatalf("attempt error = %v, want %q", failure, mentionAbandonedError)
+				}
+				want := receipt{actor: event.Actor, payload: model.CommentDeliveryEventPayload{
+					CommentID: commentID, Target: "session:s1", Attempt: 1, Delivery: "steer",
+					SessionID: new("s1"), State: "failed", Error: mentionAbandonedError,
+				}}
+				if len(receipts) != 1 || !reflect.DeepEqual(receipts[0], want) {
+					t.Fatalf("receipts = %#v, want %#v", receipts, want)
+				}
+				return
+			}
+			if failure != nil {
+				t.Fatalf("attempt error = %q, want none: the claim that took it owns its outcome", *failure)
+			}
+			if len(receipts) != 0 {
+				t.Fatalf("receipts = %#v, want none for an attempt the outbox did not settle", receipts)
 			}
 		})
 	}

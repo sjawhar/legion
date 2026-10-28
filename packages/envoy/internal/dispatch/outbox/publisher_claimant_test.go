@@ -452,7 +452,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 				holder = tc.claim.ID
 			}
 			publisher := &recordingPublisher{}
-			err = publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, slug, routing{route: tc.route, claimant: holder}, map[string]struct{}{})
+			err = publish(context.Background(), Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}, event, slug, routing{route: tc.route, claimant: holder}, map[string]struct{}{})
 			if tc.wantErr == nil && err != nil {
 				t.Fatalf("publish %s: %v", event.Type, err)
 			}
