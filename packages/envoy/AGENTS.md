@@ -325,10 +325,15 @@ write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all
 settlement writes a version only when a content-class row lies past the latest version's
 `doc_update_version` cursor and the settled document renders differently from that version. It
 stays one measure where a rendering is reused rather than made again: a write takes the rendering
-of its fork before the operation from the room's replica or from its own previous operation, and
-the observer takes a published write's own rendering, only where each is the rendering of the very
-state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is
-deterministic over one state.
+of its fork before the operation from the room's replica or from its own previous operation, the
+observer takes a published write's own rendering, and the replica's first run takes the room
+load's rendering of the state it starts from, only where each is the rendering of the very state
+being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`, `renderedReplica.start`),
+since rendering is deterministic over one state. It stays one measure where the observer renders
+less than the whole document, too: for an update that changed something inside some top-level
+blocks, `pmdoc.Layout.Splice` renders only those blocks into the markdown the replica keeps and
+answers exactly what a whole render of the new document writes or declines, and where it declines
+the observer renders the whole document (`renderedReplica.updateChangesMarkdown`).
 Indexing an ask block fails the second half: it writes an `asks` row and an `ask.opened` event
 over words the edit that wrote the block already versioned, and a settlement that versioned the
 document for that event alone would write a byte-identical version credited to nobody, staling an
@@ -600,10 +605,11 @@ therefore only tries the lock, and
 reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
 never queue behind each other or ahead of a waiting observer. `BenchmarkKeystrokeBesideReads`
 measures the wait: a keystroke's transaction and the observer's whole turn with the replica -
-the drain of the room's update log, the update applied to the replica and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since
-the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run of
-each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races
-beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
+the drain of the room's update log, the update applied to the replica and the whole render the
+observer then ran after every update (`renderedReplica.observe`, through `renderDocumentForUpdate`
+since the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run
+of each - the render's own cost, then hundreds of ms a keystroke regardless of which read mechanism
+races beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
 p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor
 (`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
 
@@ -613,14 +619,17 @@ p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a pr
 | copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
 | the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
 
-The render dominates every row now, on both designs: at half a processor the three keystroke
-counts are within one run's noise of each other, matching round 2's real-browser, end-to-end
-measurement of the same three modes (PR comment, not reproduced here). On 32 cores the replica
-still costs more at the tail than a copy does - about 50 ms at its median and 200 ms at p99
-reading every 250 ms, growing to about 1 s at p99 reading back to back - the same direction this
-design's trade-off has shown since round 1, now measured on top of the render's own cost rather
-than in isolation from it. A replica of the reads' own would remove that tail (measured early in
-this PR's history, before this benchmark counted the render, at `93a77af2`) and was rejected for
+These runs predate INFRA-644: the observer rendered the whole replica after every update then, and
+it now renders only the top-level blocks an update touched wherever it can (below); the table has
+not been measured again since. The render dominated every row then, on both designs: at half a
+processor the three keystroke counts are within one run's noise of each other, matching round 2's
+real-browser, end-to-end measurement of the same three modes (PR comment, not reproduced here). On
+32 cores the replica still costs more at the tail than a copy does - about 50 ms at its median and
+200 ms at p99 reading every 250 ms, growing to about 1 s at p99 reading back to back - the same
+direction this design's trade-off has shown since round 1, now measured on top of the render's own
+cost rather than in isolation from it. A replica of the reads' own would remove that tail (measured
+early in this PR's history, before this benchmark counted the render, at `93a77af2`) and was
+rejected for
 its memory: a room read while resident would hold a second whole copy of its document until
 eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB,
 with nothing bounding how many rooms hold one. Copying the observer's rendered tree under the lock
@@ -785,41 +794,77 @@ never documents touched since the process started (LEGION-513). A room an `Apply
 peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
-The room's update observer renders a replica of the room, the one its reads walk, not the live
-tree, since ygo fires it after the transaction has released the document's lock and another write
-can be integrating meanwhile (`renderedReplica`). The replica moves only through the room's commits,
-one at a time and in commit order: ygo appends each committed transaction's update to the room's
-update log under the document's lock, before any observer of that transaction runs
-(`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains
-the log, applying each update in turn and comparing the rendering it leaves with the one before it
-(`renderedReplica.changedBy`). It renders the replica for that only when it cannot know the
-rendering otherwise, and two cases it knows exactly. A published live write's update carries its
-operation's rendering, taken when the replica still stands at the epoch and foreign-commit count
-the operation's fork read found before it encoded the room: the replica has then consumed nothing
-since that read but published writes' commits, which under the writer slot are this write's own
-earlier updates, so after the update it is the fork the write rendered. ygo encodes the room's
-whole delete set in every update, so that holds only on the room instance the fork was read from:
-a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch. And an update
-whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`)
-is already in the replica, which starts from the room as of its first commit, so applying it
-changes nothing: a cold write's publish into the room its own publish loaded is never rendered.
-So every committed update is classified, and its authors credited, exactly once, by whichever
-observer reaches the log first, against the room as the
-commit before it left it. Catching the replica up to the room instead took in every commit since
-the last one rendered: when a published write's observer ran first, it counted a browser's edit in
-its own change, which credits no one, and the browser's own observer then found nothing changed,
-so the browser was on no version and in no pending row. The update an observer is
-handed cannot stand in for the log: two transactions' observers run concurrently in either order,
-and each update carries the room's whole delete set. The log records the room's state as of just
-before its first transaction since the load, which the replica starts from, so a room that is only
-read holds no replica; a replica that cannot apply an update starts again from a fresh base at the
-room's next commit (`UpdateLog.Reset`), and counts the updates it could not place as content
-changes. A repair's update is applied and rendered like any other, so the update after it is
+The room's update observer measures each update on a replica of the room, the one its reads walk,
+not the live tree, since ygo fires it after the transaction has released the document's lock and
+another write can be integrating meanwhile (`renderedReplica`). The replica moves only through the
+room's commits, one at a time and in commit order: ygo appends each committed transaction's update
+to the room's update log under the document's lock, before any observer of that transaction runs
+(`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock
+drains the log, applying each update in turn and comparing the rendering it leaves with the one
+before it (`renderedReplica.changedBy`). It renders the replica for that only when it cannot know
+the rendering otherwise, and two cases it knows exactly. A published live write's update carries
+its operation's rendering, taken when the replica still stands at the epoch and foreign-commit
+count the operation's fork read found before it encoded the room: the replica has then consumed
+nothing since that read but published writes' commits, which under the writer slot are this
+write's own earlier updates, so after the update it is the fork the write rendered. ygo encodes
+the room's whole delete set in every update, so that holds only on the room instance the fork was
+read from: a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch. And
+an update whose version is at or below the head the room instance's load folded
+(`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first
+commit, so applying it changes nothing: a cold write's publish into the room its own publish
+loaded is never rendered. So every committed update is classified, and its authors credited,
+exactly once, by whichever observer reaches the log first, against the room as the commit before
+it left it. Catching the replica up to the room instead took in every commit since the last one
+rendered: when a published write's observer ran first, it counted a browser's edit in its own
+change, which credits no one, and the browser's own observer then found nothing changed, so the
+browser was on no version and in no pending row. The update an observer is handed cannot stand in
+for the log: two transactions' observers run concurrently in either order, and each update carries
+the room's whole delete set. The log records the room's state as of just before its first
+transaction since the load, which the replica starts from, so a room that is only read holds no
+replica. The load rendered that very state already (`onLoadDocument`, before it opens the log),
+and hands that rendering and its layout to the replica (`keepReplica`, `loadedRendering`), which
+holds it only through a weak pointer: the replica's first run takes it in place of rendering its
+base again while no collection has taken it (`renderedReplica.start`, `catchUpFromLoad`), and
+renders the base otherwise (`catchUpRendered`), so the handover keeps nothing resident. A replica
+that cannot apply an update starts again from a fresh base at the room's next commit
+(`UpdateLog.Reset`), which it always renders, and counts the updates it could not place as content
+changes. A repair's update is applied and measured like any other, so the update after it is
 measured against the room it left, but its class is recorded by its own observer. The test hooks
 around the observer (`beforeObserveUpdate`, `afterCreditUpdate`) hold an observer, not an update:
 another transaction's observer classifies a held one's update if it reaches the log first. On a
-1 MiB document the render took about 160 ms and a whole copy about 420 ms, and the replica holds a
-whole copy's heap (above) while its room is resident.
+1 MiB document the whole render took about 160 ms and a whole copy about 420 ms, and the replica
+holds a whole copy's heap (above), and a layout of its markdown (below), while its room is
+resident.
+
+Where the observer cannot know an update's rendering otherwise (above), it renders no more of the
+replica than the update can have changed (`renderedReplica.updateChangesMarkdown`), on one of three
+paths, each counted (`renderPathCounts`). On a replica whose markdown and layout are known, an
+update that touched nothing under the document's fragment changed no rendering, and nothing is
+read or rendered (`observerUntouched`); one that changed something inside some top-level blocks,
+and added, deleted or moved none, renders just those blocks, each read alone
+(`pmdoc.ReadBlockForRendering`), into the markdown the replica keeps (`pmdoc.Layout.Splice`,
+`observerIncremental`). Anything else renders the whole replica, as every update did before
+INFRA-644, and records a fresh layout from the same render (`renderDocumentForUpdate`,
+`observerRendered`): an update that changed the fragment itself, one that touched more than 64
+blocks (`maxTouchedBlocks`), one on a replica whose markdown or layout is unknown, and one `Splice`
+declines. `Splice` answers exactly what the whole render of the new document writes, and declines
+wherever the rest of the document could read a changed block differently (its guards, G0 to G8):
+a document of one block or whose first block is a rule, a changed block that held or holds a
+footnote definition, one whose list kind or empty-paragraph status changed, which moves the list
+markers after it, one whose tables charged the render's span budget or would exhaust it, a
+document or changed block that writes a blank empty code block, and a block that does not read,
+validate or render alone. The replica learns which blocks an update touched through its block
+change finder (`blockChangeFinder`, `changedTypesFinder`): after each transaction that applies an
+update to the replica, it reads the shared types ygo says the transaction changed
+(`crdt.Transaction.ChangedTypes`) and walks each up its `Parent` chain to the top-level block it
+sits in, and it marks the update for a whole render when one is the fragment itself or sits deeper
+than any document in the schema nests (`noteChangedTypes`). sjawhar/ygo v1.51.3-sami.4 exports
+neither accessor; the fork adds both for this. Beside its markdown the replica keeps that
+markdown's `pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and flags); a
+published live write's rendering carries its own layout (`publishedRendering.layout`), which the
+replica takes with the markdown, and a rendering that carries none leaves the next update a whole
+render. The ask blocks an update left are walked only when its classification asks for them, and
+on the incremental path only in the blocks the layout says hold one.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
