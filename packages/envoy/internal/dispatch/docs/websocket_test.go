@@ -103,26 +103,6 @@ func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t
 	}
 }
 
-func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
-	service, artifactID := newTestService(t)
-
-	mismatched, err := service.authorizeSchemaVersion(artifactID, "0")
-	if err != nil {
-		t.Fatalf("authorize mismatched schema version: %v", err)
-	}
-	if !mismatched.ReadOnly {
-		t.Fatalf("mismatched schema admission = %#v, want read-only", mismatched)
-	}
-
-	current, err := service.authorizeSchemaVersion(artifactID, fmt.Sprintf("%d", pmdoc.SchemaVersion()))
-	if err != nil {
-		t.Fatalf("authorize current schema version: %v", err)
-	}
-	if current.ReadOnly {
-		t.Fatalf("current schema admission = %#v, want read-write", current)
-	}
-}
-
 // The page presents its schema in the socket's query as schema_version and schema_creatable, and
 // in its Hocuspocus token as the version alone. A page of this build that does so is writable on
 // an open issue, both when the socket is accepted and when the provider authenticates.

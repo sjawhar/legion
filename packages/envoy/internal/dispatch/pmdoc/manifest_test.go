@@ -200,3 +200,34 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 	})
 	refusesFuture(t, "write a tree holding future over a document without it", err)
 }
+
+// DocumentSince is the highest since among the declared elements a document holds: the schema
+// version a client needs to represent all of it. A document of version 1 elements is 1, one that
+// also holds an element read from version 2 is 2, and no document is 0. An element the manifest
+// does not declare has no since, and counts for nothing.
+func TestDocumentSinceIsTheHighestSinceTheDocumentHolds(t *testing.T) {
+	useFutureBlock(t, 2)
+	plain, err := Parse("Question?\n")
+	if err != nil {
+		t.Fatalf("parse a paragraph: %v", err)
+	}
+	future, err := Parse("Question?\n\n:::future{#future-1}\nBody.\n:::\n")
+	if err != nil {
+		t.Fatalf("parse a document holding future: %v", err)
+	}
+	unknown := &Node{Type: "doc", Children: []*Node{{Type: "paragraph"}, {Type: "unknown_node"}}}
+	for _, c := range []struct {
+		name string
+		doc  *Node
+		want int
+	}{
+		{name: "no document", doc: nil, want: 0},
+		{name: "a paragraph", doc: plain, want: 1},
+		{name: "a paragraph and a future block", doc: future, want: 2},
+		{name: "a paragraph and an undeclared node", doc: unknown, want: 1},
+	} {
+		if got := DocumentSince(c.doc); got != c.want {
+			t.Errorf("DocumentSince(%s) = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
