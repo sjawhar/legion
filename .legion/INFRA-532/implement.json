@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-532",
+  "completed": "2026-10-28T18:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2472",
+  "redCommit": "349f14eb48a3",
+  "proof": [
+    {
+      "criterion": "A1: a document's mermaid diagram draws, styles nothing outside it, and the browser makes no request to fonts.googleapis.com; fails at the commit before",
+      "surface": "Dispatch document page /issues/<KEY>/spec in the editor, real Go server and Postgres, chromium/iphone/webkit/firefox",
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"styles nothing outside\" (red: bun run e2e -- e2e/mermaid.e2e.ts, four projects, at 349f14eb)",
+      "observed": "Passes in all four projects at the head. At 349f14eb it fails in all four on sentinels.svgText = \"rgb(1, 2, 3)\" (the diagram's sheet reaches the page); soft run also showed the page's sheets holding the @import and the svg --_text rule, and a Google Inter CSS request in chromium/iphone/webkit.",
+      "headSha": "39fc1b41",
+      "negativeControl": "sanitizeElement skipped in sanitizeMermaidSvg: R1 fails on a fonts.googleapis.com request (googleFonts = [https://fonts.googleapis.com/css2?family=Inter...])"
+    },
+    {
+      "criterion": "Spec paragraph 4: hostile diagram markup runs nothing and fetches nothing, in a comment and in the document editor; fails with the sanitizer bypassed",
+      "surface": "Conversation comment thread and document editor, four projects (DOMParser wrap feeds HOSTILE_SVG through the real path)",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"hostile diagram markup\"",
+      "observed": "R2 and R3 pass in all four projects at the head; R3 fails at 349f14eb on requests to hostile.example (image.png, xlink-image.png, import.css; style.png in chromium).",
+      "headSha": "39fc1b41",
+      "negativeControl": "sanitizeElement skipped: R2 and R3 fail in chromium and webkit with window.__hostile = [image onerror x2, xlink image onerror x2, foreignObject img onerror x2]"
+    },
+    {
+      "criterion": "Architect's decision and condition 1: a document diagram draws in the worker, the page thread keeps answering, and one the worker does not answer in 5 s shows the reason and its source",
+      "surface": "document editor, four projects, worker bundle routed to a stub that never answers",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"document diagram too large\"",
+      "observed": "Passes in all four: five 100 ms timers each under 1 s, then status 'Unable to render Mermaid diagram: it did not finish within 5 seconds', source line n799 --> n0 visible, no diagram, stub served once. At 349f14eb it fails in all four: the page thread is held and the open times out.",
+      "headSha": "39fc1b41",
+      "negativeControl": "At the red commit (editor drawing on the page thread) the row fails: toContainText(\"Large document:\") times out after 15 s in every project"
+    },
+    {
+      "criterion": "Condition 2: an edit redraws 300 ms after typing pauses, the last drawing staying until the new one arrives",
+      "surface": "document editor, four projects, Worker wrapped to record posted sources",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 --repeat-each 5 -g \"redraws once typing pauses\"",
+      "observed": "5/5 in each project at ef163c71 (3/3 more in webkit): only the source ending FinishLine is sent, one worker, and a diagram is shown in every sampled frame. Fails at 349f14eb on __mermaidSent = [].",
+      "headSha": "ef163c71",
+      "negativeControl": "EDIT_REDRAW_DELAY_MS = 0: fails with FinishL, FinishLi, FinishLine all sent"
+    },
+    {
+      "criterion": "Condition 3: a block link and a highlighted mark land on their block whether or not a diagram above drew",
+      "surface": "document page with #b-<id> and a past version with ?v=1&comment=<id>, held worker, scroll anchoring off (as in Safari before 27), four projects",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"lands on its block\"",
+      "observed": "R7 and R8 pass in all four at the head; at 349f14eb they fail on a diagram already drawn before the release. A throwaway variant with a mouse wheel scroll after the link landed kept scrollTop 1031 -> 1031 after the draw (the reader is not pulled back).",
+      "headSha": "39fc1b41",
+      "negativeControl": "refocusAfterDiagrams made a no-op: R7 and R8 fail in chromium and webkit with toBeInViewport 'viewport ratio 0'"
+    },
+    {
+      "criterion": "Condition 4: with no worker the document block shows its source",
+      "surface": "document editor with new Worker() throwing, four projects",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"with no worker\"",
+      "observed": "Passes in all four: source visible, no diagram, no status, one console.error naming the unavailable renderer. Fails at 349f14eb (a diagram is drawn on the page thread).",
+      "headSha": "39fc1b41",
+      "negativeControl": "At the red commit the row fails on diagramIn(editor) count 1 in every project"
+    },
+    {
+      "criterion": "INFRA-528 cleanup and round-5 flake fix",
+      "surface": "Dispatch unit suite; Firefox comment-thread rows",
+      "command": "cd packages/dispatch && bun test web/src e2e/__tests__; bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project firefox --workers=1 --repeat-each 10 -g \"a comment holding|a reply to a comment|renderer refuses|label holding markup|another language stays code|in a comment runs nothing\"",
+      "observed": "2612 unit tests pass; 60/60 Firefox comment-thread runs pass.",
+      "headSha": "39fc1b41",
+      "negativeControl": "Timer started at queue time: the ready-delay case fails with 'it did not finish within 0.05 seconds'; open-fence pop removed: the callout case fails (length 2, expected 1); worker setter removed: the comment row shows 'Cannot set property self of #<DedicatedWorkerGlobalScope> which has only a getter'"
+    }
+  ],
+  "filesChanged": [
+    "biome.json",
+    "packages/proof-editor/AGENTS.md",
+    "packages/proof-editor/src/lib.css",
+    "packages/proof-editor/src/lib.ts",
+    "packages/proof-editor/src/mermaid-code-block-view.ts",
+    "packages/proof-editor/src/mermaid-svg.ts",
+    "packages/proof-editor/tests/mermaid-code-block-view.test.ts",
+    "packages/proof-editor/tests/mermaid-svg.test.ts",
+    "packages/proof-editor/tests/upstream-boundary.ts",
+    "packages/dispatch/AGENTS.md",
+    "packages/dispatch/e2e/mermaid.e2e.ts",
+    "packages/dispatch/e2e/text-typed-blocks.e2e.ts",
+    "packages/dispatch/web/src/features/doc/ProofDocument.tsx",
+    "packages/dispatch/web/src/features/doc/VersionView.tsx",
+    "packages/dispatch/web/src/features/doc/editor.ts",
+    "packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts",
+    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx",
+    "packages/dispatch/web/src/features/refs/mermaid-diagrams.test.tsx",
+    "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts",
+    "packages/dispatch/web/src/features/refs/mermaid-render.worker.ts",
+    "packages/dispatch/web/src/styles.css",
+    "packages/dispatch/web/vite.config.ts",
+    "packages/envoy/.changes/unreleased/INFRA-532-document-mermaid-styles.yaml"
+  ],
+  "trickyParts": [
+    "The editor view sets a mermaid block's layout only in ProseMirror's update; an answer only fills the shadow root and the status, so a late drawing never moves the contentDOM (a unit test watches with a MutationObserver; moving it on answer hangs the happy-dom run).",
+    "Every engine Playwright runs (and Safari 27) anchors the scroll natively, so R7/R8 turn overflow-anchor off to prove the page's own re-run; without that the rows pass with the re-run removed.",
+    "The focus runs again only when a diagram is still waiting (mermaidDrawsWaiting), so a document with no pending diagram pulses its target once. An earlier version focused twice; VersionView.test.tsx then failed and bun's failure diff of the fake editor grew past 3 GB, which OOM-killed the pod several times."
+  ],
+  "deviations": [
+    "Plan v2 (dispatch://INFRA-532/artifact/plan-md) supersedes plan.json: documents draw in the worker by the INFRA-138 architect's decision.",
+    "R7 and R8 fail at the red commit (they assert no diagram is drawn before the release), as the architect requires every new row to fail before the change; the plan's table said they pass.",
+    "R6 routes the worker bundle to a stub that never answers (INFRA-713's approach, the architect's instruction); the INFRA-528 comment too-large row keeps main's text except its openCommentThread lead, and is left to INFRA-713 and CI.",
+    "Browser runs are one project at a time with --workers=1 (pod memory); the full four-project run is CI's.",
+    "The comment too-large row was not run in the pod at the head: it draws 800 nodes for real."
+  ],
+  "openQuestions": []
+}
