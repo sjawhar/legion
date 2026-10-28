@@ -53,10 +53,13 @@
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,
-# -buildvcs=false and one -tags T, that is its step's whole run: script (comments and blank lines
-# aside), with no shell: on the step and no defaults.run.shell on the job or the workflow, no
-# container: on the job, no GO* or CGO_* variable and no BASH_ENV or ENV in the workflow's, job's
-# or step's env, no step of the job writing $GITHUB_ENV or $GITHUB_PATH or running `go env -w`
+# -buildvcs=false and one -tags T, that is its step's whole run: script (split at \n alone,
+# stripped of spaces and tabs, comments and blank lines aside; a script holding any character
+# outside printable ASCII, tab and \n is not simple), with no shell: on the step and no
+# defaults.run.shell on the job or the workflow, no container: on the job, no name outside
+# ENV_ALLOWED (test configuration go never reads; GO*, CGO_*, BASH_ENV, ENV, HOME,
+# XDG_CONFIG_HOME and PATH are outside it) in the workflow's, job's or step's env, no step of the
+# job writing $GITHUB_ENV or $GITHUB_PATH or running `go env -w`
 # (each reaches every later go command unseen), and the step's working directory (its own, else
 # the job's or workflow's defaults.run, else the root) the Run's. A -race line's closure is the
 # one `go list -race` lists, so its Run says race too. A script_run is held exact instead: the
@@ -75,6 +78,14 @@
 # them. So a cd, `go -C` or a step in another directory than the Run's can only widen what it
 # reads. It fails wide, never narrow: a new evasion is answered by falling to everything, not by
 # more parsing.
+#
+# What it reads, and what it does not: ci.yaml's own steps (their run: text, shell, working
+# directory and env: blocks), the job's and workflow's env and defaults, and the scripts and steps
+# the table pins. It does not read the environment a local action or a repository script writes
+# (a composite action's own $GITHUB_ENV or $GITHUB_PATH, a script's export), nor what such a
+# script runs beyond its pinned line. It answers accidental drift: a new import, file or command
+# that silently stops a job running on its own inputs. A committer who deliberately hides a
+# command or a flag where this check does not read is the review's to catch.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party

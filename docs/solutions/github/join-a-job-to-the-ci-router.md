@@ -152,10 +152,13 @@ fails the pull request that adds it.
   go command (`go test`, `vet`, `build`, `run`, `list`, `install`, `generate`) nothing claims.
   It reduces a claimed command only in its simple form: one line of `go test|vet|build`,
   relative package paths and only `-v`, `-race`, `-count=N`, `-timeout D`, `-buildvcs=false` and
-  one `-tags T`, that is its step's whole `run:` script (comments and blank lines aside), with no
-  `shell:` on the step, no `defaults.run.shell` on the job or the workflow, no `container:` on
-  the job, no `GO*` or `CGO_*` variable and no `BASH_ENV` or `ENV` in the workflow's, job's or
-  step's `env:`, no step of the job writing `$GITHUB_ENV` or `$GITHUB_PATH` or running
+  one `-tags T`, that is its step's whole `run:` script (split at `\n` alone, stripped of spaces
+  and tabs, comments and blank lines aside; any character outside printable ASCII, tab and `\n`
+  makes it not simple), with no `shell:` on the step, no `defaults.run.shell` on the job or the
+  workflow, no `container:` on the job, no `env:` name outside `ENV_ALLOWED` in the workflow's,
+  job's or step's `env:` (test configuration go never reads; `GO*`, `CGO_*`, `BASH_ENV`, `ENV`,
+  `HOME`, `XDG_CONFIG_HOME` and `PATH` are outside it, and a new name joins it only when go does
+  not read it), no step of the job writing `$GITHUB_ENV` or `$GITHUB_PATH` or running
   `go env -w`, and the step's working directory (its own, else a `defaults.run` one, else the
   root) the `Run`'s; its packages, tags, `-race` and mode must then be exactly the `Run`'s (a
   `-race` line's `Run` says `race=True`, and its closure is what `go list -race` lists), and a
@@ -167,6 +170,12 @@ fails the pull request that adds it.
   command unless its filter selects them all. Pass a value to a later step as a step output set
   in that step's `env:`, not through `$GITHUB_ENV`. The check fails wide rather than parse
   further.
+
+  The check reads `ci.yaml`'s own steps, `env:` blocks and defaults and the scripts and steps the
+  table pins. It does not read the environment a local action or a repository script writes (a
+  composite action's own `$GITHUB_ENV`, a script's `export`). It answers accidental drift, a new
+  import that silently stops a job running on it; a command or flag hidden on purpose where it
+  does not read is the review's to catch.
 
   A step whose go commands are in no simple form (a loop, a pipe, `GOOS=... go build`) gets an
   exact entry instead of `step_run`s: add `pinned_step(job, step, workdir, script, runs)` to the

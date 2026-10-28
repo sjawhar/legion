@@ -661,4 +661,39 @@ check "names the step and why it falls" \
   "$(contains "$out" 'job app step "Test the app".s pinned script, which this check does not reduce (the step.s script is not the pinned text), so it counts as reading every Go file of the repository and every file under a Go module.s directory; filter app must select them all on any Go change')"
 check "and a file it falls to" "$(contains "$out" '::error file=mod/other/other.go::')"
 
+for odd in cr nbsp; do
+  echo "case: a hidden command after a ${odd} that Python reads as a comment and bash runs"
+  root=$(fixture "hidden-$odd")
+  # YAML's own escapes, as a committer would write them: \r and \_ (no-break space).
+  if [ "$odd" = cr ]; then char='\r' code=U+000D; else char='\_' code=U+00A0; fi
+  replace "$root/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" \
+    "        run: \"go test ./cmd/app ./lib\\n${char}# || go build ./other\""
+  run_check "$root"
+  check "fails" "$(is "$status" 1)"
+  check "names the character" "$(contains "$out" "its step.s script holds the character $code")"
+  check "and a file it falls to" "$(contains "$out" '::error file=mod/other/other.go::')"
+done
+
+# HOME, XDG_CONFIG_HOME and PATH reach go's env file or binary; PROBE_SETTING stands for any other
+# name outside ENV_ALLOWED.
+for name in XDG_CONFIG_HOME HOME PATH PROBE_SETTING; do
+  echo "case: $name, outside ENV_ALLOWED, in a simple go command's env"
+  root=$(fixture "env-$name")
+  cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+  mkdir -p "$root/mod/goenv/go"
+  printf 'GOFLAGS=-tags=probe\n' > "$root/mod/goenv/go/env"
+  replace "$root/.github/workflows/ci.yaml" "        working-directory: mod" $'        working-directory: mod\n        env:\n          '"$name"': ./goenv'
+  run_check "$root"
+  check "fails" "$(is "$status" 1)"
+  check "names the command and $name" \
+    "$(contains "$out" "job app step \"Test the app\" runs \`go test ./cmd/app ./lib\`, which this check does not reduce (step \"Test the app\".s env sets $name)")"
+  check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
+done
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

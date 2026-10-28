@@ -394,8 +394,17 @@ def squash(text: str) -> str:
 
 
 def script_lines(text: str) -> list:
-    """The lines of a run: script, stripped, comments and blank lines aside."""
-    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    """The lines of a run: script as bash splits them (at \\n alone), stripped of spaces and tabs,
+    comments and blank lines aside."""
+    stripped = (line.strip(" \t") for line in text.split("\n"))
+    return [line for line in stripped if line and not line.startswith("#")]
+
+
+def script_reason(text: str) -> str:
+    """'' when a run: script holds only printable ASCII, tabs and newlines; else the first other
+    character, which Python and bash may split, strip or read differently (a \\r, a NBSP)."""
+    odd = next((c for c in text if c not in "\t\n" and not " " <= c <= "~"), None)
+    return f"its step's script holds the character U+{ord(odd):04X}" if odd else ""
 
 
 def go_lines(text: str) -> list:
@@ -447,17 +456,29 @@ def reduce_line(line: str) -> tuple:
     return pkgs, tag_set(tags or ""), words[1], "-race" in words, ""
 
 
+# The only env: names a step, its job or the workflow may set while a go command of the step stays
+# reduced: test configuration the go tool itself never reads. Any other name falls to everything,
+# among them GO* and CGO_*, BASH_ENV and ENV (which bash sources before the script), HOME and
+# XDG_CONFIG_HOME (go reads its env file, GOFLAGS among it, from $XDG_CONFIG_HOME/go/env or else
+# $HOME/.config/go/env) and PATH (which chooses the go binary). Add a name here only when go does
+# not read it.
+ENV_ALLOWED = frozenset({
+    "BROKER_TEST_DATABASE_URL", "DATABASE_URL", "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
+    "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
+    "LEGION_E2E", "LEGION_E2E_PG_DSN", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN", "TESTCONTAINERS_RYUK_DISABLED",
+})
+
+
 def env_reason(document: dict, job: dict, steps: list) -> str:
     """The first env: block of the workflow, the job or one of the steps that can change what a go
-    command compiles (a GO* or CGO_* variable, BASH_ENV or ENV, which bash sources before the
-    script, or an expression), or ''."""
+    command compiles (an expression, or a name outside ENV_ALLOWED), or ''."""
     blocks = [("the workflow's", document.get("env")), ("the job's", job.get("env"))]
     blocks += [(f'step "{step_label(s)}"\'s', s.get("env")) for s in steps]
     for where, env in blocks:
         if env is not None and not isinstance(env, dict):
             return f"{where} env is an expression"
         for name in env or {}:
-            if str(name).startswith(("GO", "CGO_")) or name in ("BASH_ENV", "ENV"):
+            if name not in ENV_ALLOWED:
                 return f"{where} env sets {name}"
     return ""
 
@@ -588,7 +609,7 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                 continue
             script = str(step["run"])
             workdir = step_workdir(document, job, step)
-            around = around_reason(document, job, [step])
+            around = around_reason(document, job, [step]) or script_reason(script)
             entries = [fe for (j, ref), fes in exacts.items() if j == job_id and step_matches(step, ref) for fe in fes]
             for name, e in entries:
                 reason = (around or ("" if script.rstrip() == e.script.rstrip() else "the step's script is not the pinned text")
@@ -661,12 +682,13 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                                 f"gate {g.filter} lists; update or remove the Run")
                 continue
             job = jobs.get(g.job) or {}
-            lines = (REPO / r.source).read_text().splitlines()
+            lines = (REPO / r.source).read_text().split("\n")
             held = [i for i, line in enumerate(lines) if r.text in line]
             reason = around_reason(document, job, job.get("steps") or []) or ("" if held else "its text spans lines")
             for i in held:
-                if not reason and lines[i].strip() != r.text:
-                    reason = f"its line is `{lines[i].strip()}`, not the text alone"
+                line = lines[i].strip(" \t")
+                if not reason and line != r.text:
+                    reason = f"its line is `{line}`, not the text alone"
                 elif not reason and continued(lines, i):
                     reason = "it is part of a backslash continuation"
             if reason:
