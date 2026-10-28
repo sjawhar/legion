@@ -528,7 +528,9 @@ export const dispatchToolSpecs = [
       "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " +
       "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " +
       "second copy is the same comment); an agent's events and every other change on the issue still " +
-      "need a subscription to it. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " +
+      "resolution or edit of it, and every reply there (new, edited, resolved or reopened), reach you " +
+      "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +
       "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
       "person, not a session: there is nothing running to message, so ask them on the issue rather than " +

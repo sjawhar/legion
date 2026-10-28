@@ -5,4 +5,6 @@ body: |-
   comment that mentions it arrives once, as the mention, when the mention reached it, and still
   reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
   twice, and the second copy is the same comment), and that an agent's events and every other
-  change on the issue still need a subscription.
+  change on the issue still need a subscription to it, except in an ask you follow: anyone else's
+  answer, hand-back, resolution or edit of it, and every reply there (new, edited, resolved or
+  reopened), reach you as its follower.
