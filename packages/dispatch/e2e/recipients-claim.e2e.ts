@@ -307,7 +307,7 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a route change that closes the issue moves the open card's route row without a reload @phone", async ({
+test("a close that also moves the route withdraws the open card's ask in place, without a reload @phone", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
@@ -319,7 +319,7 @@ test("a route change that closes the issue moves the open card's route row witho
     { actor: asker, as: "agent" }
   );
   // No claim: closing a claimed issue releases it in the same write, and that `issue.released`
-  // would refresh the card on its own, so only `issue.closed` carries the route change here.
+  // would refresh the card on its own, so only the close's own events reach the card here.
   await patchIssue(issue.key, { route: `session:${routed}` });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
@@ -339,16 +339,15 @@ test("a route change that closes the issue moves the open card's route row witho
     // card stays mounted in the Inbox after the close and its own thread is what must move.
     await recipients.getByRole("button", { name: /^Reaches/ }).click();
     const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
-    const routeRow = (session: string) =>
-      viaIssue.getByRole("listitem").filter({ has: page.locator(`[title='${session}']`) });
-    await expect(routeRow(routed)).toContainText("via route");
+    await expect(
+      viaIssue.getByRole("listitem").filter({ has: page.locator(`[title='${routed}']`) })
+    ).toContainText("via route");
 
-    // One PATCH sets the new route and closes the issue: the server emits `issue.closed` alone.
+    // One PATCH sets the new route and closes the issue. The close withdraws the issue's open
+    // asks, so the card shows its ask withdrawn by the closer and lists no recipient at all.
     await patchIssue(issue.key, { route: `session:${moved}`, status: "done" });
-    await expect(routeRow(moved)).toContainText("Routed next (e2e)");
-    await expect(routeRow(moved)).toContainText("via route");
-    await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
-    await expect(recipients).toContainText("Reaches 2");
+    await expect(card).toContainText("Withdrawn when alice closed the issue");
+    await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();
   } finally {
     await alice.close();
@@ -406,8 +405,9 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     }
     await route.fallback();
   });
-  const streamOpened = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  const streamOpened = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   // Every issue event's flush refreshes the issue lists, the shell's pinned list among them: its
   // request is the page's own word that it has handled the event.
@@ -418,7 +418,8 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     });
   try {
     const navigation = page.goto("/");
-    // The writes must reach an open stream: a cold client's stream replays nothing from before.
+    // The writes go out once the page's live socket is open, so each one's flush reaches the page
+    // while the Inbox load it is timed against is still in flight.
     await Promise.all([firstRequested.promise, streamOpened]);
     await patchIssue(other.key, { title: "Edited while the Inbox loads" });
     await secondFetched.promise;
