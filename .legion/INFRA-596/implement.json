@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-596",
-  "completed": "2026-10-28T14:20:00Z",
+  "completed": "2026-10-28T15:35:00Z",
   "proof": [
     {
       "criterion": "Each cause found in Dispatch is fixed with a test, on main as it now is (#2225 owns the claimant copy): a person's reply reaches every session in its thread and the thread document's authors, and a comment on an issue with no route and no session claim reaches its primary document's authors, each session once, beside main's claimant copy.",
       "surface": "Local Dispatch stack: the server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy, driven over the HTTP API.",
       "command": "implementer-rig-edge.sh head (attached to the Dispatch issue; run from $TMPDIR/infra596-tester with the pinned Bun on PATH)",
       "observed": "13 of 13 cases OK and a 30-issue burst OK, no duplicate topic: E1 reply, its edit and a reply aimed at a reply -> S-claim S-other S-writer; E1 root edit -> S-claim S-writer; E2 routed+claimed conversation and reply -> S-claim S-route; E3 person-claimed -> S-spec; E4 ask thread -> S-asker S-claim; E9 reply mentioning the claimant -> S-other S-writer; E10 claimant that started the thread -> S-claim once; E5/E6 -> none.",
-      "headSha": "55be984b0902de53ee34d221f7b3770dea6f2553",
+      "headSha": "ed6e225db639456b93465bc33320eeda5a64ed92",
       "negativeControl": "implementer-rig-edge.sh main (main 2d872499 with #2225): FAILS=5 — E1 reply, edit and reply-to-reply reached only S-claim, E3 reached nobody, E9 reached nobody; every claimant case passed there."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "The dispatch CLI bundled from the head (packages/envoy-client/bin/dispatch.ts, as build-dispatch-cli.sh bundles it) against the same local Dispatch.",
       "command": "/legion/scratch/tmp/infra596-rig/run.sh head, step: dispatch doc-read --issue RIG-1 --artifact spec (output in /legion/scratch/tmp/infra596-rig/head/doc-read.txt)",
       "observed": "'Open anchored threads:' then the reopened root (id, author, quote, body) and both replies with author, time and full body, including the person's reopening reply.",
-      "headSha": "55be984b0902de53ee34d221f7b3770dea6f2553",
+      "headSha": "ed6e225db639456b93465bc33320eeda5a64ed92",
       "negativeControl": "run.sh main: main's CLI printed only 'Open anchored asks/comments: comment <id>'; a resolved thread is absent from the head's output (unit test in dispatch-execute.test.ts)."
     },
     {
@@ -33,7 +33,7 @@
       "surface": "report.ts over the run's files attached to INFRA-596; the uploaded documents dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md (version 2) and dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-pairs-tsv.",
       "command": "R=<dir with the comment-delivery-* files, each fetched with dispatch doc-read … | tail -n +3>; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md",
       "observed": "Exit 0. 'Total 1055 = delivered 795 + not delivered 44 (no-target 14, not-addressed:claimant 19, running-no-row 11) + unknown 216'. With findings version 2 (fix attribution: the claimant's 19 to #2225, the 10 reply and unclaimed-issue comments to #2366), report.ts at this head is uploaded as version 4 of the October document and reads back byte for byte; pairs TSV unchanged (bd067fb6…).",
-      "headSha": "55be984b0902de53ee34d221f7b3770dea6f2553",
+      "headSha": "ed6e225db639456b93465bc33320eeda5a64ed92",
       "negativeControl": "A counts file whose rows_without_id is 1, a duplicated receipts row, a listed pair missing from receipts.tsv, or counts that disagree with the rows make report.ts exit 1 naming the line or rows (comment-delivery.test.ts); a pair whose session the store does not hold is reported unknown, never delivered."
     },
     {
@@ -41,7 +41,7 @@
       "surface": "Dispatch's outbox against a real Postgres and a recording sender (the package's real-process harness), as scanBatch/publishBatch run it in production.",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/outbox/ -count=1 -run 'TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTopic|TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed' -v",
       "observed": "Store error (artifact_versions.authors made a JSON scalar, SQLSTATE 22023): the comment records published_destinations [issue topic] (and the route on a routed issue) and is backed off; a message.created in the same batch is published. Cancelled context: every comment of the batch is released (published_at null, attempt_count 0, next_attempt_at null). Whole outbox package green.",
-      "headSha": "55be984b0902de53ee34d221f7b3770dea6f2553",
+      "headSha": "ed6e225db639456b93465bc33320eeda5a64ed92",
       "negativeControl": "At 86599d457b94 the same tests fail: published_destinations [] for the failed comment, and attempt_count 1 with a retry delay after a stop."
     },
     {
@@ -102,7 +102,8 @@
     "CI round (red test at 16191b48, job 122325058297): the failures were packages/daemon check_wake tests under -race, which this pull request does not change; main fixed that rig in 2dbeca18b. The pull request also conflicted with main b295a3fb, so forward merge fb909998478e brings main in: four CHANGELOG conflicts kept both sides, claude-envoy dist rebuilt with the pinned Bun 1.4.4. The fingerprint changed only in the generated dist (without it both heads give f8bf00ea…). On the merge both daemon tests pass with and without -race (local Postgres and nats-server via LEGION_TEST_NATS_URL), and the outbox and deliveryaudit suites pass.",
     "Review round 5 (public-repository rule, 2026-10-27 17:00Z): every Dispatch key and dispatch:// link in text this pull request adds was replaced by the pull request number, a description of the case, or the repository path theorem-labs/agent-infra transcript-store/, and fixtures and tests use the ACME project key (892c6542f947). Checked on the diff's added lines against fork point b295a3fb: none remain; the PR body keeps only the Dispatch: line. Two cause texts in classes.ts changed, so the October document was re-uploaded as version 3 (report.ts at this head over the same files); version 2 stays as the earlier record.",
     "Test round (verdict fail: conflicting with main 2d872499, which merged #2225's claimant route): per the tree's architect, main's claimant rule wins. This pull request dropped its own claimant path and keeps only the thread/document reply recipients and the primary-document recipients for an issue with no route and no session claim, both through main's delivered-only mention rule (leftToMention), plus the failed-query behaviour and doc-read (merge 06af8ab7, then be2fe717 onto 08572e01). CHANGELOG.md edits moved to .changes/unreleased/pr2366-*.yaml fragments, as main now requires. The report's fix column credits #2225 and #2366; findings v2 and document v4 uploaded. The wording-pin test of CAUSES texts was removed.",
-    "Review round 6 (the architect's capped list): the envoy fragment's resolve/reopen sentence, THROUGHPUT.md's baseline labelled main before #2225, envoy.md's edit/resolution/reopening sentence, the two comments now name the claimant, recipientFilter reads the comment's mentions as main's routes do (so comment_create.go and model.go are back to main's text; nothing in the outbox reads suppressed_authors), three tests that duplicated main's claimant tests deleted, the deliveryaudit fixtures use ACME, and the PR body's tester line describes the case (55be984b0902). The delivery rig passes 13/13 and the 30-issue burst; the outbox, deliveryaudit and api subset tests pass."
+    "Review round 6 (the architect's capped list): the envoy fragment's resolve/reopen sentence, THROUGHPUT.md's baseline labelled main before #2225, envoy.md's edit/resolution/reopening sentence, the two comments now name the claimant, recipientFilter reads the comment's mentions as main's routes do (so comment_create.go and model.go are back to main's text; nothing in the outbox reads suppressed_authors), three tests that duplicated main's claimant tests deleted, the deliveryaudit fixtures use ACME, and the PR body's tester line describes the case (55be984b0902). The delivery rig passes 13/13 and the 30-issue burst; the outbox, deliveryaudit and api subset tests pass.",
+    "Acceptance cleanup (ed6e225db639): comment.created's suppressed_authors deleted with its write and its test uses after a repository-wide search found no reader outside tests (recorded as the PR's contract change census); the uncalled payloadStringSet deleted; recipients.go no longer calls routes main's; the comment paragraphs this PR added rewrapped to 100 columns; the envoy fragment records the field's removal. The outbox, deliveryaudit and api subset tests pass, and the delivery rig passes 13/13 plus the 30-issue burst."
   ],
   "openQuestions": [
     "INFRA-49 (the controller's daily report issue) needs a route to role:legion-infra-controller; the INFRA-514 architect asked the controller to set it.",
