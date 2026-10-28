@@ -19,21 +19,23 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-// markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
+// markdownReader is a goldmark configuration Dispatch reads markdown with. Its only way in is
+// parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
 // ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
 // (emptyItemGuard).
 type markdownReader struct {
 	md goldmark.Markdown
 }
 
+// blockReader is the configuration every document is read with, its delimiter runs read by
+// editorRules.
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
 		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
+		parser.WithInlineParsers(inlineParsers(editorRules)...),
 		parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
 	)),
-	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, strikethrough{}, taskList{}, footnotes{}),
+	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
@@ -246,17 +248,16 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
 // list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
-// delimiter runs read by emphasis.
-func inlineParserOptions(emphasis emphasisParser) []parser.Option {
+// delimiter runs read by rules, `~` runs among them (tildeParser).
+func inlineParserOptions(rules delimiterRules) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000),
 		),
-		parser.WithInlineParsers(inlineParsers(emphasis)...),
+		parser.WithInlineParsers(inlineParsers(rules)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(newStrikethroughGuard(), 500),
 			util.Prioritized(newLinkifyGuard(), 999),
 		),
 	}
@@ -269,28 +270,26 @@ type inlineReader struct {
 	run, withDefinitions parser.Parser
 }
 
-func newInlineReader(emphasis emphasisParser) inlineReader {
+func newInlineReader(rules delimiterRules) inlineReader {
 	return inlineReader{
-		run:             parser.NewParser(inlineParserOptions(emphasis)...),
-		withDefinitions: parser.NewParser(append(inlineParserOptions(emphasis), footnoteParserOptions()...)...),
+		run:             parser.NewParser(inlineParserOptions(rules)...),
+		withDefinitions: parser.NewParser(append(inlineParserOptions(rules), footnoteParserOptions()...)...),
 	}
 }
 
-// inlineMarkdown reads inline markdown as Parse does; flankingOnlyMarkdown reads it with its
-// delimiter runs judged by CommonMark's flanking rules alone (emphasisParser.flankingOnly).
-var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{flankingOnly: true})
+// inlineMarkdown reads inline markdown as Parse does (editorRules). storedMarkdown and
+// flankingMarkdown read it with its delimiter runs read as Parse read them before (storedRules and
+// flankingRules), the rules most stored markdown was written under, which the renderer keeps
+// writing a run's bytes to read back under where it can (inlineWithEscapes, altReadsBack).
+var inlineMarkdown, storedMarkdown, flankingMarkdown = newInlineReader(editorRules), newInlineReader(storedRules), newInlineReader(flankingRules)
 
 // parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
 // does, after a definition for each of labels, the footnote labels it refers to. It is the
 // renderer's read-back of a run it wrote, where a reference is only a reference beside its
-// definition. diverged reports whether a delimiter run read otherwise than by CommonMark's
-// flanking rules alone (flankingDivergenceKey), which a read by flankingOnlyMarkdown never
-// reports: where it is false, flankingOnlyMarkdown reads the markdown as reader did.
-func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) (nodes []*Node, diverged bool, err error) {
-	context := parser.NewContext()
+// definition.
+func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
 	if len(labels) == 0 {
-		nodes, err = readInline(markdown, reader.run, nil, context)
-		return nodes, context.Get(flankingDivergenceKey) != nil, err
+		return readInline(markdown, reader.run, nil)
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -298,21 +297,20 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root, err := parseSource(reader.withDefinitions, source, context)
-	diverged = context.Get(flankingDivergenceKey) != nil
+	root, err := parseSource(reader.withDefinitions, source, parser.NewContext())
 	if err != nil {
-		return nil, diverged, err
+		return nil, err
 	}
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
-		return nil, diverged, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
+		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
 	paragraph, err := convert(first, source, 1, footnoteLabels(root))
 	if err != nil {
-		return nil, diverged, err
+		return nil, err
 	}
 	sortNodeMarks(paragraph)
-	return paragraph.Children, diverged, nil
+	return paragraph.Children, nil
 }
 
 // referencedLabels is the footnote labels nodes refer to, each once, in order.
@@ -333,15 +331,15 @@ func referencedLabels(nodes []*Node) []string {
 // budget, its caller write's, on the elements it makes. Markdown that forms more than one
 // paragraph, or holds text after its paragraph's last line, is ErrSchema.
 func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
-	return readInline(markdown, inlineMarkdown.run, budget, parser.NewContext())
+	return readInline(markdown, inlineMarkdown.run, budget)
 }
 
-// readInline is ParseInline read with inline, one of an inlineReader's parsers, and context, a
-// fresh one, counting the elements it makes on budget, a caller write's, or none when budget is
-// nil (a read-back).
-func readInline(markdown string, inline parser.Parser, budget *WriteBudget, context parser.Context) (nodes []*Node, err error) {
+// readInline is ParseInline read with inline, one of an inlineReader's parsers, counting the
+// elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
+func readInline(markdown string, inline parser.Parser, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
+	context := parser.NewContext()
 	var count *parseCount
 	if budget != nil {
 		context.Set(writeBudgetKey, budget)
@@ -827,6 +825,10 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	return &Node{Type: nodeType, Children: children}, nil
 }
 
+// parseImage converts image. Its alt text is its label's plain text as the browser editor's parser
+// takes it (mdast-util-to-string): every text in the label, marked or not, and the alt text of an
+// image in it. inlineNesting holds images within maxInlineNesting of one another, so each alt
+// text is copied into at most that many others.
 func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
 	alt, err := parseInline(image, source, nil, footnotes)
 	if err != nil {
@@ -834,8 +836,12 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}
 	var text strings.Builder
 	for _, child := range alt {
-		if child.Type == "text" {
+		switch child.Type {
+		case "text":
 			text.WriteString(child.Text)
+		case "image":
+			nested, _ := child.Attrs["alt"].(string)
+			text.WriteString(nested)
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{

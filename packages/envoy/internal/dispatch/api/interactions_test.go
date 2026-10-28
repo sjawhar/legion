@@ -458,10 +458,19 @@ func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Caps", "A spec")
-	tooLong := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
-		"question": strings.Repeat("a", 801), "actor": sessionActor(),
+	// A whole-cap question is accepted, since a question names its concrete case; one past it is
+	// refused by name.
+	atCap := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": strings.Repeat("a", contracts.AskQuestionMax), "actor": sessionActor(),
 	})
-	if tooLong.Code != http.StatusBadRequest || !strings.Contains(tooLong.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLong.Body.String(), "question is 1 characters over the 800-character limit (801/800)") {
+	if atCap.Code != http.StatusCreated {
+		t.Fatalf("question at the cap: status=%d body=%s", atCap.Code, atCap.Body.String())
+	}
+	tooLong := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": strings.Repeat("a", contracts.AskQuestionMax+1), "actor": sessionActor(),
+	})
+	overCap := fmt.Sprintf("question is 1 characters over the %d-character limit (%d/%d)", contracts.AskQuestionMax, contracts.AskQuestionMax+1, contracts.AskQuestionMax)
+	if tooLong.Code != http.StatusBadRequest || !strings.Contains(tooLong.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLong.Body.String(), overCap) {
 		t.Fatalf("question cap: status=%d body=%s", tooLong.Code, tooLong.Body.String())
 	}
 	tooManyOptions := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{

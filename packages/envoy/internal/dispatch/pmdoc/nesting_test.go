@@ -166,10 +166,10 @@ func TestParseRefusesAnUnsupportedDirectiveInTheDeepestQuoteForWhatItIs(t *testi
 // refused there, as every other reader refuses them, rather than read as the paragraph's text.
 func TestInlineReadBackRefusesDefinitionsNestedPastTheBound(t *testing.T) {
 	definitions := func(depth int) string { return "a\n\n" + strings.Repeat("[^a]: ", depth) + "x" }
-	if _, _, err := parseInlineWithDefinitions(definitions(expectedMaxNesting), []string{"a"}, inlineMarkdown); err != nil {
+	if _, err := parseInlineWithDefinitions(definitions(expectedMaxNesting), []string{"a"}, inlineMarkdown); err != nil {
 		t.Fatalf("a run before %d nested definitions: %v, want it read", expectedMaxNesting, err)
 	}
-	_, _, err := parseInlineWithDefinitions(definitions(expectedMaxNesting+1), []string{"a"}, inlineMarkdown)
+	_, err := parseInlineWithDefinitions(definitions(expectedMaxNesting+1), []string{"a"}, inlineMarkdown)
 	refusal := fmt.Sprintf("line 3 opens a block inside %d blocks", expectedMaxNesting)
 	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
 		t.Fatalf("a run before %d nested definitions: %v, want ErrSchema saying %q", expectedMaxNesting+1, err, refusal)

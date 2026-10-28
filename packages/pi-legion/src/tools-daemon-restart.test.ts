@@ -307,7 +307,7 @@ test("an aborted call stops waiting and sends nothing more, even with the daemon
   expect(result.isError).toBe(true);
   const [block] = result.content;
   expect(block?.type === "text" ? block.text : "").toBe(
-    "sign_off: the Legion daemon was unreachable (Unable to connect. Is the computer able to access the url?) and the call was aborted; call it again once the daemon is back"
+    "sign_off: the Legion daemon was unreachable (ECONNREFUSED: Unable to connect. Is the computer able to access the url?) and the call was aborted; call it again once the daemon is back"
   );
   expect(clock.waits).toEqual([500, 1000, 2000]);
   expect(live.answered).toEqual([]);
@@ -428,7 +428,7 @@ test("a daemon that stays down past the ten-minute budget fails the call with th
   expect(result.isError).toBe(true);
   const [block] = result.content;
   expect(block?.type === "text" ? block.text : "").toBe(
-    "sign_off: the Legion daemon was unreachable (Unable to connect. Is the computer able to access the url?) and stayed so for 10 minutes; call it again once the daemon is back"
+    "sign_off: the Legion daemon was unreachable (ECONNREFUSED: Unable to connect. Is the computer able to access the url?) and stayed so for 10 minutes; call it again once the daemon is back"
   );
   expect(live.answered).toEqual([]);
   expect(clock.waits.reduce((sum, wait) => sum + wait, 0)).toBe(10 * 60_000);

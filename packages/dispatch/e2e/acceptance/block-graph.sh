@@ -3,11 +3,20 @@
 # reference in a comment and the block's backlinks through the API and `dispatch read`; a deleted
 # and restored block; a pinned block reference that changes and is removed; links between the
 # blocks of two documents; each block's changed version; every block part of its document; a link
-# in a list item; the older document references route.
+# in a list item; who made each node of every kind and when, who last changed it and when, its
+# parent and the parent's version, read by its own reference, as an edge's other end and on the
+# `Node:` line of `dispatch read`; the older document references route.
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
-# here and never printed), PROJECT (an existing project key). It writes one issue in PROJECT and
-# closes it, also when a check fails. Each passing check prints `PASS: <section> <what>`; the first
+# here and never printed), PROJECT (an existing project key), and optionally COMPONENT_SOURCE
+# (where the component nodes come from: `fixture` seeds the harness's fake GitHub, on
+# FAKE_GITHUB_PORT, with a two-component model in acme/r12-arch, replacing every repository it
+# served, and adds that repository as an architecture source of PROJECT; `existing` reads the first
+# project with a component that has a parent, and writes nothing; `none` proves the server has no
+# architecture source; unset, the script reads no component node and says so on one
+# `SKIP: R12 component …` line). It writes two issues in PROJECT, the second a child of the first
+# holding an ask, and resolves the ask and closes both, also when a check fails; it removes the
+# source `fixture` added the same way. Each passing check prints `PASS: <section> <what>`; the first
 # failing one prints `FAIL: <section> <what>: <observed>` and the script exits 1.
 #
 # Every check is `cmd || fail …`, never part of an `&&` list: under `set -e` a failing command
@@ -19,15 +28,35 @@ set +x
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE block-graph.sh
-       (DISPATCH_TOKEN_FILE=<file holding the bearer> in place of DISPATCH_TOKEN)
+Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
+         [COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022] block-graph.sh
+       (DISPATCH_TOKEN_FILE=<file holding the bearer> in place of DISPATCH_TOKEN;
+       COMPONENT_SOURCE=existing reads a component the server holds, COMPONENT_SOURCE=none proves
+       it holds none, and neither takes FAKE_GITHUB_PORT; unset, no component node is read)
 USAGE
 }
 
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_env DISPATCH_URL PROJECT
-require_commands bun curl jq
+readonly component_source="${COMPONENT_SOURCE-}"
+case "$component_source" in
+  fixture)
+    require_env FAKE_GITHUB_PORT
+    [[ "$FAKE_GITHUB_PORT" =~ ^[0-9]+$ ]] || {
+      printf 'FAKE_GITHUB_PORT is %s, not a port number\n' "$FAKE_GITHUB_PORT" >&2
+      usage
+      exit 2
+    }
+    ;;
+  existing | none | "") ;;
+  *)
+    printf 'COMPONENT_SOURCE is %s; want fixture, existing or none\n' "$component_source" >&2
+    usage
+    exit 2
+    ;;
+esac
+require_commands base64 bun curl jq
 read_bearer
 # No child process inherits the bearer from here: read_bearer has unset it from the environment,
 # curl reads it from a header file, and the CLI gets it in an environment this script builds.
@@ -53,13 +82,37 @@ printf 'Authorization: Bearer %s\n' "$token" >"$work/auth"
 
 key=""
 closed=0
+child=""
+child_closed=0
+ask=""
+ask_resolved=0
+source_path=""
+# close_written ISSUE: closes ISSUE, an issue this script wrote, from cleanup.
+close_written() {
+  cli issue-update --issue "$1" --status "done" \
+    --reason "block-graph.sh stopped before its last check; closing the issue it wrote." \
+    >"$work/cleanup" 2>&1 ||
+    printf 'block-graph.sh: could not close %s: %s\n' "$1" "$(<"$work/cleanup")" >&2
+}
 cleanup() {
   local code=$?
-  if [[ -n "$key" && "$closed" == 0 ]]; then
-    cli issue-update --issue "$key" --status "done" \
-      --reason "block-graph.sh stopped before its last check; closing the issue it wrote." \
+  if [[ -n "$ask" && "$ask_resolved" == 0 ]]; then
+    cli resolve-ask --ask "$ask" --kind resolved \
+      --reason "block-graph.sh stopped before its last check; resolving the ask it wrote." \
       >"$work/cleanup" 2>&1 ||
-      printf 'block-graph.sh: could not close %s: %s\n' "$key" "$(<"$work/cleanup")" >&2
+      printf 'block-graph.sh: could not resolve ask %s: %s\n' "$ask" "$(<"$work/cleanup")" >&2
+  fi
+  if [[ -n "$child" && "$child_closed" == 0 ]]; then
+    close_written "$child"
+  fi
+  if [[ -n "$key" && "$closed" == 0 ]]; then
+    close_written "$key"
+  fi
+  if [[ -n "$source_path" ]]; then
+    send DELETE "$source_path" "$(jq -cn --arg s "$session" '{actor: {kind: "session", id: $s}}')"
+    [[ "$status" == 2?? ]] ||
+      printf 'block-graph.sh: could not remove the architecture source %s: HTTP %s: %s\n' \
+        "$source_path" "$status" "$(body)" >&2
   fi
   rm -rf "$work"
   exit "$code"
@@ -105,11 +158,16 @@ run() {
 
 q() { jq -rn --arg v "$1" '$v|@uri'; }
 
-# get PATH: the answer's body goes to $work/body and its HTTP status to $status.
-get() {
-  status="$(curl -sS -o "$work/body" -w '%{http_code}' -H "@$work/auth" "$base$1" 2>"$work/curl")" ||
-    status="curl failed: $(<"$work/curl")"
+# send METHOD PATH [JSON]: the answer's body goes to $work/body and its HTTP status to $status.
+send() {
+  local -a data=()
+  [[ $# -lt 3 ]] || data=(-H 'Content-Type: application/json' --data-binary "$3")
+  status="$(curl -sS -X "$1" -o "$work/body" -w '%{http_code}' -H "@$work/auth" "${data[@]}" \
+    "$base$2" 2>"$work/curl")" || status="curl failed: $(<"$work/curl")"
 }
+
+# get PATH: send GET PATH.
+get() { send GET "$1"; }
 body() { head -c 600 "$work/body"; }
 
 # want_status CODE SECTION WHAT: the last answer's status is CODE.
@@ -139,10 +197,10 @@ doc_edit() {
   version="${BASH_REMATCH[1]}"
 }
 
-# upload SECTION NAME FILE: uploads FILE as the issue document NAME through `dispatch artifact`;
-# sets $doc_ref and $doc_id.
+# upload SECTION NAME FILE [ISSUE]: uploads FILE as the document NAME of ISSUE (default $key)
+# through `dispatch artifact`; sets $doc_ref and $doc_id.
 upload() {
-  run "$1" "upload $2" artifact --issue "$key" --name "$2" --path "$3"
+  run "$1" "upload $2" artifact --issue "${4:-$key}" --name "$2" --path "$3"
   [[ "$(<"$work/out")" =~ (dispatch://[^\);[:space:]]+)\) ]] ||
     fail "$1" "upload $2" "no reference in: $(<"$work/out")"
   doc_ref="${BASH_REMATCH[1]}"
@@ -425,12 +483,309 @@ expect R7 "the mention in the second item starts at the item's paragraph" \
   "$(jq -cn --arg id "$item_paragraph" '[$id]')" \
   --arg spec "$spec" '[.edges[] | select(.kind == "mentions" and .node.ref == $spec) | .block.block_id]'
 
+# R12/A11: every node of every kind carries who made it and when, who last changed it and when,
+# its parent and the version of the parent it belongs to: read by its own reference, as the other
+# end of an edge, and on the `Node:` line of `dispatch read`. `facts` projects a node's six facts,
+# each actor as its kind and id and each time as whether it is set; `same` is what an edge's other
+# end shares with the node its own reference reads; `instant` is a timestamp's epoch seconds.
+readonly defs='
+  def facts: {made_by: [.made_by[] | {kind, id}], made_at: (.made_at != null),
+    changed_by: [.changed_by[] | {kind, id}], changed_at: (.changed_at != null),
+    parent, parent_version};
+  def same: {kind, id, made_by, made_at, changed_by, changed_at, parent, parent_version};
+  def instant: capture("^(?<s>[^.Z+]+)(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
+    | ((.s + "Z") | fromdateiso8601) + ((.f // "0") | tonumber)
+      - (if .z == "Z" then 0
+         else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[4:6] | tonumber) * 60)
+         end);
+'
+me="$(jq -cn --arg s "$session" '[{kind: "session", id: $s}]')"
+
+# parent_of KIND ID [REF]: a node's parent.
+parent_of() {
+  jq -cn --arg kind "$1" --arg id "$2" --arg ref "${3-}" \
+    '{kind: $kind, id: $id} + (if $ref == "" then {} else {ref: $ref} end)'
+}
+
+# wanted MADE_BY CHANGED_BY PARENT VERSION: the facts of a node whose two times are set.
+wanted() {
+  jq -cnS --argjson made "$1" --argjson changed "$2" --argjson parent "$3" --argjson version "$4" \
+    '{made_by: $made, made_at: true, changed_by: $changed, changed_at: true, parent: $parent,
+      parent_version: $version}'
+}
+
+# node_facts WHAT REF WANT: ?to=REF's node carries the facts WANT; the answer stays in $work/body.
+node_facts() {
+  get "/api/v1/references?to=$(q "$2")"
+  want_status 200 R12 "?to=$1 answers"
+  expect R12 "$1 carries its facts" "$3" "$defs .node | facts"
+}
+
+# changed_later WHAT: the node node_facts last read was changed after it was made.
+changed_later() {
+  expect R12 "$1 is later than its making" true \
+    "$defs (.node.changed_at | instant) > (.node.made_at | instant)"
+}
+
+# node_of SECTION REF: sets $node to the `same` projection of ?to=REF's node.
+node_of() {
+  get "/api/v1/references?to=$(q "$2")"
+  want_status 200 "$1" "?to=$2 answers"
+  node="$(jq -cS "$defs .node | same" "$work/body")" || fail "$1" "read ?to=$2's node" "$(body)"
+}
+
+# node_line SECTION WHAT PREFIX MIDDLE SUFFIX: the last CLI output holds one `Node:` line, and it
+# is PREFIX, then MIDDLE somewhere, and ends with SUFFIX; each part matched as written.
+node_line() {
+  local line
+  line="$(grep '^Node: ' "$work/out")" || fail "$1" "$2" "no Node: line in: $(<"$work/out")"
+  [[ "$line" != *$'\n'* ]] || fail "$1" "$2" "more than one Node: line in: $(<"$work/out")"
+  [[ "$line" == "$3"*"$4"*"$5" ]] || fail "$1" "$2" "got $line"
+  pass "$1" "$2"
+}
+
+# Setup beside $key: a child issue, retitled; an ask on it, reworded; a comment on a quote of its
+# spec and a reply; a message and a reply; a file and a picture.
+printf 'Child spec paragraph for the facts check.\n\nSecond paragraph.\n' >"$work/child.md"
+run R12 "create the child issue" issue --project "$project" --title "Block graph facts check" \
+  --parent "$key" --spec-file "$work/child.md" --force
+[[ "$(<"$work/out")" =~ Created\ ([A-Z][A-Z0-9]*-[0-9]+): ]] ||
+  fail R12 "create the child issue" "no issue key in: $(<"$work/out")"
+child="${BASH_REMATCH[1]}"
+pass R12 "created $child under $key"
+child_ref="dispatch://$child"
+child_spec="$child_ref/spec"
+run R12 "retitle $child" issue-update --issue "$child" --title "Block graph facts check, retitled"
+
+recommendation="Should it stay open? Recommendation: no, the check resolves it when it ends."
+run R12 "ask on $child" ask --issue "$child" \
+  --question "The block graph check reads this ask's facts. $recommendation"
+[[ "$(<"$work/out")" =~ Asked\ ([0-9a-f-]{36}) ]] ||
+  fail R12 "ask on $child" "no ask id in: $(<"$work/out")"
+ask="${BASH_REMATCH[1]}"
+ask_ref="$child_ref/ask/$ask"
+run R12 "reword the ask" edit-ask --ask "$ask" \
+  --question "The block graph check reads this ask's facts, reworded. $recommendation"
+
+get "/api/v1/issues/$child/artifacts/spec/text"
+want_status 200 R12 "read $child's spec version"
+anchored_version="$(jq -er '.version' "$work/body")" ||
+  fail R12 "read $child's spec version" "$(body)"
+run R12 "comment on a quote of $child's spec" comment --issue "$child" --artifact spec \
+  --quote "Child spec paragraph" --body "Why this paragraph?"
+[[ "$(<"$work/out")" =~ Posted\ comment\ ([0-9a-f-]{36}) ]] ||
+  fail R12 "comment on a quote of $child's spec" "no comment id in: $(<"$work/out")"
+head="${BASH_REMATCH[1]}"
+head_ref="$child_ref/comment/$head"
+run R12 "reply to the comment" comment --issue "$child" --reply-to "$head" \
+  --body "Because the check reads it."
+[[ "$(<"$work/out")" =~ Posted\ comment\ ([0-9a-f-]{36}) ]] ||
+  fail R12 "reply to the comment" "no comment id in: $(<"$work/out")"
+reply_ref="$child_ref/comment/${BASH_REMATCH[1]}"
+
+run R12 "message on $child" message --issue "$child" --body "The block graph check posted this."
+[[ "$(<"$work/out")" =~ Posted\ message\ ([0-9a-f-]{36}) ]] ||
+  fail R12 "message on $child" "no message id in: $(<"$work/out")"
+message="${BASH_REMATCH[1]}"
+message_ref="$child_ref/message/$message"
+run R12 "reply to the message" message --issue "$child" --in-reply-to "$message_ref" \
+  --body "The block graph check replied to its own message."
+[[ "$(<"$work/out")" =~ Posted\ message\ ([0-9a-f-]{36}) ]] ||
+  fail R12 "reply to the message" "no message id in: $(<"$work/out")"
+reply_message_ref="$child_ref/message/${BASH_REMATCH[1]}"
+
+printf 'plain notes\n' >"$work/notes.txt"
+upload R12 notes.txt "$work/notes.txt" "$child"
+file_ref="$doc_ref"
+# A 1x1 PNG.
+base64 -d >"$work/pixel.png" <<<'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+upload R12 pixel.png "$work/pixel.png" "$child"
+image_ref="$doc_ref"
+
+# Each node the setup wrote, read by its own reference.
+of_child="$(parent_of issue "$child" "$child_ref")"
+node_facts "$child" "$child_ref" \
+  "$(wanted "$me" "$me" "$(parent_of issue "$key" "dispatch://$key")" null)"
+changed_later "$child's last change, its retitle,"
+node_facts "$child's spec" "$child_spec" "$(wanted "$me" "$me" "$of_child" null)"
+child_spec_id="$(jq -er '.node.id' "$work/body")" || fail R12 "read $child's spec id" "$(body)"
+node_facts "the file" "$file_ref" "$(wanted "$me" "$me" "$of_child" null)"
+node_facts "the picture" "$image_ref" "$(wanted "$me" "$me" "$of_child" null)"
+node_facts "the ask" "$ask_ref" "$(wanted "$me" "$me" "$of_child" null)"
+changed_later "the ask's last change, its rewording,"
+node_facts "the anchored comment" "$head_ref" \
+  "$(wanted "$me" "$me" "$(parent_of artifact "$child_spec_id" "$child_spec")" "$anchored_version")"
+node_facts "the reply" "$reply_ref" \
+  "$(wanted "$me" "$me" "$(parent_of comment "$head" "$head_ref")" null)"
+node_facts "the message" "$message_ref" "$(wanted "$me" "$me" "$of_child" null)"
+node_facts "the reply message" "$reply_message_ref" \
+  "$(wanted "$me" "$me" "$(parent_of message "$message" "$message_ref")" null)"
+
+# Blocks where they still exist: X was deleted for good above, and is read by its removed pin.
+node_facts "paragraph P of changes.md" "$(block_ref "$changes" "$p")" \
+  "$(wanted "$me" "$me" "$(parent_of artifact "$changes_id" "$changes")" "$p_version")"
+node_facts "paragraph R of changes.md" "$(block_ref "$changes" "$r")" \
+  "$(wanted "$me" "$me" "$(parent_of artifact "$changes_id" "$changes")" "$first")"
+expect R12 "paragraph R, never edited, was last changed when it was made" true \
+  '.node.made_at == .node.changed_at'
+node_facts "the removed pin $pin" "$pin" \
+  "$(wanted "$me" "$me" "$(parent_of artifact "$spec_id" "$spec")" "$((removed_in - 1))")"
+
+# The other end of an edge carries the node's own facts.
+node_of R12 "$head_ref"
+get "/api/v1/references?from=$(q "$reply_ref")"
+want_status 200 R12 "?from=<reply> answers"
+expect R12 "?from=<reply>'s replies_to node is the comment as its own reference reads it" \
+  "[$node]" "$defs"'[.edges[] | select(.kind == "replies_to") | .node | same]'
+get "/api/v1/references?from=$(q "$ask_ref")&kind=followed_by"
+want_status 200 R12 "?from=<ask>&kind=followed_by answers"
+expect R12 "the session following the ask has no recorded facts" \
+  "$(jq -cnS --arg s "$session" '[{kind: "session", id: $s, made_by: [], made_at: null,
+    changed_by: [], changed_at: null, parent: null, parent_version: null}]')" \
+  "$defs"'[.edges[] | select(.kind == "followed_by") | .node | same]'
+node_of R12 "$(block_ref "$list" "$item_paragraph")"
+get "/api/v1/references?from=$(q "$list")"
+want_status 200 R12 "?from=list.md answers"
+expect R12 "R7's mention starts at a block carrying the block's own facts" "[$node]" \
+  --arg spec "$spec" \
+  "$defs"'[.edges[] | select(.kind == "mentions" and .node.ref == $spec) | .block | same]'
+node_of R12 "$decisions"
+decisions_node="$node"
+node_of R12 "$spec"
+spec_node="$node"
+node_of R12 "$(block_ref "$spec" hold_line)"
+hold_node="$node"
+get "/api/v1/block-links?from=$(q "$decisions")&to=$(q "$spec")"
+want_status 200 R12 "block-links decisions.md -> spec answers"
+expect R12 "block-links' from is decisions.md as its own reference reads it" "$decisions_node" \
+  "$defs .from | same"
+expect R12 "block-links' to is the spec as its own reference reads it" "$spec_node" \
+  "$defs .to | same"
+expect R12 "every link's two ends carry all six facts" true \
+  '[.links[] | .from, .to | has("made_by") and has("made_at") and has("changed_by")
+    and has("changed_at") and has("parent") and has("parent_version")] | length == 4 and all'
+expect R12 "the link to hold_line ends at the block as its own reference reads it" "[$hold_node]" \
+  "$defs"'[.links[] | select(.to.block_id == "hold_line") | .to | same]'
+
+# component_node TIMES: reads component $component of $component_project and its part_of edge to
+# its parent $component_parent. TIMES is `recorded` when the import that projected it recorded its
+# times, and `unrecorded` when it may predate them.
+component_node() {
+  local component_ref="dispatch://$component_project/component/$component"
+  local component_parent_ref="dispatch://$component_project/component/$component_parent"
+  local component_parent_node of_parent
+  node_of R12 "$component_parent_ref"
+  component_parent_node="$node"
+  of_parent="$(parent_of component "$component_project/$component_parent" "$component_parent_ref")"
+  get "/api/v1/references?to=$(q "$component_ref")"
+  want_status 200 R12 "?to=$component_ref answers"
+  if [[ "$1" == recorded ]]; then
+    expect R12 "component $component carries its facts, its times recorded at the import" \
+      "$(wanted '[]' '[]' "$of_parent" null)" "$defs .node | facts"
+  else
+    # A component imported before its times were recorded has them null.
+    expect R12 "component $component carries its facts" \
+      "$(jq -cnS --argjson parent "$of_parent" '{made_by: [], changed_by: [], parent: $parent,
+        parent_version: null, times: [true, true]}')" \
+      '.node | {made_by, changed_by, parent, parent_version,
+        times: [has("made_at"), has("changed_at")]}'
+  fi
+  get "/api/v1/references?from=$(q "$component_ref")&kind=part_of"
+  want_status 200 R12 "?from=$component_ref&kind=part_of answers"
+  expect R12 "component $component is part of $component_parent as its own reference reads it" \
+    "[$component_parent_node]" "$defs"'[.edges[] | select(.kind == "part_of") | .node | same]'
+}
+
+# Components, from the source COMPONENT_SOURCE names.
+case "$component_source" in
+  fixture)
+    arch_repo="acme/r12-arch"
+    jq -cn --arg repo "$arch_repo" '{($repo): {contents: "read", installation_id: 367, files: {
+      "platform.md": "---\ntitle: Platform\n---\nEverything that runs.\n",
+      "web.md": "---\ntitle: Web\nparent: platform\n---\nThe web front end.\n"}}}' \
+      >"$work/repos.json"
+    status="$(curl -sS -X PUT -o "$work/body" -w '%{http_code}' \
+      -H 'Content-Type: application/json' --data-binary "@$work/repos.json" \
+      "http://127.0.0.1:$FAKE_GITHUB_PORT/__fixture/repos" 2>"$work/curl")" ||
+      status="curl failed: $(<"$work/curl")"
+    want_status 200 R12 "seed the fake GitHub with $arch_repo"
+    source_path="/api/v1/projects/$project/architecture-sources/$arch_repo"
+    send PUT "$source_path" \
+      "$(jq -cn --arg s "$session" '{branch: "main", actor: {kind: "session", id: $s}}')"
+    want_status 200 R12 "add $arch_repo as an architecture source of $project"
+    send POST "$source_path/sync"
+    want_status 200 R12 "sync $arch_repo"
+    expect R12 "the sync of $arch_repo imports its two components" '[null,2]' \
+      '[.last_error, .components]'
+    component_project="$project"
+    component=web
+    component_parent=platform
+    component_node recorded
+    ;;
+  existing)
+    get "/api/v1/settings/architecture-sources"
+    want_status 200 R12 "list the architecture sources"
+    projects="$(jq -r '[.[].project] | unique | .[]' "$work/body")" ||
+      fail R12 "list the architecture sources" "$(body)"
+    [[ -n "$projects" ]] || fail R12 component \
+      "this server has no architecture source: COMPONENT_SOURCE=existing needs one"
+    mapfile -t source_projects <<<"$projects"
+    pick=""
+    for component_project in "${source_projects[@]}"; do
+      get "/api/v1/projects/$component_project/architecture"
+      want_status 200 R12 "read $component_project's architecture"
+      pick="$(jq -r '[.components[].id] as $ids
+        | first(.components[] | select(.parent != null and (.parent | IN($ids[])))
+          | "\(.id) \(.parent)") // empty' "$work/body")" ||
+        fail R12 "read $component_project's architecture" "$(body)"
+      [[ -z "$pick" ]] || break
+    done
+    [[ -n "$pick" ]] || fail R12 component "no project with an architecture source has a \
+component with a parent: COMPONENT_SOURCE=existing needs one"
+    read -r component component_parent <<<"$pick"
+    component_node unrecorded
+    ;;
+  none)
+    get "/api/v1/settings/architecture-sources"
+    want_status 200 R12 "list the architecture sources"
+    jq -e 'length == 0' "$work/body" >/dev/null || fail R12 component \
+      "this server has architecture sources, so run with COMPONENT_SOURCE=existing: $(body)"
+    pass R12 "component: this server has no architecture source, so it holds no component node"
+    ;;
+  "")
+    printf 'SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; set it to fixture (with FAKE_GITHUB_PORT), existing or none to read one\n'
+    ;;
+esac
+
+# The CLI prints the facts of the node it reads on its Node: line.
+run R12 "dispatch read --ref <anchored comment>" read --ref "$head_ref"
+# A session actor holding a service token prints `session <id> (as <service>)`, so each check
+# leaves room for that label after the session id.
+node_line R12 "dispatch read --ref <anchored comment> prints its facts" \
+  "Node: comment $head_ref · made by session $session" " at " \
+  " · part of $child_spec (version $anchored_version)"
+run R12 "dispatch read --ref <paragraph P>" read --ref "$(block_ref "$changes" "$p")"
+node_line R12 "dispatch read --ref <paragraph P> prints its facts" \
+  "Node: block $(block_ref "$changes" "$p") · made by session $session" " at " \
+  " · part of $changes (version $p_version)"
+run R12 "dispatch read --issue $child" read --issue "$child"
+node_line R12 "dispatch read --issue $child prints its facts" \
+  "Node: issue $child_ref · made by session $session" " · changed by session $session" \
+  " · part of dispatch://$key"
+
 # The older references route keeps decisions.md, which cites only blocks of the spec, as a source.
 get "/api/v1/artifacts/$spec_id/references"
 want_status 200 older-route "GET /artifacts/<spec>/references answers"
 expect older-route "referenced_by keeps decisions.md" 1 \
   --arg d "$decisions_id" '[.referenced_by[] | select(.kind == "artifact" and .id == $d)] | length'
 
+run close "resolve the ask on $child" resolve-ask --ask "$ask" --kind resolved \
+  --reason "block-graph.sh read this ask's facts; nothing waits on a person."
+ask_resolved=1
+run close "close $child" issue-update --issue "$child" --status "done" \
+  --reason "block-graph.sh passed every check against this issue."
+child_closed=1
+pass close "$child is done"
 run close "close $key" issue-update --issue "$key" --status "done" \
   --reason "block-graph.sh passed every check against this issue."
 closed=1

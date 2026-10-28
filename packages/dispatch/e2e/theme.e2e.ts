@@ -166,7 +166,7 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
   }
 });
 
-test("a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode", async ({
+test("a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -210,7 +210,7 @@ test("a link in a comment's Markdown body renders the app's link blue in dark mo
   }
 });
 
-test("the margin review sheet renders the dark palette in dark mode on an iPhone viewport", async ({
+test("the margin review sheet renders the dark palette in dark mode on an iPhone viewport @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
