@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-520",
+  "completed": "2026-10-28T11:29:33Z",
+  "round": 1,
+  "reviewedHead": "ff92bbdfcf5bc79a3fd726dc2aebac915e8bd894 (code head 6a43ed31312a45a599d1caf02be007590df0075a)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/ci.yaml:56-58,1486-1505",
+      "description": "Regression: GitHub Pages can be left at an older main commit's site. docs.yaml grouped main pushes as docs-refs/heads/main with cancel-in-progress false (main 184897ac docs.yaml:39-41), so docs builds ran in push order and a newer pending run replaced an older one. ci.yaml groups each main push by github.sha, so two docs-selecting merges build in parallel and their docs-deploy jobs enter the `pages` group in build-finish order: an older build that finishes later deploys over the newer site, or arrives while the newer deploy is pending and cancels it. docs-deploy is not in ci-ok's needs, so nothing turns red. Required: the site ends at the newest docs-selecting main commit's build, as before, proven on GitHub or by a stated mechanism."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/ci_filter_coverage.py:388-397,466-479",
+      "description": "Filter-drift check ignores a claimed go command's -tags and subcommand. The Run is pinned by substring and only its packages are compared; -tags is a VALUE_FLAG whose value is skipped, and Run.tags / Run.mode are never compared with the line. Reproduced in a scratch copy of ff92bbdf: probe file packages/envoy/cmd/broker/probe_test.go (//go:build probe, imports internal/routing) plus ci.yaml:2246 changed to `go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker -tags multiprocess,probe` (go test honours the trailing -tags: verified, the probe file compiled) -> check-ci-filters.sh exit 0, 'broker-multiprocess: 279 files, 0 uncovered'. Control: the Run's tags set to multiprocess,probe -> exit 1 naming internal/routing/match.go and match_test.go uncovered. Same class the round-5 fix closed for packages; fix by deriving or comparing -tags (both spellings, last wins) and the subcommand (mode) from the claimed line and failing closed on a mismatch, with a test case."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/github/join-a-job-to-the-ci-router.md:165-168",
+      "description": "The router guide tells a new job to set restore-keys to the family prefix unconditionally; ci.yaml (header lines 25-27, e.g. line 1161) sets it only off main, so the guide's recipe brings back the main prefix fallback this pull request removes. Docs-only; fix with the push."
+    }
+  ],
+  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection: none. Newest pull_request CI run 40674943570 at 6a43ed31 was still queued at 11:19Z (changes and pr-title queued); no CI run of any #2316 head has completed. A request for changes does not wait on it.",
+  "thermonuclear": "deep review: CHANGES at ff92bbdf (Medium: Pages deploy order; Minor: go-daemon family shared by three jobs; Minor hardening: release builds restore CI-written Go caches). Code quality: CHANGES at ff92bbdf (tags/mode not compared, ci-ok needs unchecked, SELECTED_BY duplication, guide recipe drift, others cleanup). Adjudicated: the Pages order and the -tags hole stand; the guide recipe is fixed with the push; the rest are risk notes or the Fast-follow.",
+  "threads": "0 review threads on GitHub (graphql at 11:2xZ); nothing to answer or accept.",
+  "architectChecks": "dispatch://INFRA-520/comment/50abb813-9787-4988-999e-2f4e5b897670: sjawhar/legion#2358 is still open, so the three check-image-trigger-paths.sh tidy-ups are not requested in this round."
+}
