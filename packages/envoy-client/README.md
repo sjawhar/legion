@@ -111,6 +111,41 @@ frame was stored (`followedBefore`, through the host's `close`), then starts the
 belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stream_moved_back` and
 `retention_gap` a card rendered by `envoyNoticeText`.
 
+## NATS connection
+
+`natsConnectionOptions({ servers, name, seed })` (`@legion/envoy-client/nats-connection`) is the
+nats.js `connect` options every session plugin dials with: the credential `natsAuthOptions` builds
+from the seed (`src/nats-auth.ts`, which the package does not export, so a plugin dials only with
+these options), reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`)
+with the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
+path that freezes without closing is left within 30 s and redialed at once, and a session is back
+within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
+default 120 s interval left a frozen path for up to 6 minutes.
+
+nats.js 2.29.3, the last 2.x release, leaves a redial's socket open when it gives up on that dial
+at its 20 s timeout (a TCP connect that hangs, or a server that never sends `INFO`): it closes
+only a transport that finished connecting, so the socket keeps the process alive and a channel
+server never exits on SIGTERM. Its stale-connection close (two unanswered pings) flushes the
+transport before it destroys the socket, and behind data a dead path never acknowledged that flush
+never completes, so the transport never closes and a client that wrote since the path froze never
+redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies`, applied by bun
+at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
+moment it dials and destroy it when a transport that never connected is closed, and makes the
+stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
+in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushes);
+`src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a `patchedDependencies` entry
+for a version that is not installed without a word, so moving nats means carrying the patch to
+the new version.
+
+`@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
+`@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall
+tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
+open at that moment without closing either side, and which records when each connection was
+accepted, first subscribed and closed; a real natsd and listener that each stack builds with
+`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
+freeze both plugins' stall tests put their session through. A test that uses the stack runs only
+with `LEGION_E2E_ENVOY_STACK=1`.
+
 ## HTTP transport
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
@@ -121,9 +156,11 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
 `Authorization` header.
 
-`subscribe` exposes listener warnings, including a topic that has no event in the configured
-stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
-optional directory and title filters.
+`subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
+`plugin_version` on every registration, and exposes listener warnings, including a topic that has
+no event in the configured stream. `getRole` returns a role holder with its last-seen timestamp,
+and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
+`plugin_version` when the session registered them.
 
 `replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
 listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on

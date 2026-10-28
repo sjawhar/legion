@@ -128,7 +128,7 @@ bun run docs:dev
 | `STRATEGY.md` | What Legion and Dispatch are for, their key metrics, tracks, principles, and the boundaries that need the owner's decision. |
 | `docs/` | Beside the site: the Kubernetes runtime's reference (`kubernetes.md`), plans and learnings. |
 | `scripts/` | The live end-to-end proofs (`scripts/e2e/`) and repository tooling. |
-| `patches/` | Patches Bun applies to three editor dependencies at install. |
+| `patches/` | Patches Bun applies at install: three editor dependencies, and nats.js (`packages/envoy-client/README.md` says why). |
 | `.github/` | CI and release workflows, and the checks they run. |
 | `.dispatch/architecture/` | Legion's architecture model, which Dispatch imports for the project. |
 

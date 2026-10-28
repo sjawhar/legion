@@ -38,7 +38,9 @@ A message published while the session's NATS connection or one of its subscripti
 recovered from Envoy's notification stream, which keeps messages for 72 hours: the session asks
 its listener (`POST /v1/replay`) for what the stream stored on its own agent subject and on each
 topic it follows, after the place it last read to, and shows each missed message once, as a card
-saying it was published while the connection was down. It asks after it reconnects, after a
+saying it was published while the connection was down. The session pings NATS every 10 seconds
+and drops a connection that leaves two pings unanswered, so a connection that stops answering
+without closing is left within 30 seconds and redialed. It asks after it reconnects, after a
 subscription is reopened, when it starts or resumes, and on every heartbeat. A targeted Dispatch
 delivery recovered this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
 runs nothing. Role messages and team or other ad-hoc topics are live only and are not recovered,
