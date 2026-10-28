@@ -349,13 +349,14 @@ never happening: the one that adds each issue's repository (migration `0113`) ho
 until you clear the parent of an ancestor that still loads. That release was deployed with the
 running server stopped first, and no server older than it has run against the database since.
 
-The release that moves live updates onto one WebSocket per tab (INFRA-258) is not a
-stop-the-world migration. At one replica the Deployment uses `Recreate`, so a tab opened before
-the new pod starts needs a reload: its event route is gone and it shows **Live updates unavailable**,
-and its broadcast body still carries a field the new server refuses. Above one replica the
-Deployment rolls: during the roll an old page reaching a new pod has those effects, while a new
-page reaching an old pod cannot open its live socket and its broadcast omits the body field that
-old server requires. Reload after the roll reaches one compatible page and server version.
+The release that moves live updates onto one WebSocket per tab and keys every write (INFRA-258)
+is one of those changes: deploy it with no server of the earlier version running. An earlier
+server ignores a write's `Idempotency-Key`, so while both run a write whose answer was lost can be
+run once by each: the page and the `dispatch` command both retry such a write, and its retry can
+reach the other version. At one replica the Deployment's `Recreate` already stops the old pod
+first; above one replica, scale to zero before the new version starts. Releases after it roll
+again. A tab opened before the deploy needs a reload: its event route is gone and it shows
+**Live updates unavailable**, and its broadcast body still carries a field the new server refuses.
 
 From that release on, every page write that could otherwise happen twice carries an
 `Idempotency-Key`, and Dispatch keeps each key's answer for 24 hours, so a change tried again after

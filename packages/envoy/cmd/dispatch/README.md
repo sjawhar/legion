@@ -462,14 +462,21 @@ migrations, below): a rolling update runs the old build and the new build agains
 once. A change that cannot be written that way is a stop-the-world migration, deployed with no
 server of the earlier release running, and that is an exception named in the pull request.
 
-**The release that moves live updates to `/ws/live` (INFRA-258) is not a stop-the-world
-exception.** At one replica the Deployment uses `Recreate`, so its old page needs a reload after
-the new pod starts: `GET /api/v1/events` is gone, so it shows `Live updates unavailable`, and its
-broadcast body still carries `idempotency_key`, which the new server refuses as an unknown field
-(`400 INVALID_JSON`). Above one replica the Deployment rolls. During that roll an old page that
-reaches a new pod sees those same removed-route and broadcast-body effects; a new page that reaches
-an old pod gets no `GET /ws/live` upgrade and its broadcast omits the body field the old server
-requires (`400 BROADCAST_INPUT`). Reloading after the roll reaches a consistent page and server.
+**The release that moves live updates to `/ws/live` and keys every write (INFRA-258) deploys with
+no server of the earlier release running**, because of its API rather than its schema. An earlier
+server ignores the `Idempotency-Key` header and keeps no key, so while both serve one database a
+write can run twice: one an earlier server ran whose answer was lost is run again by its retry on
+a new server, which holds no key for it, and a retry of one a new server ran runs again on an
+earlier one. The page and the `dispatch` command both retry a write whose answer was lost, and the
+command's check that Dispatch keeps keys (the key echoed back, or `/healthz`) reads whichever
+server answered it. Stop the earlier release, or scale it to zero, before this one serves: a
+Kubernetes Deployment's `strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its
+default one replica; a deployment running more than one replica, which rolls, is scaled to zero
+first, as for `0117` (Database migrations, below). The compose auto-deployer stops the old
+container before it starts the new one. Releases after this one roll again. A tab opened before
+the deploy needs a reload: `GET /api/v1/events` is gone, so it shows `Live updates unavailable`,
+and its broadcast body still carries `idempotency_key`, which this release refuses as an unknown
+field (`400 INVALID_JSON`).
 
 What the two processes share, and what each keeps to itself:
 
