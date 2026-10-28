@@ -2,61 +2,72 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-27T17:48:00Z",
-  "round": 2,
-  "headTested": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round2-tar-gz (round 2) and dispatch://INFRA-606/artifact/infra606-tester-evidence-tar-gz (round 1); RESULTS.md in each",
+  "completed": "2026-10-28T11:35:00Z",
+  "round": 3,
+  "headTested": "12aada04cc8c",
+  "handoffHead": "0c810188d6d611e44e9f6769daae25903e7c024e",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round3-tar-gz (RESULTS.md, scripts, raw output); rounds 1 and 2: infra606-tester-evidence-tar-gz, infra606-tester-round2-tar-gz",
+  "ci": "No check run was reported on 0c810188 or on 12aada04 when read; not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Built Dispatch from the workspace at a248dad3 (c792db86 adds only the handoff) and drove the round-2 proofs with my own scripts on INFRA-589's load-test stack: lat.sh with a listener that never answers (one 250 ms timeout on a routed issue now: 0.36-0.42 s), crash.sh with SIGKILL during mention sends (every attempt sent, each recipient's NATS subject stores each comment once), and production_dispatch_audit over GET /api/v1/events/log (both rig events flagged, the project document on the log's second page). The red test TestAListenerThatAnswersNoLookupDelaysARoutedCommentByOneTimeoutAtMost is unmodified (the round's diff of that file only adds tests). Round 1's verification of proofs 1, 2, 4, 5 and 6 stands: round 2 does not touch the stream, relay, hub or agent stream, and the stream's boundaries and a reconnect run hold at the new head."
+    "how": "The pod was replaced, so I rebuilt INFRA-589's stack (harness d6916b3676ca plus the restart-scenario patch, own LOADTEST_ROOT and ports) and built Dispatch from the workspace (head), from git archive c3d09eec (base) and from a248dad3 (round 2). Round 3's three proofs hold on that surface: rolling update with a successor running beside the old process (all attempts sent once, each recipient stores each comment once), the unanswered session:<id> suppression (a person's reply in a thread the mentioned session rooted reaches it once at a 600 ms listener; round 2 twice), and the Stage 3 audit's fallback (base: fallback line, rig flagged, clean passes; head: log route). Earlier rounds' proofs re-checked at this head: stream boundaries, reconnects, relay/hub reads, agent-stream budget, kill recovery, restart replay bytes."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "Mention delivery runs off the request path and is not lost (INFRA-514: no event lost); a comment reaches each session it is for at least as surely as before.",
+      "evidence": "With Dispatch's ENVOY_URL through 'loadgen proxy -rtt 30s' (a listener that answers nothing; the mention send's own recheck then fails after the client's 5 s window), a person comments mentioning session:ses-x. routecopy.sh (LGA-6 routed to session:ses-x): head 12aada04 writes suppress_route=true, the attempt fails, and ses-x's NATS subject stores 0 copies; base c3d09eec writes suppress_route=false, the attempt fails, and ses-x stores 1 copy (the route copy, id dispatch-13001). authorcopy.sh (a reply in a thread ses-x rooted): head writes suppressed_authors=[ses-x], 0 copies; base suppressed_authors=[], 1 copy (the author-route copy). With a live listener every case gets 1 copy on both builds. Creation suppresses the route or author copy because the mention will deliver, and the mention's send then fails. The route case dates from round 1 (string-equal suppression, the architect's option A); the author case is new in round 3 (e587ca77). Red test: TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment in packages/envoy/internal/dispatch/api/comment_delivery_silent_listener_test.go (commit 'test(dispatch): a silent listener still leaves the routed or root-author session one copy of a mentioned comment'); `cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<postgres url> go test ./internal/dispatch/api/ -run TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment -count=1` fails both subtests at head ('no event of comment ... was published to notifications.agent.s1, and its mention failed: s1 got no copy of the comment'); at a248dad3 the reply subtest passes and the route subtest fails."
+    },
+    {
+      "criterion": "The stranded-mention pass costs little when nothing is stranded (named by the INFRA-514 architect, 2026-10-28T10:19Z, to be counted without measuring).",
+      "evidence": "The pass runs every 30 s in every process and reads comment_deliveries with state = 'pending' and created_at bounds; the table's only index is its primary key (comment_id, target, attempt), and EXPLAIN of the pass's statement on the stack shows 'Seq Scan on comment_deliveries'. The architect schedules the fix (a partial index on pending rows and one statement that uses it) for the next implementing round."
+    }
+  ],
+  "failed": 2,
   "proof": [
     {
-      "criterion": "Mention delivery runs off the request path, in order, with a test that a slow listener does not delay the comment's response (architect's bound: a listener that never answers delays comment creation by at most the 250 ms lookup timeout).",
-      "surface": "POST /api/v1/issues/{key}/comments on the load-test stack, Dispatch's ENVOY_URL through 'loadgen proxy -rtt 30s' (a listener that answers no lookup), Dispatch built from the workspace",
-      "command": "swap.sh head 30s; lat.sh (5 comments per shape); then swap.sh head and three comments with a live listener to check route suppression",
-      "observed": "No mention 0.086-0.170 s; one mention on an unrouted issue 0.356-0.385 s; mention = route 0.353-0.368 s; one mention, issue routed elsewhere 0.357-0.420 s; three mentions, issue routed elsewhere 0.376-0.406 s. Live listener: LGA-5 mentioning its route's session suppresses the route with that session; LGA-6 mentioning another session does not; mentioning both suppresses the route session.",
-      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
-      "negativeControl": "Round 1's head 153513a3 with the same script: 0.612-0.718 s on an issue routed elsewhere (two timeouts in series)."
+      "criterion": "Mention delivery is not lost across a SIGKILL or a rolling update, and each recipient gets each comment once.",
+      "surface": "The load-test stack, listener at 2 s round trip; stack.sh restart-dispatch with SIGKILL 0.3 s into the drain; a second envoy-dispatch on the same database as the successor; each recipient's NATS subject read with $JS.API.STREAM.MSG.GET",
+      "command": "crash.sh one 1 110; rolling.sh; steal.sh 45",
+      "observed": "SIGKILL: 24 of 24 attempts sent, sends starting 60-70 s after the kill and done by 100 s, each of ses-a/b/c stores c1..c8 once, in order. Rolling: 4 comments committing during the old process's drain (12 'mention sender has stopped' lines); the successor sends all 30 attempts, each recipient stores the 10 comments once, the one in flight at the SIGTERM last, about 125 s after it. Two live processes, 45 comments to one recipient (143 s backlog): 45 stored once, in order, none duplicate.",
+      "headSha": "12aada04cc8c",
+      "negativeControl": "Round 1's head 153513a3 (round 1): after the same SIGKILL, c2's attempts stayed pending and no recipient got c2."
     },
     {
-      "criterion": "Mention delivery is not lost: a process killed during mention sends does not strand them, and every recipient gets that comment once (architect's ruling).",
-      "surface": "The load-test stack with Dispatch's ENVOY_URL through a 2 s round-trip proxy; stack.sh restart-dispatch with SIGKILL of the old process 0.3 s into its drain; the recipients' NATS subjects in the ENVOY_NOTIFICATIONS stream",
-      "command": "crash.sh one 1 80; crash.sh loop 2 90 (a second SIGKILL 22 s after the first restart, before the first claims lapse); jsmsgs.py reads each recipient's stored messages with $JS.API.STREAM.MSG.GET",
-      "observed": "One kill: 3 attempts pending with a live claim and 21 unclaimed after the kill; 80 s later 24 of 24 sent (3 marked duplicate), and ses-a, ses-b and ses-c each store c1..c8 exactly once, in order. Two kills: 48 of 48 sent (6 marked duplicate), each recipient stores its 16 comments exactly once. The surviving process uses 0 s of CPU over the next 2 minutes.",
-      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
-      "negativeControl": "Round 1's head 153513a3, mention.sh head kill9: c2's three attempts stay pending for good and no recipient ever gets c2."
+      "criterion": "An unanswered session:<id> mention does not wake its session twice (review finding 1).",
+      "surface": "POST /api/v1/issues/LGA-7/comments as a person, reply in a thread ses-x rooted, listener at 600 ms",
+      "command": "swap.sh head 600ms; authorcopy.sh head-600; the same with the a248dad3 build",
+      "observed": "Head: suppressed_authors=[ses-x], ses-x stores 1 copy (the mention).",
+      "headSha": "12aada04cc8c",
+      "negativeControl": "Round 2's head a248dad3: suppressed_authors=[], ses-x stores 2 copies (author route dispatch-13009 and the mention)."
     },
     {
-      "criterion": "The Stage 3 production audit proves a run wrote nothing outside its project, events that belong to no issue included (architect's ruling).",
-      "surface": "production_dispatch_audit (scripts/e2e/lib/operator-dispatch.sh) against the stack's Dispatch built from the workspace, which serves GET /api/v1/events/log",
-      "command": "audit2.sh: a rig-session comment, 1,100 filler comments, then a rig-session project document uploaded to project LGA; then production_dispatch_audit '[\"ses-rig-1\"]' '[]'. Route probes: curl GET /api/v1/events/log with after=-1, after=abc, limit=0, limit=1001, no identity, a bad bearer",
-      "observed": "The audit reads 1,103 events from the baseline 13000 across two pages (control true) and flags both the comment (13001) and the artifact.created with no issue (14102, second page), exit 1. The route answers 400 INVALID_QUERY for the bad parameters, 401 for no identity and for a bad bearer, and [] past the head; issue event pages are still capped at 200.",
-      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
-      "negativeControl": "Against base c3d09eec (no log route): curl 404, 'production Dispatch could not be read for the audit', exit 1; round 1's audit let the rig project document pass."
+      "criterion": "The Stage 3 production audit proves a run wrote nothing outside its project, also against a production Dispatch from before GET /api/v1/events/log.",
+      "surface": "production_dispatch_audit (scripts/e2e/lib/operator-dispatch.sh) against the stack's Dispatch, head and base builds",
+      "command": "audit.sh head-rig rig; audit.sh head-clean; audit.sh base-rig rig; audit.sh base-clean; production_dispatch_audit with Dispatch stopped",
+      "observed": "Head rig: 1,103 events from the baseline, the rig comment and the rig project document (no issue, event 14103) flagged, exit 1; head clean: 1,101 events, exit 0. Base: 'production Dispatch has no GET /api/v1/events/log ...; reading its event stream since 13000 instead', same two answers.",
+      "headSha": "12aada04cc8c",
+      "negativeControl": "Dispatch stopped: curl exit 7, 'production Dispatch could not be read for the audit', exit 1."
     },
     {
-      "criterion": "A reconnecting stream receives a bounded catch-up (or a signal to refetch once), never the whole backlog; an overflowed subscriber is caught up from the database instead of being closed.",
-      "surface": "GET /api/v1/events on the load-test stack",
-      "command": "Round 1 at 153513a3: sse_probe.py boundaries, ovf.sh 360/700, reconnect_flap.py 80. Round 2 at a248dad3: sse_probe.py at H-256 and H-257, reconnect_flap.py 40",
-      "observed": "Round 2: H-256 replays 256 frames with complete, H-257 none and no header; 40 reconnects: 112 of 112 events, no duplicate, none out of order. Round 1: overflow at 360 caught up with no gap; 34 events over 1 MiB replay none.",
-      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
-      "negativeControl": "Base c3d09eec: ovf.sh 360 ends the response after 250 frames with 110 ids missing (round 1)."
+      "criterion": "A reconnecting stream receives a bounded catch-up or a signal to refetch once (census entry 1, through the browser).",
+      "surface": "The Dispatch web app (packages/dispatch build) on the stack, headless Chromium on /issues/LGA-12 as person-1; GET /api/v1/events",
+      "command": "Browser: one live comment shown, stream blocked with tab.route, stack.sh restart-dispatch, burst300.py 300 (then 5), stream unblocked; sse_probe.py at H-256/H-257/H-10; reconnect_flap.py 60",
+      "observed": "300 missed: reconnect GET /api/v1/events?since=13302 with no X-Dispatch-Event-Replay; the page refetches (/api/v1/issues/LGA-12/comments among them) and shows the new comment. 5 missed: ?since=13604 with 'complete', comment shown. H-256: 256 frames + complete; H-257: none; 60 reconnects: 198/198 events, no duplicate, none out of order.",
+      "headSha": "12aada04cc8c",
+      "negativeControl": "since=H-257 replays nothing and carries no header; /api/v1/events/log answers 400 for after=-1, limit=0, limit=1001 and 401 with no identity."
     },
     {
-      "criterion": "The relay and the delivery hub do no event-log reads while nobody subscribes, and one read serves every subscriber of a commit; agent-stream viewers hold a bounded number of bytes; before and after on the load reproduction.",
-      "surface": "The load-test stack (log_statement=all, /ws/delivery, agent stream test hooks, run-step.sh restart scenario)",
-      "command": "Round 1 at 153513a3: flap.sh, hub.sh, agent4.sh 7/14, measure.sh (one restart run per side at 1x). Round 2 changes none of these paths (diff e51834f2..a248dad3 touches comment creation, the mention sender, the claim lease constant and the new log route).",
-      "observed": "Relay reads 0 with nothing open, 13 for 13 commits with 20 streams; a paused agent viewer ended past 8 MiB while a fast one gets all 15 frames; restart replay 1.48 MB against 122.0 MB, refetch requests 60 against 300.",
-      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
-      "negativeControl": "Base c3d09eec: a paused agent viewer holds 14 MiB; its stale streams replay 12 MB each and no reconnect carries the complete header."
+      "criterion": "The relay and delivery hub read the event log only while subscribed, one read per commit; agent-stream viewers hold bounded bytes; restart before and after.",
+      "surface": "The stack's Postgres with log_statement='all', /ws/delivery, the agent stream test hooks, run-step.sh restart step at 1x",
+      "command": "hubflap.sh head; agent.sh 7 and 14; measure.sh (run-step.sh t606r3-restart-head with the plan's flags)",
+      "observed": "Rename of a shown issue reaches the view as a delta, also after 15 flapping views; event-log reads 0 idle and after flapping, 9 for 9 commits with 20 streams and a view. Paused agent viewer keeps 7 x 1 MiB, ended at 14 x 1 MiB while a fast one gets 15. Restart: replay bytes 480,800 total, stale streams 0 with 10 refetches (60 requests), 40/50 complete; Dispatch CPU-s in the 60 s after 25.5 (one run).",
+      "headSha": "12aada04cc8c",
+      "negativeControl": "A rename of an issue the view does not show sends no frame; base c3d09eec (round 1): stale streams replay 12 MB each and a paused agent viewer holds 14 MiB."
     }
   ],
   "observations": [
-    "Criterion 5 is still measured on the restart-scenario patch: INFRA-589's PR #2369 is open, and the architect scheduled the harness commit and five runs per side for the round after it merges (dispatch://INFRA-606/comment/b7beb47e-3229-477c-9f93-e00c586c0cfb).",
-    "The Stage 3 audit now needs GET /api/v1/events/log on production Dispatch. Until production runs a build with this PR, a Stage 3 run's audit answers 404 and fails closed ('production Dispatch could not be read for the audit'); nothing deploys Dispatch automatically yet (INFRA-64).",
-    "After a SIGKILL, order is kept per process only: an attempt the recovery pass resumes reaches its recipient a lease after the kill, after comments accepted later, as the implementer's handoff states."
+    "Kill recovery is slower than round 2: an attempt queued but never started now waits a claim lease before any pass takes it (sends begin 60-70 s after a SIGKILL); the implementer records this trade-off.",
+    "The restart step's run on this head measured more Dispatch CPU in the minute after the restart (25.5 s) than round 1's single runs (head 16.6, base 17.3), on a different stack; criterion 5's CPU expectation stays unmet and recorded, pending the five runs per side after INFRA-589 merges.",
+    "The run's meta.json records build_dirty=true because my red test file was in the working copy when run-step.sh built Dispatch; it changes no binary."
   ]
 }
