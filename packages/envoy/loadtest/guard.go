@@ -128,6 +128,10 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.allowForeign, "allow-foreign", false, "allow endpoint flags that differ from stack.json (another stack, such as a cluster copy)")
 }
 
+// tokenFlags are the endpoint flags whose values are bearer tokens; meta.json records the run's
+// arguments with their values redacted (redactArgs).
+var tokenFlags = []string{"token", "listener-token"}
+
 // foreignFlagError refuses an endpoint flag that names something other than the stack's own.
 type foreignFlagError struct {
 	Flag string
@@ -139,17 +143,15 @@ func (e *foreignFlagError) Error() string {
 
 // missingForeignFlagError refuses a run under -allow-foreign that leaves an endpoint flag empty:
 // it would fall back to the local stack's value, so the run would write to one stack and count,
-// sample or profile another.
+// sample or profile another. All are every endpoint and token flag.
 type missingForeignFlagError struct {
 	Flag string
+	All  []string
 }
 
 func (e *missingForeignFlagError) Error() string {
-	return fmt.Sprintf("%s is required with -allow-foreign: a foreign run takes no endpoint or token from stack.json, so give every one of %s", e.Flag, strings.Join(endpointFlagNames, ", "))
+	return fmt.Sprintf("%s is required with -allow-foreign: a foreign run takes no endpoint or token from stack.json, so give every one of %s", e.Flag, strings.Join(e.All, ", "))
 }
-
-// endpointFlagNames are the endpoint and token flags, in the order the guard checks them.
-var endpointFlagNames = []string{"-url", "-listener", "-nats", "-nats-mon", "-pprof", "-pg", "-token", "-listener-token"}
 
 // resolve reads stack.json and resolves the endpoints. It opens no connection.
 func (f endpointFlags) resolve() (endpoints, error) {
@@ -176,46 +178,42 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 		return endpoints{}, fmt.Errorf("no stack.json, and -allow-foreign is not set")
 	}
 	var e endpoints
-	stackValue := map[string]string{}
+	// Under -allow-foreign without stack.json, the stack values below are never used.
+	var sv stackFile
 	if st != nil {
-		local := func(scheme string, port int) string { return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port) }
-		stackValue = map[string]string{
-			"-url":            local("http", st.Ports.Dispatch),
-			"-listener":       local("http", st.Ports.Listener),
-			"-nats":           local("nats", st.Ports.NATS),
-			"-nats-mon":       local("http", st.Ports.NATSMonitor),
-			"-pprof":          local("http", st.Ports.Pprof),
-			"-pg":             fmt.Sprintf("postgres://postgres@127.0.0.1:%d/dispatch?sslmode=disable", st.Ports.Postgres),
-			"-token":          st.DispatchToken,
-			"-listener-token": st.ListenerToken,
-		}
+		sv = *st
 		e.pgDirect = st.PGDirect && !f.allowForeign
 	}
+	local := func(scheme string, port int) string { return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port) }
+	// The endpoint and token flags, in the order the guard checks them: each one's name, the value
+	// given, the stack's value and the endpoint it sets.
 	fields := []struct {
-		flag  string
-		given string
-		dst   *string
+		flag, given, stack string
+		dst                *string
 	}{
-		{"-url", strings.TrimRight(f.url, "/"), &e.dispatch},
-		{"-listener", strings.TrimRight(f.listener, "/"), &e.listener},
-		{"-nats", f.nats, &e.nats},
-		{"-nats-mon", strings.TrimRight(f.natsMon, "/"), &e.natsMon},
-		{"-pprof", strings.TrimRight(f.pprof, "/"), &e.pprof},
-		{"-pg", f.pg, &e.pg},
-		{"-token", f.token, &e.token},
-		{"-listener-token", f.listenerToken, &e.listenerToken},
+		{"-url", strings.TrimRight(f.url, "/"), local("http", sv.Ports.Dispatch), &e.dispatch},
+		{"-listener", strings.TrimRight(f.listener, "/"), local("http", sv.Ports.Listener), &e.listener},
+		{"-nats", f.nats, local("nats", sv.Ports.NATS), &e.nats},
+		{"-nats-mon", strings.TrimRight(f.natsMon, "/"), local("http", sv.Ports.NATSMonitor), &e.natsMon},
+		{"-pprof", strings.TrimRight(f.pprof, "/"), local("http", sv.Ports.Pprof), &e.pprof},
+		{"-pg", f.pg, fmt.Sprintf("postgres://postgres@127.0.0.1:%d/dispatch?sslmode=disable", sv.Ports.Postgres), &e.pg},
+		{"-token", f.token, sv.DispatchToken, &e.token},
+		{"-listener-token", f.listenerToken, sv.ListenerToken, &e.listenerToken},
 	}
 	for _, field := range fields {
-		want := stackValue[field.flag]
 		switch {
 		case f.allowForeign && field.given == "":
-			return endpoints{}, &missingForeignFlagError{Flag: field.flag}
-		case !f.allowForeign && field.given != "" && field.given != want:
+			all := make([]string, len(fields))
+			for i, fl := range fields {
+				all[i] = fl.flag
+			}
+			return endpoints{}, &missingForeignFlagError{Flag: field.flag, All: all}
+		case !f.allowForeign && field.given != "" && field.given != field.stack:
 			return endpoints{}, &foreignFlagError{Flag: field.flag}
 		case field.given != "":
 			*field.dst = field.given
 		default:
-			*field.dst = want
+			*field.dst = field.stack
 		}
 	}
 	if f.natsServerName != "" && !f.allowForeign {

@@ -38,11 +38,23 @@ type sample struct {
 	HeapSys    float64            `json:"heap_sys"`
 	NATS       map[string]float64 `json:"nats"`
 	InWindow   bool               `json:"in_window"`
+	// FailedReads names the reads of this sample that failed: readPostgres, readGoroutines,
+	// readHeap. Their values above stay 0 and enter no statistic.
+	FailedReads []string `json:"failed_reads,omitempty"`
 }
+
+// The sampler's reads that can fail, as sample.FailedReads names them: pg_stat_activity (a failed
+// connect included), and Dispatch's goroutine and heap profiles.
+const (
+	readPostgres   = "postgres"
+	readGoroutines = "goroutines"
+	readHeap       = "heap"
+)
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
 // Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, and NATS
-// /varz. At each sample it also checks that every stack process is alive (checkAlive).
+// /varz. A failed Postgres or pprof read is marked in its sample (sample.FailedReads). At each
+// sample it also checks that every stack process is alive (checkAlive).
 type sampler struct {
 	pids    map[string]int // by name; "postgres" is the postmaster
 	pprof   string
@@ -220,12 +232,18 @@ func boxBusy(ctx context.Context, window time.Duration) (float64, bool) {
 	return (busy1 - busy0) / (total1 - total0), true
 }
 
-func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time) {
+// loop samples every 5 s until ctx ends. A failed read is marked in its sample and logged as
+// readErrors does, one count for the Postgres reads and one for the pprof reads.
+func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.Logger) {
 	var pg *pgx.Conn
+	pgErrs := readErrors{name: "sampler: postgres", lg: lg}
+	pprofErrs := readErrors{name: "sampler: pprof", lg: lg}
 	defer func() {
 		if pg != nil {
 			pg.Close(context.Background())
 		}
+		pgErrs.done()
+		pprofErrs.done()
 	}()
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
@@ -233,6 +251,13 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time) {
 	for n := 0; ; n++ {
 		sm := sample{At: time.Now(), CPUTicks: map[string]float64{}, RSSKiB: map[string]float64{}, PGConns: map[string]int{}, NATS: map[string]float64{}}
 		sm.InWindow = !sm.At.Before(winStart) && !sm.At.After(winEnd.Add(5*time.Second))
+		// failed marks a failed read; one that failed because ctx ended is not logged.
+		failed := func(read string, errs *readErrors, err error) {
+			sm.FailedReads = append(sm.FailedReads, read)
+			if ctx.Err() == nil {
+				errs.add(err)
+			}
+		}
 		s.checkAlive(sm.At)
 		for name, pid := range s.pids {
 			if name == "postgres" {
@@ -251,31 +276,29 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time) {
 			sm.RSSKiB["loadgen"] = procRSS(self)
 		}
 		sm.SysBusy, sm.SysTotal = sysCPU()
+		var err error
 		if pg == nil {
-			if c, err := pgx.Connect(ctx, s.pgURL); err == nil {
-				pg = c
-			}
+			pg, err = pgx.Connect(ctx, s.pgURL)
 		}
-		if pg != nil {
-			rows, err := pg.Query(ctx, `select coalesce(state,'') || '|' || coalesce(wait_event_type,''), count(*)::int from pg_stat_activity where datname='dispatch' group by 1`)
-			if err == nil {
-				for rows.Next() {
-					var k string
-					var v int
-					if rows.Scan(&k, &v) == nil {
-						sm.PGConns[k] = v
-						sm.PGTotal += v
-					}
-				}
-				rows.Close()
+		if err == nil {
+			var conns map[string]int
+			if conns, sm.PGTotal, err = pgActivity(ctx, pg); err == nil {
+				sm.PGConns = conns
 			} else {
 				pg.Close(context.Background())
 				pg = nil
 			}
 		}
-		sm.Goroutines, sm.PoolWait = goroutineCounts(s.pprof)
+		if err != nil {
+			failed(readPostgres, &pgErrs, err)
+		}
+		if sm.Goroutines, sm.PoolWait, err = goroutineCounts(s.pprof); err != nil {
+			failed(readGoroutines, &pprofErrs, err)
+		}
 		if n%3 == 0 {
-			sm.HeapInuse, sm.HeapAlloc, sm.HeapSys = heapStats(s.pprof)
+			if sm.HeapInuse, sm.HeapAlloc, sm.HeapSys, err = heapStats(s.pprof); err != nil {
+				failed(readHeap, &pprofErrs, err)
+			}
 		}
 		if v := natsVarz(s.natsMon); v != nil {
 			sm.NATS = v
@@ -291,6 +314,30 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time) {
 	}
 }
 
+// pgActivity counts the connections to database dispatch in pg_stat_activity, by
+// "state|wait_event_type", and in all.
+func pgActivity(ctx context.Context, conn *pgx.Conn) (map[string]int, int, error) {
+	rows, err := conn.Query(ctx, `select coalesce(state,'') || '|' || coalesce(wait_event_type,''), count(*)::int from pg_stat_activity where datname='dispatch' group by 1`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	conns, total := map[string]int{}, 0
+	for rows.Next() {
+		var k string
+		var v int
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, 0, err
+		}
+		conns[k] = v
+		total += v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return conns, total, nil
+}
+
 func (s *sampler) all() []sample {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,18 +346,34 @@ func (s *sampler) all() []sample {
 
 var shortClient = &http.Client{Timeout: 10 * time.Second}
 
-// goroutineCounts reads Dispatch's goroutine total and how many wait in pgx's pool Acquire
-// (puddle frames) from /debug/pprof/goroutine?debug=1.
-func goroutineCounts(pprof string) (total, poolWait int) {
-	resp, err := shortClient.Get(pprof + "/debug/pprof/goroutine?debug=1")
+// getOK GETs url with client; an answer other than 200 is an error.
+func getOK(client *http.Client, url string) (io.ReadCloser, error) {
+	resp, err := client.Get(url)
 	if err != nil {
-		return 0, 0
+		return nil, err
 	}
-	defer resp.Body.Close()
-	sc := bufio.NewScanner(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		return nil, fmt.Errorf("GET %s answered %d %s", url, resp.StatusCode, trunc(b))
+	}
+	return resp.Body, nil
+}
+
+// goroutineCounts reads Dispatch's goroutine total and how many wait in pgx's pool Acquire
+// (puddle frames) from /debug/pprof/goroutine?debug=1; an error when the read fails or the
+// profile names no total.
+func goroutineCounts(pprof string) (total, poolWait int, err error) {
+	url := pprof + "/debug/pprof/goroutine?debug=1"
+	body, err := getOK(shortClient, url)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer body.Close()
+	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	block := 0
-	inPool := false
+	inPool, haveTotal := false, false
 	flush := func() {
 		if inPool {
 			poolWait += block
@@ -320,7 +383,8 @@ func goroutineCounts(pprof string) (total, poolWait int) {
 	for sc.Scan() {
 		line := sc.Text()
 		if v, ok := strings.CutPrefix(line, "goroutine profile: total "); ok {
-			total, _ = strconv.Atoi(v)
+			total, err = strconv.Atoi(v)
+			haveTotal = err == nil
 			continue
 		}
 		if line == "" {
@@ -339,28 +403,45 @@ func goroutineCounts(pprof string) (total, poolWait int) {
 		}
 	}
 	flush()
-	return total, poolWait
+	if err := sc.Err(); err != nil {
+		return 0, 0, fmt.Errorf("GET %s: %w", url, err)
+	}
+	if !haveTotal {
+		return 0, 0, fmt.Errorf("GET %s: no goroutine profile total", url)
+	}
+	return total, poolWait, nil
 }
 
-func heapStats(pprof string) (inuse, alloc, sys float64) {
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(pprof + "/debug/pprof/heap?debug=1")
+// heapStats reads Dispatch's HeapInuse, HeapAlloc and HeapSys from /debug/pprof/heap?debug=1; an
+// error when the read fails or the profile names no HeapInuse.
+func heapStats(pprof string) (inuse, alloc, sys float64, err error) {
+	url := pprof + "/debug/pprof/heap?debug=1"
+	body, err := getOK(&http.Client{Timeout: 30 * time.Second}, url)
 	if err != nil {
-		return 0, 0, 0
+		return 0, 0, 0, err
 	}
-	defer resp.Body.Close()
-	sc := bufio.NewScanner(resp.Body)
+	defer body.Close()
+	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	haveInuse := false
 	for sc.Scan() {
 		line := sc.Text()
 		if v, ok := strings.CutPrefix(line, "# HeapInuse = "); ok {
-			inuse, _ = strconv.ParseFloat(v, 64)
+			inuse, err = strconv.ParseFloat(v, 64)
+			haveInuse = err == nil
 		} else if v, ok := strings.CutPrefix(line, "# HeapAlloc = "); ok {
 			alloc, _ = strconv.ParseFloat(v, 64)
 		} else if v, ok := strings.CutPrefix(line, "# HeapSys = "); ok {
 			sys, _ = strconv.ParseFloat(v, 64)
 		}
 	}
-	return inuse, alloc, sys
+	if err := sc.Err(); err != nil {
+		return 0, 0, 0, fmt.Errorf("GET %s: %w", url, err)
+	}
+	if !haveInuse {
+		return 0, 0, 0, fmt.Errorf("GET %s: no HeapInuse", url)
+	}
+	return inuse, alloc, sys, nil
 }
 
 func natsVarz(mon string) map[string]float64 {
@@ -385,29 +466,47 @@ func natsVarz(mon string) map[string]float64 {
 	return map[string]float64{"cpu_pct": v.CPU, "mem": v.Mem, "connections": v.Connections, "in_msgs": v.InMsgs, "out_msgs": v.OutMsgs, "slow_consumers": v.SlowCons, "subscriptions": v.Subs}
 }
 
-// xidRate reads the next transaction id to be assigned at from and at to, over a direct Postgres
-// connection (pollPG), and returns the transaction ids assigned per second between the two reads;
-// nil when either read failed or ctx ended first. pg_current_snapshot assigns no transaction id,
-// so the probe does not count itself.
-func xidRate(ctx context.Context, url string, from, to time.Time, lg *log.Logger) *float64 {
-	type read struct {
-		xid int64
-		at  time.Time
+// xidRate reads the next transaction id to be assigned at from and at to, over one direct
+// Postgres connection, and returns the transaction ids assigned per second between the two reads.
+// When the connect or either read fails, or ctx ends first, it returns no rate and the error,
+// logged. pg_current_snapshot assigns no transaction id, so the probe does not count itself.
+func xidRate(ctx context.Context, url string, from, to time.Time, lg *log.Logger) (*float64, error) {
+	r, err := readXIDRate(ctx, url, from, to)
+	if err != nil {
+		err = fmt.Errorf("xid probe: %w", err)
+		lg.Print(err)
+		return nil, err
 	}
-	var reads []read
-	failed := pollPG(ctx, url, from, to, to.Sub(from), "xid probe", lg, func(ctx context.Context, conn *pgx.Conn) error {
-		var x int64
-		if err := conn.QueryRow(ctx, `select pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&x); err != nil {
-			return err
+	return &r, nil
+}
+
+func readXIDRate(ctx context.Context, url string, from, to time.Time) (float64, error) {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close(context.Background())
+	read := func(at time.Time) (xid int64, readAt time.Time, err error) {
+		if !sleepUntil(ctx, at) {
+			return 0, time.Time{}, fmt.Errorf("the step ended before the read at %s: %w", at.UTC().Format(time.RFC3339), context.Cause(ctx))
 		}
-		reads = append(reads, read{xid: x, at: time.Now()})
-		return nil
-	})
-	if failed > 0 || len(reads) != 2 || !reads[1].at.After(reads[0].at) {
-		return nil
+		if err := conn.QueryRow(ctx, `select pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&xid); err != nil {
+			return 0, time.Time{}, err
+		}
+		return xid, time.Now(), nil
 	}
-	r := float64(reads[1].xid-reads[0].xid) / reads[1].at.Sub(reads[0].at).Seconds()
-	return &r
+	x0, t0, err := read(from)
+	if err != nil {
+		return 0, err
+	}
+	x1, t1, err := read(to)
+	if err != nil {
+		return 0, err
+	}
+	if !t1.After(t0) {
+		return 0, fmt.Errorf("the read at the window end (%s) is not after the read at its start (%s)", t1.UTC().Format(time.RFC3339Nano), t0.UTC().Format(time.RFC3339Nano))
+	}
+	return float64(x1-x0) / t1.Sub(t0).Seconds(), nil
 }
 
 // --- statistics -------------------------------------------------------------------------------
@@ -453,12 +552,22 @@ type resourcesSummary struct {
 	NATSInMsgsPerS        float64            `json:"nats_in_msgs_per_s"`
 	NATSSlowConsumers     float64            `json:"nats_slow_consumers"`
 	// DispatchCPUSPerOp is Dispatch's CPU-seconds per committed event or sent request; null
-	// with no operations or no Dispatch pid.
+	// with no operations, no Dispatch pid, or when the commit rows were not read
+	// (events.commits_error), which leaves the committed events unknown.
 	DispatchCPUSPerOp *float64 `json:"dispatch_cpu_s_per_op"`
 	// XIDsPerS is the transaction ids Postgres assigned per second from the window start to its
-	// end (xidRate); null when a read failed.
-	XIDsPerS *float64 `json:"xids_per_s"`
+	// end (xidRate); null when a read failed, and then XIDReadError is why.
+	XIDsPerS     *float64 `json:"xids_per_s"`
+	XIDReadError string   `json:"xid_read_error,omitempty"`
+	// PGReadErrors counts the in-window samples whose pg_stat_activity read failed, a failed
+	// connect included; PprofReadErrors the in-window reads of Dispatch's goroutine and heap
+	// profiles that failed. A failed read enters no statistic above.
+	PGReadErrors    int `json:"pg_read_errors"`
+	PprofReadErrors int `json:"pprof_read_errors"`
 }
+
+// failedReads is the sampler's failed reads in the window, Postgres and pprof.
+func (r *resourcesSummary) failedReads() int { return r.PGReadErrors + r.PprofReadErrors }
 
 // summarizeResources reduces the in-window samples; ops is committed events plus requests sent
 // in the window, over durationS.
@@ -496,12 +605,22 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 		for k, v := range s.RSSKiB {
 			res.RSSMiBMax[k] = max(res.RSSMiBMax[k], v/1024)
 		}
-		gor = append(gor, float64(s.Goroutines))
-		pw = append(pw, float64(s.PoolWait))
-		pgTot = append(pgTot, float64(s.PGTotal))
-		if s.HeapInuse > 0 {
+		if slices.Contains(s.FailedReads, readGoroutines) {
+			res.PprofReadErrors++
+		} else {
+			gor = append(gor, float64(s.Goroutines))
+			pw = append(pw, float64(s.PoolWait))
+		}
+		if slices.Contains(s.FailedReads, readHeap) {
+			res.PprofReadErrors++
+		} else if s.HeapInuse > 0 {
 			heap = append(heap, s.HeapInuse/1048576)
 		}
+		if slices.Contains(s.FailedReads, readPostgres) {
+			res.PGReadErrors++
+			continue
+		}
+		pgTot = append(pgTot, float64(s.PGTotal))
 		for k, v := range s.PGConns {
 			pgState[k] = append(pgState[k], float64(v))
 		}

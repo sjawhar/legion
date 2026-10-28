@@ -12,8 +12,7 @@ import (
 // with leading zeros kept, then the write's counter in the run (1, 2, ...). The nonce is random
 // per run, so a run reads back only its own commit rows even when an earlier run on the same
 // database wrote the same counters. commit-trigger.sql extracts the first match of markerPattern
-// from each new event's payload; a trigger installed before the nonce existed uses the same
-// pattern, so it extracts the whole marker too.
+// from each new event's payload.
 const markerNonceDigits = 9
 
 // markerPattern matches any run's marker; parseMarker tells the runs apart.

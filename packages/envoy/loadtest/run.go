@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,7 +56,9 @@ type runConfig struct {
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
-	args          []string
+	// args are the run's arguments as meta.json records them: the token values redacted
+	// (redactArgs).
+	args []string
 	// source is the request source; replay is the replay's plan and roster under -source replay.
 	source string
 	replay *replaySetup
@@ -186,9 +190,44 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
-		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: args,
+		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: redactArgs(fs, args),
 		source: *source, replay: rs,
 	}, sf)
+}
+
+// redacted replaces a token in the arguments that meta.json records.
+const redacted = "<redacted>"
+
+// redactArgs is args with the value of each tokenFlags flag replaced by redacted. It reads args as
+// fs.Parse does: "-name" or "--name", the value after "=" or, for a flag that is not boolean, in
+// the next argument, up to "--" or the first argument that is not a flag.
+func redactArgs(fs *flag.FlagSet, args []string) []string {
+	out := slices.Clone(args)
+	for i := 0; i < len(out); i++ {
+		a := out[i]
+		if len(a) < 2 || a[0] != '-' || a == "--" {
+			break
+		}
+		name, _, inline := strings.Cut(strings.TrimPrefix(a[1:], "-"), "=")
+		secret := slices.Contains(tokenFlags, name)
+		if inline {
+			if secret {
+				out[i] = a[:strings.IndexByte(a, '=')+1] + redacted
+			}
+			continue
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		if i++; i < len(out) && secret {
+			out[i] = redacted
+		}
+	}
+	return out
 }
 
 type session struct {
@@ -285,10 +324,13 @@ type metaFile struct {
 	Kernel      string    `json:"kernel"`
 	// BoxBusyBefore is the box's busy fraction over the BoxBusyBeforeWindowS seconds before the
 	// step, from /proc/stat; null when /proc/stat gave no ticks.
-	BoxBusyBefore        *float64        `json:"box_busy_before"`
-	BoxBusyBeforeWindowS float64         `json:"box_busy_before_window_s"`
-	GOMAXPROCS           string          `json:"gomaxprocs"`
+	BoxBusyBefore        *float64 `json:"box_busy_before"`
+	BoxBusyBeforeWindowS float64  `json:"box_busy_before_window_s"`
+	GOMAXPROCS           string   `json:"gomaxprocs"`
+	// PostgresVersion is select version() on -pg, "" when it could not be read, and then
+	// PostgresVersionError is why.
 	PostgresVersion      string          `json:"postgres_version"`
+	PostgresVersionError string          `json:"postgres_version_error,omitempty"`
 	BuildCommit          string          `json:"build_commit"`
 	BuildDirty           bool            `json:"build_dirty"`
 	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
@@ -320,7 +362,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
 	meta := collectMeta(ctx, cfg, lg)
 	meta.MarkerNonce = formatNonce(nonce)
-	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
+	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	logSamplerStart(lg, cfg.ep)
 	st := newStep(cfg, sf, lg, nonce)
 	if cfg.replay != nil {
@@ -340,7 +382,7 @@ func execute(cfg runConfig, sf seedFile) error {
 
 	st.openWindow(time.Now())
 	meta.Start, meta.WindowStart, meta.WindowEnd = st.start, st.winStart, st.winEnd
-	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
+	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
@@ -361,17 +403,21 @@ func execute(cfg runConfig, sf seedFile) error {
 	time.Sleep(cfg.grace)
 	pr.wait()
 	cancel()
+	pr.waitSampler()
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 
 	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
-	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, lg)
+	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
-	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
-	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g)",
-		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
-		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
-	if err := errStackExits(sum.StackExits); err != nil {
+	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
+	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
+	if sum.Events.commitsUnread() {
+		committed = "committed and receipts not read"
+	}
+	lg.Printf("step %s done: events offered %d %s, requests sent %d (%.1f/s of %g)",
+		cfg.name, sum.Events.Offered, committed, sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
+	if err := stepFailure(sum); err != nil {
 		lg.Print(err)
 		return err
 	}
@@ -556,16 +602,21 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 // transaction-id probe and the profiles.
 type probes struct {
 	smp      *sampler
+	smpDone  chan struct{} // closed when the sampler, which runs until ctx ends, has returned
 	lp       *lockProbe
 	ls       *lockSampler
 	xidsPerS *float64
-	wg       sync.WaitGroup // every probe but the sampler, which runs until ctx ends
+	xidErr   error          // why xidsPerS is nil
+	wg       sync.WaitGroup // every probe but the sampler
 }
 
 // startProbes starts the probes. The two lock samplers run from 20 s into the window to its end.
 func (st *step) startProbes(ctx context.Context) *probes {
-	p := &probes{smp: newSampler(st.cfg.ep), lp: &lockProbe{}, ls: &lockSampler{}}
-	go p.smp.loop(ctx, st.winStart, st.winEnd)
+	p := &probes{smp: newSampler(st.cfg.ep), smpDone: make(chan struct{}), lp: &lockProbe{}, ls: &lockSampler{}}
+	go func() {
+		defer close(p.smpDone)
+		p.smp.loop(ctx, st.winStart, st.winEnd, st.lg)
+	}()
 	lockFrom := st.winStart.Add(20 * time.Second)
 	if lockFrom.After(st.winEnd) {
 		lockFrom = st.winStart
@@ -573,7 +624,7 @@ func (st *step) startProbes(ctx context.Context) *probes {
 	pg := st.cfg.ep.pg
 	p.wg.Go(func() { p.lp.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
 	p.wg.Go(func() { p.ls.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
-	p.wg.Go(func() { p.xidsPerS = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
+	p.wg.Go(func() { p.xidsPerS, p.xidErr = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
 	p.wg.Go(func() { st.profile(ctx) })
 	return p
 }
@@ -584,6 +635,10 @@ func (p *probes) wait() {
 	p.smp.checkAlive(time.Now())
 	p.wg.Wait()
 }
+
+// waitSampler waits, once ctx has ended, for the sampler to take its last sample and log the
+// totals of its failed reads.
+func (p *probes) waitSampler() { <-p.smpDone }
 
 // profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
 // dump and the heap profile are taken once it has finished, outside it, and under -source replay
@@ -652,10 +707,17 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		st.lg.Printf("commits: %v", commitsErr)
 	}
 	ss := pr.smp.all()
-	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, st.lg)
+	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, 0o644, st.lg)
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
 	if sum.Resources != nil {
 		sum.Resources.XIDsPerS = pr.xidsPerS
+		if pr.xidErr != nil {
+			sum.Resources.XIDReadError = pr.xidErr.Error()
+		}
+		if commitsErr != nil {
+			// Its operations count the committed events, which were not read.
+			sum.Resources.DispatchCPUSPerOp = nil
+		}
 	}
 	sum.StackExits = pr.smp.stackExits()
 	if st.replay != nil {
@@ -664,17 +726,25 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	return sum
 }
 
-// stackExitsError fails a step in which stack processes exited.
-type stackExitsError struct {
-	Exits []stackExit
-}
-
-func (e *stackExitsError) Error() string {
-	gone := make([]string, len(e.Exits))
-	for i, x := range e.Exits {
-		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
+// stepFailure is why the step failed, nil when it did not: a stack process exited during it
+// (errStackExits), or the run's commit rows were not read (events.commits_error), so its
+// committed, receipt and delivery columns measure nothing. The other reads of the run's database,
+// the lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the
+// transaction-id probe and the Postgres version, feed none of those columns: a failure of one
+// marks its own table, or meta.json, and does not fail the step.
+func stepFailure(sum summary) error {
+	var why []string
+	if err := errStackExits(sum.StackExits); err != nil {
+		why = append(why, err.Error())
 	}
-	return strings.Join(gone, ", ") + "; this row does not measure the load"
+	if sum.Events.commitsUnread() {
+		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); the step's committed, receipt and delivery columns do not measure the load",
+			sum.Events.CommitsError))
+	}
+	if len(why) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(why, "; "))
 }
 
 // errStackExits is the step's failure when a stack process exited during it, nil otherwise.
@@ -682,7 +752,11 @@ func errStackExits(exits []stackExit) error {
 	if len(exits) == 0 {
 		return nil
 	}
-	return &stackExitsError{Exits: exits}
+	gone := make([]string, len(exits))
+	for i, x := range exits {
+		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
+	}
+	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
 }
 
 func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) requestsSummary {
@@ -780,16 +854,26 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	}
 	pgCtx, pgCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pgCancel()
-	if conn, err := pgx.Connect(pgCtx, cfg.ep.pg); err == nil {
-		if err := conn.QueryRow(pgCtx, "select version()").Scan(&m.PostgresVersion); err != nil {
-			lg.Printf("meta: postgres version: %v", err)
-		}
-		conn.Close(context.Background())
+	if v, err := postgresVersion(pgCtx, cfg.ep.pg); err != nil {
+		m.PostgresVersionError = err.Error()
+		lg.Printf("meta: postgres version: %v", err)
 	} else {
-		lg.Printf("meta: postgres: %v", err)
+		m.PostgresVersion = v
 	}
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}
 	return m
+}
+
+// postgresVersion reads select version() on the Postgres at url.
+func postgresVersion(ctx context.Context, url string) (string, error) {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close(context.Background())
+	var v string
+	err = conn.QueryRow(ctx, "select version()").Scan(&v)
+	return v, err
 }

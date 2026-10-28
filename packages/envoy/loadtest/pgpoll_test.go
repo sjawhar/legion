@@ -6,12 +6,55 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestPollCountsEveryFailedReadAndLogsTheFirst(t *testing.T) {
+// TestReadErrorsLogsTheFirstAndATotalPastThem: every failure counts; run.log gets one line for each
+// of the first pollErrorsLogged, then one line naming the probe and the total, only when more
+// failed.
+func TestReadErrorsLogsTheFirstAndATotalPastThem(t *testing.T) {
+	for _, failures := range []int{1, pollErrorsLogged, pollErrorsLogged + 2} {
+		var buf bytes.Buffer
+		errs := readErrors{name: "probe", lg: log.New(&buf, "", 0)}
+		for i := range failures {
+			errs.add(fmt.Errorf("failure %d", i+1))
+		}
+		if got := errs.done(); got != failures {
+			t.Fatalf("done() = %d after %d failures", got, failures)
+		}
+		lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+		logged := 0
+		for i := range failures {
+			for _, l := range lines {
+				if strings.Contains(l, fmt.Sprintf("failure %d", i+1)) {
+					logged++
+					if i >= pollErrorsLogged {
+						t.Errorf("%d failures: failure %d is logged, past the first %d", failures, i+1, pollErrorsLogged)
+					}
+				}
+			}
+		}
+		if logged != min(failures, pollErrorsLogged) {
+			t.Errorf("%d failures: %d logged, want %d", failures, logged, min(failures, pollErrorsLogged))
+		}
+		totals := len(lines) - logged
+		if failures <= pollErrorsLogged {
+			if totals != 0 {
+				t.Errorf("%d failures: %d lines besides the failures, want no total:\n%s", failures, totals, buf.String())
+			}
+			continue
+		}
+		last := lines[len(lines)-1]
+		if totals != 1 || !strings.Contains(last, "probe") || !strings.Contains(last, strconv.Itoa(failures)) {
+			t.Errorf("%d failures: want one last line that names the probe and the count:\n%s", failures, buf.String())
+		}
+	}
+}
+
+func TestPollCountsEveryFailedRead(t *testing.T) {
 	var buf bytes.Buffer
 	lg := log.New(&buf, "", 0)
 	calls := 0
@@ -26,11 +69,8 @@ func TestPollCountsEveryFailedReadAndLogsTheFirst(t *testing.T) {
 	if calls == 0 || failed != (calls+1)/2 {
 		t.Fatalf("%d failed of %d reads, want every odd read counted", failed, calls)
 	}
-	if logged := strings.Count(buf.String(), "probe: relation does not exist\n"); logged != min(failed, pollErrorsLogged) {
+	if logged := strings.Count(buf.String(), "relation does not exist"); logged != min(failed, pollErrorsLogged) {
 		t.Fatalf("%d failures logged of %d, want the first %d:\n%s", logged, failed, pollErrorsLogged, buf.String())
-	}
-	if total := fmt.Sprintf("probe: %d reads failed in all\n", failed); (failed > pollErrorsLogged) != strings.Contains(buf.String(), total) {
-		t.Fatalf("the log should name the total only past %d failures:\n%s", pollErrorsLogged, buf.String())
 	}
 }
 

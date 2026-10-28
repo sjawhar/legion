@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+// triggerPattern is the pattern that commit-trigger.sql extracts each new event's marker with:
+// the argument of `substring(new.payload::text from '...')`.
+func triggerPattern(t *testing.T) *regexp.Regexp {
+	t.Helper()
+	m := regexp.MustCompile(`substring\(new\.payload::text from '([^']+)'\)`).FindStringSubmatch(commitTriggerSQL)
+	if m == nil {
+		t.Fatal("commit-trigger.sql extracts no marker with substring(new.payload::text from '...')")
+	}
+	return regexp.MustCompile(m[1])
+}
+
 func TestMarkerRoundTripsOnlyForItsRun(t *testing.T) {
 	tag := markerTag(42, 17)
 	if tag != "lgm00000004217x" {
@@ -26,10 +37,10 @@ func TestMarkerRoundTripsOnlyForItsRun(t *testing.T) {
 			t.Errorf("parseMarker(%q, 42) accepted it", s)
 		}
 	}
-	// The trigger, old and new, extracts the first lgm[0-9]+x of the payload: the whole marker.
-	trigger := regexp.MustCompile(`lgm[0-9]+x`)
+	// The trigger extracts the first match of its pattern in the payload: the whole marker.
+	trigger := triggerPattern(t)
 	if got := trigger.FindString(`{"body":"` + tag + ` reply: text"}`); got != tag {
-		t.Fatalf("the trigger's pattern extracts %q, want %q", got, tag)
+		t.Fatalf("the trigger's pattern %s extracts %q, want %q", trigger, got, tag)
 	}
 	if n, ok := findMarker([]byte(markerTag(7, 5)+" "+tag), 42); !ok || n != 17 {
 		t.Fatalf("findMarker = %d, %t; want 17, past the other run's marker", n, ok)

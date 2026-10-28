@@ -265,7 +265,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Accepting},
 		{name: "an untimed request for changes, then an older approval redelivered with a time", steps: []string{"cr head id=12", "approve head id=11 at=2", "complete"}, want: phase.Implementing},
 		{name: "a timed approval, then a newer untimed request for changes", steps: []string{"approve head id=11 at=2", "cr head id=12", "complete"}, want: phase.Implementing},
-		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Reviewing},
+		// The code push head..head-2 arrives after head-2 arrived and the branch was reset to head: it
+		// is the move the record already made, spent as it arrives (classify.unspentPushes), not code
+		// on its way. A second push of the same two heads looks the same until its synchronize moves
+		// the head; meanwhile no merge can land it, since the READY merge carries the approved head as
+		// GitHub's expected head (daemon's TestAREADYMergeNeverLandsAHeadReplacedAfterTheREADY).
+		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Accepting},
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Accepting},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
 		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
@@ -1310,5 +1315,44 @@ func TestATruncatedReviewWithNoFooterIsSetAsideAndLogsTruncation(t *testing.T) {
 	}
 	if got := logs.String(); !strings.Contains(got, "body_truncated=true") {
 		t.Fatalf("logs = %s, want the set-aside line to carry body_truncated=true", got)
+	}
+}
+
+// A push the record's bound lets go - the oldest of more pushes waiting for a link than the bound
+// keeps, each behind a webhook that never arrived - is logged as a warning that names it, once, by
+// the push that let it go: the move it would have linked into is judged without it.
+func TestAPushTheBoundLetsGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	// Sixteen pushes of a line the branch never takes are the most the record keeps waiting
+	// (classify's maxWaitingPushes); the seventeenth lets the first go.
+	for i := 1; i <= 17; i++ {
+		logged.Reset()
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo(fmt.Sprintf("x%d", i-1), fmt.Sprintf("x%d", i), "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, message) {
+				warned = append(warned, line)
+			}
+		}
+		if i < 17 {
+			if len(warned) != 0 {
+				t.Fatalf("push %d of 16 waiting warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 {
+			t.Fatalf("the push past the bound warned %d times (%q), want once", len(warned), warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=x0", "after=x1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the push let go named", warned[0], want)
+			}
+		}
 	}
 }

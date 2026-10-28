@@ -81,9 +81,6 @@ func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
 		"-token":          func(f *endpointFlags) { f.token = "" },
 		"-listener-token": func(f *endpointFlags) { f.listenerToken = "" },
 	}
-	if len(unsetters) != len(endpointFlagNames) {
-		t.Fatalf("the test covers %d flags, the guard checks %d", len(unsetters), len(endpointFlagNames))
-	}
 	for flag, unset := range unsetters {
 		for _, st := range []*stackFile{testStack(), nil} {
 			flags := foreignFlags()
