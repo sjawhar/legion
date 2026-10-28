@@ -34,7 +34,14 @@ import {
   SharedRunsFile,
 } from "./judge-prompts";
 import { byCreatedAt } from "./production-dispatch";
-import { CREATED, SessionEntry, session, sessionId, toolResults } from "./transcript";
+import {
+  CREATED,
+  SessionEntry,
+  session,
+  sessionId,
+  subagentSessions,
+  toolResults,
+} from "./transcript";
 
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
 const IssueAsks = z.array(
@@ -1474,19 +1481,22 @@ const readsSkill = (target: string, name: string) =>
     target
   );
 
-/** A spec-only check that counts for a spec write: a `task` call whose every task completed with a
- * report that came back before the write (checkOutcome). `assignment` is every string of its
- * arguments, `report` each task's report, and `write` the place of the write in SpecWork.writes. */
+/** A spec-only check that counts for a spec write (specWork): a `task` call whose every task
+ * completed with a report that came back before the write (checkOutcome), or a subagent of the
+ * session started some other way, such as from an eval cell, whose transcript holds its report
+ * (subagentCheck). `assignment` is every string of the call's arguments, or the first user message
+ * of the subagent's transcript; `report` each task's report, or the subagent's; and `write` the
+ * place of the write in SpecWork.writes. */
 export interface SpecCheck {
   assignment: string;
   report: string;
   write: number;
 }
-/** A spec-only check that counts for no spec write: its tasks, its call's id, the place of the
- * write after it, and why. */
+/** A spec-only check that counts for no spec write: its tasks, where the scorer found it (`call
+ * <id>`, or `transcript <name>.jsonl`), the place of the write after it, and why. */
 export interface RejectedCheck {
   tasks: string;
-  call: string;
+  via: string;
   write: number;
   problem: string;
 }
@@ -1694,27 +1704,70 @@ function checkOutcome(
   }
   return problems.length > 0 ? { problem: problems.join("; ") } : { report: reports.join("\n\n") };
 }
-/** The spec writes of a transcript (writesSpec, against the run's fixture.json) and the spec-only
- * checks before them. A spec-only check is a `task` call whose assignment holds the seven outline
- * headings as `##` lines and names no path under a checkout in `reach`. It counts for the first
- * spec write after it when its tasks' reports came back before that write (checkOutcome); either
- * way it counts for no later write. Each `dispatch` command of a call is a write of its own
- * (operationsOf), so two writes in one call with no check between them leave the second
- * unchecked. Places are transcript order, never timestamps. */
-export function specWork(entries: SessionEntry[], reach: string[], fixture: SpecFixture): SpecWork {
+/** Whether a check's assignment is a spec-only check's: it holds the seven outline headings as `##`
+ * lines and names no path under a checkout in `reach`. */
+function specOnly(assignment: string, reach: string[]): boolean {
+  const outlined = OUTLINE.every((heading) =>
+    new RegExp(`^[ \\t]*## ${escaped(heading)}[ \\t]*$`, "m").test(assignment)
+  );
+  const local = reach.some((dir) => new RegExp(`${escaped(dir)}(?![\\w.-])`).test(assignment));
+  return outlined && !local;
+}
+/** A subagent's run as its own transcript records it: its assignment (the first user message) and
+ * when that came, and its report and when that came. The report is the subagent's last assistant
+ * message: the arguments of the `yield` call it ends with, else its text. A last message that is
+ * neither (the subagent never finished) is no report. */
+function subagentRun(
+  entries: SessionEntry[]
+): { assignment: string; started: number; report: string; reported: number } | undefined {
+  const first = entries.find((entry) => entry.message?.role === "user");
+  if (first === undefined) return undefined;
+  const last = entries.findLast((entry) => entry.message?.role === "assistant");
+  const parts = last?.message?.content ?? [];
+  const ending = parts.find((part) => part.type === "toolCall" && part.name === "yield");
+  const report =
+    ending === undefined
+      ? parts.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("")
+      : strings(ending.arguments).join("\n\n");
+  return {
+    assignment: (first.message?.content ?? [])
+      .flatMap((part) => (part.type === "text" ? [part.text ?? ""] : []))
+      .join(""),
+    started: Date.parse(first.timestamp ?? ""),
+    report: report.trim(),
+    reported: Date.parse(last?.timestamp ?? ""),
+  };
+}
+/** The spec writes of the run's session (writesSpec, against the run's fixture.json) and the
+ * spec-only checks before them: the one list of checks that both specRow's `checked` and the
+ * findings judge (judgeInputs, judge.ts) read. A spec-only check's assignment holds the seven
+ * outline headings as `##` lines and names no path under a checkout in `reach` (specOnly). A check
+ * is either of:
+ * - a `task` call of the session's transcript. It counts for the first spec write after it when its
+ *   tasks' reports came back before that write (checkOutcome); either way it counts for no later
+ *   write. Places are transcript order.
+ * - a subagent transcript beside the session's (subagentSessions) that no `task` call of the
+ *   session names, as a subagent started from an eval cell (`tool.task(…)`, `agent(…)`) is. Its
+ *   assignment is its first user message and its report its last assistant message
+ *   (subagentRun). It counts for the first spec write after its report when it started after the
+ *   write before that one, by the transcripts' timestamps. A subagent that a `task` call names is
+ *   that call's check alone, so a call rejected for its path or its failed task stays rejected.
+ * Each `dispatch` command of a call is a write of its own (operationsOf), so two writes in one
+ * call with no check between them leave the second unchecked. The checks are in the order of the
+ * writes they count for, and of when each started. */
+export function specWork(runDir: string, reach: string[], fixture: SpecFixture): SpecWork {
+  const entries = session(runDir);
   const results = outcomes(entries);
   const writes: SpecWork["writes"] = [];
-  const checks: SpecCheck[] = [];
+  const checks: (SpecCheck & { started: number })[] = [];
   const rejected: RejectedCheck[] = [];
+  const named = new Set<string>();
   let pending: { step: Step; assignment: string }[] = [];
   for (const step of steps(entries)) {
     if (step.tool === "task") {
+      for (const name of taskNames(step, results.get(step.id))) named.add(name);
       const assignment = strings(step.args).join("\n\n");
-      const outlined = OUTLINE.every((heading) =>
-        new RegExp(`^[ \\t]*## ${escaped(heading)}[ \\t]*$`, "m").test(assignment)
-      );
-      const local = reach.some((dir) => new RegExp(`${escaped(dir)}(?![\\w.-])`).test(assignment));
-      if (outlined && !local) pending.push({ step, assignment });
+      if (specOnly(assignment, reach)) pending.push({ step, assignment });
       continue;
     }
     for (const operation of operationsOf(step, results.get(step.id))) {
@@ -1727,7 +1780,7 @@ export function specWork(entries: SessionEntry[], reach: string[], fixture: Spec
         if ("problem" in outcome)
           rejected.push({
             tasks: taskNames(check.step, own).join(", ") || "(unnamed)",
-            call: check.step.id,
+            via: `call ${check.step.id}`,
             write: writes.length,
             problem: outcome.problem,
           });
@@ -1736,6 +1789,7 @@ export function specWork(entries: SessionEntry[], reach: string[], fixture: Spec
             assignment: check.assignment,
             report: outcome.report,
             write: writes.length,
+            started: Date.parse(check.step.at),
           });
           checked = true;
         }
@@ -1744,7 +1798,37 @@ export function specWork(entries: SessionEntry[], reach: string[], fixture: Spec
       pending = [];
     }
   }
-  return { writes, checks, rejected };
+  const writeTimes = writes.map((write) => Date.parse(write.at));
+  for (const { name, entries: own } of subagentSessions(runDir)) {
+    if (named.has(name)) continue;
+    const run = subagentRun(own);
+    if (run === undefined || !specOnly(run.assignment, reach)) continue;
+    const write = writeTimes.findIndex((at) =>
+      run.report === "" ? at > run.started : at > run.reported
+    );
+    if (write < 0) continue;
+    const before = writeTimes[write - 1];
+    const problem =
+      run.report === ""
+        ? "its transcript holds no report"
+        : before !== undefined && run.started <= before
+          ? `it started before spec write ${write}, so it checked an earlier version`
+          : undefined;
+    if (problem !== undefined) {
+      rejected.push({ tasks: name, via: `transcript ${name}.jsonl`, write, problem });
+      continue;
+    }
+    const counted = writes[write];
+    if (counted !== undefined) counted.checked = true;
+    checks.push({ assignment: run.assignment, report: run.report, write, started: run.started });
+  }
+  return {
+    writes,
+    checks: checks
+      .toSorted((a, b) => a.write - b.write || a.started - b.started)
+      .map(({ assignment, report, write }) => ({ assignment, report, write })),
+    rejected: rejected.toSorted((a, b) => a.write - b.write),
+  };
 }
 
 /** Each `**R<n>.**` or `**A<n>.**` paragraph of a spec: its mark and its text, up to a blank line,
@@ -1981,8 +2065,9 @@ export function sharedRuns(runDir: string): SharedRun[] {
  *   precision (Dispatch writes `…:00.5Z` before `…:00.51Z`, which text order reverses);
  * - `texts`: agent-texts.json less the seeded asks;
  * - `documents`: each file of documents/, as `documents/<file>`;
- * - `checks`: how many spec-only checks count for a spec write (specWork): with none, no findings
- *   judge runs and findings.json has no row. */
+ * - `checks`: how many spec-only checks count for a spec write, from specWork, the one list of
+ *   checks specRow's `checked` reads too: with none, no findings judge runs and findings.json has
+ *   no row. */
 export interface JudgeInputs {
   requirements: string[];
   asks: z.infer<typeof AgentAsks>;
@@ -2131,9 +2216,11 @@ const indented = (text: string, depth = 6) =>
  *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
  *     the run's own primary spec, each `dispatch` command of a call apart), a spec-only check
  *     (specWork) counts for every one, the first included, and findings.json has no `neither`
- *     row. A check counts for a write when its task call and every task's completed, non-empty
- *     report came after the write before it and before this write, in transcript order
- *     (checkOutcome). Each check that counts for no write is printed with why.
+ *     row. A `task` call's check counts for a write when its task call and every task's completed,
+ *     non-empty report came after the write before it and before this write, in transcript order
+ *     (checkOutcome); a subagent started another way, as from an eval cell, counts from its own
+ *     transcript when it started after the write before and reported before this one. Each check
+ *     that counts for no write is printed with why.
  *   - refusals: every refused `dispatch` call (refusalBlocks: an `error` line of the CLI's ledger,
  *     or a refusal a call's output shows that the ledger holds no line of: an `eval` cell's, whose
  *     kernel knows no session, or one the CLI made with no session) is followed by a call
@@ -2170,7 +2257,7 @@ function specRow(
   const fixture = json(path.join(runDir, "fixture.json"), SpecFixture);
   const { approved, version, turns } = approval(runDir);
   const all = steps(entries);
-  const work = specWork(entries, reach, fixture);
+  const work = specWork(runDir, reach, fixture);
   const ops = operations(entries);
   // Places in `ops`, so a read and a write of one call keep their order.
   const firstWrite = ops.findIndex(
@@ -2199,7 +2286,7 @@ function specRow(
     details.push(`finding of check ${row.check} neither fixed nor recorded: ${row.finding}`);
   for (const check of work.rejected)
     details.push(
-      `check ${check.tasks} (call ${check.call}) for spec write ${check.write + 1} does not count: ${check.problem}`
+      `check ${check.tasks} (${check.via}) for spec write ${check.write + 1} does not count: ${check.problem}`
     );
 
   const id = sessionId(entries);

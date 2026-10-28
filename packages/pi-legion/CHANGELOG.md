@@ -30,6 +30,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   three of each with the call's text around them. A flag shows the run named the path, not that it
   read it nor that its result is wrong; prose and reaches share the same arguments. A path a call
   reaches without naming it, as a glob from `/` does, is not caught.
+- The skill-scenario scorer reads a spec-only check from the subagent's own transcript
+  (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
+  from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no
+  `task` call, so `checked` missed it and the findings judge never saw its report. Such a check
+  counts for the first spec write after its report (its last assistant message, or the `yield`
+  it ends with) when it started after the write before that one. A subagent a `task` call names is
+  that call's check alone, so a call rejected for a path or a failed task stays rejected, and
+  nothing counts twice. `specWork` is the one list of checks that `checked` and the findings
+  judge both read.
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at

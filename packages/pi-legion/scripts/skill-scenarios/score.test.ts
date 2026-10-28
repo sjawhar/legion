@@ -816,7 +816,40 @@ interface SpecFixture {
   /** agent-asks.json and agent-texts.json, when not the run's one question and one message. */
   asks?: object[];
   texts?: object[];
+  /** Subagent transcripts beside the session's, by name (subagentTranscript). */
+  subagents?: Record<string, object[]>;
 }
+/** A time `seconds` after the first entry of a spec run's transcript: timed gives entry N the time
+ * of second N. */
+const second = (seconds: number) =>
+  new Date(Date.parse("2026-10-24T10:00:00.000Z") + seconds * 1000).toISOString();
+/** A subagent's own transcript, as Oh My Pi writes one beside the session's: its assignment as its
+ * first user message at second `started`, and its report as its last assistant message at second
+ * `reported`, in text or (`yielded`) as the `yield` call it ends with. */
+const subagentTranscript = (
+  assignment: string,
+  started: number,
+  reported: number,
+  report = "No gaps.",
+  yielded = false
+) => [
+  { type: "session", id: "01a16641", timestamp: second(started), cwd: "/rig/cwd" },
+  {
+    type: "message",
+    timestamp: second(started),
+    message: { role: "user", content: [{ type: "text", text: assignment }] },
+  },
+  {
+    type: "message",
+    timestamp: second(reported),
+    message: {
+      role: "assistant",
+      content: yielded
+        ? [{ type: "toolCall", id: "y1", name: "yield", arguments: { data: { review: report } } }]
+        : [{ type: "text", text: report }],
+    },
+  },
+];
 /** The run's transcript and its dispatch CLI ledger (results.jsonl): each entry gets a time one
  * second after the one before it, and each line an entry logs (`logged`) is written to the ledger
  * one millisecond apart, just before that entry's time, so it falls inside its tool call. */
@@ -890,6 +923,14 @@ function specRun(name: string, fixture: SpecFixture = {}) {
     writeFileSync(path.join(dir, "spec-versions", `${version}.md`), spec);
   for (const [file, text] of Object.entries(fixture.documents ?? {}))
     writeFileSync(path.join(dir, "documents", file), text);
+  const subagents = path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc");
+  for (const [agent, transcript] of Object.entries(fixture.subagents ?? {})) {
+    mkdirSync(subagents, { recursive: true });
+    writeFileSync(
+      path.join(subagents, `${agent}.jsonl`),
+      transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
+    );
+  }
   if (fixture.ledger === false) return;
   const state = path.join(ledgerDir(name));
   mkdirSync(state, { recursive: true });
@@ -1505,6 +1546,70 @@ specRun("spec-writing-head-69", {
       }
     ),
   ]),
+});
+// checked: a check the agent started from an eval cell (`tool.task(…)`, `agent(…)`) has no `task`
+// call in the transcript, only a transcript of its own beside the session's. It counts for the
+// first spec write after its report when it started after the write before that one. In each run
+// below, entry N of the session's transcript is at second N: the eval cell's call is entry 6 and
+// the first write's call entry 8.
+const evalSpawn =
+  'spec = open("spec.md").read()\nawait tool.task({"tasks": [{"name": "EvalCheck", "task": "Read this spec alone and list each gap.\\n\\n" + spec}]})';
+const evalFirst = (...subagent: object[][]) =>
+  conversation(
+    routedRead,
+    ...subagent,
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  );
+// Started from the cell, reported with `yield` before the first write: it checks that write.
+specRun("spec-writing-head-96", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: subagentTranscript(
+      `Read this spec alone and list each gap.\n\n${outlined()}`,
+      6.2,
+      6.8,
+      "No gaps.",
+      true
+    ),
+  },
+});
+// A `task` call's own subagent is that call's check alone: the call names a path under the
+// checkout, so neither it nor its transcript, which does not, counts.
+specRun("spec-writing-head-97", {
+  transcript: evalFirst(
+    checkOf("c1", `${outlined()}\nCompare /checkouts/head/packages/cli/greet.ts.`)
+  ),
+  subagents: {
+    Checkc1: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 6.2, 6.8),
+  },
+});
+// Started before the first write (second 8) and reported before the second (second 12): it read
+// the version before the first write, so it checks neither.
+specRun("spec-writing-head-98", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    specEdit("w2"),
+    finish
+  ),
+  subagents: {
+    LateCheck: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 7.5, 11.5),
+  },
+});
+// A subagent whose assignment is not the spec in the outline checks nothing, and one whose
+// transcript ends with no report checks nothing either.
+specRun("spec-writing-head-99", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned two agents.")),
+  subagents: {
+    Summary: subagentTranscript("Summarize the person's messages.", 6.2, 6.8),
+    NoReport: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 6.2, 6.8, ""),
+  },
 });
 // refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
 // `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
@@ -2650,6 +2755,28 @@ test("checked: a background check's report in a wait result or an async-result m
   // `followed`'s checks are blocking, each with a completed `<task-result>` block.
   expect(scoresOf("spec-writing-head-1")).toEqual(allPass);
   expect(rowOf("spec-writing-head-1")).not.toContain("does not count");
+});
+
+test("checked: a check started from an eval cell counts from its own transcript, once, and in time", () => {
+  // Its report, ended with `yield`, came before the write it checks.
+  expect(scoresOf("spec-writing-head-96")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-96")).not.toContain("does not count");
+  // A `task` call rejected for its path stays rejected: its own transcript is no second check.
+  expect(scoresOf("spec-writing-head-97")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-97")).toContain("unchecked writes: 1 of 2");
+  // Started before the write before the one it reported ahead of.
+  expect(scoresOf("spec-writing-head-98")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-98")).toContain(
+    "check LateCheck (transcript LateCheck.jsonl) for spec write 2 does not count: it started before spec write 1, so it checked an earlier version"
+  );
+  // A subagent not given the spec in the outline, and one that never reported.
+  expect(scoresOf("spec-writing-head-99")).toEqual({ ...allPass, checked: "false" });
+  const row = rowOf("spec-writing-head-99");
+  expect(row).toContain("unchecked writes: 1 of 2");
+  expect(row).toContain(
+    "check NoReport (transcript NoReport.jsonl) for spec write 1 does not count: its transcript holds no report"
+  );
+  expect(row).not.toContain("check Summary");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {
