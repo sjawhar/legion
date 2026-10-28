@@ -396,27 +396,63 @@ func TestClusteredNatsHubChart(t *testing.T) {
 }
 
 // hubServer is one nats-server of the local cluster, on the rendered nats.conf and auth.conf in a
-// directory of its own.
+// directory of its own. Its command line is built at each start from its ports and its peers'
+// route ports as they are then (commandArgs), so a start that draws new ports runs on them.
 type hubServer struct {
 	name                   string
 	dir                    string
 	client, monitor, route int
 	binary                 string
-	args, env              []string
+	podArgs, env           []string
+	peers                  []*hubServer
+	ports                  *loopbackPorts
 	proc                   *cmdtest.Process
 }
 
+// commandArgs is the container's own arguments (--config /etc/nats-config/nats.conf, with the
+// ConfigMap's mount replaced by the server's directory, podArgs), then a command-line override for
+// each other value of nats.conf that a pod fixes, since three servers here share one host and
+// filesystem.
+func (s *hubServer) commandArgs() []string {
+	var routes []string
+	for _, other := range s.peers {
+		if other != s {
+			routes = append(routes, fmt.Sprintf("nats://127.0.0.1:%d", other.route))
+		}
+	}
+	return append(slices.Clone(s.podArgs),
+		// port: 4222, the client port each pod has to itself.
+		"-p", strconv.Itoa(s.client),
+		// http_port: 8222, the monitoring port.
+		"-m", strconv.Itoa(s.monitor),
+		// cluster.port: 6222, the route port.
+		"--cluster", fmt.Sprintf("nats://127.0.0.1:%d", s.route),
+		// cluster.routes, the three pods' DNS names in the headless Service: here the other two
+		// servers' route ports.
+		"--routes", strings.Join(routes, ","),
+		// pid_file: /var/run/nats/nats.pid, the emptyDir the pod shares with the reloader.
+		"-P", filepath.Join(s.dir, "nats.pid"),
+	)
+}
+
 // start starts the server and waits until it listens on all three of its ports (its last bind is
-// the route port's); the test kills it by its PID when it ends if it is still running.
+// the route port's); the test kills it by its PID when it ends if it is still running. A start
+// that another program's hold on one of its ports refused is retried on three new ports. A peer
+// started earlier still names the old route port, which costs nothing: a route is one connection
+// both servers use, so this server's own routes to its peers complete the mesh.
 func (s *hubServer) start(t *testing.T) {
 	t.Helper()
-	listening := fmt.Sprintf("Listening for route connections on 127.0.0.1:%d", s.route)
+	attempt := 0
 	s.proc = startBound(t, s.name, func() *exec.Cmd {
-		cmd := exec.Command(s.binary, s.args...)
+		if attempt++; attempt > 1 {
+			drawn := s.ports.draw(t, 3)
+			s.client, s.monitor, s.route = drawn[0], drawn[1], drawn[2]
+		}
+		cmd := exec.Command(s.binary, s.commandArgs()...)
 		cmd.Env = append(os.Environ(), s.env...)
 		return cmd
 	}, func(p *cmdtest.Process) error {
-		if !strings.Contains(p.Output.String(), listening) {
+		if !strings.Contains(p.Output.String(), fmt.Sprintf("Listening for route connections on 127.0.0.1:%d", s.route)) {
 			return errors.New("not listening yet")
 		}
 		return nil
@@ -435,23 +471,50 @@ func startLogged(t *testing.T, name string, cmd *exec.Cmd) *cmdtest.Process {
 	return p
 }
 
-// loopbackPort is a loopback TCP port the kernel chose, its socket closed again. nats-server and
-// the exporter take a port number and bind it themselves, so cmdtest.HoldPort, which hands a held
-// socket to a process that serves on it, cannot give them one; another program can take the port
-// before the process binds it, which startBound answers.
-func loopbackPort(t *testing.T) int {
+// loopbackPorts hands out loopback TCP ports the kernel chose, each one distinct from every port
+// it handed out before in the test. nats-server and the exporter take a port number and bind it
+// themselves, so cmdtest.HoldPort, which hands a held socket to a process that serves on it,
+// cannot give them one. A draw holds every socket it opens until it has all the ports it was asked
+// for, so the kernel cannot give one port twice within a draw, and it passes over a port an
+// earlier draw handed out, whose socket is closed. Another program can still take a port before
+// the process binds it, which startBound answers with a new draw.
+type loopbackPorts struct {
+	mu   sync.Mutex
+	used map[int]bool
+}
+
+func newLoopbackPorts() *loopbackPorts { return &loopbackPorts{used: map[int]bool{}} }
+
+// draw returns n ports no earlier draw returned, distinct from one another.
+func (p *loopbackPorts) draw(t *testing.T, n int) []int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := listener.Addr().(*net.TCPAddr).Port
-	require.NoError(t, listener.Close())
-	return port
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var held []net.Listener
+	defer func() {
+		for _, l := range held {
+			_ = l.Close()
+		}
+	}()
+	ports := make([]int, 0, n)
+	for len(ports) < n {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		held = append(held, listener)
+		port := listener.Addr().(*net.TCPAddr).Port
+		if p.used[port] {
+			continue
+		}
+		p.used[port] = true
+		ports = append(ports, port)
+	}
+	return ports
 }
 
 // startBound starts the process build makes and waits up to 30 s for ready to return nil. A
 // process that exits because a port it binds is taken is started again, from a new build, up to
-// 10 times: loopbackPort's port is free only when it returns, so another program, or an outgoing
-// connection's ephemeral port, can hold it when the process binds it.
+// 10 times; each build draws its ports anew (loopbackPorts), since another program, or an
+// outgoing connection's ephemeral port, can hold a drawn port when the process binds it.
 func startBound(t *testing.T, name string, build func() *exec.Cmd, ready func(*cmdtest.Process) error) *cmdtest.Process {
 	t.Helper()
 	for attempt := 1; ; attempt++ {
@@ -758,14 +821,18 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	natsContainer := r.container(t, "nats")
 	require.Contains(t, natsContainer["env"], map[string]any{"name": "SERVER_NAME", "value": "$(POD_NAME)"},
 		"each server is named after its pod")
+	// One draw of the nine server ports, all held until the last is chosen, so no two servers share
+	// one; the exporters' ports come from the same pool, distinct from these.
+	ports := newLoopbackPorts()
+	serverPorts := ports.draw(t, 9)
 	servers := make([]*hubServer, 3)
 	for i := range servers {
 		servers[i] = &hubServer{
-			name: fmt.Sprintf("%s-%d", r.release, i), dir: t.TempDir(), binary: natsServer,
-			client: loopbackPort(t), monitor: loopbackPort(t), route: loopbackPort(t),
+			name: fmt.Sprintf("%s-%d", r.release, i), dir: t.TempDir(), binary: natsServer, peers: servers, ports: ports,
+			client: serverPorts[3*i], monitor: serverPorts[3*i+1], route: serverPorts[3*i+2],
 		}
 	}
-	for i, s := range servers {
+	for _, s := range servers {
 		// jetstream.store_dir: /data, the pod's claim, is the one value replaced in the server's
 		// copy of nats.conf: nats-server v2.15.1 reads the file onto the options its flags set and
 		// refuses -sd beside a store_dir in the file ("Duplicate 'store_dir' configuration"), so
@@ -775,33 +842,11 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 		natsConf := strings.Replace(r.natsConf, storeDir, fmt.Sprintf(`"store_dir": %q`, filepath.Join(s.dir, "data")), 1)
 		require.NoError(t, os.WriteFile(filepath.Join(s.dir, "nats.conf"), []byte(natsConf), 0o600))
 		require.NoError(t, os.WriteFile(filepath.Join(s.dir, clusteredHubAuthConfKey), []byte(r.authConf), 0o600))
-		var routes []string
-		for j, other := range servers {
-			if j != i {
-				routes = append(routes, fmt.Sprintf("nats://127.0.0.1:%d", other.route))
-			}
-		}
-		// The container's own arguments (--config /etc/nats-config/nats.conf) with the ConfigMap's
-		// mount replaced by the server's directory, then a command-line override for each other
-		// value of nats.conf that a pod fixes, since three servers here share one host and
-		// filesystem:
-		s.args = append(podArgs(t, stringList(t, natsContainer["args"]), map[string]string{"/etc/nats-config/": s.dir + "/"}),
-			// port: 4222, the client port each pod has to itself.
-			"-p", strconv.Itoa(s.client),
-			// http_port: 8222, the monitoring port.
-			"-m", strconv.Itoa(s.monitor),
-			// cluster.port: 6222, the route port.
-			"--cluster", fmt.Sprintf("nats://127.0.0.1:%d", s.route),
-			// cluster.routes, the three pods' DNS names in the headless Service: here the other two
-			// servers' route ports.
-			"--routes", strings.Join(routes, ","),
-			// pid_file: /var/run/nats/nats.pid, the emptyDir the pod shares with the reloader.
-			"-P", filepath.Join(s.dir, "nats.pid"),
-		)
+		s.podArgs = podArgs(t, stringList(t, natsContainer["args"]), map[string]string{"/etc/nats-config/": s.dir + "/"})
 		// server_name: $SERVER_NAME, which the container sets to its pod's name.
 		s.env = []string{"SERVER_NAME=" + s.name}
 		s.start(t)
-		t.Logf("%s: nats-server %s", s.name, strings.Join(s.args, " "))
+		t.Logf("%s: nats-server %s", s.name, strings.Join(s.commandArgs(), " "))
 	}
 	urls := make([]string, len(servers))
 	for i, s := range servers {
@@ -1037,7 +1082,7 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	for i, s := range servers {
 		var args []string
 		startBound(t, s.name+" exporter", func() *exec.Cmd {
-			exporterPorts[i] = loopbackPort(t)
+			exporterPorts[i] = ports.draw(t, 1)[0]
 			// The chart's arguments with the exporter's port, -port=7777, and the monitoring port
 			// of http://localhost:8222/, both fixed by the pod, replaced by this server's.
 			args = podArgs(t, exporterArgs, map[string]string{
