@@ -13,7 +13,23 @@ carrying `pool_max_conns` is refused at open rather than silently overridden —
 applies embedded migrations from `internal/dispatch/store/migrations` (refusing
 the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
-migrations"), then starts HTTP serving. The Postgres store contains people,
+migrations"), then binds its port, registers the process in the registry of
+live server processes (`internal/dispatch/processes`, migration `0135`: a key
+set a live process does not share both ways refuses the start, exiting 1
+before anything is served, once the process has waited up to one live window
+(15 s) and a heartbeat for the refusing process to stop heartbeating, so a
+restart after a kill starts once the dead process's row lapses, and a SIGTERM
+during that wait logs `dispatch: stopped while waiting for admission to the
+registry of live server processes` at INFO and exits 0; `joinRegistry` in
+`registry.go`), and starts HTTP serving; shutdown deregisters it
+once HTTP has drained. A process whose heartbeat lapsed (frozen, cut from the
+database) or whose row was pruned checks its keys again before it counts as
+live once more; beside a live process whose keys it does not share, its
+heartbeat refuses (`processes.Registration.Lost`), and `serveUntilStopped`
+logs `dispatch: this server process no longer shares its signing keys with a
+live server process` at ERROR, stops serving as at SIGTERM (listener closed,
+requests in flight answered, row deleted) and returns the refusal, so the
+process exits 1. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
 A migration must leave the release before it able to read and write the
 schema, since two processes serve one database through a rolling update: a
@@ -47,7 +63,10 @@ generated from it. A variable a release stopped reading leaves the table for
 `resolveBootConfig` refuses to start while it is set (`refuseRemovedSettings`).
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
-mux, above the dashboard router, and the probe reads the database through
+mux, above the dashboard router. It is a readiness probe and never a liveness
+check: its status is `200` while this process can serve requests and `503`
+while the database does not answer, so a liveness probe on it would restart
+every server process during a database failover. The probe reads the database through
 `store.Pool.Healthy` — a one-connection pool nothing else uses, under
 `store.healthProbeTimeout`, two seconds covering dial and query. It never waits
 on the shared pool: a busy period legitimately leaves that pool with no free
@@ -57,14 +76,24 @@ in-flight request of every other client. The compose healthcheck and the deploy
 script are tighter still at three seconds. The deadline covers the other half —
 a database that drops packets rather than refusing is answered `503` with
 `db: false` inside the bound, never with silence, and the reason is logged.
+`ok` is `db`: `nats` (the publisher's connection, `null` with NATS disabled;
+`serverBus`'s pings declare a silently cut connection lost within two to three
+seconds), `files`, `signin` and `service_tokens` (each issuer's discovery
+document read, `null` when that issuer is not configured) are reported and
+none decides `ok` or the status, since the process serves through an outage of
+each; a check that needs one asserts it itself (`healthzHandler`).
 
-Beside `ok`, `db`, `nats` and `files`, `/healthz` names what is deployed: `commit`, the
-legion commit the image build stamped (`main.buildCommit`, from the Dockerfile's
+Beside those, `/healthz` names what is deployed: `commit`, the
+legion commit this process's image build stamped (`main.buildCommit`, from the Dockerfile's
 `LEGION_COMMIT` build argument, which the release workflow sets to its
 `github.sha` and which must be a full sha or empty; `null` in an unstamped
-build), and `schema_version`, `max(version)` from `schema_migrations`, read by
+build); `fleet_commit`, the commit of the latest announcement that every live
+server process serves one build (`startup.Announcer.FleetCommit`, the one
+`server.started` carries; `null` when there is none or before this process's
+announcer first read it, and up to one five-second announcer pass behind the
+table), which the Legion daemon reads; and `schema_version`, `max(version)` from `schema_migrations`, read by
 the same probe query (`null` whenever `db` is false). The deployment repository's
-dispatch-apply lane compares both with the image pin it applied and that commit's
+dispatch-apply lane compares `commit` and `schema_version` with the image pin it applied and that commit's
 migrations.
 
 Migration 0010 added stored generated `search` columns. Migrations `0057`–`0061` made them plain
@@ -131,7 +160,12 @@ server's.
 A present `NATS_URLS` overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the
 outbox start; the server
 owns `ENVOY_NOTIFICATIONS` on whichever server that resolves to, and refuses one that is not this
-machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the run means it (every deployment sets it). A
+machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the run means it (every deployment sets it). Every
+NATS client of the server connects through `serverBus` (`bus.WithConnectInBackground`,
+`bus.WithSilentCutDetection`): a NATS that is down or refuses the credential at boot refuses
+nothing, the client connecting in the background and retrying forever, and only a configuration
+error (an unusable seed or SOCKS5 setting, a server that is not this machine's) stops the boot;
+the owning client reconciles the stream on its first connection rather than at boot. A
 present `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an absolute `http`
 or `https` URL with no path, and is the exact browser origin
 used for sign-in. It must equal the URL humans type into the browser, with
@@ -162,7 +196,9 @@ With NATS configured and the GitHub App private key loaded, startup also runs th
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
 `redeliver.Interval` it lists the App webhook's failed deliveries and redelivers them through
 GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
-bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
+bucket, which the sweeper opens on its first pass that finds NATS connected (`Sweeper.Open`), not
+at boot, since the server's NATS clients connect in the background (`serverBus`).
+`envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
 over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
 the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
 Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`)
@@ -269,8 +305,18 @@ write identity errors with `identity.WriteError`.
   another issuer, a domain that is not a lowercase DNS name, and a group under
   Google's issuer; a deployment with the four Cognito settings reaches none of
   them. The authorization and token endpoints come from the issuer's discovery
-  document, read at boot under `oidc.DiscoveryTimeout`. Those boot checks, the
-  discovery and the request identity main builds live in
+  document, which `oidc.NewCodeFlow` does not read: `oidc.CodeFlow.Run`, started
+  at boot, reads it in the background (retrying after one second, doubling to
+  thirty), and so does the first call that needs it, so an unreachable issuer
+  refuses no boot. Until it is read, `AuthURL`, `Exchange`, `Refresh` and
+  `Revoke` fail with `oidc.ErrIssuerUnavailable`, which `/auth/start` and the
+  callback wrap in `identity.ErrSignInUnavailable` and answer
+  `503 SIGNIN_UNAVAILABLE`. The sign-in in flight rides the
+  browser's `dispatch_oauth_state` cookie (`routes/oauthstate.go`: state,
+  nonce, next and expiry, signed under a key `auth.SigningKeys.SignFor` derives
+  from the current signing key), so any process completes a sign-in another
+  started, and no process holds pending state. Those boot checks, the
+  code flow and the request identity main builds live in
   `cmd/dispatch/signin.go`, and `identity.SignInRule` — an interface with two
   implementations, `identity.GroupRule` and `identity.DomainRule`, which
   `signInRule` chooses between once from boot's settings — carries the choice
@@ -293,13 +339,21 @@ write identity errors with `identity.WriteError`.
   migration 0112): `PgPeopleStore.SignInSubject` ends every session of the address in
   the transaction that records a `sub` other than the stored one, so a failed
   revoke records nothing. `identity.Membership` renews that sign-in at least
-  hourly: a refresh the issuer refuses, or one whose ID token no longer passes
+  hourly, the age measured by the database (`now() - confirmed_at`): a refresh
+  the issuer refuses (`oidc.ErrGrantRefused`, a `400` or `401` `invalid_grant`),
+  or one whose ID token no longer passes
   the rule, names another email, or (under a domain) another `sub`, advances
   their session generation and forgets the token, ending every session they
-  hold. `store.PgPeopleStore` seals that token at rest
+  hold. Any other failed refresh (`oidc.ErrIssuerUnavailable`) ends nothing:
+  `Login` returns it wrapped in `identity.ErrSignInUnavailable`, every caller
+  answers that `503 SIGNIN_UNAVAILABLE` (`identity.WriteError`; a service
+  token's own issuer outage stays `OIDC_ISSUER_UNAVAILABLE`), and the next
+  request after the issuer answers
+  refreshes. `store.PgPeopleStore` seals that token at rest
   (`store/refresh_token_seal.go`; the format is in the README's Identity
-  section) under a key derived from the session signing key, which main hands
-  it with the cookie key (`openPeople`, `signin.go`). A stored value that does
+  section) under a key derived from the current signing key, and opens one
+  sealed under any key of the set; main hands
+  it the same `auth.SigningKeys` as the cookie identity (`openPeople`, `signin.go`). A stored value that does
   not open is no refresh token: `Membership` answers none and logs, writing
   nothing. Every boot retires each token stored in plain text
   (`retirePlainRefreshTokens`, `PgPeopleStore.RetirePlainRefreshTokens`):
@@ -379,10 +433,13 @@ write identity errors with `identity.WriteError`.
   pair refuses to boot naming the missing one) make a Kubernetes pod's projected
   service-account token a third bearer credential. `resolveBootConfig` only
   reads the pair, through the shared `oidc.ConfigFromEnv` the listener also
-  uses; `oidc.Discover` runs in the boot path beside the store and document
-  setup, under `oidc.DiscoveryTimeout`, so an issuer that is unreachable — or
-  one that accepts the connection and never answers — refuses the boot naming
-  it instead of hanging before the port is bound. A bearer is tried as the
+  uses; the server's verifier is an `oidc.LazyVerifier` (`serviceTokenVerifier`),
+  which reads the issuer's discovery document in the background from boot
+  (`Run`) or at the first token, each attempt bounded at ten seconds, so an
+  issuer that is unreachable — or one that accepts the connection and never
+  answers — refuses no boot: until it is read a JWT-shaped bearer is answered
+  `503 OIDC_ISSUER_UNAVAILABLE`, never a 401, and every other credential is
+  served. A bearer is tried as the
   shared token first, and a JWT-shaped one
   (`oidc.LooksLikeJWT`) is then verified rather than looked up as a personal
   token: it succeeds as `{kind: "session", id: <body actor id>}` carrying
@@ -483,7 +540,7 @@ attempt runs again; and a repeat whose first request committed a write but whose
 comment routes, the single-session send and the broadcast commit a recovery point with what they
 made, so their repeat answers `201` from a fresh read instead and resumes what delivery it owes,
 which the delivery sweep also finishes on its own. Keys belong to the caller's login and are kept
-24 hours (`request_keys`, migration `0135`, swept by the suggestion-outcome sweep's pass). A write
+24 hours (`request_keys`, migration `0136`, swept by the suggestion-outcome sweep's pass). A write
 without the header runs unkeyed, as before. `PUT` and `DELETE` take no key. Every write route,
 `PUT` and `DELETE` included, that names its presser in `Dispatch-Login` runs only as that person:
 another person, or any bearer, is `409 LOGIN_CHANGED` before anything runs, its key untouched; a
@@ -492,13 +549,13 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
-| `/auth/start` | GET | public | Start Google sign-in at the sign-in issuer (the Cognito pool, or Google for `DISPATCH_SIGNIN_DOMAIN`, with offline access, `prompt=consent` and `hd`); `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `SignInRule.Person` admits (`GroupRule` or `DomainRule`): a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie (`issueSession`). |
+| `/auth/start` | GET | public | Start Google sign-in at the sign-in issuer (the Cognito pool, or Google for `DISPATCH_SIGNIN_DOMAIN`, with offline access, `prompt=consent` and `hd`), the sign-in's state in the signed `dispatch_oauth_state` cookie; `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`, `503 SIGNIN_UNAVAILABLE` and no cookie while the issuer is not discovered. |
+| `/auth/callback` | GET | sign-in state | Verify the `dispatch_oauth_state` cookie under the key set (any process completes a sign-in another started; `400` "invalid or expired state" for one missing, tampered, lapsed or naming another state), exchange the issuer's code and sign in the person `SignInRule.Person` admits (`GroupRule` or `DomainRule`): a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. `503 SIGNIN_UNAVAILABLE` while this process has not discovered the issuer; `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie (`issueSession`). |
 | `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the issuer's own session is left alone. |
 | `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login, event_head}` with `login` their lowercase email and `event_head` the newest committed event id when the sign-in check answered. The page uses that head as its first events subscription's resume point, so reads begun after sign-in cannot miss an event. The sign-in check comes first: a caller who is not signed in is `401 NO_IDENTITY` and the head is never read, and a signed-in caller whose event head cannot be read is `503 EVENT_HEAD_UNAVAILABLE`. |
 | `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no issuer exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | identity | Read a pull request, an issue, a commit's check runs or a commit's workflow runs from GitHub as the GitHub App (above). |
-| `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where one is configured (`files`, null otherwise), plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
+| `/healthz` | GET | public | Readiness, not liveness: `200` while Postgres answers within two seconds on the health pool, `503` while it does not (`ok` and `db` say the same). Also reports, never deciding the status, `nats` (the publisher connected to NATS, `null` with NATS disabled), `files` (the bucket answers a two-second `HeadBucket`, `null` with none configured), `signin` and `service_tokens` (each issuer discovered, `null` when not configured), plus `commit` (this process's build's legion commit, or `null`), `fleet_commit` (the commit of the latest announcement that every live server process serves one build, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
 | `/api/v1/projects` | GET, POST | user or bearer | List projects (including `open_asks`) or create one from `key` and `name`, whoever asks: a person or an agent session, which names itself in `actor`. A key that is not a project key, an empty name, a name holding a control character (Unicode Cc) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), or a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) is `400 INVALID_PROJECT`; every other format character (an emoji's joiner, a flag's tags, a direction mark, a soft hyphen) and combining mark is allowed beside a visible one; a name over `contracts.ProjectNameMax` (80) UTF-16 units after the trim is `400 CAP_EXCEEDED`; a key that already exists is `409 PROJECT_EXISTS`. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact, its kind read from its bytes as an issue upload's is. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as `README.md`'s Element weights lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/settings/repo-projects` | GET | user or bearer | List repository-to-project mappings, each with `default`: whether it is its project's default repository. |
@@ -631,11 +688,13 @@ The `dispatch-memory` job runs only when a file its `dispatch_memory` filter in
 itself, so every package the server imports is in that filter; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
-The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one
+The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-555) start two real Dispatch servers on one
 Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
 across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, an event-feed subscription receiving another process's event, and a document room
-closed when the other process writes it. They build only under the `multiprocess` tag and run in their own CI
+published once, an event-feed subscription receiving another process's event, a document room
+closed when the other process writes it, a sign-in started on one process completed on the other,
+people kept signed in across a key rotation, a process whose key set a live peer does not share
+refused at boot, and `server.started` published once per fleet-wide build. They build only under the `multiprocess` tag and run in their own CI
 job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
 and their NATS take minutes rather than seconds:
 

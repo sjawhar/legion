@@ -702,7 +702,7 @@ func TestResumeFromBeforeTheKeptDayGetsASnapshot(t *testing.T) {
 	if _, err := rig.database.Pool.Exec(t.Context(), `update delivery_changes set at = now() - interval '2 days' where seq <= 2`); err != nil {
 		t.Fatalf("age the first changes: %v", err)
 	}
-	if _, err := delivery.PruneChanges(t.Context(), rig.database.Pool, time.Now()); err != nil {
+	if _, err := delivery.PruneChanges(t.Context(), rig.database.Pool); err != nil {
 		t.Fatalf("prune the change log: %v", err)
 	}
 	conn := newFakeLiveConn()

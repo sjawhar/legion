@@ -43,7 +43,7 @@ func storeRouter(t *testing.T, database *store.Store) http.Handler {
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		People:     people,
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
 		Store:      database,
@@ -214,7 +214,7 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			options := build(t)
 			people := newMemoryPeople()
-			options.SigningKey = "signing-key"
+			options.SigningKey = testSigningKey
 			options.People = people
 			options.Identity = identity.HeaderIdentity{Header: "X-Dispatch-User", People: people}
 			ctx, err := BuildAppContext(options)
@@ -245,7 +245,7 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing.T) {
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		People:     people,
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
 	})
