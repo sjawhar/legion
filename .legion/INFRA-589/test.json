@@ -2,37 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T13:55:00Z",
-  "round": 8,
-  "headTested": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd (code head 8530db16; meta.json build_commit 405dfe70, build_dirty false)",
-  "surface": "The branch diff, and the packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod: LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120), seed at migration 134, box_busy_before 1.0%. The stack is stopped.",
-  "scope": "8530db16 changes comments, README.md prose, the header comments of the route-mix file built into the binary, and the changelog fragment's name. I checked that no non-comment line of a .go, .sh or .txt file changed. Behaviour was proven in round 7 at 945d9940, so this round re-checked the key search and ran one smoke step, which also proves the edited route-mix file still parses.",
+  "completed": "2026-10-28T14:55:00Z",
+  "round": 9,
+  "headTested": "17cff7cab67b047f91a3b3ef3f988c8e33fc16d1 (code head f93dbc53; meta.json build_commit 17cff7ca, build_dirty false)",
+  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120). The seed is at migration 134, this build's level. box_busy_before was 0.7-1.5%. The stack is stopped.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's key search over the branch's added lines outside .legion/: 3 matches, all the {key_ref} placeholder (README.md:456, routes-2026-10-26-1719Z.txt:15, routes.go:148). Read the fragment: pr2369-Added-20261028-133210.yaml, Issue: pr2369. Ran a smoke step at this head."
+    "how": "I drove both review round-4 fixes live, with harder inputs than the implementer's. For finding 1: a step with --grace 0s, so the sampler's context ends at the window's end, then a normal smoke, two 1x steps and a 60 s series. For finding 2: foreign runs with a NATS token userinfo plus user:password in a two-server -nats list, a two-host -pg URL with a password, a password in the -pg query string, an unescaped comma inside a password, and a keyword/value -pg string. I re-ran the negative controls."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The head can merge and carries CI: GitHub runs the required checks and envoy-go only on a head that merges cleanly with main (the same failure as round 5, which the architect agreed to complete as fail)",
+      "evidence": "gh pr view 2369 --json mergeable,mergeStateStatus -> CONFLICTING DIRTY at head 17cff7ca, read at 14:5xZ on 2026-10-28; it was MERGEABLE at 945d9940 and 405dfe70. Since the branch's last merge of main, main changed .github/workflows/envoy-and-contracts.yaml and packages/envoy/AGENTS.md, which this branch also edits. CI at f93dbc53 when read: changes, typecheck and pr-title success; lint and test in progress; envoy-go, envoy-e2e-local and envoy-smoke queued. One thing for the forward merge to check: main's 139c61b3 (#2364) moves Dispatch to PostgreSQL 18 (gcp:Dispatch defaults to POSTGRES_18; CI, tests and dev databases run pgvector on 18). This harness runs Postgres 16.2 from the pgserver 0.1.4 wheel, and README.md 'Differences from production' does not yet say that production's database is a different major. The next round runs the harness on the merged build, seed included, to check whether Dispatch's migrations still apply on 16.2. I sent the architect the question of whether the harness should move to Postgres 18."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "Tester round-7 failure: text this branch adds outside .legion/ carries no Dispatch issue key, project key or dispatch:// link, apart from the {key_ref} placeholder; the changelog fragment names the pull request",
-      "surface": "the branch diff against main (what the squash merge puts on main)",
-      "command": "jj diff --from 'fork_point(main@origin | @-)' --to @- --git '~.legion' | grep '^+' | grep -v '^+++' | grep -cE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://'; grep -rnE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://' packages/envoy/loadtest packages/envoy/.changes/unreleased/; ls packages/envoy/.changes/unreleased/",
-      "observed": "3 added lines match, all the placeholder: README.md:456 '`{key_ref}`: `dispatch://<key>`', routes-2026-10-26-1719Z.txt:15 '(URL-escaped dispatch://<key>)', routes.go:148 'url.QueryEscape(\"dispatch://\"+is.Key)'. Fragment pr2369-Added-20261028-133210.yaml with kind Added and Issue: pr2369; INFRA-589-load-test-harness.yaml is gone. The new commit subject carries no key. No non-comment line of a loadtest .go, .sh or .txt file changed in 8530db16.",
-      "headSha": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd",
-      "negativeControl": "at round 7's head 945d9940 the same search found 19 lines, including the fragment's 'Issue: INFRA-589'"
+      "criterion": "Review round 4, finding 1: a sample whose reads ran after the step ended keeps none of them, so no zero or negative value enters the statistics",
+      "surface": "run-step.sh on the real stack",
+      "command": "run-step.sh smoke-r9-g0 --events 2 --sessions 50 --requests 10 --duration 60s --grace 0s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; jq on summary.json and samples.json",
+      "observed": "exit 0; 16/16, 22/22, 20/20, 35/35, 23/23 committed, receipts 580/580; 13 samples in window; goroutines p50 137; NATS in/out 10.3/22.0 msgs/s; no sample in samples.json with pg_total 0 or goroutines 0; pg, pprof, nats, lock and ungranted read errors all 0; no mark in TABLES.md",
+      "headSha": "17cff7cab67b047f91a3b3ef3f988c8e33fc16d1",
+      "negativeControl": "smoke-r9 (20 s grace), step-1x-r9/-r9b and the six series steps: every read-error count 0, NATS rates positive"
     },
     {
-      "criterion": "A1/A3 and A5 still hold after the wording change, including the edited default route-mix file, which is built into the binary",
-      "surface": "packages/envoy/loadtest CLI",
-      "command": "run-step.sh smoke-r8 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; README header search",
-      "observed": "exit 0; 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, clock_anomalies 0, all read-error counts 0; route mix 'routes-2026-10-26-1719Z.txt (embedded)' with 18 routes, 899/899 2xx; 47 table headers all defined in README.md",
-      "headSha": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd",
-      "negativeControl": "the route-mix parser refuses a bad file before any request (round 7 at 945d9940: POST on line 3 refused, exit 1); this round's file has only comment changes, and the run read all 18 routes"
+      "criterion": "Review round 4, finding 2: no step file or output holds a NATS user or token, a URL password or a bearer token, for a single URL and for a comma-separated list",
+      "surface": "stack.sh loadgen run -allow-foreign and loadgen tables on the real stack",
+      "command": "stack.sh reset; loadgen run -allow-foreign with -nats 'nats://<token>@127.0.0.1:24222,nats://loadgen:<pw>@127.0.0.1:24222' and -pg 'postgres://postgres:<pw>@127.0.0.1:25432,127.0.0.1:25432/dispatch?sslmode=disable'; then -pg '...?sslmode=disable&password=<pw>'; then -nats 'nats://u:<pw first 5>,<rest>@127.0.0.1:24222' (an unescaped comma in a password); then a keyword/value -pg 'host=... password=<pw> ...'. Each time, grep -caF the NATS token, the password, a 6-character slice of it and both stack tokens over every step file, stdout, stderr and the tables output",
+      "observed": "list: rc 0, 31/31 committed, receipts 155/155, meta.json '-nats=nats://127.0.0.1:24222,...' and '-pg=postgres://127.0.0.1:25432,...', 0 of 19 files hold a secret. qpw: rc 0, '-pg=postgres://127.0.0.1:25432/dispatch?sslmode=disable', 0 of 19. comma: rc 1 '-nats is not a URL with a scheme and a host, or a comma-separated list of them', before any connection, 0 of 2. kv: rc 1, the same refusal for -pg, 0 of 2",
+      "headSha": "17cff7cab67b047f91a3b3ef3f988c8e33fc16d1",
+      "negativeControl": "-allow-foreign -url $DISPATCH_URL -listener $ENVOY_URL (production, the party the guard must refuse) with the stack's tokens: rc 1, 'answered 401'; events max id 10004 before and after"
+    },
+    {
+      "criterion": "A1/A3, A4, A2, A5, A6 at this head",
+      "surface": "packages/envoy/loadtest CLI; README.md",
+      "command": "run-step.sh smoke-r9 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; run-step.sh step-1x-r9 and step-1x-r9b --events 4 --sessions 400 --requests 60; run-series.sh --duration 60s; run-step.sh routes-alt-r9 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; README header search",
+      "observed": "smoke-r9 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34, receipts 865/865, clock_anomalies 0. step-1x-r9: lock held 85%, waiters p50 45, 1.19 of 3.99 events/s; step-1x-r9b: held 100%, waiters 44, 1.89. lockprobe.go is unchanged this round, so I read r9 as run-to-run variance: its probe took 6,081 reads against 4,498 in r9b, and Postgres used 0.54 cores against 0.75; held > 0.5 passes A4 either way. series-20261028T142802Z exit 0, six complete step directories on build 17cff7ca, 8 tables, 1x and 2x held 100%, read errors 0. routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0. 47 table headers, 0 missing",
+      "headSha": "17cff7cab67b047f91a3b3ef3f988c8e33fc16d1",
+      "negativeControl": "route mix with POST on line 3 -> 'line 3: method \"POST\" is refused', exit 1; --event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1"
     }
   ],
   "observations": [
-    "Wording only, for the reviewer: README.md lines 886-888 and 889-891, edited this round, break onto short lines ('document-room sampler', 'into this package, so that'), where the README elsewhere wraps at 100 characters.",
-    "CI at code head 8530db16 when read: changes, lint, typecheck, test and pr-title queued. GitHub reports MERGEABLE."
+    "No defect found in the round-4 review fixes. The only failure is the merge conflict and the CI it blocks, plus the Postgres 18 check the forward merge brings.",
+    "Main's own reds that the INFRA controller named (recipients-claim.e2e.ts since #2233, fixed by #2324; infra/gcp TestDispatchConnectionsPerPodIsTheServers since #2233) are main's, not this PR's. Neither has run at this head yet."
   ]
 }
