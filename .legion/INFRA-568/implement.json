@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-568",
+  "completed": "2026-10-28T21:57:42Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
+  "proof": [
+    {
+      "criterion": "Conflict round after retro: forward merge of main bb9fe49c with migrations contiguous after main's, dispatchConnectionsPerPod equal to store.ConnectionsPerProcess, fragments and the key rule kept, no claude-envoy dist",
+      "surface": "the pull request on GitHub and the merged head's Go suites on Postgres (ICU, fresh database)",
+      "command": "gh pr view 2397 --json mergeable; go test ./internal/dispatch/store/ ./internal/dispatch/embedqueue/ and the route/related/ask/search api tests; cd infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers; jj diff --from main@origin -- packages/*/CHANGELOG.md packages/claude-envoy/dist packages/claude-envoy/legion; jj diff --from main@origin | grep -E '^\\+.*(INFRA-[0-9]|dispatch://)'",
+      "observed": "MERGEABLE; migrations 0136_dashboard_assets (main), 0137_related_checks, 0138_issue_embedding_spec, TestMigrationSetIsNumberedOneToN passes; dispatchConnectionsPerPod 87 passes; the CHANGELOG, dist and legion diffs are empty; the key grep prints nothing; the suites pass; fingerprint a0b437d3… -> 03557e7b… (https://github.com/sjawhar/legion/pull/2397#issuecomment-6481687006)",
+      "headSha": "e64224e5503c79febb49fbb03946b3bda72dce3b",
+      "negativeControl": "before the merge GitHub reported CONFLICTING on envoy-client.md, cmd/dispatch/README.md and routes_table_test.go, and the branch's 0136_related_checks collided with main's 0136_dashboard_assets"
+    }
+  ],
+  "filesChanged": [
+    "merge e64224e5: .dispatch/architecture/{envoy-client,dispatch-store}.md, packages/envoy/cmd/dispatch/{README,AGENTS}.md, api/routes_table_test.go (145 routes), the four migration files renamed to 0137/0138 and their references, packages/envoy/.changes/unreleased/pr2397-Added-*.yaml"
+  ],
+  "trickyParts": [
+    "The retro learnings (docs/solutions/*/*-pr2397.md) stay; the next retro removes this .legion/INFRA-568/ directory again."
+  ]
+}
