@@ -12,14 +12,15 @@ import (
 )
 
 // A lone loop of a fixed cadence - the webhook redelivery, suggestion-outcome, compaction,
-// issue-ask repair and prune loops each return their interval from every pass - must serve every
-// period its run spans: each pass records the period after the one the pass before it recorded.
+// issue-ask repair and prune loops, each on duty.RunLeased's ticker - must serve every period its
+// run spans: each pass records the period after the one the pass before it recorded.
 // Here every pass takes 40% of the interval, as a sweep that pages GitHub or a compaction that
 // walks every document takes a noticeable share of its own. A loop whose next tick is armed only
 // once the pass returns is due one interval plus that pass's time after the tick before, so its
 // due times drift across the period boundaries and, about every two and a half passes here, jump
 // over a whole period that no pass serves: the period a lone process loses. A loop that ticks on a
-// fixed schedule, its due times one interval apart whatever each pass takes, serves every one.
+// ticker, its due times one interval apart while each pass takes less than the interval, serves
+// every one.
 func TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)

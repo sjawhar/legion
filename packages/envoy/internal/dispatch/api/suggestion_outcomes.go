@@ -163,7 +163,8 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 // leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened). The period is
 // interval itself and not SuggestionSweepInterval: this loop ticks on what its caller asked for.
 // The ticks are duty.RunLeased's, a ticker's: the first one interval after the call, then one each
-// interval however long a pass takes, the ticks a pass overruns dropped.
+// interval; the first tick a pass overran comes at once with the moment it was due, and only the
+// ones after it are dropped.
 func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, suggestionOutcomeLease, interval, duty.TickAfterInterval, func(ctx context.Context) {
 		if err := sweepSuggestionOutcomes(ctx, pool); err != nil {

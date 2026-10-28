@@ -61,12 +61,14 @@ const (
 // time, the moment it hands Exclusive, is the value the ticker delivered, the clock read at that
 // tick and not a moment worked out from a reading taken at start, so a step of the wall clock
 // while the loop runs moves the due times after it with it. The ticker's ticks are one interval
-// apart however long each pass takes, so a lone loop's due times fall in consecutive periods on
-// this process's clock (periodBoundary) and no period is lost. A tick armed only once the pass
-// before it returned would be due one interval plus that pass's time after it, and as those delays
-// add up its due times would drift across the period boundaries and jump over a period no pass
-// serves. A pass that overruns the interval gets what a ticker gives a slow receiver: the ticks it
-// overran are dropped, not run late one after another.
+// apart while each pass takes less than the interval, so a lone loop's due times fall in
+// consecutive periods on this process's clock (periodBoundary) and no period is lost. A tick armed
+// only once the pass before it returned would be due one interval plus that pass's time after it,
+// and as those delays add up its due times would drift across the period boundaries and jump over
+// a period no pass serves. A pass that overruns the interval gets what a ticker gives a slow
+// receiver (Go's runtime, time.go): the first tick it overran comes at once, with the moment it
+// was due, and only the ticks after it are dropped, so due times stay whole intervals apart and
+// overrun ticks are not run late one after another.
 //
 // ctx ending returns at once from a wait, and from a tick once its pass returns.
 func RunLeased(ctx context.Context, leases Leases, name string, interval time.Duration, first FirstTick, pass func(context.Context)) {

@@ -431,7 +431,8 @@ func (r *Registration) Deregister(ctx context.Context) error {
 // PruneAge by the database's clock: what processes that died without deregistering left behind.
 // Each pass runs under pruneLease, so one process prunes per period however many serve the
 // database. The ticks are duty.RunLeased's, a ticker's: the first one interval after the call,
-// then one each interval however long a pass takes, the ticks a pass overruns dropped.
+// then one each interval; the first tick a pass overran comes at once with the moment it was due,
+// and only the ones after it are dropped.
 func RunPrune(ctx context.Context, pool *store.Pool, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) {
 		pruned, err := prune(ctx, pool)

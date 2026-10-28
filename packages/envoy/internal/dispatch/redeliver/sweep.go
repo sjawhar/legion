@@ -241,8 +241,9 @@ const webhookRedeliveryLease = "webhook-redelivery"
 // starts in the middle of another's interval, which is what a rolling update makes, finds that
 // interval swept and skips. The period is interval itself, the loop's own tick, and not the
 // package's Interval. The ticks are duty.RunLeased's, a ticker's: the first at the moment Run
-// starts, then one each interval however long a sweep takes, the ticks a sweep overruns dropped,
-// so a lone process sweeps every period. leases is required, as it is of every leased loop
+// starts, then one each interval; the first tick a sweep overran comes at once with the moment it
+// was due, and only the ones after it are dropped, so a lone process sweeps every period its
+// sweeps do not overrun. leases is required, as it is of every leased loop
 // (cmd/dispatch exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, webhookRedeliveryLease, interval, duty.TickAtStart, s.sweepAndReport)

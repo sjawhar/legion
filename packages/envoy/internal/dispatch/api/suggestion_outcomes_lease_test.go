@@ -118,7 +118,9 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 //
 // It is the loop's own shape that is at stake. Two ticks' due times are as little as one period
 // apart: a loop of a fixed cadence (duty.RunLeased) passes its interval as its period and its
-// ticker's ticks as its due times, exactly one interval apart, and a loop paced by its passes
+// ticker's ticks as its due times, one interval apart while each pass takes less than the
+// interval (a pass that overruns gets the first tick it overran at once, with the moment it was
+// due, and only the ticks after it are dropped), and a loop paced by its passes
 // (duty.RunLeasedAfterEachPass, duty.RunJittered) passes the wait before its tick, its due times
 // that wait plus the time the earlier tick took apart. The record of a pass is stamped a moment
 // after the tick that made it - the time it takes to take the lease. Judged by that moment, a tick
