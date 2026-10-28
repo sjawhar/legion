@@ -157,10 +157,11 @@ fails the pull request that adds it.
   `go env -w`, and the step's working directory (its own, else a `defaults.run` one, else the
   root) the `Run`'s; its packages, tags and mode must then be exactly the `Run`'s, and a script's
   line must be exactly the pinned text. Any other claimed command (`GOFLAGS=...`, another flag,
-  a pipe, a quote, a continuation) counts as reading every Go file of its module and the module
-  files, and fails naming the command unless its filter selects them all; a step in another
-  directory falls to the modules of both. Pass a value to a later step as a step output set in
-  that step's `env:`, not through `$GITHUB_ENV`. The check fails wide rather than parse further.
+  a pipe, a quote, a continuation, a `cd`), and one whose step runs in another directory, counts
+  as reading every Go file and every `go.mod`, `go.sum`, `go.work` and `go.work.sum` of the
+  repository, and fails naming the command unless its filter selects them all. Pass a value to a
+  later step as a step output set in that step's `env:`, not through `$GITHUB_ENV`. The check
+  fails wide rather than parse further.
   It fails too when a pinned text is gone, and when a job or step is
   gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go commands still gets a
   gate with its reads.

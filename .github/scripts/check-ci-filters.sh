@@ -16,7 +16,7 @@
 #     of a go command it starts, and each file it reads through `..`;
 #   * the module files of each go command's workspace: go.work, go.work.sum and every bound
 #     module's go.mod and go.sum (`go env GOWORK`, `go work edit -json`);
-#   * for a claimed go command this check does not reduce (below), every Go file of its module;
+#   * for a claimed go command this check does not reduce (below), every Go file of the repository;
 #   * the static reads of the job's other steps: actions, the Bun install, Biome, scripts, fixtures.
 # Those globs are expanded over the repository's files (tracked, and untracked ones git does not
 # ignore, so an uncommitted new file counts and a build output does not) and each file is held to
@@ -57,13 +57,11 @@
 # script's line holding its text must be that text alone and uncontinued, under such an env (the
 # job's and every one of its steps') and such a job; the script's variables are the Run author's
 # to read, and anything appended to that line falls to everything. Any other claimed command - an
-# assignment such as GOFLAGS, another flag, a pipe, a quote, a substitution - counts as reading
-# every Go file of its module (the nearest go.mod at or above its directory, nested modules
-# aside; above every module, each module of the go.work there), with the module's go.mod and
-# go.sum and its workspace's module files, and fails naming the command unless its filter
-# selects all of them. A line whose step runs in another directory than the Run's falls to the
-# modules of both, since a cd in the script may move it to either. It fails wide, never narrow: a
-# new evasion is answered by falling to everything, not by more parsing.
+# assignment such as GOFLAGS, another flag, a pipe, a quote, a substitution, a cd - counts as
+# reading every Go file of the repository, with every go.mod, go.sum, go.work and go.work.sum in
+# it, and fails naming the command unless its filter selects all of them. So a cd, `go -C` or
+# a step in another directory than the Run's can only widen what it reads. It fails wide, never
+# narrow: a new evasion is answered by falling to everything, not by more parsing.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party

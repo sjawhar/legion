@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -260,27 +260,14 @@ def apply_rules(session: Session, rules: dict, source: str, seen: set) -> list:
     return reads
 
 
-def module_reads(session: Session, files: list, run_: Run) -> tuple:
-    """What a claimed command this check does not reduce counts as reading: every Go file of its
-    module (the nearest directory at or above the Run's workdir holding a go.mod, any nested
-    module's subtree aside; above every module, each module of the go.work that governs it), those
-    modules' go.mod and go.sum, and its workspace's module files. Returns (the modules'
-    directories, those paths)."""
-    root = (REPO / run_.workdir).resolve()
-    while root != REPO and not (root / "go.mod").is_file():
-        root = root.parent
-    work = session.module_files(run_)
-    if (root / "go.mod").is_file():
-        prefixes = ["" if root == REPO else f"{rel(str(root))}/"]
-    else:
-        prefixes = sorted({read.glob.removesuffix("go.mod") for read in work if read.glob.endswith("go.mod")})
-    paths = [read.glob for read in work]
-    for prefix in prefixes:
-        nested = [f.removesuffix("go.mod") for f in files
-                  if os.path.basename(f) == "go.mod" and f.startswith(prefix) and f != f"{prefix}go.mod"]
-        paths += [f for f in files if f.endswith(".go") and f.startswith(prefix) and not f.startswith(tuple(nested))]
-        paths += [f"{prefix}go.mod", f"{prefix}go.sum"]
-    return " ".join(p.rstrip("/") or "." for p in prefixes) or "(none)", paths
+GO_FILE_NAMES = ("go.mod", "go.sum", "go.work", "go.work.sum")
+
+
+def every_go_file(files: list) -> list:
+    """What a claimed command this check does not reduce counts as reading: every Go file of the
+    repository, and every module's and workspace's go.mod, go.sum, go.work and go.work.sum. A cd,
+    `go -C` or any other move of the command can then only widen what it reads, never narrow it."""
+    return [f for f in files if f.endswith(".go") or os.path.basename(f) in GO_FILE_NAMES]
 
 
 # ---------------------------------------------------------------- files and filters
@@ -376,7 +363,7 @@ def continued(lines: list, i: int) -> bool:
 
 
 # The one form of a go command this check reduces: `go test|vet|build`, then relative package paths
-# and only these flags. Any other claimed command counts as reading every Go file of its module.
+# and only these flags. Any other claimed command counts as reading every Go file of the repository.
 NOT_SIMPLE = "$'\"`|&;()<>*?\\"
 PACKAGE = re.compile(r"\.\.?(/[A-Za-z0-9_./-]*)?")
 FLAG = re.compile(r"-v|-race|-count=[0-9]+|-timeout=[0-9]+[smh]|-buildvcs=false")
@@ -531,10 +518,7 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                 workdir = step_workdir(document, job, step)
                 for r in pinned:
                     if workdir != (r.workdir.removeprefix("./").rstrip("/") or "."):
-                        # A cd in its script may move it to the Run's directory or not, so it falls to
-                        # the modules of both.
-                        why_not = reason or f"its step runs in {workdir}, the Run in {r.workdir}"
-                        unreduced[owner[id(r)]] += [(r, where, why_not), (replace(r, workdir=workdir), where, why_not)]
+                        unreduced[owner[id(r)]].append((r, where, reason or f"its step runs in {workdir}, the Run in {r.workdir}"))
                         continue
                     if reason:
                         unreduced[owner[id(r)]].append((r, where, reason))
@@ -737,13 +721,13 @@ def main() -> int:
                 whys[read.glob].append(read.why)
         for read in g.reads:
             whys[read.glob].append(read.why)
-        # An unreduced command counts as reading every Go file of its module, and fails naming the
-        # command when its filter misses one.
+        # An unreduced command counts as reading every Go file of the repository, and fails naming
+        # the command when its filter misses one.
         held = []
         for r, command, why_not in unreduced.get(g.filter, []):
-            module, paths = module_reads(session, files, r)
+            paths = every_go_file(files)
             why = (f"{command}, which this check does not reduce ({why_not}), so it counts as reading every Go "
-                   f"file of module {module}")
+                   f"file of the repository")
             for path in paths:
                 whys[path].append(why)
             held.append((f"::error file={WORKFLOW}::{why}; filter {g.filter} must select it on any Go change", paths))

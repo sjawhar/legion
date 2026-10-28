@@ -417,7 +417,7 @@ replace "$root/.github/workflows/ci.yaml" "              - 'mod/**'" "          
 run_check "$root"
 check "fails once its filter misses one of them" "$(is "$status" 1)"
 check "names the command, why it is not reduced and the filter" \
-  "$(contains "$out" 'job app step "Test the app" runs `GOFLAGS=-tags=probe go test ./cmd/app ./lib`, which this check does not reduce (it starts with `GOFLAGS=-tags=probe`, not go), so it counts as reading every Go file of module mod; filter app must select it on any Go change')"
+  "$(contains "$out" 'job app step "Test the app" runs `GOFLAGS=-tags=probe go test ./cmd/app ./lib`, which this check does not reduce (it starts with `GOFLAGS=-tags=probe`, not go), so it counts as reading every Go file of the repository; filter app must select it on any Go change')"
 
 echo "case: a script's go command is held to its pinned text, the whole line"
 root=$(fixture script-line)
@@ -430,7 +430,7 @@ printf '#!/bin/sh\ngo build ./cmd/app ./other\n' > "$root/build.sh"
 run_check "$root"
 check "fails once the line holds more" "$(is "$status" 1)"
 check "names the script's command and its line" \
-  "$(contains "$out" 'build.sh, which job app runs, runs `go build ./cmd/app`, which this check does not reduce (its line is `go build ./cmd/app ./other`, not the text alone), so it counts as reading every Go file of module mod')"
+  "$(contains "$out" 'build.sh, which job app runs, runs `go build ./cmd/app`, which this check does not reduce (its line is `go build ./cmd/app ./other`, not the text alone), so it counts as reading every Go file of the repository')"
 check "and the file the module adds" "$(contains "$out" '::error file=mod/other/other.go::')"
 
 echo "case: a claimed simple go command whose step runs it in another directory"
