@@ -22,8 +22,8 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_SIGNING_KEY` | One key, or several separated by whitespace, the first the current key: it signs every new session cookie, seals every refresh token Dispatch stores, and, under a key derived from it for that purpose alone, signs the sign-in's state cookie; every key of the set verifies a cookie and opens a seal (Identity, below). It is parsed as `DISPATCH_AGENT_TOKEN` is: whitespace at either end is ignored, and startup refuses an empty or repeated entry, naming its position and never its value. A value of nothing but whitespace counts as unset. Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), which no other process holds, so a deployment of more than one process gives every process the same keys: a session minted on one process is presented to whichever process answers next, and a key that process does not hold signs the person out and leaves their stored refresh token unopenable. A process whose key set a live server process does not share both ways, a minted key included, refuses to start, exiting 1 before it serves (Running more than one process, below). A rotation in three steps signs nobody out (Identity, below); dropping the key a cookie or a seal was made under signs its person out and leaves that seal unopenable. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. A NATS that does not answer at boot, or refuses the credential, refuses nothing: the server starts and serves, each of its NATS clients connects in the background and retries forever, and a refused credential is logged at ERROR at most once a minute (Running more than one process, below). |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
-| `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`). When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment. It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time. It never reads `index.html` or a non-asset path from the bucket. An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key. An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once: a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away. A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs nothing above a debug line and gets no response. The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404. Leave it unset for local-only static serving. |
-| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Since it generates its key at every start, a dev-sign-in server refuses to start beside any other live server on its database, and any other server refuses to start beside it (Running more than one process, below); a restart after a kill, which leaves the killed process's row behind, waits up to about 20 seconds for that row to lapse. Any value other than `1` or unset is refused. |
+| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY` (below) gives the processes of one local harness one key; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Without `DISPATCH_DEV_SIGNIN_SHARED_KEY` it generates its key at every start, so a dev-sign-in server refuses to start beside any other live server on its database, and any other server refuses to start beside it (Running more than one process, below); a restart after a kill, which leaves the killed process's row behind, waits up to about 20 seconds for that row to lapse. The processes given one shared value start beside each other. Any value other than `1` or unset is refused. |
+| `DISPATCH_DEV_SIGNIN_SHARED_KEY` | Only with `DISPATCH_DEV_SIGNIN=1`, which every fence above still applies to; boot refuses it otherwise. Every process given the same value signs session cookies with one key, so a person signed in on one of them stays signed in on the others: the browser suite's two-process mode (`packages/dispatch/e2e/run-server.sh`) gives both of its servers one random value per run. The key is not the value but the base64url of HMAC-SHA256 keyed by it over the fixed label `dispatch dev sign-in` (`devSignInSharedSigningKey`), so a production `DISPATCH_SIGNING_KEY` placed here signs no cookie, and seals no refresh token, that the production server accepts, and that server's cookies sign nobody in here. `DISPATCH_SIGNING_KEY` stays refused beside it. Unset, each dev-sign-in process generates a key of its own. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
 | `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` | Where meaning search embeds, and with what credential. Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below). A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries. |
 
@@ -39,8 +39,8 @@ created through the default also gets a `repo:owner/name` label.
 humans type into their browser, and the sign-in pool's app client must list
 `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
 
-`DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are removed: a boot
-that still sets either is refused, naming what replaced it.
+`DISPATCH_ALLOWED_LOGINS`, `DISPATCH_APP_CLIENT_SECRET` and `DISPATCH_ASSET_STORE_BUCKET` are
+removed: a boot that still sets any of them is refused, naming what replaced it.
 
 Agents normally authenticate with a personal `dsp_` token minted in Settings,
 sent as `Authorization: Bearer <token>`. `DISPATCH_AGENT_TOKEN` remains the
@@ -361,7 +361,11 @@ indistinguishable from one that is. The per-process key bounds the cookie, not
 every credential a dev session can write: a `dsp_` token it mints, and the
 session and token rows its sign-out changes, live in the database, and every
 server that reads that database acts on them. A dev-sign-in server therefore
-needs a database of its own.
+needs a database of its own. The one exception to the per-process key is a
+harness that runs several dev-sign-in processes on one database on purpose,
+as the browser suite's two-process mode does: `DISPATCH_DEV_SIGNIN_SHARED_KEY`
+gives them one key, derived from the value under a dev-only label, so their
+cookies are each other's and never a production server's.
 
 ## Local Postgres
 
@@ -532,6 +536,16 @@ What the two processes share, and what each keeps to itself:
   until then. A sign-in issuer or service-account issuer that cannot be reached is discovered in
   the background (Identity, above); until then only what needs it answers `503`. `/healthz`
   reports each as `nats`, `signin` and `service_tokens`, and none of them fails the probe.
+- Each build's dashboard assets are in the database. Every process publishes its web dist's
+  assets at boot, before it listens (`internal/dispatch/dashboard`, migration `0136`), and answers
+  a local miss under `/assets/` from there (Routes, below), so a page of one build served by one
+  process is served its chunks by a process of another build. A process that cannot publish (the
+  database refuses the write, or the build holds a file over 8 MiB, which CI's
+  `bun run check:asset-sizes` in `packages/dispatch` refuses first) exits before it is ready, so a
+  rolling update keeps the processes it would have replaced. A restart on a build already stored
+  writes no bytes. The prune after each publish keeps
+  every build a live server process serves and the 20 builds started most recently; a failed prune
+  is logged and the boot goes on.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
@@ -574,7 +588,7 @@ and nothing due they hold no timer and send no statement. The four that run pass
 replaced, so under load each runs no more often than that ticker did.
 
 - The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding
-  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0136`) for a new item
+  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0137`) for a new item
   or a text whose hash changed, and an update that leaves the text as it was notifies nothing. The
   rows the coverage pass writes wake it in process. Scans start at least 5 s apart. After each
   scan it reads when the earliest pending row falls due (a failed row's retry, or another
@@ -582,11 +596,11 @@ replaced, so under load each runs no more often than that ticker did.
   away. A throttled batch waits 5 s plus its backoff before the next. It takes no lease: its claim
   keeps two processes' scans off each other's rows.
 - The reference excerpt reconciliation (`docs.Service.RunReferenceExcerptReconciliation`, lease
-  `reference-excerpts`) is woken by a row trigger on `refs` (`0138`) that notifies
+  `reference-excerpts`) is woken by a row trigger on `refs` (`0139`) that notifies
   `dispatch_excerpts_owed` for each document mention left owed an excerpt, whichever build or
   command wrote it (`rebuild-refs` included). Batches of 20 documents start at least 2 s apart, the
   next as soon as that allows while a full batch leaves documents it can still record. A document
-  it cannot read or record is deferred in `reference_excerpt_backoff` (`0137`), keyed by the
+  it cannot read or record is deferred in `reference_excerpt_backoff` (`0138`), keyed by the
   version that failed: one minute after the first failure, doubling to at most six hours, plus up
   to a fifth again of jitter; a success deletes the row, and a newer version starts again from
   one. A deferred document stays out of the batches until it falls due, so documents that keep
@@ -594,7 +608,7 @@ replaced, so under load each runs no more often than that ticker did.
   earliest due time is the loop's only timer. Each process's first pass also marks owed the
   excerpts a pre-`0092` build left stale (`refs.MarkStaleExcerpts`), once.
 - The edit notice sweep (`docs.Service.RunEditNotices`, lease `edit-notices`) is woken by a row
-  trigger on `document_edit_notices` (`0142`) that notifies `dispatch_edit_notices` each time a
+  trigger on `document_edit_notices` (`0143`) that notifies `dispatch_edit_notices` each time a
   writer gives a notice a due time: a person's settled version opening or moving its quiet
   window, from either build. A sweep sends the notices that are due, each as one
   `artifact.human_edited` event, and then reads the earliest due time left
@@ -606,8 +620,8 @@ replaced, so under load each runs no more often than that ticker did.
 - The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`, lease `suggestion-outcomes`) is
   woken by `dispatch_events` (`0107`), which every event commit notifies whichever process made
   it. Passes start at least 60 s apart. A pass reads the events after its cursor
-  (`suggestion_outcome_cursor`, `0139`) and the suggestions no pass has judged yet
-  (`write_suggestions.swept`, `0140`), in pages of 1,000, each page in a transaction that holds the
+  (`suggestion_outcome_cursor`, `0140`) and the suggestions no pass has judged yet
+  (`write_suggestions.swept`, `0141`), in pages of 1,000, each page in a transaction that holds the
   cursor row `for update`, and judges only the pending suggestions those can resolve: the newly
   recorded ones, against all their events, and those whose source issue, source document or
   suggested issue a page's event names. An event or suggestion less than 60 s old waits for a
@@ -617,7 +631,7 @@ replaced, so under load each runs no more often than that ticker did.
   later.
 - The delivery settings both GitHub intakes route by are one cache per process
   (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
-  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0141`) for a change to any
+  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0142`) for a change to any
   column but the freshness ones every GitHub event and reconcile pass rewrite. A settings change
   reaches a running intake without a restart, and neither intake reads the row per message or on
   a timer; a read that fails is tried again 30 s later. The release before this one polls the row
@@ -1214,36 +1228,45 @@ server processes, and `server_build_announcements`, each build the fleet has ann
 exists, and the release before it neither reads nor writes either table, so that release runs
 over the new schema unchanged and the census answers `0`.
 
-Migrations `0136`–`0142` let the background loops wait for a change instead of polling for one
+Migration `0136_dashboard_assets` creates `dashboard_builds`, `dashboard_assets` and
+`dashboard_build_assets`, where every server process publishes its dashboard build's assets at
+boot and from which it answers a page of another build that asks it for that build's chunks
+(`internal/dispatch/dashboard`). It creates tables and touches no row; its census answers `0`.
+The release before it never reads or writes these tables, so it serves beside `0136` unaffected
+while both run — its own pages are served from its own image, as before — and rolling Dispatch
+back past `0136` is an image rollback alone, with no schema to restore: the tables are left for
+the next release that carries them, whose boot prunes what no build still needs.
+
+Migrations `0137`–`0143` let the background loops wait for a change instead of polling for one
 (Background loops, above). Each is additive: the release before them never reads the new tables
 or column, its writes reach the two replaced functions through the same triggers as before, it
 never listens on the new channels, and it keeps polling beside them during the roll. Every census
 answers `0`.
 
-- `0136_embeddings_notify` and `0141_delivery_settings_notify` each replace a function's body and
+- `0137_embeddings_notify` and `0142_delivery_settings_notify` each replace a function's body and
   lock no table. `embeddings_enqueue` (0118's body otherwise unchanged) also notifies
   `dispatch_embeddings` when its upsert writes a row, and `delivery_settings_changed` (0100's,
   which 0106's trigger keeps calling by name) also notifies `dispatch_delivery_settings` in the
   branch that logs a settings change.
-- `0137_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
+- `0138_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
   excerpt reconciliation failed on: its version, the failures in a row there, and when it is tried
   again.
-- `0138_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
+- `0139_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
   `excerpt_version` that leaves a document mention owed an excerpt, which notifies
   `dispatch_excerpts_owed`. It is a trigger rather than a notify in Go so that what the release
   before it writes, and `rebuild-refs` from either build, wakes the loop too; a migration of its
   own, so its transaction holds `refs`' lock alone, for milliseconds.
-- `0139_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
+- `0140_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
   highest event id the outcome sweep has judged by, inserted null so that the first pass judges
   every pending suggestion once.
-- `0140_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
+- `0141_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
   against all its events, with the constant default `true`, so the column is added without
   rewriting the table and every existing row counts as swept, and then sets the default to `false`
   for the rows inserted after it, the release before's included. It also creates two partial
   indexes: `write_suggestions_unswept`, the pass's read of the rows not yet swept, and
   `write_suggestions_pending_artifact`, its lookup of the pending suggestions by a new event's
   document.
-- `0142_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
+- `0143_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
   insert or an update that leaves a notice with a due time, which notifies
   `dispatch_edit_notices`. Every writer of such a row — a settlement, a named or snapshot version,
   a person's rebuild — writes a version and appends its event in the same transaction, which
@@ -1689,12 +1712,13 @@ then method. `envoy-dispatch routes` prints the same body from the table alone, 
 or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
 table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
-/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell. When
-`DISPATCH_ASSET_STORE_BUCKET` is configured, a missing local file under `/assets/` is read whole
-from the same key in the retained-assets bucket before Dispatch answers; it never reads
-`index.html` or a non-asset path from that bucket. An absent object remains
-`404 {"error":"not found"}` and any other store failure is a 502 with no cache header; without the
-setting every local asset miss remains the 404. The dashboard's
+/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell. Every server
+process publishes its dashboard build's assets into the database at boot (Running more than one
+process, above), so a missing local file under `/assets/` is read whole from the database under
+the same key (`assets/<file>`) before Dispatch answers, through a cache of at most 64 MiB the
+process's requests share; it never reads `index.html` or a non-asset path from there. A path no
+build published remains `404 {"error":"not found"}` and any other read failure is a 502 with no
+cache header. The dashboard's
 pages (`index.html` and the shell served for a browser route) carry `Cache-Control: no-cache` and
 an `ETag` of their bytes, no `Last-Modified`, and its hashed `/assets` files
 `public, max-age=31536000, immutable`, so a browser keeps no page from another build.
@@ -1734,6 +1758,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/dashboard/builds` | GET | cookie, trusted header, or bearer | Which dashboard builds are served: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (the registry of live server processes joined to `dashboard_builds` on the build id), sorted. The dashboard offers "A new version is available" only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. An older process answers `404`, which the dashboard reads as no new version. |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` against the process's one copy of the listener's `GET /v1/sessions`, stored in no table: that copy is at most 5 s old, one listener call refreshes it for every read that asks while it runs, and a listener that fails or does not answer within 2 s is asked again only after 5 s, every read in that window reading `unknown` at once. The status is `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). Every `ask` hit carries `ask`, where the ask stands when the search ran: `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or `{state: "resolved", resolution, answer?}` with the last answer it had, absent when nobody answered; its excerpt is cut from the ask's indexed text ([Search](#search)). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
