@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // The branches chooseAnchor takes, by name, as replay-fetch counts them, the seed records them
@@ -204,10 +205,10 @@ func substituteAnchor(text string, bm *replayBlockMap, blockID, quote string, rn
 // historyPlan is how a document's synthetic history reproduces production's version sizes. Every
 // version below Restore is the base (the text at At with the run [RunStart, RunEnd) removed and the
 // typed ask blocks still to be answered or resolved stripped) plus a padding paragraph of synthetic
-// words at the end, sized so the version has Sizes[n-1] bytes. Version Restore removes the padding
-// and inserts the run back (before the heading at RunEnd, or at the end), giving the text at At
-// less the ask steps still to come. AskAt maps a version to the ask steps (a typed ask block's
-// answer or resolve, a change Dispatch makes) it carries.
+// words at the end (padAt), sized so the version has Sizes[n-1] bytes. Version Restore removes the
+// padding and inserts the run back (before the heading at RunEnd, or at the end) in one edit, giving
+// the text at At less the ask steps still to come. AskAt maps a version to the ask steps (a typed ask
+// block's answer or resolve, a change Dispatch makes) it carries.
 type historyPlan struct {
 	Final            int
 	Sizes            []int
@@ -232,6 +233,15 @@ type askStep struct {
 
 // padMin is the shortest padding paragraph a version carries.
 const padMin = 8
+
+// maxJSONBody is the largest JSON request body Dispatch takes (maxJSONRequestBytes at 35efd326;
+// a larger one is refused 413 REQUEST_TOO_LARGE) and the largest document it stores
+// (pmdoc.MaxDocumentBytes, 413 CAP_EXCEEDED).
+const maxJSONBody = 1 << 20
+
+// restoreEnvelope bounds what the restore edit's body holds beside its run's encoded markdown: the
+// padding block's delete, the insert's anchor and the actor.
+const restoreEnvelope = 1024
 
 // padLen is the length of padded version n's padding paragraph: version n-1's (prevPad bytes)
 // changed by the planned size change, so version n changes size by exactly the plan's change
@@ -278,19 +288,21 @@ func sectionStarts(text string) []int {
 	return starts
 }
 
-// chooseRun picks the run of whole sections to remove: the shortest one of at least need bytes
-// holding no typed ask block, else (none is long enough) the longest one holding none. Both ends
-// are section starts (the end may be the text's end). It returns 0, 0 when need <= 0 or no run
-// qualifies.
-func chooseRun(text string, need int) (int, int) {
+// chooseRun picks the run of whole sections to remove. It considers the runs that hold no typed ask
+// block and whose markdown, JSON-encoded, takes at most maxJSON bytes (the restore edit re-inserts
+// the run whole, in one body): the shortest one of at least need bytes, else (none is long enough)
+// the longest one. Both ends are section starts (the end may be the text's end). It returns 0, 0
+// when need <= 0 or no run qualifies.
+func chooseRun(text string, need, maxJSON int) (int, int) {
 	if need <= 0 {
 		return 0, 0
 	}
 	starts := append(sectionStarts(text), len(text))
+	enc := jsonPrefix(text)
 	bestS, bestE, longS, longE := 0, 0, 0, 0
 	for i := 0; i < len(starts)-1; i++ {
 		for j := i + 1; j < len(starts); j++ {
-			if strings.Contains(text[starts[i]:starts[j]], ":::ask") {
+			if strings.Contains(text[starts[i]:starts[j]], ":::ask") || enc[starts[j]]-enc[starts[i]] > maxJSON {
 				break
 			}
 			n := starts[j] - starts[i]
@@ -306,6 +318,44 @@ func chooseRun(text string, need int) (int, int) {
 		return bestS, bestE
 	}
 	return longS, longE
+}
+
+// jsonCost is how many bytes encoding/json's Marshal writes, inside a string's quotes, for the
+// character starting at s[i], and that character's length in s: an invalid byte is written as
+// U+FFFD (3 bytes), U+2028 and U+2029 escaped (TestJSONPrefix holds it to Marshal).
+func jsonCost(s string, i int) (cost, size int) {
+	if b := s[i]; b < utf8.RuneSelf {
+		switch {
+		case b == '\\' || b == '"' || b == '\b' || b == '\f' || b == '\n' || b == '\r' || b == '\t':
+			return 2, 1
+		case b < 0x20 || b == '<' || b == '>' || b == '&':
+			return 6, 1
+		}
+		return 1, 1
+	}
+	c, size := utf8.DecodeRuneInString(s[i:])
+	switch {
+	case c == utf8.RuneError && size == 1:
+		return 3, 1
+	case c == '\u2028' || c == '\u2029':
+		return 6, size
+	}
+	return size, size
+}
+
+// jsonPrefix is, for each k in [0, len(text)] that starts a character (or ends text), the length of
+// text[:k] JSON-encoded without its quotes.
+func jsonPrefix(text string) []int {
+	enc := make([]int, len(text)+1)
+	for i := 0; i < len(text); {
+		cost, size := jsonCost(text, i)
+		for k := i + 1; k <= i+size; k++ {
+			enc[k] = enc[i]
+		}
+		enc[i+size] += cost
+		i += size
+	}
+	return enc
 }
 
 // baseText is the text with the run removed. A run reaching the end leaves the blank line before
@@ -380,7 +430,7 @@ func planHistory(text string, sizes []int, final int, steps []askStep, versions 
 	for n := 1; n < p.Restore; n++ {
 		smallest = min(smallest, local(n))
 	}
-	p.RunStart, p.RunEnd = chooseRun(text, len(text)+padOverhead(len(text))+padMin-smallest)
+	p.RunStart, p.RunEnd = chooseRun(text, len(text)+padOverhead(len(text))+padMin-smallest, maxJSONBody-restoreEnvelope)
 	base := baseText(text, p.RunStart, p.RunEnd)
 	floor := len(base) + padOverhead(len(base)) + padMin
 	// Walk back from Restore: each padded version is the next one less production's change; one
@@ -444,16 +494,88 @@ func padText(n int, salt int) string {
 	return s
 }
 
-// nextPad is padding of n bytes that differs from prev, so a version whose size does not change
-// still changes its bytes.
-func nextPad(prev string, n, salt int) string {
-	s := padText(n, salt)
-	if s == prev {
-		if s[len(s)-1] == 'y' {
-			s = s[:n-1] + "z"
-		} else {
-			s = s[:n-1] + "y"
+// The padding paragraph of n bytes is padAt(n): the first n bytes of the pad stream, the words
+// padWord(0), padWord(1), ... joined by single spaces (a last byte that would be a space is an x).
+// Each word is padToken and four lowercase letters, so a whole word occurs once in a document (no
+// document holds padToken, docText). Growing the paragraph by d appends the stream's next d bytes
+// and shrinking it by d drops its last d, each sent as a replace of only the paragraph's tail
+// (padEdit), and a version whose size does not change swaps its last whole word for the word's
+// digit form or back (padSwap): every padding edit's body holds the change and under 40 bytes of
+// padding besides, however long the paragraph.
+const padWordLen = len(padToken) + 4
+
+// padStride is the distance between two words' starts in the pad stream.
+const padStride = padWordLen + 1
+
+// padWord is the pad stream's word i (i < 26^4, so a stream of up to 4.5 MB, past any document).
+func padWord(i int) string {
+	b := []byte(padToken + "aaaa")
+	for k := len(b) - 1; k >= len(padToken); k-- {
+		b[k] = 'a' + byte(i%26)
+		i /= 26
+	}
+	return string(b)
+}
+
+// padAt is the padding paragraph of n bytes.
+func padAt(n int) string {
+	var b strings.Builder
+	b.Grow(n + padStride)
+	for i := 0; b.Len() < n; i++ {
+		if i > 0 {
+			b.WriteByte(' ')
 		}
+		b.WriteString(padWord(i))
+	}
+	s := b.String()[:n]
+	if strings.HasSuffix(s, " ") {
+		s = s[:n-1] + "x"
 	}
 	return s
+}
+
+// padSwap is pad with its last whole word swapped between the stream's word and its digit form
+// (padToken and four digits, a word no stream holds), the same length and other bytes; a paragraph
+// too short for a whole word swaps its last byte between y and z.
+func padSwap(pad string) string {
+	if len(pad) < padWordLen {
+		last := byte('y')
+		if pad[len(pad)-1] == 'y' {
+			last = 'z'
+		}
+		return pad[:len(pad)-1] + string(last)
+	}
+	j := (len(pad) - padWordLen) / padStride
+	at := j * padStride
+	word := padWord(j)
+	if pad[at:at+padWordLen] == word {
+		word = fmt.Sprintf("%s%04d", padToken, j%10000)
+	}
+	return pad[:at] + word + pad[at+padWordLen:]
+}
+
+// padEdit is the replace that turns padding paragraph cur into next: find is cur from the start of
+// the last whole word at or before the first byte they differ in (from cur's start when it holds no
+// whole word), with is next from there. The find starts with a whole word, which occurs once in the
+// document (padSwap's digit form too, which only the last word ever takes), or is the whole
+// paragraph, the document's only text holding padToken: so it occurs once.
+func padEdit(cur, next string) (find, with string) {
+	k := 0
+	for k < len(cur) && k < len(next) && cur[k] == next[k] {
+		k++
+	}
+	at := 0
+	if len(cur) >= padWordLen {
+		at = min(k, len(cur)-padWordLen) / padStride * padStride
+	}
+	return cur[at:], next[at:]
+}
+
+// padNext is the padding paragraph of n bytes that follows cur: padAt(n), or cur swapped (padSwap)
+// when that is cur itself, so a version whose size does not change still changes its bytes.
+func padNext(cur string, n int) string {
+	if next := padAt(n); next != cur {
+		return next
+	}
+	return padSwap(cur)
 }

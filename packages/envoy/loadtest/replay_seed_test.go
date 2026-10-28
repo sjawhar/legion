@@ -2,10 +2,41 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/sync/errgroup"
 )
+
+// TestWriteCanceledByAnotherWrite: when one issue's write fails, errgroup cancels the others'
+// context with that error as its cause, and net/http returns the cause for a request the context
+// ended. A write ended so must not read as its own refusal: the full seed logged five "quote
+// refused (413 REQUEST_TOO_LARGE)" for a comment whose request was only canceled by another
+// issue's history edit, Dispatch having created the comment.
+func TestWriteCanceledByAnotherWrite(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"c1"}`)
+	}))
+	defer srv.Close()
+	s := &replaySeeder{api: newAPI(srv.URL, "t", 1), lg: log.New(io.Discard, "", 0), counts: map[string]int{}, marks: map[string]int{}}
+	g, gctx := errgroup.WithContext(context.Background())
+	g.Go(func() error {
+		return &seedError{step: "history-edit", logged: "d1@7", status: http.StatusRequestEntityTooLarge, code: "REQUEST_TOO_LARGE"}
+	})
+	_ = g.Wait()
+	_, err := s.write(gctx, "comment-anchored", "PRJ-1", 0, "", "comment-anchored", "c1", "POST", "/api/v1/issues/PRJ-1/comments", who{}, jsonBody(map[string]any{"body": "x"}))
+	var se *seedError
+	if err == nil || errors.As(err, &se) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("a write the group canceled returns %v, want context.Canceled and no refusal", err)
+	}
+}
 
 func TestResumeSkipsMappedIDs(t *testing.T) {
 	// A seeder with no API client and no database: any step that sent a request or ran a query
@@ -140,7 +171,11 @@ func TestHistoryPadsFromStoredSizes(t *testing.T) {
 				if pad == "" || l < padMin {
 					t.Fatalf("shift %d: version %d: padding %q, next %d bytes", c.shift, n, pad, l)
 				}
-				md = strings.Replace(md, pad, nextPad(pad, l, n), 1)
+				find, with := padEdit(pad, padNext(pad, l))
+				if strings.Count(md, find) != 1 {
+					t.Fatalf("shift %d: version %d: the padding edit's find occurs %d times", c.shift, n, strings.Count(md, find))
+				}
+				md = strings.Replace(md, find, with, 1)
 			}
 			sizes = append(sizes, stored())
 			want := p.Sizes[n-1] - p.Sizes[n-2]

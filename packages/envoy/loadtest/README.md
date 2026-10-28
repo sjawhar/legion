@@ -550,6 +550,24 @@ mapped to its local one in `loadtest.replay_ids` as it goes, so a killed seed re
   ask blocks' answers and resolves land at their logged versions, so the last version is the text
   at 22:55. Where the base cannot be made small enough, a version changes by production's change
   with the sign flipped: 21 versions, all on documents with typed ask blocks (`sign_flipped`).
+- **Request bodies under Dispatch's 1 MiB.** Dispatch refuses a JSON body over 1 MiB (413
+  `REQUEST_TOO_LARGE`), and padding paragraphs run to hundreds of KB, so no edit carries one
+  whole. The paragraph is a prefix of a stream of words that each occur once in the document
+  (`padAt`): a version that grows by d appends the stream's next d bytes, one that shrinks by d
+  drops the last d, and one whose size does not change swaps its last word for a same-length one
+  (`padSwap`), each as a replace of the paragraph's tail from the last whole word before the
+  change (`padEdit`). A padding edit's body is its change plus about 130 bytes, so the largest
+  single version change bounds it. The restore deletes the paragraph by its block id and
+  re-inserts the run whole in that one edit (splitting it would add versions), so the run is
+  chosen among the runs whose JSON-encoded markdown fits 1 MiB less 1 KiB (`chooseRun`); a
+  document whose needed run does not fit gets the longest run that does, and its versions out of
+  reach flip sign or are raised as before. In the 2026-10-26 bundle the bound changes no
+  document's run.
+  `TestRequestBodiesBundle` (with `LOADTEST_REPLAY_BUNDLE=<bundle dir>`, like
+  `TestPlanHistoryBundle`) plans every body the seed sends and every one `replay-plan` plans at
+  rate 1, fails on a body or a planned document version over 1 MiB, and logs the largest body of
+  each kind. Largest in the 2026-10-26 bundle: a padding edit of 623,266 bytes (a 623,138-byte
+  version change), a restore of 637,584 bytes, a replay upload of 665,020 bytes.
 - **Comments.** Every open thread in creation order, and every resolved thread a window event
   refers to (created, then resolved). The other resolved threads are not recreated.
 - **Anchors** (`chooseAnchor`). Most logged blocks no longer exist in today's block maps, so an
