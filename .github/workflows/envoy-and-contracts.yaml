@@ -399,7 +399,8 @@ jobs:
               # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
               # heading of that skill's SKILL.md.
               - 'skills/**'
-            # envoy-go's gate alone; every other Go job has a filter of its own.
+            # The gate of envoy-go and of the two Envoy Go jobs on production's Postgres 16
+            # (dispatch-go-postgres-16, broker-go-postgres-16); every other Go job has its own.
             envoy:
               - '.github/workflows/envoy-and-contracts.yaml'
               - 'packages/envoy/**'
