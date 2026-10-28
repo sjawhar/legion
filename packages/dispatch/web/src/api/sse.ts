@@ -268,7 +268,10 @@ export function useEventStream({
         // `["block-schema"]` with an infinite `staleTime`, resolves from a module-level
         // per-session cache (`features/doc/schema.ts`), so its refetch issues no request. A
         // genuine reconnect after a gap refreshes on the leading edge; `visibilitychange`
-        // reopening the stream repeatedly does not.
+        // reopening the stream repeatedly does not. That edge is the reopen itself, which
+        // `reconnectDelayMs` already spreads after a dropped stream, so a refresh waits no
+        // further: tabs a restart dropped together and the server does not replay in full
+        // refresh spread as well.
         if (!replayComplete) {
           refreshEverything();
         }
