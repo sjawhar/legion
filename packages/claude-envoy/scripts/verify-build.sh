@@ -11,17 +11,21 @@
 #
 # It writes no file of the checkout: a pull request never commits dist/ or legion/, and jj records
 # whatever a command writes into the working copy. Every build goes into a scratch directory
-# outside the repository, and <tar> must be outside it too. Only the rebuild workflow puts the
-# build into its own checkout, by extracting the checked <tar> (its build job's next step).
+# outside the repository, and <tar> must be outside it too. The rebuild's build job and
+# envoy-and-contracts.yaml's claude-envoy job (for its pack) each put the checked <tar> into their
+# own disposable CI checkout afterwards, with `release-push.sh extract-built`; nothing a person runs
+# locally writes the two directories.
 #
 # In order, whatever the caller's directory:
 #   1. `bun scripts/build.ts --out` twice, into two scratch directories, and the two builds'
 #      dist/ and legion/ compared byte for byte, so what lands is what the source builds to, not
 #      one run's accident;
 #   2. .github/scripts/check-private-names.sh over the first build, laid out at its repository
-#      path (packages/claude-envoy/dist and legion) in a scratch git repository, since the check
-#      reads through git and its vendored-NATS exception is tied to that path;
-#   3. no built file is one this repository's .gitignore matches (below);
+#      path (packages/claude-envoy/dist and legion) in a scratch git repository. The check reads
+#      the paths it is given with find and grep, not git, but its vendored-NATS exception is tied
+#      to packages/claude-envoy/dist/envoy-channel.js, so the build sits at that path;
+#   3. no built file is one git ignores there, with this repository's .gitignore files on the path
+#      to the build copied in beside any .gitignore the build carries (below);
 #   4. `tar -cf <tar>` of the first build's dist/ and legion/, the tar the push job receives;
 #   5. `.github/scripts/release-push.sh check-built <tar>`, push-built's own member checks: no
 #      symlink, no executable file, no name outside letters, digits, '.', '_' and '-', and every
@@ -68,34 +72,36 @@ if ! differ=$(diff -r -q "$first/dist" "$second/dist" && diff -r -q "$first/legi
   exit 1
 fi
 
-# The check finds the repository it scans from its own path, so a link to it sits in the scratch
-# repository around the first build, and it scans that build's two directories alone.
+# The scratch git repository around the first build is there for the ignore check below. The
+# private-name check runs from it only so the build sits at its repository path
+# (packages/claude-envoy/dist/envoy-channel.js, the vendored-NATS exception's path): given paths,
+# the check reads them with find and grep, not git. It finds the repository it scans from its own
+# path, so a link to it sits in the scratch repository, and it scans the build's two directories
+# alone.
 mkdir -p "$scratch/first/.github/scripts"
 ln -s "$repo_root/.github/scripts/check-private-names.sh" "$scratch/first/.github/scripts/"
 git -c init.defaultBranch=main init -q "$scratch/first"
 (cd "$scratch/first" && .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion)
 
-# A generated file at a path this repository's .gitignore matches (a skill's `logs/`, `out/`,
-# `*.log` or `coverage`, force-added under skills/ and staged into legion/) is skipped by push-built's
-# `git add -A`, so main would silently lack it while the tar holds it. check-ignore answers for the
-# path as git add would see it, a tracked path never being ignored: 0 when it printed one, 1 when
-# none matched.
-status=0
-ignored=$(cd "$first/.." && find claude-envoy/dist claude-envoy/legion -type f -printf 'packages/%p\n' |
-  git -C "$repo_root" check-ignore --stdin) || status=$?
-case $status in
-  0)
-    while IFS= read -r path; do
-      printf '::error::verify-build.sh: %q is a generated file git ignores, so the rebuild would never commit it to main; rename its source, or make .gitignore stop matching it\n' "$path" >&2
-    done <<<"$ignored"
-    exit 1
-    ;;
-  1) ;;
-  *)
-    echo "::error::verify-build.sh: git check-ignore exited $status, so the ignored files of the build could not be listed" >&2
-    exit 1
-    ;;
-esac
+# A generated file at a path a .gitignore matches (a skill's `logs/`, `out/`, `*.log` or
+# `coverage`, force-added under skills/ and staged into legion/, or a file named by a .gitignore a
+# skill ships inside legion/) is skipped by push-built's `git add -A`, so main would silently lack it
+# while the tar holds it. The scratch repository gets this repository's .gitignore files on the path
+# to the build, and git applies them and any .gitignore the build carries, as `git add -A` would.
+# Nothing there is tracked, so git lists every ignored file of the two directories; a failing git
+# stops the script.
+for gitignore in .gitignore packages/.gitignore packages/claude-envoy/.gitignore; do
+  if [ -f "$repo_root/$gitignore" ]; then
+    cp "$repo_root/$gitignore" "$scratch/first/$gitignore"
+  fi
+done
+ignored=$(git -C "$scratch/first" ls-files -o -i --exclude-standard -- packages/claude-envoy/dist packages/claude-envoy/legion)
+if [ -n "$ignored" ]; then
+  while IFS= read -r path; do
+    printf '::error::verify-build.sh: %q is a generated file git ignores, so the rebuild would never commit it to main; rename its source, or make .gitignore stop matching it\n' "$path" >&2
+  done <<<"$ignored"
+  exit 1
+fi
 
 tar -cf "$tar_file" -C "$first" dist legion
 "$repo_root/.github/scripts/release-push.sh" check-built "$tar_file"

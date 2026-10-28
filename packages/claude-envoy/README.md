@@ -290,8 +290,9 @@ every third-party package they inline, written from Bun's metafile by
   the two directories into `<tar>`, which must be outside the repository, and runs
   `release-push.sh check-built` over it, the member checks the push job's `push-built` runs before
   it commits. It writes no file of the checkout, so running it on a pull request's tree changes
-  nothing jj records; only the rebuild workflow's build job extracts the checked tar into its own
-  checkout. The required
+  nothing jj records. The rebuild workflow's build job and the `claude-envoy` job (for its pack,
+  in its own disposable CI checkout) each extract the checked tar with `release-push.sh
+  extract-built`; nothing a person runs locally writes `dist/` or `legion/`. The required
   `test` job and the `claude-envoy` job run the same command on a pull request, so a skill file
   that is executable, a symlink or named with a space, or a bundle `BUNDLE_ENTRYPOINTS` no longer
   names, fails there instead of failing every rebuild on main.

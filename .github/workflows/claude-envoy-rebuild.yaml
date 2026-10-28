@@ -9,14 +9,13 @@ name: Rebuild Claude Envoy plugin
 #
 # The repository's release-credential rule (AGENTS.md, Conventions) binds it, since it pushes with
 # the deploy key, and check-release-credentials.sh pins its shape. `build` runs the dependencies'
-# code (install, the bundler, the notices) and holds no write scope and no secret; it builds and
-# checks the plugin with packages/claude-envoy/scripts/verify-build.sh, the one statement of what
-# `push` accepts, which the pull request's required test job runs too, puts the tar that script
-# packs into this job's own checkout to see whether it changes main's files, hands that tar over,
-# and ends in the no-credential tripwire. `push` holds the deploy key
-# and actions: write, runs no dependency code and restores no cache: release-push.sh push-built
-# checks the tar, member by member, as verify-build's check-built did, before anything acts on it,
-# commits it over the commit it was built from and lands that one commit.
+# code (install, the bundler, the notices) and holds no write scope and no secret: it runs
+# packages/claude-envoy/scripts/verify-build.sh, which the pull request's required test job runs
+# too, puts the tar that script packs into this job's own checkout with release-push.sh
+# extract-built to see whether it changes main's files, hands that tar over, and ends in the
+# no-credential tripwire. `push` holds the deploy key and actions: write, runs no dependency code
+# and restores no cache: release-push.sh push-built checks the tar, member by member, before
+# anything acts on it, commits it over the commit it was built from and lands that one commit.
 #
 # `build` checks out main's tip when it starts, not the commit that started the run, so the newest
 # pending run, the one the concurrency group below keeps, builds the newest main. `push` lands only
@@ -75,17 +74,16 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      # packages/claude-envoy/scripts/verify-build.sh: everything push-built checks, here, where a
-      # refusal fails the build job instead of the push. It writes no file of the checkout.
+      # What it builds and checks: packages/claude-envoy/scripts/verify-build.sh.
       - name: Build, check and pack the plugin
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
-      # The one place the checked build enters a checkout, this job's own, as push-built extracts
-      # it: the tar is the whole of both directories, so a file it lacks is deleted.
+      # The checked build enters this job's own checkout as push-built puts it into the push job's:
+      # the tar is the whole of both directories, so a file it lacks is deleted. The claude-envoy job
+      # of envoy-and-contracts.yaml extracts it the same way, for its pack, in its own disposable
+      # checkout; nothing a person runs locally writes the two directories.
       - name: Put the checked build into the checkout
-        run: |
-          rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
-          tar -xf "$RUNNER_TEMP/claude-envoy-built.tar" -C packages/claude-envoy --no-same-owner
+        run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
       # base is the commit this job built from, the only commit push lands onto. The build may
       # change the two directories and nothing else.
       - name: Record the base and whether the build changed the tracked files

@@ -1022,16 +1022,15 @@ jobs:
         working-directory: packages/claude-envoy
       # A pull request never commits dist/ or legion/ (main's Rebuild Claude Envoy plugin workflow
       # does), so this builds and checks them from the head's source as that workflow's build job
-      # does (packages/claude-envoy/scripts/verify-build.sh, which writes no file of the checkout).
+      # does: packages/claude-envoy/scripts/verify-build.sh.
       - name: Build, check and pack the plugin as main's rebuild does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
       # The pack step packs the package's own dist/ and legion/, so the checked build goes into
-      # this job's disposable checkout first, which nothing commits.
+      # this job's disposable checkout first, which nothing commits, as the rebuild's build job puts
+      # it into its own.
       - name: Put the checked build into CI's checkout for the pack
-        run: |
-          rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
-          tar -xf "$RUNNER_TEMP/claude-envoy-built.tar" -C packages/claude-envoy --no-same-owner
+        run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
       - name: Test Claude Envoy plugin
         run: bun run test
         working-directory: packages/claude-envoy
