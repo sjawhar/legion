@@ -40,6 +40,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 const (
@@ -98,9 +100,13 @@ type bootConfig struct {
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
-	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
-	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	// ListenAddr is the address the server serves on: the inherited socket's own address with
+	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what serves.
 	ListenAddr string
+	// ListenSocket is the listening socket DISPATCH_LISTEN_FD names, inspected but not yet
+	// adopted: main serves on it in place of binding ListenAddr. Nil when the variable is unset.
+	ListenSocket *listenfd.Socket
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
@@ -470,20 +476,21 @@ func main() {
 
 	routesHandler, waitDelivery := routes.New(appCtx)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
+	server := newHTTPServer(handler, time.Now)
+	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
+	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
+	// the process with 1: a supervisor must not read a port clash as a clean stop.
+	var listener net.Listener
+	if boot.ListenSocket != nil {
+		listener, err = listenfd.Adopt(*boot.ListenSocket)
+	} else {
+		listener, err = net.Listen("tcp", boot.ListenAddr)
 	}
-	// Bound before serving, so an address that cannot be taken ends the process with 1: a
-	// supervisor must not read a port clash as a clean stop.
-	listener, err := net.Listen("tcp", boot.ListenAddr)
 	if err != nil {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
@@ -615,11 +622,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
 	}
 	boot.AgentTokens = tokens
-	listenAddr, err := listenAddress(env)
+	boot.ListenAddr, boot.ListenSocket, err = resolveListen(env)
 	if err != nil {
 		return bootConfig{}, err
 	}
-	boot.ListenAddr = listenAddr
 	pprofAddr, err := pprofAddress(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -697,7 +703,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if agentSecretsURL != "" {
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
-			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
+			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", redact.URL(agentSecretsURL))
 		}
 		boot.AgentSecretsURL = agentSecretsURL
 		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
@@ -732,6 +738,9 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in issuer, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
+		if boot.ListenSocket != nil {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: %s, must be on 127.0.0.1 or [::1]", boot.ListenSocket)
+		}
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
 	}
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
@@ -745,7 +754,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	}
 	if boot.AgentSecretsURL != "" {
 		if !routes.LoopbackURL(boot.AgentSecretsURL) {
-			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", redact.URL(boot.AgentSecretsURL))
 		}
 	}
 	if !routes.LoopbackURL(boot.EnvoyURL) {
@@ -969,12 +978,15 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
-// dispatchHandler mounts the one /healthz the process serves above every dashboard and API
-// route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
-// longer pattern, so "GET /healthz" wins over the router's "/".
+// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
+// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
+// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
+// answers 204 and touches nothing: it says only that the process answers, for a liveness or
+// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
 func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("/", handler)
 	return mux
 }
@@ -1056,6 +1068,33 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			SchemaVersion *int    `json:"schema_version"`
 		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
+}
+
+// resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket
+// that names, at the socket's own address, and DISPATCH_LISTEN_HOST and DISPATCH_PORT, each only
+// when set, must name that address: no default stands in for one that is unset. An empty value
+// reads as unset: without the socket an empty one is its default, and the listener reads an empty
+// ENVOY_LISTEN_HOST or PORT as unset too. Without DISPATCH_LISTEN_FD, it is the address
+// listenAddress builds, for main to bind. It only inspects the socket; main adopts it, so nothing a
+// caller of resolveBootConfig gets owns a descriptor.
+func resolveListen(env settingValues) (string, *listenfd.Socket, error) {
+	descriptor, set := env.lookup("DISPATCH_LISTEN_FD")
+	if !set {
+		address, err := listenAddress(env)
+		return address, nil, err
+	}
+	socket, err := listenfd.Inspect("DISPATCH_LISTEN_FD", descriptor)
+	if err != nil {
+		return "", nil, err
+	}
+	setting := func(name string) listenfd.Setting {
+		value := strings.TrimSpace(env.get(name))
+		return listenfd.Setting{Name: name, Value: value, Set: value != ""}
+	}
+	if err := socket.CheckAgainst(setting("DISPATCH_LISTEN_HOST"), setting("DISPATCH_PORT")); err != nil {
+		return "", nil, err
+	}
+	return socket.Addr().String(), &socket, nil
 }
 
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT

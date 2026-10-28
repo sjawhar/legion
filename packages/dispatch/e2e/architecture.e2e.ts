@@ -82,7 +82,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker", async ({
+test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker @phone", async ({
   browser,
 }, testInfo) => {
   const issues = await seedArchitecture();

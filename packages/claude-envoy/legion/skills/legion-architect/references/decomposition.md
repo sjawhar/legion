@@ -27,10 +27,18 @@ child waits in your tree until Legion starts it.
 
 ```bash
 dispatch issue --project <project> --parent <root issue> --title '<child outcome>' --spec-file - <<'EOF'
-<acceptance criteria, scope, and context>
+<the child's spec, written as skill://dispatch-writing-specs says, scaled to the child>
 EOF
 ```
 
+- Write each child's spec as `skill://dispatch-writing-specs` says, scaled to the child: its
+  outline (`Summary` through `Acceptance`, a few sentences a part for a small child), a proposed
+  answer to each point, each term a new reader may not know explained, no item number from another
+  document (name a requirement of the root by what it says), and no text copied from the root that
+  does not apply to this child. The child's workers read only this spec.
+- Before `dispatch issue` creates each child, paste its whole spec into a fresh
+  `task(agent="plan-gap-analyst")` to check it against `skill://dispatch-writing-specs`, and fix
+  what it flags: your own reread misses the terms and item numbers you already know.
 - `--project` is the issue key's prefix before `-<n>` (`LEGSMOKE-3` → `LEGSMOKE`).
 - In a root session `$LEGION_ISSUE` is the root (it equals `$LEGION_TREE`): pass it as `--parent`.
   The daemon makes the sub-issue link from `--parent`.

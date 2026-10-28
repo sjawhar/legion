@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type Config struct {
@@ -528,10 +529,10 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
-		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
+		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", redact.URL(cfg.PublicURL))
 	}
 	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", cfg.MachineLoginURL)
+		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:

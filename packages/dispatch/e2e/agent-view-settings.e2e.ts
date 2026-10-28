@@ -246,7 +246,7 @@ test.beforeEach(async () => {
 
 // A1: a session on this change's pi-envoy reports its settings in its replay, before any turn has
 // run, and every later report replaces them, with no turn run.
-test("the header shows the session's reported model and thinking level before any turn, and follows its next settings frame", async ({
+test("the header shows the session's reported model and thinking level before any turn, and follows its next settings frame @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(1);
@@ -282,7 +282,7 @@ test("the header shows the session's reported model and thinking level before an
 // A1: a session on an older pi-envoy replays turns and no settings frame. Its header is the last
 // turn's model, as before, and it says what a restart would bring; a session not answering the
 // live view at all says nothing of the kind, since the empty transcript already says why.
-test("an older session's header shows its last turn's model with no picker and asks for a restart, and a session not answering the live view shows no such notice", async ({
+test("an older session's header shows its last turn's model with no picker and asks for a restart, and a session not answering the live view shows no such notice @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(2);
@@ -319,7 +319,7 @@ test("an older session's header shows its last turn's model with no picker and a
 
 // A1, decision 7's other rows: what the header shows when the session reports less than a model
 // and a level it can switch from Dispatch, and why.
-test("the header says why a session shows less: an Oh My Pi that does not report, no switch from Dispatch, no adjustable thinking, and a model-default level", async ({
+test("the header says why a session shows less: an Oh My Pi that does not report, no switch from Dispatch, no adjustable thinking, and a model-default level @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(3);
@@ -403,7 +403,7 @@ test("the header says why a session shows less: an Oh My Pi that does not report
 // the thread shows as theirs; Send waits for the session's answer, and the header moves only when
 // the session reports the switch. A pick is a steer whatever the composer's mode, since a BTW is a
 // side question the session answers rather than input it runs.
-test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says", async ({
+test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(4);
@@ -478,7 +478,7 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
 });
 
 // A2: a thinking level picked from the levels the session's `/effort` offers.
-test("a thinking level picked in the header sends /effort, and the session's answer and next frame update the header", async ({
+test("a thinking level picked in the header sends /effort, and the session's answer and next frame update the header @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(5);
@@ -517,7 +517,7 @@ test("a thinking level picked in the header sends /effort, and the session's ans
 
 // A2: a switch the session refuses (here, a model whose key it cannot read) changes nothing, and
 // the page shows the session's own reason, quoted.
-test("a switch the session refuses shows its reason and leaves the header on the values it last reported", async ({
+test("a switch the session refuses shows its reason and leaves the header on the values it last reported @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(6);
@@ -549,7 +549,7 @@ test("a switch the session refuses shows its reason and leaves the header on the
 
 // A2 and R2: a switch is stored under the person who made it. Bob switches from his own browser;
 // Alice, reading the same session, sees his name on the switch in the thread.
-test("a switch from the header is stored under the person who made it and names them to everyone else", async ({
+test("a switch from the header is stored under the person who made it and names them to everyone else @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(7);
@@ -593,7 +593,7 @@ test("a switch from the header is stored under the person who made it and names 
 // agent token and a person's own agent token alike, so no agent can switch a session from
 // Dispatch. The route refused a bearer before this change, so this row passes at the commit
 // before it too; it is here so that a later change to the route cannot open the switch.
-test("an agent's bearer cannot switch a session: the messages route answers 403 HUMAN_ONLY and nothing is sent", async ({
+test("an agent's bearer cannot switch a session: the messages route answers 403 HUMAN_ONLY and nothing is sent @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(8);
@@ -640,7 +640,7 @@ test("an agent's bearer cannot switch a session: the messages route answers 403 
 // switch the page says no answer came, keeps the values the session last reported, and gives the
 // pickers back; an answer that still comes replaces the line. A switch whose send already failed
 // (no live session took it) says so at once.
-test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so at once", async ({
+test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so at once @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(9);
@@ -697,7 +697,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
 // Decision 8: the header's values come from the session's reports alone and the line from the
 // latest switch's answer alone, so neither depends on which arrives first, and an earlier switch's
 // late answer never speaks for a newer switch.
-test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status", async ({
+test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(10);
