@@ -37,18 +37,19 @@ import (
 // in the replica's build. One path's figure moved by up to a fifth from one run to the other.
 const copyHeapPerByte = 48
 
-// copyHeapBound is the most the full-state decodes are granted at once: what the Go memory limit
-// leaves above the room budget, the cold reads' cache, the pressure reserve past the budget's limit
-// and the apply-heap bound, 3,865,470,566 - roomBudgetBytes 2,147,483,648 - documentReadBudget
-// 268,435,456 - pressureReserveBytes 268,435,456 - applyHeapBound 590,558,003 = 590,558,003 bytes,
-// about 563 MiB, the half of what is left past the reserve that the apply-heap bound leaves. A load
-// of a document at or near the decode cap fits in it with room to spare: the heaviest measured held
-// 303,430,664 bytes live beside its two copies (copyHeapPerByte), and the heaviest decode of any
-// path 320,762,656. Weighed at copyHeapPerByte, a mebibyte of prose (145,691,520 bytes) decodes
-// four at a time; a run of a million keystrokes (383,220,432) one at a time; the agent-rewritten
-// and long-edited documents weigh more than the whole bound (602,726,112 and 692,509,680), and each
-// runs alone.
-const copyHeapBound = goMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes - applyHeapBound
+// copyHeapBound is the most the full-state decodes are granted at once: the third of what the Go
+// memory limit leaves above the room budget, the cold reads' cache and the pressure reserve past
+// the budget's limit (heapAboveTheReserve) that neither the apply-heap bound nor the slack takes,
+// 1,181,116,006 - applyHeapBound 393,705,335 - heapSlackBytes 393,705,335 = 393,705,336 bytes,
+// about 375 MiB. Every load of a document at or near the decode cap measured holds less above what
+// it leaves than the whole bound: the heaviest load measured held 303,430,664 bytes live beside its
+// two copies (copyHeapPerByte), and the heaviest decode of any path 320,762,656, 72,942,680 under
+// the bound. Weighed at copyHeapPerByte, a mebibyte of prose (145,691,520 bytes) decodes two at a
+// time; a run of a million keystrokes (383,220,432) one at a time; the agent-rewritten and
+// long-edited documents at the decode cap weigh more than the whole bound (602,726,112 and
+// 692,509,680), and each waits for all of it and runs alone, never refused, since a stored document
+// must always load (copyGrant.cover).
+const copyHeapBound = heapAboveTheReserve - applyHeapBound - heapSlackBytes
 
 // copyHeaps is the pod's bound on the heap its full-state decodes hold (copyHeapBound). Its zero
 // value is ready: the bound is made on first use. Waiters are served in the order they came

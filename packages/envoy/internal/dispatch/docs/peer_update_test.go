@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -504,7 +505,7 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 // bound with its full margin and anchor marks, through the hook itself (weighPeerUpdate), with
 // updates a browser's copy of the room makes the way the editor makes them (pmdoc.Update of its
 // tree), of the densest markdown this repository measures: empty items of alternating bullet lists,
-// `- \n\n* \n\n`, 2.25 elements a byte (room_budget.go:90-92), each list and item and paragraph
+// `- \n\n* \n\n`, 2.25 elements a byte (room_budget.go:119-121), each list and item and paragraph
 // carrying the block id a browser's write mints. Each update is as large as the hook admits at the
 // bound, and the last is taken from a rendering under the creep cap by at most a pair, so the
 // document ends as far past the cap as one admitted update can take it; one more pair is then
@@ -1576,9 +1577,9 @@ func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
 		_, typed := applyHeapEstimate(t, holding(heaviestState)(t), keystroke(t))
 		t.Logf("the heaviest handoff is estimated at %d bytes into the room holding it, %d into a fresh one; a 64 KiB paste's own share is %d, a keystroke's %d",
 			held, handedOver, pasted, typed)
-		if 8*held > applyHeapBound || 2*handedOver > applyHeapBound {
-			t.Errorf("the heaviest handoff is estimated at %d bytes into the room holding it and %d into a fresh one, past an eighth and a half of the %d-byte bound",
-				held, handedOver, applyHeapBound)
+		if 5*held > applyHeapBound || handedOver > applyHeapBound {
+			t.Errorf("the heaviest handoff is estimated at %d bytes into the room holding it and %d into a fresh one, past a fifth and the whole of the %d-byte bound",
+				held, handedOver, uint64(applyHeapBound))
 		}
 		if 3*pasted > unweighedApplyHeapBytes || 400*typed > unweighedApplyHeapBytes {
 			t.Errorf("a 64 KiB paste's own share is %d bytes and a keystroke's %d, past a third and a four-hundredth of the %d unweighed",
@@ -1749,13 +1750,105 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	}
 }
 
-// An update whose estimate alone passes the whole bound could never apply within it, so the hook
-// answers it with an error and no close, as it answers a walk's refusal, and never applies it: a
-// frame at the message floor of null values for a client whose every clock the room already holds,
-// which inserts nothing and adds no struct, so that every other rule admits it. One such frame of
-// 25,165,779 bytes, at the floor before it rose to 37 MiB, measured to allocate 805,307,736 bytes
-// in one apply. The room holds a clock for every byte of the floor, more than the frame has values.
-func TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied(t *testing.T) {
+// An admitted update whose estimate passes applyHeapBound, and not applyTooHeavyBytes, is never
+// refused for its weight: it waits while any part of the bound is held, then holds all of it, so
+// it applies alone, and gives it all back once it has. Each update is a frame of null values for a
+// client whose every clock its room holds, which inserts nothing and adds no struct, so that no
+// rule of the document's refuses it while ygo's apply would decode every value: one under the
+// bound applies first and holds its part until released, and one past the bound waits until then.
+func TestAnApplyPastTheApplyHeapBoundWaitsForAllOfItAndRunsAlone(t *testing.T) {
+	const lightValues, heavyValues = 4_000_000, 7_000_000
+	service := &Service{}
+	holding := func(values int) *crdt.Doc {
+		room := newDocumentCopy()
+		if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(uint64(values)).noDeletes(), nil); err != nil {
+			t.Fatal(err)
+		}
+		return boundRoomDocument(room)
+	}
+	lightRoom, heavyRoom := holding(lightValues), holding(heavyValues)
+	light, heavy := marginValues(lightValues, nil), marginValues(heavyValues, nil)
+	lightEstimate, _ := applyHeapEstimate(t, lightRoom, light)
+	heavyEstimate, own := applyHeapEstimate(t, heavyRoom, heavy)
+	t.Logf("the light update is estimated at %d bytes and the heavy one at %d, against the %d-byte bound and the %d-byte line",
+		lightEstimate, heavyEstimate, uint64(applyHeapBound), uint64(applyTooHeavyBytes))
+	if lightEstimate >= applyHeapBound || heavyEstimate <= applyHeapBound || heavyEstimate > applyTooHeavyBytes || own <= unweighedApplyHeapBytes {
+		t.Fatalf("the light update is estimated at %d bytes and the heavy one at %d, its own share %d, want the light under the %d-byte bound and the heavy past it, within the %d-byte line and weighed",
+			lightEstimate, heavyEstimate, own, uint64(applyHeapBound), uint64(applyTooHeavyBytes))
+	}
+	release := make(chan struct{})
+	lightStarted, heavyStarted := make(chan struct{}), make(chan bool, 1)
+	answers := make(chan error, 2)
+	var applies sync.WaitGroup
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		applies.Wait()
+	})
+	applies.Go(func() {
+		answers <- service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "light", Doc: lightRoom, Update: light}, func() error {
+			close(lightStarted)
+			<-release
+			return nil
+		})
+	})
+	select {
+	case <-lightStarted:
+	case err := <-answers:
+		t.Fatalf("the hook answered the light update %v before applying it", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the light update had not started its apply after ten seconds")
+	}
+	applies.Go(func() {
+		answers <- service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "heavy", Doc: heavyRoom, Update: heavy}, func() error {
+			bound := service.applyHeaps.bound
+			alone := !bound.TryAcquire(1)
+			if !alone {
+				bound.Release(1)
+			}
+			heavyStarted <- alone
+			return nil
+		})
+	})
+	select {
+	case <-heavyStarted:
+		t.Fatal("the heavy update applied while the light one held part of the bound")
+	case err := <-answers:
+		t.Fatalf("the hook answered %v to an update past the bound while the light one applied, want it waiting", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case alone := <-heavyStarted:
+		if !alone {
+			t.Error("the heavy update applied with part of the bound free, want it holding all of it")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the heavy update had not applied ten seconds after the light one gave its part back")
+	}
+	applies.Wait()
+	close(answers)
+	for err := range answers {
+		if err != nil {
+			t.Errorf("the hook refused an update: %v", err)
+		}
+	}
+	if !service.applyHeaps.bound.TryAcquire(applyHeapBound) {
+		t.Fatal("the applies left part of the bound held once both had returned")
+	}
+}
+
+// An update whose estimate alone passes applyTooHeavyBytes could not apply even alone, so the
+// hook answers it with an error and no close, as it answers a walk's refusal, and never applies
+// it: a frame at the message floor of null values for a client whose every clock the room already
+// holds, which inserts nothing and adds no struct, so that every other rule admits it. One such
+// frame of 25,165,779 bytes, at the floor before it rose to 37 MiB, measured to allocate
+// 805,307,736 bytes in one apply. The room holds a clock for every byte of the floor, more than
+// the frame has values.
+func TestAnUpdateHeavierThanAnyApplyMayHoldIsNeverApplied(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(maxMessageBytes).noDeletes(), nil); err != nil {
 		t.Fatal(err)
@@ -1769,10 +1862,10 @@ func TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied(t *testing.T) {
 		t.Fatalf("the %d-byte update inserts %d and adds %d structs, want a frame within the floor that inserts and adds nothing", len(update), weighed.inserted, weighed.added())
 	}
 	estimate := weighed.applyHeap(len(update), replica.structs.roomStructs(room))
-	if estimate <= applyHeapBound {
-		t.Fatalf("the %d-byte update is estimated at %d bytes, within the %d-byte bound", len(update), estimate, applyHeapBound)
+	if estimate <= applyTooHeavyBytes {
+		t.Fatalf("the %d-byte update is estimated at %d bytes, within the %d-byte line", len(update), estimate, uint64(applyTooHeavyBytes))
 	}
-	t.Logf("a %d-byte update of null values is estimated at %d bytes, against the %d-byte bound", len(update), estimate, applyHeapBound)
+	t.Logf("a %d-byte update of null values is estimated at %d bytes, against the %d-byte line", len(update), estimate, uint64(applyTooHeavyBytes))
 	held := room.StateVector()
 	before := crdt.EncodeStateAsUpdateV1(room, nil)
 	err, called := weighInto(service, room, update)
@@ -1782,11 +1875,156 @@ func TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied(t *testing.T) {
 		t.Fatalf("the hook answered %v, want the apply heap's refusal and no close", err)
 	}
 	if called {
-		t.Fatal("the hook called the apply for an update heavier than the bound")
+		t.Fatal("the hook called the apply for an update heavier than the line")
 	}
 	if !maps.Equal(room.StateVector(), held) || !bytes.Equal(crdt.EncodeStateAsUpdateV1(room, nil), before) {
 		t.Fatal("the room changed for an update the hook refused")
 	}
+}
+
+// heaviestHandoffMeasurement is the environment variable that runs the heavy rows of
+// TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy.
+const heaviestHandoffMeasurement = "DISPATCH_MEASURE_HEAVIEST_HANDOFF"
+
+// An honest whole-state handoff at F (heaviestHandoffBound), the heaviest frame the hook lets a
+// browser hand over, is never refused as too heavy (errApplyTooHeavy): its estimate stays under
+// applyTooHeavyBytes, and the hook applies it, holding the whole apply-heap bound where its
+// estimate passes the bound, so that it runs alone. Each row is a room holding a document whose
+// frame text nested under the margin (handoffAtTheHeaviestFrame), which grows the frame and
+// nothing else the hook weighs, takes to 16 KiB short of F, and the handoff of a browser holding
+// that room that has typed a few words since, a frame within a few kibibytes of F; a document at
+// the decode cap, to which nothing can be added, is handed back as it stands, and the room's
+// struct total may refuse it as too large, never the apply heap as too heavy. Each handoff is
+// estimated into the room holding it, which its load charged, as a browser's sync finds it; a
+// fresh room loads its document before it takes any browser. Each row runs in a process of its
+// own (measuredAlone).
+//
+// Measured on 2026-10-28, the estimates into the room holding each: a paragraph padded to F,
+// 404,291,526 bytes, past the 393,705,335-byte bound, so it runs alone; the long-edited fixture,
+// 494,310 structs, padded to F, 657,900,131; that document typed on until 4,096 structs short of
+// the decode cap and padded to F, 904,378,600, the heaviest; and as they stand, the long-edited
+// document at the decode cap 500,387,754 and the agent-rewritten one 549,442,004. Every one of
+// them is under the 1,181,116,006-byte line, the heaviest by 276,737,406. The fast rows are the
+// paragraph and the long-edited fixture, 2.7 and 5.8 s here, their processes' peaks 404 and 636
+// MiB; set DISPATCH_MEASURE_HEAVIEST_HANDOFF=1 for the others, which reach 905 MiB, about 30 s
+// together with the agent's state cached (DISPATCH_AGENT_REWRITTEN_CACHE).
+func TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy(t *testing.T) {
+	heavy := os.Getenv(heaviestHandoffMeasurement) != ""
+	for _, row := range []struct {
+		name  string
+		heavy bool
+		// atCap is whether the document stands at the decode cap and is handed back as it stands.
+		atCap bool
+		state func(t *testing.T) []byte
+	}{
+		{"a paragraph", false, false, func(t *testing.T) []byte {
+			tree, err := pmdoc.Parse("# Title\n\nOne paragraph of ordinary prose.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed, err := encodeDocumentTree(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return seed
+		}},
+		{"the long-edited document", false, false, func(t *testing.T) []byte { return longEditedState(t) }},
+		{"the long-edited document typed on until 4,096 structs short of the decode cap", true, false, func(t *testing.T) []byte {
+			return longEditedTypedTo(t, maxUpdateItems-4_096)
+		}},
+		{"the long-edited document typed on until the decode cap", true, true, longEditedAtCapState},
+		{"an agent's whole rewrites until the decode cap refused one", true, true, cachedAgentRewrittenState},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if row.heavy && !heavy {
+				t.Skip("set " + heaviestHandoffMeasurement + "=1 to run the heavy rows")
+			}
+			if !measuredAlone(t) {
+				return
+			}
+			room, handoff := handoffAtTheHeaviestFrame(t, row.state(t), !row.atCap)
+			estimate, own := applyHeapEstimate(t, room, handoff)
+			t.Logf("a %d-byte handoff, against F's %d, into a room of %d structs is estimated at %d bytes, its own share %d; the apply-heap bound is %d and the too-heavy line %d",
+				len(handoff), uint64(heaviestHandoffBound), countRoomStructs(room), estimate, own, uint64(applyHeapBound), uint64(applyTooHeavyBytes))
+			if !row.atCap && len(handoff) < heaviestHandoffBound-64<<10 {
+				t.Fatalf("the handoff is %d bytes, want it within 64 KiB of F's %d", len(handoff), uint64(heaviestHandoffBound))
+			}
+			if estimate > applyTooHeavyBytes {
+				t.Errorf("the handoff is estimated at %d bytes, past the %d-byte line past which an apply is refused as too heavy", estimate, uint64(applyTooHeavyBytes))
+			}
+			rendering, err := renderDocument(room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The room's load charges it, which lists its delete set as the ranges it holds
+			// deleted (deletedRuns), so a handoff carrying them is weighed as adding none.
+			service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+			replica := service.keepReplica(room, nil, &rendering, nil)
+			service.chargeLoadedRoom("room", room, replica)
+			called, alone := false, false
+			err = service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: handoff}, func() error {
+				called = true
+				if bound := service.applyHeaps.bound; bound != nil {
+					alone = !bound.TryAcquire(1)
+					if !alone {
+						bound.Release(1)
+					}
+				}
+				return crdt.ApplyUpdateV1(room, handoff, nil)
+			})
+			runtime.KeepAlive(replica)
+			t.Logf("the hook answered %v, applied %t, holding the whole bound %t", err, called, alone)
+			if errors.Is(err, errApplyTooHeavy) {
+				t.Fatalf("the hook refused the handoff as too heavy: %v", err)
+			}
+			if row.atCap {
+				return
+			}
+			if err != nil || !called {
+				t.Fatalf("the hook answered %v (applied %t), want the handoff applied", err, called)
+			}
+			if past := estimate > applyHeapBound; alone != past {
+				t.Errorf("the handoff held the whole bound %t while it applied, want %t for an estimate of %d against the %d-byte bound", alone, past, estimate, uint64(applyHeapBound))
+			}
+		})
+	}
+}
+
+// handoffAtTheHeaviestFrame is a room holding state, and the whole-state handoff of a browser
+// holding it. Where pad says, the room first takes a text nested under the margin
+// (nestedMarginText), pasted in one transaction until the room's whole-state frame stands 16 KiB
+// short of F (heaviestHandoffBound), and the browser types a few words into its first text before
+// it hands over: a frame within a few kibibytes of F, which the frame total admits.
+func handoffAtTheHeaviestFrame(t *testing.T, state []byte, pad bool) (room *crdt.Doc, handoff []byte) {
+	t.Helper()
+	const paste, typed = 256 << 10, "an honest edit "
+	room = newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(room, state, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !pad {
+		return room, state
+	}
+	margin := room.GetMap(marksMapName)
+	room.Transact(func(txn *crdt.Transaction) { margin.Set(txn, marginTextKey, crdt.NewTextPrelim()) })
+	nested, _ := margin.Get(marginTextKey)
+	text, ok := nested.(*crdt.YText)
+	if !ok {
+		t.Fatalf("the margin holds %T under %q, want a text", nested, marginTextKey)
+	}
+	left := int(heaviestHandoffBound) - len(crdt.EncodeStateAsUpdateV1(room, nil)) - 16<<10
+	if left < 0 {
+		t.Fatalf("the state is %d bytes past F less 16 KiB, want it under", -left)
+	}
+	chunk := strings.Repeat("p", paste)
+	room.Transact(func(txn *crdt.Transaction) {
+		for at := 0; at < left; at += paste {
+			text.Insert(txn, at, chunk[:min(paste, left-at)], nil)
+		}
+	})
+	browser, into := peerDocument(t, room)
+	browser.Transact(func(txn *crdt.Transaction) { into.Insert(txn, 0, typed, nil) })
+	return room, crdt.EncodeStateAsUpdateV1(browser, nil)
 }
 
 // BenchmarkStructTotalConfirmation measures what the hook's confirmation of a room's struct total

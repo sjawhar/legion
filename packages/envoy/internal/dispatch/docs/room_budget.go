@@ -32,11 +32,13 @@ import (
 // of them and refuses the fortieth; what browsers add to a room after its load is charged beside
 // that count (roomCharge), so rooms typed into hold fewer. A document whose history outgrows its
 // rendering is priced at its structs instead (bytesOfHeapAStructHeld): six documents at the decode
-// cap, 356,515,840 bytes each at both copies, whatever they render. No room has a ceiling: a
-// mebibyte of the densest markdown measured is priced at more than the whole budget
-// (bytesOfHeapAByteAtTheDensest), and what answers a room that heavy is the hook's refusal of every
-// insert while nothing can be closed (refusedUnderPressure), not a cap on its charge
-// (TestTheRoomBudgetsArithmetic).
+// cap, 356,515,840 bytes each at both copies, whatever they render. A document of long runs of
+// text, which makes few elements from few structs, is priced at its rendered bytes
+// (bytesOfHeapARenderedByte): a paragraph of a mebibyte about 25 MB at both copies, where its 9
+// elements would price it at 8,460 bytes. No room has a ceiling: a mebibyte of the densest
+// markdown measured is priced at more than the whole budget (bytesOfHeapAByteAtTheDensest), and
+// what answers a room that heavy is the hook's refusal of every insert while nothing can be closed
+// (refusedUnderPressure), not a cap on its charge (TestTheRoomBudgetsArithmetic).
 const roomBudgetBytes = 2 << 30
 
 // bytesOfHeapAnElement is the heap one copy of a document holds for each element its rendering
@@ -49,16 +51,17 @@ const roomBudgetBytes = 2 << 30
 // of heap a byte of markdown, was measured on a shape no room can hold (room_heap_test.go).
 // TestAResidentRoomsHeapPerByteOfItsMarkdown measures rooms of each size, read and edited, and
 // fails once a copy's heap an element leaves 0.85x to 1.3x of this. A document whose structs weigh
-// more at bytesOfHeapAStructHeld than its elements at this is priced at its structs (copyHeap).
+// more at bytesOfHeapAStructHeld, or whose rendered bytes weigh more at bytesOfHeapARenderedByte,
+// than its elements at this is priced at the heavier of those instead (copyHeap).
 const bytesOfHeapAnElement = 470
 
 // bytesOfHeapAStructHeld is the heap one copy of a document holds for each struct of its state
 // (countRoomStructs, the count the room's struct total keeps, structTotal). A copy is priced at its
-// elements (bytesOfHeapAnElement) or at its structs at this price, whichever is more (copyHeap),
-// because a document's history, which no rendering shows, can hold far more than the document
-// renders: the long-edited document typed on until the decode cap renders 5,314 bytes making 53
-// elements, 24,910 bytes of heap at the element price, from 1,048,576 structs, which hold
-// 168,652,856 bytes in each copy.
+// elements (bytesOfHeapAnElement), its rendered bytes (bytesOfHeapARenderedByte) or its structs at
+// this price, whichever is the most (copyHeap), because a document's history, which no rendering
+// shows, can hold far more than the document renders: the long-edited document typed on until the
+// decode cap renders 5,314 bytes making 53 elements, 24,910 bytes of heap at the element price,
+// from 1,048,576 structs, which hold 168,652,856 bytes in each copy.
 //
 // Measured on 2026-10-28 (TestAResidentRoomsHeapPerStructOfItsState), what one copy of a resident
 // room holds for each struct of its state: the document an agent rewrote whole until the decode cap
@@ -71,9 +74,35 @@ const bytesOfHeapAnElement = 470
 // the decode of its state merges the run into one item (squashRuns, sjawhar/ygo v1.51.3-sami.7,
 // crdt/transaction.go:168-323), so a loaded copy holds 11 structs and 9 elements, priced at 4,230
 // bytes, while both copies hold 20,410,464 bytes, about 10.2 bytes a character of the paragraph's
-// mebibyte of text in each copy: text in one paragraph is a cost neither price follows. That test
+// mebibyte of text in each copy: text in one paragraph is a cost neither this price nor the
+// element price follows, and the rendered-byte price does (bytesOfHeapARenderedByte). That test
 // fails once a struct-dense shape holds more than this a struct, or less than 0.85 of it.
 const bytesOfHeapAStructHeld = 170
+
+// bytesOfHeapARenderedByte is the heap one copy of a document holds at most for each byte of its
+// rendering: the floor of its price (copyHeap), which is its elements at bytesOfHeapAnElement, its
+// structs at bytesOfHeapAStructHeld or its rendered bytes at this, whichever is the most. Text in
+// long runs is what neither other price follows: ygo merges a run typed in one transaction into
+// one item as the transaction commits, and the decode of a state merges a run of keystrokes stored
+// each as an item of its own the same way (squashRuns, sjawhar/ygo v1.51.3-sami.7,
+// crdt/transaction.go:168-323), so a paragraph of a mebibyte loads as 11 structs making 9
+// elements, 4,230 bytes a copy at the element price, while each copy holds its text.
+//
+// Measured on 2026-10-28 (TestAResidentRoomsHeapPerStructOfItsState), what one copy of a resident
+// room holds for each byte of its rendering: a run of a million keystrokes, each stored as an item
+// of its own, 10.2 bytes, 20,410,464 for both copies of 1,000,042 rendered bytes; runs of 50,000
+// to 500,000 keystrokes 9.2 to 11.1, the most at 300,000. The decode appends each keystroke's item
+// to its client's slice of the store before the merge, and the merge keeps that slice's array
+// (crdt/store.go:56-58, crdt/transaction.go:300-321): eight bytes a keystroke and the slack append
+// grew the array by, beside the character's own byte, so the figure moves with the run's length. A
+// paragraph of a mebibyte typed in one transaction, which no decode merges, holds 1.0 byte a byte,
+// and so do eight paragraphs of 128 KiB. It is set past the most measured, 11.1, rounded up to the
+// next whole byte. It stays under the other two prices of the shapes they price: a mebibyte of
+// prose holds 25.6 bytes a rendered byte and is priced by its 57,600 elements, 27,072,000 bytes a
+// copy against 12,580,308 at this price, and the agent-rewritten document at the decode cap by its
+// structs, 178,257,920 bytes a copy against 12,582,900 for its mebibyte of rendering. That test
+// fails once a long run holds more than this a byte, or a run of keystrokes less than 0.75 of it.
+const bytesOfHeapARenderedByte = 12
 
 // bytesOfHeapAByteAtTheDensest is the densest price: the heap one copy of a document is charged
 // for each byte of a rendering pmdoc.MeasureDocument could not finish counting (DocumentSize.Counted
@@ -81,7 +110,7 @@ const bytesOfHeapAStructHeld = 170
 // this repository measures it, at bytesOfHeapAnElement each. That is the one thing it prices
 // (copyHeap): MeasureDocument answers such a rendering with no elements at all, and charged as
 // that, the heaviest room in the pod would look free. Every rendering it finishes is charged its
-// count.
+// count, or its bytes at bytesOfHeapARenderedByte where they weigh more.
 //
 // The bytes it prices are always a rendering - a room's (renderedReplica.publishSize), or a stored
 // version, which is stored as its rendering (pmdoc/parse.go:120-122) - so what it is measured on is
@@ -264,9 +293,9 @@ type budgetedRoom struct {
 
 // roomCharge is one loaded room's charge (weight), the sum of three parts (roomWeight):
 //
-//   - the counted part: its latest measured document, priced from the count of its rendering and
-//     the struct total of its state (copyHeap), at both copies. Each count replaces the last rather
-//     than adding to it, so a document that shrinks is charged less.
+//   - the counted part: its latest measured document, priced from the count of its rendering, the
+//     rendering's bytes and the struct total of its state (copyHeap), at both copies. Each count
+//     replaces the last rather than adding to it, so a document that shrinks is charged less.
 //   - the uncounted part: the content bytes the room's transactions have added since the rendering
 //     that count measured (contentAdded), each at the densest price at both copies, since what
 //     elements they make is unknown until a count. Every transaction is charged it once, whoever
@@ -490,12 +519,13 @@ func roomWeight(heap, content, structure int64) int64 {
 
 // copyHeap is the heap one copy of a document is priced at whose rendering is bytes long and makes
 // elements elements (renderedReplica.size), and whose state holds structs structs (structTotal, or
-// a stored history's walk, storedStructs): its elements at bytesOfHeapAnElement or its structs at
-// bytesOfHeapAStructHeld, whichever is more. A rendering goldmark stopped counting
-// (elementsPastCounting) is priced from its bytes at the densest price in place of its elements,
-// and one the room could not render (sizeUnmeasured) at nothing in place of them, so such a room
-// is priced at its structs alone. Nothing caps it: a room is charged what its document holds,
-// however heavy.
+// a stored history's walk, storedStructs): its elements at bytesOfHeapAnElement, its rendered bytes
+// at bytesOfHeapARenderedByte or its structs at bytesOfHeapAStructHeld, whichever is the most. A
+// rendering goldmark stopped counting (elementsPastCounting) is priced from its bytes at the
+// densest price in place of its elements and its bytes at the rendered-byte price, which is far
+// under the densest, and one the room could not render (sizeUnmeasured) at nothing in place of
+// them, so such a room is priced at its structs alone. Nothing caps it: a room is charged what its
+// document holds, however heavy.
 func copyHeap(bytes, elements, structs int64) int64 {
 	rendered := int64(0)
 	switch {
@@ -503,7 +533,7 @@ func copyHeap(bytes, elements, structs int64) int64 {
 	case elements == elementsPastCounting:
 		rendered = bytes * bytesOfHeapAByteAtTheDensest
 	default:
-		rendered = elements * bytesOfHeapAnElement
+		rendered = max(elements*bytesOfHeapAnElement, bytes*bytesOfHeapARenderedByte)
 	}
 	return max(rendered, structs*bytesOfHeapAStructHeld)
 }
@@ -1111,17 +1141,19 @@ func (s *Service) reserveRoom(ctx context.Context, room string) (*roomReservatio
 }
 
 // storedRoomReservation is what an admission to room reserves: its latest version's stored
-// markdown, counted (pmdoc.MeasureDocument), and the structs of its stored history (storedStructs),
-// priced as a loaded room's rendering and struct total are (copyHeap), at both copies. A version is
-// stored as its rendering (pmdoc/parse.go:120-122), so the element count is the count the room's
-// load makes of the rendering it loads with (keepReplica) wherever no update has been stored since
-// that version, and that count replaces this reservation (roomBudget.load). So a mebibyte of prose
-// reserves about the 54 MB it costs once counted
+// markdown, counted (pmdoc.MeasureDocument) and measured in bytes, and the structs of its stored
+// history (storedStructs), priced as a loaded room's rendering and struct total are (copyHeap), at
+// both copies. A version is stored as its rendering (pmdoc/parse.go:120-122), so the element count
+// and the bytes are what the room's load counts of the rendering it loads with (keepReplica)
+// wherever no update has been stored since that version, and that count replaces this reservation
+// (roomBudget.load). So a mebibyte of prose reserves about the 54 MB it costs once counted
 // (TestAnAdmissionReservesTheCountOfItsStoredVersion), where its bytes at the densest price would
-// reserve 2.2 GB, past the whole budget, and refuse it on an empty pod; and a document whose
-// history outgrows its rendering reserves its structs, as its load is charged them
-// (TestAStructDenseDocumentReservesAndIsChargedItsStructs). Only markdown
-// MeasureDocument cannot finish is priced from its bytes (bytesOfHeapAByteAtTheDensest). A
+// reserve 2.2 GB, past the whole budget, and refuse it on an empty pod; a document whose history
+// outgrows its rendering reserves its structs, as its load is charged them
+// (TestAStructDenseDocumentReservesAndIsChargedItsStructs); and a paragraph of a mebibyte reserves
+// its rendered bytes, as its load is charged them
+// (TestAParagraphOfAMebibyteReservesAndIsChargedItsRenderedBytes). Only markdown MeasureDocument
+// cannot finish is priced from its bytes at the densest price (bytesOfHeapAByteAtTheDensest). A
 // document with no version yet reserves nothing.
 //
 // The count is a whole goldmark parse: about 89 ms for a mebibyte, and up to about 130 MiB of heap
@@ -1277,8 +1309,8 @@ type storedCounts struct {
 	beforeCount func(room string, number int64)
 }
 
-// storedCount is the price of one copy of room's version number (copyHeap): its elements or the
-// structs of its stored history, whichever is more.
+// storedCount is the price of one copy of room's version number (copyHeap): its elements, its
+// bytes or the structs of its stored history, whichever is the most.
 type storedCount struct {
 	room         string
 	number, heap int64
@@ -1325,10 +1357,11 @@ func (c *storedCounts) put(count *storedCount) {
 // chargeLoadedRoom charges room's newly loaded instance, live, whose replica has just published
 // its load's count (keepReplica), in place of the reservations of the sockets admitted to it, and
 // hands the replica the charge its counts re-base from then on (renderedReplica.storeCounted). The
-// load is priced from that count and from the struct total the replica counted at the load
-// (newStructTotal), whichever is more (copyHeap). The charge lists live's delete set as the ranges
-// the room holds deleted (deletedRuns) before the replica hands it to the peer hook: a walk of the
-// document's whole store, beside the load's rendering of it, which is not a keystroke.
+// load is priced from that count, the rendering's bytes and the struct total the replica counted
+// at the load (newStructTotal), whichever is the most (copyHeap). The charge lists live's delete
+// set as the ranges the room holds deleted (deletedRuns) before the replica hands it to the peer
+// hook: a walk of the document's whole store, beside the load's rendering of it, which is not a
+// keystroke.
 func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *renderedReplica) *roomCharge {
 	bytes, elements, _ := replica.size()
 	charge := s.budget.load(room, copyHeap(bytes, elements, replica.structs.countedStructs()))

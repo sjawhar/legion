@@ -1415,7 +1415,7 @@ func (s *server) artifactRoomLive(w http.ResponseWriter, r *http.Request) {
 // total, closing its room first, so the next room it loads is used up
 // (docs.Service.UseUpScanTotalForTest). Test-only: mounted by routes() only when
 // Deps.TestHooksEnabled is set, so a browser test can drive the editor's handling of
-// DOC_NEEDS_REBUILD and the rebuild it offers without typing the 506,000 scans a real room takes.
+// DOC_NEEDS_REBUILD and the rebuild it offers without typing the 1,000,000 scans a real room takes.
 func (s *server) useUpArtifactScanTotal(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return

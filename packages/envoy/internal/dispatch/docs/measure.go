@@ -183,9 +183,10 @@ func (m *elementMeasurer) next() (weak.Pointer[renderedReplica], bool) {
 // counts the room's struct total afresh (structTotal.recountLive), an encode of the live
 // document's state and a walk of it, which re-bases the total the peer update hook refuses past
 // the decode cap on, and which the re-base prices the room's counted part by beside the element
-// count, whichever is more (copyHeap): neither count touches the room's structure part. A replica
-// already collected, or one whose waiting rendering a later publication withdrew (one the room
-// could not read), has nothing to count. The parse and the walk run in the measurer's turn.
+// count and the rendering's bytes, whichever is the most (copyHeap): neither count touches the
+// room's structure part. A replica already collected, or one whose waiting rendering a later
+// publication withdrew (one the room could not read), has nothing to count. The parse and the walk
+// run in the measurer's turn.
 func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	markdown, publication, content := takeUncounted(replica)
 	if markdown == nil {

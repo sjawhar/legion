@@ -48,12 +48,20 @@ const usedUpScanBudget = 64
 
 // roomScanTotal is the most items the conflict scans of a room's history may come to, counted from
 // a re-scan of its stored state at the room's load and from what each transaction the room commits
-// scans after it: the ruling's fifteen times the 33,308 items an honest long session's updates
-// scanned on the development machine. TestTheRoomScanTotalHoldsFifteenHonestLongSessions holds
-// it to that rule, and on this pod (2026-10-28) its session scanned 42,401, fifteen times 636,015,
-// so it fails against this total until the architect rules on the figure. A rebuild is the way out
-// of a room that reaches it (RebuildDocument).
-const roomScanTotal = 506_000
+// scans after it: 1,000,000, the architect's ruling. It is at least twice the re-scan of the
+// heaviest document the server's own writes store, the document an agent rewrote whole until the
+// decode cap refused a write, 475,136 items, twice 950,272
+// (TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed); and at least fifteen times what an
+// honest long session's updates scan, 42,401 items on this pod, fifteen times 636,015
+// (TestTheRoomScanTotalHoldsFifteenHonestLongSessions). A copy of a room at the total costs at most
+// a copy at the decode cap and about a second of scans, measured on 2026-10-28
+// (TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans) on a run of a million
+// keystrokes whose state re-scans 1,000,000 items: its decode took 2.22 s and allocated 457,822,248
+// bytes, against 1.46 s and 383,011,168 for the same run unscanned, 0.76 s and 74,811,080 bytes
+// more (an earlier run of the same decode took 2.47 s, against 1.25 to 1.36 s unscanned). Copies
+// take turns under the copy-heap bound (copyHeapBound). A rebuild is the way out of a room that
+// reaches it (RebuildDocument).
+const roomScanTotal = 1_000_000
 
 // honestHandoffScans is what one honest offline handoff scans: a browser that typed into a hundred
 // paragraphs while another person typed at the same places hands over an update scanning 35,800
@@ -66,10 +74,10 @@ const honestHandoffScans = 35_800
 // apply-heap estimate is own (peerWeighing.ownApplyHeap): perFrameScanCeiling for an update the
 // hook weighs (own past unweighedApplyHeapBytes), whose estimate prices the marks its scans can
 // make (peerWeighing.applyHeap) and which applies only once it holds that estimate out of
-// applyHeapBound, and for any other what its marks can hold in what is left of
-// unweighedApplyHeapBytes past its own share, (2 MiB - own) / 76: 27,594 for an update of no
-// share, so typing never waits on the heap bound for its scans either. It is at least 1, since an
-// allowance of 0 would leave the apply unbounded (crdt/doc.go:362-370).
+// applyHeapBound, or the whole bound for an estimate past it, and for any other what its marks can
+// hold in what is left of unweighedApplyHeapBytes past its own share, (2 MiB - own) / 76: 27,594
+// for an update of no share, so typing never waits on the heap bound for its scans either. It is
+// at least 1, since an allowance of 0 would leave the apply unbounded (crdt/doc.go:362-370).
 func scanCeiling(own uint64) int {
 	if own > unweighedApplyHeapBytes {
 		return perFrameScanCeiling

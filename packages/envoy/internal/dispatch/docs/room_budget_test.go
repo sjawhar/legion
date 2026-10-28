@@ -31,10 +31,10 @@ import (
 // copies are charged from its load, which keeps both (roomCopies). Each count replaces the last
 // rather than adding to it, so the charge falls when the document does, and clears the content
 // added up to the rendering it measured; no count touches the structure part. A count prices a
-// copy at its elements or at its structs, whichever is more. A rendering goldmark could not finish
-// counting is priced from its bytes at the densest price, past the element bound and never at
-// nothing. A socket's reservation is replaced by its room's charge when the room loads, and the
-// whole charge goes when ygo retires the room.
+// copy at its elements, its rendered bytes or its structs, whichever is the most. A rendering
+// goldmark could not finish counting is priced from its bytes at the densest price, past the
+// element bound and never at nothing. A socket's reservation is replaced by its room's charge when
+// the room loads, and the whole charge goes when ygo retires the room.
 func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *testing.T) {
 	const densest = bytesOfHeapAByteAtTheDensest * roomCopies
 	budget := &roomBudget{limit: roomBudgetBytes}
@@ -61,6 +61,10 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 	requireCharged(t, budget, charge, 2*100_000*bytesOfHeapAStructHeld+5_000, "a count whose structs outweigh its elements is priced at its structs")
 	charge.measured(copyHeap(8_000, 800, 2_000), 150)
 	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+5_000, "a count whose elements outweigh its structs is priced at its elements")
+	// A long run of text renders many bytes making few elements from few structs: its bytes
+	// outweigh both, and price it.
+	charge.measured(copyHeap(800_000, 9, 11), 150)
+	requireCharged(t, budget, charge, 2*800_000*bytesOfHeapARenderedByte+5_000, "a count whose rendered bytes outweigh its elements and structs is priced at its bytes")
 
 	// A rendering MeasureDocument leaves uncounted answers no elements at all; priced as that, the
 	// heaviest room in the pod would be free. It is priced from its bytes at the densest price,
@@ -87,15 +91,15 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 	// at the room's load by the charge of the room's own document at both copies, here one an
 	// update stored since that version has made smaller.
 	ctx := context.Background()
-	reserved := roomWeight(copyHeap(3_000, 30, 0), 0, 0)
+	reserved := roomWeight(copyHeap(3_000, 300, 0), 0, 0)
 	reservation, err := budget.reserve(ctx, time.Time{}, "other", reserved)
 	if err != nil || reservation == nil || budget.used != reserved {
 		t.Fatalf("a reservation held %d bytes (%v), want %d", budget.used, err, reserved)
 	}
-	other := budget.load("other", copyHeap(3_000, 10, 0))
-	if budget.used != 2*10*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
+	other := budget.load("other", copyHeap(3_000, 100, 0))
+	if budget.used != 2*100*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
 		t.Fatalf("the loaded room is charged %d bytes beside %d reservations, want its own %d alone",
-			budget.used, len(budget.rooms["other"].reservations), 2*10*bytesOfHeapAnElement)
+			budget.used, len(budget.rooms["other"].reservations), 2*100*bytesOfHeapAnElement)
 	}
 	if other.closeOnceUnused || budget.marked.Load() != 0 {
 		t.Fatal("a room loaded for an admitted socket was marked to close once unused")
@@ -225,11 +229,17 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 // take the whole budget. A document at the decode cap is priced at its 1,048,576 structs whatever
 // it renders (bytesOfHeapAStructHeld), 1,048,576 x 170 x 2 = 356,515,840 bytes: the long-edited
 // document's 53 elements and the agent-rewritten document's 65,536 alike, so the budget admits six
-// of either, where their elements would have admitted over forty thousand of the first. There is
-// no ceiling on one room: a mebibyte of the densest rendering, which goldmark stops counting and
-// which is priced from its bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at
-// both copies, so the budget admits none, and the pressure rule is what answers a room grown that
-// heavy (refusedUnderPressure).
+// of either, where their elements would have admitted over forty thousand of the first. A
+// paragraph of a mebibyte typed in one transaction loads as 11 structs making 9 elements, 4,230
+// bytes a copy at the element price, and is priced at its rendered bytes instead
+// (bytesOfHeapARenderedByte), 1,048,576 x 12 x 2 = 25,165,824 bytes, so the budget admits
+// eighty-five; the same price leaves the other shapes where their elements or structs put them, a
+// mebibyte of prose at 12,582,912 bytes a copy against its elements' 27,072,000, and the
+// agent-rewritten document at 12,582,900 against its structs' 178,257,920. There is no ceiling on
+// one room: a mebibyte of the densest rendering, which goldmark stops counting and which is priced
+// from its bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at both copies, so
+// the budget admits none, and the pressure rule is what answers a room grown that heavy
+// (refusedUnderPressure).
 func TestTheRoomBudgetsArithmetic(t *testing.T) {
 	prose := copyHeap(pmdoc.MaxDocumentBytes, 57_600, 77_600)
 	for _, shape := range []struct {
@@ -244,6 +254,7 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 		{"a mebibyte of prose given a frame of 500,000 GC structs", prose, 0, 500_000 * (1 + splitsAStructCanCause) * bytesOfHeapAStruct * roomCopies, 1_914_144_000, 2},
 		{"the long-edited document typed on until the decode cap", copyHeap(5_314, 53, maxUpdateItems), 0, 0, 356_515_840, 6},
 		{"an agent's whole rewrites until the decode cap refused one", copyHeap(1_048_575, 65_536, maxUpdateItems), 0, 0, 356_515_840, 6},
+		{"a paragraph of a mebibyte typed in one transaction", copyHeap(pmdoc.MaxDocumentBytes, 9, 11), 0, 0, 25_165_824, 85},
 		{"a mebibyte of the densest rendering", copyHeap(pmdoc.MaxDocumentBytes, elementsPastCounting, 0), 0, 0, 2_218_786_816, 0},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
@@ -800,6 +811,62 @@ func TestAStructDenseDocumentReservesAndIsChargedItsStructs(t *testing.T) {
 	}
 	ratio := float64(reservation.weight) / float64(loaded)
 	t.Logf("%d stored structs reserve %d bytes; the loaded room counts %d and is charged %d (%.4fx)", structs, reservation.weight, counted, loaded, ratio)
+	if ratio < 1/factor || ratio > factor {
+		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room is charged once loaded, want within %.2fx", reservation.weight, ratio, loaded, factor)
+	}
+	leaveDocument(connection)
+}
+
+// A document of one long run of text reserves its rendered bytes and is charged them once loaded:
+// a paragraph of a mebibyte, its text one item, renders about a mebibyte making a few elements
+// from a few structs, which would price it at a few kilobytes while each copy holds its text. Its
+// admission reserves the stored version's bytes at bytesOfHeapARenderedByte at both copies, past
+// what its elements and the structs of its stored history would reserve (copyHeap); its room's
+// load prices its rendering the same way (chargeLoadedRoom), within 1.05x of the reservation.
+func TestAParagraphOfAMebibyteReservesAndIsChargedItsRenderedBytes(t *testing.T) {
+	const factor = 1.05
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.settle = time.Hour // no settlement writes into the room while it is weighed
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	const words = "words of one long paragraph "
+	paragraph := strings.Repeat(words, (pmdoc.MaxDocumentBytes-4<<10)/len(words)) + "end"
+	room := createDocumentsHolding(t, database, 1, "# Title\n\n"+paragraph+"\n")[0]
+	stored := latestVersionMarkdown(t, database, room)
+	structs := storedHistoryStructs(t, database, room)
+	bytes, elements := int64(len(stored)), countElements(stored)
+	byElements, byStructs := elements*bytesOfHeapAnElement, structs*bytesOfHeapAStructHeld
+	if bytes < pmdoc.MaxDocumentBytes-8<<10 || bytes*bytesOfHeapARenderedByte <= max(byElements, byStructs) {
+		t.Fatalf("the stored version is %d bytes making %d elements beside %d stored structs, want about a mebibyte whose bytes outweigh both", bytes, elements, structs)
+	}
+
+	reservation, err := service.reserveRoom(ctx, room)
+	if err != nil || reservation == nil {
+		t.Fatalf("the admission was refused: %v", err)
+	}
+	if want := bytes * bytesOfHeapARenderedByte * roomCopies; reservation.weight != want {
+		t.Fatalf("the admission reserved %d bytes, want its %d rendered bytes at both copies, %d, where its %d elements would reserve %d and its %d structs %d",
+			reservation.weight, bytes, want, elements, byElements*roomCopies, structs, byStructs*roomCopies)
+	}
+	service.budget.release(reservation)
+
+	connection, err := dialDocument(httpServer.URL, room)
+	if err != nil {
+		t.Fatalf("open the document: %v", err)
+	}
+	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
+	requireNothingReserved(t, service)
+	rendering := renderedLive(t, service, room)
+	loaded := budgetUsed(service)
+	if want := int64(len(rendering)) * bytesOfHeapARenderedByte * roomCopies; loaded != want {
+		t.Fatalf("the loaded room is charged %d bytes for a %d-byte rendering making %d elements from %d structs, want its rendered bytes at both copies, %d",
+			loaded, len(rendering), countElements(rendering), liveStructs(t, service, room), want)
+	}
+	ratio := float64(reservation.weight) / float64(loaded)
+	t.Logf("a %d-byte version of %d elements and %d stored structs reserves %d bytes; the loaded room renders %d bytes and is charged %d (%.4fx)",
+		bytes, elements, structs, reservation.weight, len(rendering), loaded, ratio)
 	if ratio < 1/factor || ratio > factor {
 		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room is charged once loaded, want within %.2fx", reservation.weight, ratio, loaded, factor)
 	}

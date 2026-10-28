@@ -38,7 +38,7 @@ const (
 	podGoMemoryLimit = 3_865_470_566
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:40), bytesOfHeapAnElement (:53), roomCopies (:479),
+	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:508),
 	// maxPeerInsertAtTheBound (peer_update.go:109), maxPeerByteCreep (:114) and maxMessageBytes
 	// (:226). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
@@ -74,11 +74,11 @@ const (
 	roomCountIntervalForTest = 15 * time.Second
 
 	// bytesOfHeapAStructHeldForTest mirrors bytesOfHeapAStructHeld
-	// (internal/dispatch/docs/room_budget.go:76), the heap one copy of a room holds for each struct
+	// (internal/dispatch/docs/room_budget.go:80), the heap one copy of a room holds for each struct
 	// of its state, measured (TestAResidentRoomsHeapPerStructOfItsState); bytesOfHeapAStructForTest
-	// mirrors bytesOfHeapAStruct (:128), what the structure part charges each struct an update adds
+	// mirrors bytesOfHeapAStruct (:157), what the structure part charges each struct an update adds
 	// and each split it can cause, and splitsAStructCanCauseForTest splitsAStructCanCause
-	// (peer_update.go:631). TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's
+	// (peer_update.go:633). TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's
 	// growth against them; a wrong mirror moves only how much growth it asks for, and its log line
 	// prints each figure beside the server's own.
 	bytesOfHeapAStructHeldForTest = 170
@@ -87,7 +87,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:228-445): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:228-447): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -279,10 +279,11 @@ func TestABrowsersUpdateIsBoundedByTheDocumentBound(t *testing.T) {
 // settled holds it, and the budget's figures and the room's struct total, which the server logs at
 // each refusal as the refusal leaves them, are the same at a second refusal of the frame as at the
 // first, so the first left them as it found them. The refused scans count toward the room's scan
-// total, so the second refusal is at what is left of it, still DOC_TOO_TANGLED. A frame one item
-// shorter, whose scans stay within the ceiling, applies once the server has started again and
-// loaded the room afresh, whose total holds none of the refused scans: what refused the frame is
-// the ceiling and nothing else.
+// total, whose million items leave more than the ceiling after the first refusal, so the second is
+// at the ceiling again, still DOC_TOO_TANGLED, with the room's total grown by what the first
+// refusal's scans passed. A frame one item shorter, whose scans stay within the ceiling, applies
+// once the server has started again and loaded the room afresh, whose total holds none of the
+// refused scans: what refused the frame is the ceiling and nothing else.
 func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
 	memory := newMemoryHarness(t)
 	server := memory.start(t)
@@ -325,8 +326,15 @@ func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
 	if limit, err := strconv.ParseInt(refusals[0][3], 10, 64); err != nil || limit != roomBudgetBytesForTest {
 		t.Fatalf("the refusal names a budget of %s bytes, want %d", refusals[0][3], roomBudgetBytesForTest)
 	}
-	if allowance, err := strconv.Atoi(refusals[0][5]); err != nil || allowance != perFrameScanCeilingForTest {
-		t.Fatalf("the first refusal names an allowance of %s items, want the %d ceiling", refusals[0][5], perFrameScanCeilingForTest)
+	for index, refusal := range refusals {
+		if allowance, err := strconv.Atoi(refusal[5]); err != nil || allowance != perFrameScanCeilingForTest {
+			t.Fatalf("refusal %d names an allowance of %s items, want the %d ceiling", index+1, refusal[5], perFrameScanCeilingForTest)
+		}
+	}
+	first, firstErr := strconv.ParseInt(refusals[0][6], 10, 64)
+	second, secondErr := strconv.ParseInt(refusals[1][6], 10, 64)
+	if firstErr != nil || secondErr != nil || second <= first {
+		t.Fatalf("the refusals left the room's scan total at %s and then %s, want the second refusal's past the first's", refusals[0][6], refusals[1][6])
 	}
 
 	joined := server.openBrowser(t, room)
@@ -352,13 +360,16 @@ func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
 }
 
 // A room's scan total survives a reload, over a real document socket of a real server: a room
-// takes a browser's frame scanning just under the per-frame ceiling, which leaves about a fifth of
-// the room's scan total; a second frame scanning more than is left, and less than the ceiling, is
-// refused DOC_TOO_TANGLED at an allowance of what is left. The server stops, which flushes the room
-// to the store, and a new server loads the room from what it stored; the same second frame is
-// refused there at an allowance within a few hundred items of the first: the reloaded room's total
-// starts at what its stored state re-scans, which is what the first room had come to, short of
-// the scans of the refusal, which the store never held.
+// takes two browsers' frames, each scanning just under the per-frame ceiling, which leave about a
+// fifth of the room's scan total; a third frame scanning more than is left, and less than the
+// ceiling, is refused DOC_TOO_TANGLED at an allowance of what is left. The server stops, which
+// flushes the room to the store, and a new server loads the room from what it stored; the same
+// third frame is refused there at an allowance within a few hundred items of the first: the
+// reloaded room's total starts at what its stored state re-scans, which is what the first room had
+// come to, short of the scans of the refusal, which the store never held. Each frame's client is
+// above the one before it, so a decode of the stored state, which takes each client's structs in
+// the order of their clients (sjawhar/ygo v1.51.3-sami.7, crdt/update.go:251), integrates the
+// frames in the order the room applied them.
 func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 	memory := newMemoryHarness(t)
 	server := memory.start(t)
@@ -372,22 +383,26 @@ func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 	t.Cleanup(setting.leave)
 	requireApplied(t, setting, chainFrame(t, setting.state(t)), fmt.Sprintf("a chain of %d one-character items", tangledChain))
 
-	_, items, _ := scanFramePast(t, setting.state(t), tangledScanClient, perFrameScanCeilingForTest)
-	first := scanFrame(tangledScanClient, items-1)
-	admitted := frameScans(t, setting.state(t), first)
-	requireApplied(t, setting, first, fmt.Sprintf("a frame of %d items scanning %d", items-1, admitted))
+	admitted := 0
+	for client := range crdt.ClientID(2) {
+		_, items, _ := scanFramePast(t, setting.state(t), tangledScanClient+client, perFrameScanCeilingForTest)
+		frame := scanFrame(tangledScanClient+client, items-1)
+		scans := frameScans(t, setting.state(t), frame)
+		requireApplied(t, setting, frame, fmt.Sprintf("a frame of %d items scanning %d", items-1, scans))
+		admitted += scans
+	}
 	after := setting.state(t)
-	second, secondItems, secondScans := scanFramePast(t, after, tangledScanClient+1, 150_000)
-	t.Logf("the room took a frame scanning %d items; the second frame, of %d items, scans %d", admitted, secondItems, secondScans)
+	third, thirdItems, thirdScans := scanFramePast(t, after, tangledScanClient+2, 300_000)
+	t.Logf("the room took two frames scanning %d items together; the third frame, of %d items, scans %d", admitted, thirdItems, thirdScans)
 
 	refuse := func(server *memoryServer) int {
 		t.Helper()
 		refused := server.openBrowser(t, room)
 		t.Cleanup(refused.leave)
 		if state := refused.state(t); !bytes.Equal(canonicalState(t, state), canonicalState(t, after)) {
-			t.Fatalf("the room holds a %d-byte state, want the %d-byte state after the first frame", len(state), len(after))
+			t.Fatalf("the room holds a %d-byte state, want the %d-byte state after the first two frames", len(state), len(after))
 		}
-		applied, closed, err := refused.send(refused.updateFrame(second))
+		applied, closed, err := refused.send(refused.updateFrame(third))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -395,9 +410,9 @@ func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 		refusal := server.scanRefusals(t, 1)[0]
 		t.Logf("the server logged %q", refusal[0])
 		allowance, err := strconv.Atoi(refusal[5])
-		if err != nil || allowance >= secondScans || allowance >= perFrameScanCeilingForTest {
+		if err != nil || allowance >= thirdScans || allowance >= perFrameScanCeilingForTest {
 			t.Fatalf("the refusal names an allowance of %s items, want what is left of the room's total, under the frame's %d scans and the %d ceiling",
-				refusal[5], secondScans, perFrameScanCeilingForTest)
+				refusal[5], thirdScans, perFrameScanCeilingForTest)
 		}
 		return allowance
 	}
@@ -413,15 +428,31 @@ func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 }
 
 // scanFramePast is scanFrame of client with the fewest items whose scans pass past in a document
-// holding state (frameScans), its items and its scans.
+// holding state (frameScans), its items and its scans. Each item scans about as many items as the
+// next - the chain, and the items of frames of lower clients already past its origin - so a first
+// reading says about how many pass past, and the count then moves an item at a time to the fewest
+// that do.
 func scanFramePast(t *testing.T, state []byte, client crdt.ClientID, past int) (frame []byte, items, scans int) {
 	t.Helper()
-	for items = past/tangledChain - 1; ; items++ {
+	items = max(past/tangledChain-1, 1)
+	if scans = frameScans(t, state, scanFrame(client, items)); scans > 0 {
+		items = max(past*items/scans, 1)
+	}
+	for ; ; items++ {
 		frame = scanFrame(client, items)
 		if scans = frameScans(t, state, frame); scans > past {
-			return frame, items, scans
+			break
 		}
 	}
+	for items > 1 {
+		shorter := scanFrame(client, items-1)
+		shorterScans := frameScans(t, state, shorter)
+		if shorterScans <= past {
+			break
+		}
+		frame, items, scans = shorter, items-1, shorterScans
+	}
+	return frame, items, scans
 }
 
 // frameScans is how many items ygo's apply of frame into a document holding state scans, read from
@@ -583,7 +614,7 @@ func (p *memoryServer) setRoomBudget(t *testing.T, bytes int64) {
 
 // unboundedRoomBudget is a room budget no drive of one document's bounds comes near: the budget
 // charges a byte of content the measurer has not yet counted at the densest price, 2,116 bytes at
-// both copies (bytesOfHeapAByteAtTheDensest, internal/dispatch/docs/room_budget.go:106), so a
+// both copies (bytesOfHeapAByteAtTheDensest, internal/dispatch/docs/room_budget.go:135), so a
 // mebibyte written in one update would fill the real budget until the room's next count.
 const unboundedRoomBudget = 1 << 50
 
@@ -768,7 +799,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:479), so the refusals begin within one room of
+// (roomCopies, internal/dispatch/docs/room_budget.go:508), so the refusals begin within one room of
 // the budget divided by what one such room reserves - its stored version's elements at the price of
 // one, at both copies - computed here from the server's constants and held to the numbers the server
 // logs, both when the browsers come one after another and when fifty open at once.
@@ -1782,7 +1813,7 @@ func requireRoomAbsent(t *testing.T, server *memoryServer, artifactID, what stri
 }
 
 // proseMarkdown is the shape TestAResidentRoomsHeapPerByteOfItsMarkdown weighs rooms in
-// (internal/dispatch/docs/room_heap_test.go:309-335), whole sections to at most size bytes: a
+// (internal/dispatch/docs/room_heap_test.go:399-425), whole sections to at most size bytes: a
 // heading, a paragraph of marks and plain words, a list, a table and a code block. Each paragraph
 // ends in about 1,400 bytes of plain words (paddingTexts), which a drive can lengthen or shorten
 // without touching a mark.
@@ -1943,7 +1974,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:544-581).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:574-611).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -1985,7 +2016,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1366-1399).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1399-1432).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

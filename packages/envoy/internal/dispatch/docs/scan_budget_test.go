@@ -104,9 +104,9 @@ func anHonestLongSession(t *testing.T, seed []byte, take func(place int, update 
 // document of its own, fresh from the seed (anHonestLongSession says why the sum is the session's).
 // It logs what the session's states re-scan past the seed's own re-scan, the count a reload starts
 // the room's total at (roomScans.rescanned), beside what the rooms' applies scanned. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 32 s here. Run on 2026-10-28: 97,600 updates at 38
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 28 s here. Run on 2026-10-28: 97,600 updates at 38
 // places scanned 42,401 items, at most 9 in one, re-scanning as 42,611; fifteen times 42,401 is
-// 636,015, past roomScanTotal, so it fails until the architect rules on the total.
+// 636,015, within the 1,000,000 of roomScanTotal.
 func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the long session's measurement")
@@ -166,11 +166,11 @@ func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 // rewrote whole until the decode cap refused a write (agentRewrittenState), and of the long-edited
 // 5 KiB document typed on until its state reached the decode cap (longEditedAtCapState) is each at
 // most half of roomScanTotal, so each leaves people at least half the total to edit it with. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 205 s here with the store, the agent's rewrites 197 s
-// of them. Run on 2026-10-28: the heaviest document's 5,360,879-byte state re-scans 49,156 items
-// and the long-edited one's 14,427,285-byte state 10, each within half; the agent-rewritten
-// document's 12,630,814-byte state, 28 whole rewrites, re-scans 475,136, past half and within one
-// honest handoff of the whole total, so it fails until the architect rules on it.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 198 s here with the store, the agent's rewrites 189 s
+// of them. Run on 2026-10-28: the heaviest document's 5,360,879-byte state re-scans 49,156 items,
+// the long-edited one's 14,427,285-byte state 10, and the agent-rewritten document's
+// 12,630,814-byte state, 28 whole rewrites, 475,136, the most, each within half the 1,000,000
+// total, 500,000.
 func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the heavy documents' re-scans")
@@ -204,6 +204,57 @@ func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 				t.Errorf("the document's load re-scans %d items, past half the %d scan total", scans, roomScanTotal)
 			}
 		})
+	}
+}
+
+// A copy of a room at its scan total costs a copy of the same state with nothing to scan and about
+// a second of scans more, the architect's rule for the total: the run of a million keystrokes and
+// the same run once three frames scanned it whole (keystrokeRunStates), whose state re-scans a
+// million distinct items, the whole of roomScanTotal, each decoded as a room's load decodes its
+// stored state (decodeStoredState) at GOMAXPROCS=1 (measureLoad). The scanned copy takes at most
+// 1.5 s more than the unscanned one, and allocates at most twice bytesOfAScanMark more for each
+// item its scans pass, which is what ygo keeps a mark for (crdt/item.go:126-158). Set
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on 2026-10-28: the scanned copy re-scanned
+// 1,000,000 items in 2.219 s, allocating 457,822,248 bytes with a peak of 434,319,528 above the
+// heap before it; the unscanned one, 4 items, 1.464 s, 383,011,168 and 354,183,752: 0.755 s and
+// 74,811,080 bytes more, 74.8 bytes a scan.
+func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t *testing.T) {
+	if os.Getenv(scanMeasurement) == "" {
+		t.Skip("set " + scanMeasurement + "=1 to run the copy measurement")
+	}
+	keystrokes, scanned := keystrokeRunStates(t)
+	copyOf := func(state []byte) (loadCost, uint64) {
+		var scans uint64
+		cost := measureLoad(t, func() any {
+			decoded, err := decodeStoredState(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scans = decoded.scans
+			return decoded.doc
+		})
+		return cost, scans
+	}
+	plain, plainScans := copyOf(keystrokes)
+	atTotal, totalScans := copyOf(scanned)
+	for _, copied := range []struct {
+		name  string
+		state []byte
+		cost  loadCost
+		scans uint64
+	}{{"unscanned", keystrokes, plain, plainScans}, {"scanned", scanned, atTotal, totalScans}} {
+		t.Logf("the %s copy of a %d-byte state re-scans %d items: %s, %d bytes allocated, %d peak, %d held",
+			copied.name, len(copied.state), copied.scans, copied.cost.took.Round(time.Millisecond), copied.cost.allocated, copied.cost.peak, copied.cost.held)
+	}
+	if totalScans < roomScanTotal || plainScans >= honestHandoffScans {
+		t.Fatalf("the scanned state re-scans %d items and the unscanned one %d, want the first at the %d total and the second under %d",
+			totalScans, plainScans, roomScanTotal, honestHandoffScans)
+	}
+	if more := atTotal.took - plain.took; more > 1500*time.Millisecond {
+		t.Errorf("the copy at the total took %s more than the unscanned one, past 1.5 s", more.Round(time.Millisecond))
+	}
+	if more := int64(atTotal.allocated) - int64(plain.allocated); more > int64(2*bytesOfAScanMark*totalScans) {
+		t.Errorf("the copy at the total allocated %d bytes more than the unscanned one, past twice %d for each of its %d scans", more, bytesOfAScanMark, totalScans)
 	}
 }
 
@@ -530,14 +581,14 @@ func TestAServerWriteIsNeverRefusedByTheRoomsScanTotal(t *testing.T) {
 }
 
 // A room whose scan total is used up still takes typing, and refuses a larger apply as needing a
-// rebuild: a room loads a history whose re-scan came to the whole total (tangledHistory), and its
-// total starts there as every load's does (roomScans.rescanned); a browser then types thirty
-// characters onto the paragraph's end, each scanning nothing, and another browser's keystroke at
-// the same place scans past them, under usedUpScanBudget, and both are admitted; a frame of three
-// items at that place, whose scans pass usedUpScanBudget, is refused 4413 DOC_NEEDS_REBUILD and
-// leaves the room as it was.
+// rebuild: a room loads a history whose re-scan came to the whole total (tangledHistory, its
+// scanners about 2,000 scans each), and its total starts there as every load's does
+// (roomScans.rescanned); a browser then types thirty characters onto the paragraph's end, each
+// scanning nothing, and another browser's keystroke at the same place scans past them, under
+// usedUpScanBudget, and both are admitted; a frame of three items at that place, whose scans pass
+// usedUpScanBudget, is refused 4413 DOC_NEEDS_REBUILD and leaves the room as it was.
 func TestAUsedUpRoomStillTakesTypingAndRefusesALargerApplyAsNeedingARebuild(t *testing.T) {
-	state := tangledHistory(t, 2_000, 254)
+	state := tangledHistory(t, 2_000, roomScanTotal/2_000+2)
 	room := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(room, state, nil); err != nil {
 		t.Fatal(err)

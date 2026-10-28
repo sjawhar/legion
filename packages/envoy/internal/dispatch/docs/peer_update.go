@@ -294,12 +294,14 @@ const maxMessageBytes = 54 << 20
 // Every update's apply is weighed too, by what the walk estimates ygo's apply of it allocates into
 // this room (peerWeighing.applyHeap), which is proportional to the values and structs it carries
 // whether or not the room already holds them, and to the room's clients and deleted items. One
-// whose estimate alone passes applyHeapBound, all the heap the pod lets its applies hold at once,
-// could never apply within it: it is answered with an error before any other rule and never
-// applied, as a walk's refusal is. An admitted update whose own share of the estimate passes
-// unweighedApplyHeapBytes applies only once it holds its estimate, the marks its scans can make
-// included, out of the bound (applyHeaps), so a reconnect storm's whole-state handoffs decode as
-// many at a time as the bound has room for rather than all at once; typing never waits on it.
+// whose estimate passes applyTooHeavyBytes, all of what the Go memory limit leaves above the room
+// budget, the cold reads' cache and the pressure reserve, could not apply even alone: it is
+// answered with an error before any other rule and never applied, as a walk's refusal is. An
+// admitted update whose own share of the estimate passes unweighedApplyHeapBytes applies only once
+// it holds its estimate, the marks its scans can make included, out of the bound (applyHeaps), or
+// the whole bound for an estimate past it, which then applies alone, so a reconnect storm's
+// whole-state handoffs decode as many at a time as the bound has room for rather than all at once,
+// and no honest handoff is refused for its weight; typing never waits on it.
 //
 // Every apply's scans are held to an allowance (roomScans): the per-frame ceiling for its heap
 // share (scanCeiling) or what is left of the room's scan total, whichever is less, reserved before
@@ -369,9 +371,9 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	own := weighed.ownApplyHeap(len(info.Update))
 	weighs := own > unweighedApplyHeapBytes
 	heap := weighed.applyHeap(len(info.Update), structs.roomStructs(info.Doc))
-	if heap > applyHeapBound {
-		return fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets every apply hold at once",
-			errApplyTooHeavy, heap, uint64(applyHeapBound))
+	if heap > applyTooHeavyBytes {
+		return fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
+			errApplyTooHeavy, heap, uint64(applyTooHeavyBytes))
 	}
 	atTheBound := bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
 	crept := measured && bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep
@@ -1383,23 +1385,33 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 }
 
 // errApplyTooHeavy is the hook's answer to an update whose apply alone is estimated to allocate
-// more than applyHeapBound, all the heap the pod lets every browser's apply hold at once: no turn
-// could ever apply it within the bound, so it is never applied. ygo answers the browser
-// SyncStatus(0) and leaves it connected, as it answers a walk's refusal.
+// more than applyTooHeavyBytes: no turn could hold it, even alone. It is never applied. ygo answers
+// the browser SyncStatus(0) and leaves it connected, as it answers a walk's refusal.
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
 // goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of
 // the container's 4 GiB, which the server sets at boot (cmd/dispatch/main.go:116-128).
 const goMemoryLimitBytes = 4 << 30 * 9 / 10
 
+// heapAboveTheReserve is what the Go memory limit leaves above the room budget, the cold reads'
+// cache and the pressure reserve the budget's charges may pass its limit by: 3,865,470,566 -
+// roomBudgetBytes 2,147,483,648 - documentReadBudget 268,435,456 - pressureReserveBytes
+// 268,435,456 = 1,181,116,006 bytes. The architect's ruling splits it three ways: the apply-heap
+// bound (applyHeapBound), the copy-heap bound (copyHeapBound) and slack named for what neither
+// bound weighs (heapSlackBytes), a third each. The ruling's words are "a quarter of what the limit
+// leaves above the reserve to each bound, and a quarter as named slack", which come to three
+// quarters and leave the last quarter to nothing; a third each is taken as what "the three-way
+// split" means, so that every byte of it has a named holder.
+const heapAboveTheReserve = goMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes
+
 // applyHeapBound is the most heap, by their estimates (peerWeighing.applyHeap), that the pod's
-// weighed applies of browsers' updates hold at once (applyHeaps): half of what the Go memory limit
-// leaves above the room budget, the cold reads' cache and the pressure reserve the budget's
-// charges may pass its limit by, (3,865,470,566 - roomBudgetBytes 2,147,483,648 -
-// documentReadBudget 268,435,456 - pressureReserveBytes 268,435,456) / 2 = 1,181,116,006 / 2 =
-// 590,558,003 bytes, about 563 MiB. The other half is the copy-heap bound's (copyHeapBound), which
-// holds the full-state decodes of loads, forks and folds; the applies under
-// unweighedApplyHeapBytes run beside both.
+// weighed applies of browsers' updates hold at once (applyHeaps): a third of heapAboveTheReserve,
+// 1,181,116,006 / 3 = 393,705,335 bytes, about 375 MiB. The copy-heap bound (copyHeapBound), which
+// holds the full-state decodes of loads, forks and folds, takes another third, and the slack
+// (heapSlackBytes) the last, where the applies under unweighedApplyHeapBytes run. A weighed apply
+// whose estimate passes the bound is never refused for it: it waits for the whole bound and then
+// holds all of it, so it runs alone (applyHeaps.hold), as a copy past the copy-heap bound does.
+// Only an estimate past applyTooHeavyBytes is refused (errApplyTooHeavy).
 //
 // It is not in the spec: it is the plan's departure 8, large applies taking turns, weighed by each
 // apply's estimate rather than counted in slots. Every browser's first sync hands over its whole
@@ -1413,17 +1425,46 @@ const goMemoryLimitBytes = 4 << 30 * 9 / 10
 // inserted nothing and added no struct. Measured on 2026-10-28
 // (TestEveryApplysTransientHeapIsWithinItsEstimate), the 5,360,879-byte handoff of the heaviest
 // document the server's own writes can leave is estimated at 71,356,658 bytes into the room
-// holding it, against the 33,410,168 it allocates there, so eight such handoffs apply at once, and
+// holding it, against the 33,410,168 it allocates there, so five such handoffs apply at once, and
 // at 234,999,499 into a fresh room, whose budget gives it the per-frame ceiling
 // (perFrameScanCeiling) for the 49,156 items decoding a whole document into one holding nothing
-// scans, against the 113,178,024 its apply allocates there, so two apply at once. The
+// scans, against the 113,178,024 its apply allocates there, so one applies at a time. The
 // 9,577,606-byte handoff of that document grown through the creep allowance (maxMessageBytes,
 // TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor) is estimated at 157,797,184
-// into the room holding it, so three apply at once, and at 482,930,134 into a fresh room, one at a
-// time. A frame of null values at the message floor, 56,623,059 bytes, is estimated at
-// 3,737,127,910 (TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied), past the whole bound,
-// and refused (errApplyTooHeavy).
-const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudget - pressureReserveBytes) / 2
+// into the room holding it, so two apply at once, and at 482,930,134 into a fresh room, past the
+// bound, so it runs alone.
+const applyHeapBound = heapAboveTheReserve / 3
+
+// heapSlackBytes is the third of heapAboveTheReserve that neither bound grants, 1,181,116,006 / 3 =
+// 393,705,335 bytes, about 375 MiB: the slack for what no bound weighs - the request path, the
+// applies of browsers' updates under unweighedApplyHeapBytes, one for each browser's read loop at
+// most, the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
+// shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go memory
+// limit to free garbage before it reaches it. An apply estimated past applyHeapBound, which runs
+// alone, may reach into it too, up to applyTooHeavyBytes.
+const heapSlackBytes = heapAboveTheReserve / 3
+
+// applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
+// update as too heavy to apply (errApplyTooHeavy): all of heapAboveTheReserve, 1,181,116,006
+// bytes, both bounds and the slack together, so that no apply is refused that could run with every
+// other weighed heap at rest. An update estimated past applyHeapBound and within it is never
+// refused: it waits for the whole apply bound and then runs alone (applyHeaps.hold). The estimate
+// bounds what an apply allocates from above: the heaviest server-written document's handoff is
+// estimated at 71,356,658 bytes and allocates 33,410,168, and no handoff of the editor's is
+// estimated past three times what it allocates (TestEveryApplysTransientHeapIsWithinItsEstimate).
+//
+// It stays above the estimate of every honest whole-state handoff at F, the heaviest frame the
+// hook lets a browser hand over (heaviestHandoffBound), measured on 2026-10-28 into the room
+// holding each (TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy): 904,378,600 bytes
+// for the heaviest, the long-edited document typed on until 4,096 structs short of the decode cap
+// and padded to F by text nested under the margin, 276,737,406 under this line; 657,900,131 for
+// the long-edited fixture padded the same way, and 404,291,526 for a paragraph. The line before
+// it was the whole apply bound, 724,775,731 bytes before the pressure reserve came out of the
+// bounds and 590,558,003 after, which refused the first of those, and at 590,558,003 the second
+// too. A frame of null values at the message floor, 56,623,059 bytes, which the editor never
+// sends, is estimated at 3,737,127,910 (TestAnUpdateHeavierThanAnyApplyMayHoldIsNeverApplied),
+// past it, and refused.
+const applyTooHeavyBytes = heapAboveTheReserve
 
 // unweighedApplyHeapBytes is the update's own share of its estimate (peerWeighing.ownApplyHeap)
 // at or under which an admitted update applies without waiting on applyHeapBound: 2 MiB, over
@@ -1434,8 +1475,7 @@ const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudge
 // transaction on a room pays for the room's clients and deleted items, the server's own writes
 // included, and ygo runs one transaction at a time in a room (its document lock), so that share is
 // paid at most once a room at any moment. An unweighed apply runs beside the bound, one per
-// browser's read loop at most, outside both halves of what the Go memory limit leaves above the
-// room budget, the cold reads' cache and the pressure reserve (copyHeapBound).
+// browser's read loop at most, in the slack neither bound grants (heapSlackBytes).
 const unweighedApplyHeapBytes = 2 << 20
 
 // applyHeaps is the service's bound on the estimated heap of its weighed applies, applyHeapBound
@@ -1449,13 +1489,14 @@ type applyHeaps struct {
 	bound *semaphore.Weighted
 }
 
-// hold waits until it holds heap of the bound and returns what gives it back. heap is never over
-// applyHeapBound, which the hook refuses before it gets here, and with a context that is never
-// done Acquire returns only once it holds heap, so it cannot fail.
+// hold waits until it holds heap of the bound, or the whole bound for a heap past it, and returns
+// what gives it back. With a context that is never done Acquire returns only once it holds what it
+// asked for, so it cannot fail.
 func (h *applyHeaps) hold(heap uint64) (release func()) {
 	h.once.Do(func() { h.bound = semaphore.NewWeighted(applyHeapBound) })
-	_ = h.bound.Acquire(context.Background(), int64(heap))
-	return func() { h.bound.Release(int64(heap)) }
+	held := int64(min(heap, applyHeapBound))
+	_ = h.bound.Acquire(context.Background(), held)
+	return func() { h.bound.Release(held) }
 }
 
 // applyHeap is the estimate of what ygo's apply of the walked update allocates, frame its bytes,

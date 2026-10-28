@@ -57,6 +57,18 @@ func longEditedAtCapState(t *testing.T) []byte {
 	if atCapStates.longEdited != nil {
 		return atCapStates.longEdited
 	}
+	state := longEditedTypedTo(t, maxUpdateItems)
+	if structs, _, _ := structsAndRendering(t, state); structs+smallestReplacementAdds <= maxUpdateItems || structs > maxUpdateItems {
+		t.Fatalf("the long-edited document typed on decodes to %d structs, want within %d of the %d cap", structs, smallestReplacementAdds, maxUpdateItems)
+	}
+	atCapStates.longEdited = state
+	return state
+}
+
+// longEditedTypedTo is the long-edited fixture typed on as longEditedAtCapState types it until the
+// decoded document counts structs structs, and those characters then deleted.
+func longEditedTypedTo(t *testing.T, structs uint64) []byte {
+	t.Helper()
 	doc := newDocumentCopy(crdt.WithClientID(0x5eed))
 	if err := crdt.ApplyUpdateV1(doc, longEditedState(t), nil); err != nil {
 		t.Fatal(err)
@@ -67,8 +79,8 @@ func longEditedAtCapState(t *testing.T) []byte {
 	}
 	doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
 	typed := 1
-	for structs := countRoomStructs(doc); structs < maxUpdateItems; structs = countRoomStructs(doc) {
-		more := int(maxUpdateItems - structs)
+	for counted := countRoomStructs(doc); counted < structs; counted = countRoomStructs(doc) {
+		more := int(structs - counted)
 		doc.Transact(func(txn *crdt.Transaction) {
 			for range more {
 				text.Insert(txn, 1, "x", nil)
@@ -77,12 +89,7 @@ func longEditedAtCapState(t *testing.T) []byte {
 		typed += more
 	}
 	doc.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, typed) })
-	state := crdt.EncodeStateAsUpdateV1(doc, nil)
-	if structs, _, _ := structsAndRendering(t, state); structs+smallestReplacementAdds <= maxUpdateItems || structs > maxUpdateItems {
-		t.Fatalf("the long-edited document typed on by %d characters decodes to %d structs, want within %d of the %d cap", typed, structs, smallestReplacementAdds, maxUpdateItems)
-	}
-	atCapStates.longEdited = state
-	return state
+	return crdt.EncodeStateAsUpdateV1(doc, nil)
 }
 
 // storeHistory makes state the whole stored history of artifactID, as one update at the next
@@ -386,7 +393,7 @@ func TestARebuildNearACapClosesTheResidentRoomAndItsEditorsReAdmitTheRebuiltDocu
 // tangledHistory is a document's history whose re-scan passes near roomScanTotal: its first
 // paragraph followed by chain one-character items, each of a client of its own so none merges
 // with its neighbour, and then scanners items each naming the chain's first as its left origin and
-// no right origin, so each scans the chain to its end.
+// no right origin, so each scans the chain to its end, about chain items each.
 func tangledHistory(t *testing.T, chain, scanners int) []byte {
 	t.Helper()
 	tree, err := pmdoc.Parse("# Tangled\n\nOne paragraph of ordinary prose.\n")
@@ -437,9 +444,10 @@ func tangledHistory(t *testing.T, chain, scanners int) []byte {
 // A history whose re-scan stands within one honest offline handoff of the room's scan total
 // (roomScanTotal, honestHandoffScans) is near the scan total, which leaves every larger merge
 // refused, and a rebuild takes it: the rebuilt history re-scans fewer items than one honest
-// handoff (historyScans, a count of the re-scan's transaction) and reads the same text.
+// handoff (historyScans, a count of the re-scan's transaction) and reads the same text. The
+// tangle's scanners, about 2,000 scans each, are enough to pass the total less one handoff.
 func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadingTheSame(t *testing.T) {
-	state := tangledHistory(t, 2_000, 250)
+	state := tangledHistory(t, 2_000, (roomScanTotal-honestHandoffScans)/2_000+2)
 	history, err := decodeHistory(state)
 	if err != nil {
 		t.Fatal(err)

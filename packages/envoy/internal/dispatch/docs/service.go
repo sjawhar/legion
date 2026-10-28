@@ -263,8 +263,8 @@ type Service struct {
 	admissionWait time.Duration
 	// applyHeaps is the pod's bound on the estimated heap of browsers' applies, applyHeapBound of
 	// it, out of which an admitted update whose own share of its estimate passes
-	// unweighedApplyHeapBytes holds its estimate while it applies (weighPeerUpdate). Its zero value
-	// is ready.
+	// unweighedApplyHeapBytes holds its estimate, or all of it for an estimate past it, while it
+	// applies (weighPeerUpdate). Its zero value is ready.
 	applyHeaps applyHeaps
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a

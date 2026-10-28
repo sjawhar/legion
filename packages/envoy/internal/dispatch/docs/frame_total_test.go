@@ -438,13 +438,9 @@ func TestTheStoredFrameNeverPassesTheHeaviestHandoffWhateverTheMixOfUpdates(t *t
 			admitted[kind]++
 			continue
 		}
-		// A whole-state handoff of a room near F is estimated past the apply heap's bound, and
-		// answered as a walk's refusal is (errApplyTooHeavy); the browser builds afresh.
-		if errors.Is(err, errApplyTooHeavy) && kind == "a whole-state handoff" {
-			refused[kind+" past the apply heap's bound"]++
-			browsers[from] = fresh()
-			continue
-		}
+		// With the frame grown to F (fullFrameBoundEnv), a whole-state handoff is estimated past
+		// the apply heap's bound and applies alone, holding all of it; the hook never answers one
+		// as too heavy (errApplyTooHeavy), and such an answer falls to the failure below.
 		var refusal *websocket.PeerClose
 		if !errors.As(err, &refusal) || refusal.Code != contracts.DocumentTooLargeCloseCode {
 			t.Fatalf("%s (step %d, %d bytes) was answered %v (applied %t), want it admitted or refused as too large", kind, steps, len(update), err, called)
