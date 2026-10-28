@@ -3,6 +3,8 @@ package docs
 import (
 	"context"
 	"maps"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +56,68 @@ func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
 	}
 	if !maps.Equal(recorded, want) {
 		t.Fatalf("recorded marks = %v, want %v", recorded, want)
+	}
+}
+
+// recordedMarkRefs sends the artifact as a bind parameter, so its prepared read can run a generic
+// plan, which this test forces. With sequential scans disabled the planner still falls back to a
+// Seq Scan when no index matches the predicate's expression, or, for asks, to a scan of all of
+// asks_anchor_artifact_id, whose partial predicate the read's anchor is not null implies; so the
+// test requires the index's node to carry an Index Cond, and fails exactly when an edit to
+// recordedMarksQuery breaks its exact-expression match with the table's anchor index.
+func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
+	database := storetest.Open(t)
+	for _, test := range []struct{ table, index string }{
+		{table: "asks", index: "asks_anchor_artifact_id"},
+		{table: "comments", index: "comments_anchor_artifact"},
+	} {
+		t.Run(test.table, func(t *testing.T) {
+			ctx := context.Background()
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin explain transaction: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+				t.Fatalf("disable sequential scans: %v", err)
+			}
+			if _, err := tx.Exec(ctx, "set local plan_cache_mode = force_generic_plan"); err != nil {
+				t.Fatalf("force generic plan mode: %v", err)
+			}
+			if _, err := tx.Exec(ctx, "prepare recorded_marks(text) as "+recordedMarksQuery(test.table)); err != nil {
+				t.Fatalf("prepare recorded %s marks query: %v", test.table, err)
+			}
+			rows, err := tx.Query(ctx, "explain (costs off) execute recorded_marks('00000000-0000-4000-8000-00000000000a')")
+			if err != nil {
+				t.Fatalf("explain recorded %s marks query: %v", test.table, err)
+			}
+			var lines []string
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					rows.Close()
+					t.Fatalf("scan plan: %v", err)
+				}
+				lines = append(lines, line)
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				t.Fatalf("iterate plan: %v", err)
+			}
+			if _, err := tx.Exec(ctx, "deallocate recorded_marks"); err != nil {
+				t.Fatalf("deallocate recorded %s marks query: %v", test.table, err)
+			}
+			plan := strings.Join(lines, "\n")
+			searched := false
+			for i := 1; i < len(lines); i++ {
+				if slices.Contains(strings.Fields(lines[i-1]), test.index) && strings.HasPrefix(strings.TrimSpace(lines[i]), "Index Cond: ") {
+					searched = true
+				}
+			}
+			if !searched || strings.Contains(plan, "Seq Scan") {
+				t.Fatalf("recorded %s marks plan does not search %s:\n%s", test.table, test.index, plan)
+			}
+		})
 	}
 }
 
