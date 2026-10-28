@@ -2693,22 +2693,42 @@ the synchronous listener call records the sent or failed attempt instead of blin
   last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed
   `artifact.version` reaches nobody; the first move after an opening or a hand-back is not quiet. A
   notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
-  a comment reply's
-  thread-root author and its direct parent author when different; a message reply's direct parent
-  author; for a bare resolve or reopen, the resolved comment's own root author; and for a new
-  comment on a document (no `reply_to`, no `ask_id`) and its edit, every session the document
-  credits - the one that created it (`artifacts.created_by`) and every one a version lists
-  (`artifact_versions.authors`), read in one query (`loadDocumentSessionAuthors`) - so a person's
-  comment on a passage, on a whole document or as a suggestion reaches the agent that wrote the
-  document. That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an
-  issue's document, and the event's own for a project document; a comment on an issue's
-  conversation names no document and reaches no author. An author route is skipped for a human
-  author, who has no topic, for the event's own actor, so a session commenting on a document it
-  wrote is never told of its own comment, and for a session the comment's mentions resolved to
-  once the mention delivered it (`suppressed_authors`: on a new comment every session a mention
-  resolved to, so a mentioned writer hears the comment once; on a reply only the thread's root
-  author when mentioned; the mention rule below). An agent's comment notifies nobody (`notify` is
-  false), so it takes no author route at all.
+  a person's comment reply (`reply_to` set), and its edit, reaches every session that wrote a
+  comment in its thread - the root and every reply, walked to `maxCommentThreadDepth` for legacy
+  nested rows - and every session the thread's document credits; a message reply's direct parent
+  author; for a resolve or reopen, the resolved comment's root author only, so the reopen a reply
+  makes in the same transaction tells no new session twice; and for a new comment on a document
+  (no `reply_to`, no `ask_id`) and its edit, every session the document credits - the one that
+  created it (`artifacts.created_by`) and every one a version lists (`artifact_versions.authors`),
+  read in one query (`loadDocumentSessionAuthors`) - so a person's comment on a passage, on a whole
+  document or as a suggestion reaches the agent that wrote the document. That document is the
+  anchor's (`anchor.artifact_id`) for a comment on a passage of an issue's document, and the
+  event's own for a project document; for a reply, it is the thread root's, since a reply carries
+  no anchor. A comment on an issue's conversation names no document. A batch reads the thread
+  sessions and the thread's document authors of all its replies in one query
+  (`outbox/recipients.go`, `loadCommentRecipients`), keyed by the comment each reply is under.
+  A person's `comment.created` or `comment.edited` on an issue with no route and no session
+  claimant (`routing`: unclaimed, or a person holds the claim) also reaches every session the
+  issue's primary document (`artifacts.is_primary`) credits, as `documentCreditsSQL` reads
+  credits (`publishPrimaryDocumentAuthors`), so a session that wrote the spec without a claim
+  still hears comments on any of the issue's threads, an ask's thread included. A batch reads
+  those sessions for all such events in one query (`loadPrimaryDocumentAuthors`), keyed by issue.
+  A routed issue, or one a session claimed, takes no primary-document route: the route's holder
+  and the claimant (the claimant route below) hear the comment. The order of an event's
+  destinations is fixed (`publishDestinations`): the owner topic, the route, the claimant, the
+  primary document's sessions, the author routes, the ask's followers, the previous claimant; a
+  topic is sent once. The primary-document and author routes are skipped for a human, who has no
+  topic, for the event's own actor, so a session commenting on a document it wrote is never told
+  of its own comment, and for a session the comment's mentions resolved to once the mention
+  delivered it (`recipientFilter`, which reads the comment's `mentions` as the claimant and
+  follower routes do; the mention rule below). An agent's comment
+  notifies nobody (`notify` is false), so it takes no primary-document or author route at all.
+  When a batch's recipient query fails, the error is carried on each event that needed it
+  (`recipientList.err`), not as the row's failure: the attempt sends the owner topic, the route
+  and the claimant, then ends with that error at the primary-document or author step, so `settle`
+  backs the event off with those destinations recorded, or releases it when the process is
+  stopping or NATS is unreachable. Such an attempt is a failure, never a deferral: its error is
+  never `errMentionPending` alone.
   A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`,
   `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created`
   or `message.answered` on an issue also takes the claimant route (`publishClaimantRoute`): it is
@@ -2732,8 +2752,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   attempt (`routing`), so a retry after the claim moved reaches the current claimant. A project
   document's event names no issue and takes none. A claimant that is also the route, a follower or
   an author gets one copy: `publishDestination` publishes each topic once per event.
-  The mention rule (`attempt.leftToMention`) is the one rule the route, claimant, author and
-  follower copies of a new comment apply to a session its mentions resolved to; the route's
+  The mention rule (`attempt.leftToMention`) is the one rule the route, claimant,
+  primary-document, author and follower copies of a new comment apply to a session its mentions
+  resolved to; the route's
   session is `suppressed_route_session_id`, the session the route resolved to when the comment was
   written, and the rule applies while the route still names that target or that session
   (`suppressesCurrentRoute`; `suppress_route` must be set). A mention resolved at write time is a
