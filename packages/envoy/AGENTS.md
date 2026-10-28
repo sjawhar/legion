@@ -2178,10 +2178,13 @@ An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`) i
 `400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever else it names,
 unless it sends `options`, which rebuilds the options as one list and so repairs the ask; the
 reason is the content rule's text plus "send options to rebuild the options as one list". The
-options sent must include every option label the block's lists hold that the ask row does not
-(the row keeps its options from before the break; `SetAskBlockText` reads them first), else the
-edit is refused quoting those labels, so an edit built from the row never deletes the other
-collaborator's list; the reason for an edit with no options names them too. Before,
+options sent must include, exactly (label and description), every option the block's lists hold
+that the ask row does not hold exactly (the row keeps its options from before the break;
+`SetAskBlockText` reads them first), else the edit is refused quoting each such option in full as
+`"Label: description"`, so an edit built from the row and the reason never deletes or rewrites
+what another collaborator wrote; the reason for an edit with no options quotes them too. Two
+options in the block sharing a label cannot be rebuilt as one list, so every edit of such an ask
+is refused quoting both and pointing to a document edit. Before,
 an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
 An ask holding a non-list block after its first list (a paragraph after its options) is refused
 whatever the edit sends, `options` included (`refuseAskContentEdit` in `docs/ask_block_text.go`):
