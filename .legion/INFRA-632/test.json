@@ -2,44 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T19:42:00Z",
-  "round": 4,
-  "testedHead": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
+  "completed": "2026-10-28T20:12:00Z",
+  "round": 5,
+  "testedHead": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands at 7cf8f4e4: the checker on the three guides and #2422's two guides (exit 0, nothing printed); restructure.ts --strict --report on main a409c128's three files (exit 0, all three outputs cmp-identical to head); replay/run.sh (36 PASS); the guides test (3 pass). The reviewer's round-2 repro (a one-line parent with 50 one-line children) passes at head and gives 'R3: 51 screen rows: - Parent item.' on the checker of 362ba0e9, as its negative control says."
+    "how": "Re-ran its claims at bb0690b9: the two Envoy guides are byte-identical to sjawhar/legion#2422's merge 1f92d90f; this pull request's six files (the three guides, the checker and its two tests) are byte-identical to 7cf8f4e4; fingerprints 529eb132… (7cf8f4e4) and 3e74ab78… (bb0690b9) reproduced; GitHub reports MERGEABLE."
   },
   "failed": 0,
   "failures": [],
-  "scope": "Since round 3 (362ba0e9) the only code change is 7cf8f4e4: R3 counts the blank lines right before a list item toward no item, the file-head comment, and three tidy-ups (one GUIDES constant in the guides test, VERBATIM_OPEN captures the tag name, relayout takes blocks as required). The three guides, restructure.ts and the replay are byte-identical to 362ba0e9.",
+  "rebaseCheck": {
+    "from": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
+    "to": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+    "fingerprint": "529eb132a2efe438ff7b70f13c01886296f853ece035a19fa13b927d2f2574b7 → 3e74ab78084e8628550e53105809a3e774f00f34037c2a4a21ac96dd5bdca703: changed, so a full round",
+    "whatChanged": "Of the twelve files in the branch's diff from main, only packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md differ between the two heads, each equal to #2422's 1f92d90f. Main a409c128..8b6ea377 changes none of the three guides or the checker files, so regenerating on main 8b6ea377 must give the same guides. Against #2422's newest head 1b2ea974, outside the three guides and .legion, only the checker and its two test files differ."
+  },
   "proof": [
     {
-      "criterion": "Review round 2's finding: the blank lines R2 requires between nested items never add up in the parent, and R3 still holds every item to one screen",
-      "surface": "bun scripts/semantic-line-breaks.ts on scratch files, as a contributor runs it",
-      "command": "15 scratch files: a one-line parent with 50 and with 200 one-line children (then a sibling); a parent with 50 and 51 own lines then children; a parent with two paragraphs totalling 50 and 51; a parent paragraph after a nested list at 49 and 51; a nested item of 50 and 51 rows followed by a sibling; a top-level item of 50 rows then three blank lines; `- - x` with 50 and 51 rows; an ordered step holding a fence of 50 rows, and one whose fence holds a blank line before a `- not an item` line (51)",
-      "observed": "every case at or below 50 exits 0, every 51-row case exits 1 with 'R3: 51 screen rows' at the item's first line; the 50- and 200-child parents pass; a blank line inside a fence is still counted (the fence case fails at 51)",
-      "headSha": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
-      "negativeControl": "the reviewer's repro on scripts/semantic-line-breaks.ts as of 362ba0e9: 'R3: 51 screen rows: - Parent item.', exit 1; at head exit 0"
+      "criterion": "Acceptance 1: outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, no item or table row is longer than one screen; no fence left under ## Commands",
+      "surface": "the checker as a contributor runs it, an independent sentence scan of every non-fence line, and the on-demand guides test",
+      "command": "bun scripts/semantic-line-breaks.ts AGENTS.md scripts/e2e/README.md docs/kubernetes.md packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; awk Commands-fence check; bun $TMPDIR/infra632/scan.ts <three guides>; bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "checker exit 0, 0 B stdout, 0 B stderr on all five guides, the two newly merged Envoy guides included; awk exit 0; scan hits=0; guides test 3 pass, 0 fail",
+      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "negativeControl": "the checker on main 8b6ea377's three guides exits 1 with 2,411 R1, 295 R2 and 7 R3 findings"
     },
     {
-      "criterion": "The tidy-ups change no output",
-      "surface": "the checker of 362ba0e9 and of head run on the same inputs",
-      "command": "both checkers on 15 scratch files of the verbatim warning (round 1's), main a409c128's three old-layout guides and the five guides, comparing exit codes and stderr; and stdout in full on main a409c128's three guides",
-      "observed": "exit codes and stderr (the warning text included) identical on all 23 files; stdout identical on main's guides (186 / 1,032 / 1,495 lines, the same seven R3 findings)",
-      "headSha": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
-      "negativeControl": "the reviewer's repro is the one input where the two differ (exit 1 at 362ba0e9, 0 at head)"
+      "criterion": "Acceptance 2: nothing lost; the head regenerates byte for byte from main; headings and anchors unchanged",
+      "surface": "restructure.ts and the difference and rendered-text checks on main 8b6ea377's files",
+      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main 8b6ea377 files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; heading and in-file link diffs",
+      "observed": "restructure exit 0 and all three outputs identical to head; 78/265/40 entries applied, 0 unexplained hunks; rendered 0 missing words, 109 Commands placeholders present; headings and in-file links identical per file",
+      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "negativeControl": "round 1: the reclaim Go tests with the 'Delete list' line indented fail; this round they pass (go test ./internal/runtime/sandbox -run 'TestTheReclaimParagraph|TestTheBootCensus…' ok; config ok; skills-guard 13 pass)"
     },
     {
-      "criterion": "Acceptance 1 to 3 still hold under the changed checker",
-      "surface": "the checker, the independent sentence scan, restructure.ts --strict, the guides test and the replay",
-      "command": "bun scripts/semantic-line-breaks.ts <five guides>; bun $TMPDIR/infra632/scan.ts <three guides>; bun .legion/INFRA-632/restructure.ts --strict --report r.json <main a409c128 files> <outs>; cmp outs head; bun test scripts/semantic-line-breaks.guides.test.ts; TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; git merge-tree --write-tree origin/main 7cf8f4e4",
-      "observed": "checker exit 0; scan hits=0; restructure exit 0 and all three outputs identical to head; guides test 3 pass, 0 fail; replay 36 PASS; the branch still merges clean with main d743376f",
-      "headSha": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
-      "negativeControl": "the checker on main a409c128's three guides exits 1 (2,411 R1, 295 R2, 7 R3)"
+      "criterion": "Acceptance 3: edits to different sentences or different items merge clean; two items added at different places of one list merge clean",
+      "surface": "git merge-tree --write-tree on throwaway repositories seeded with the head's guides",
+      "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE",
+      "observed": "run.sh exit 0, 36 PASS; my 8 pairs pass (6 clean, 2 controls conflict)",
+      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "negativeControl": "the same 8 pairs on main 8b6ea377's guides: the first pair (two sentences of the Production check paragraph) conflicts"
+    },
+    {
+      "criterion": "The checker's three changes still hold after the merge (R3 own lines, `(` as a sentence start, the verbatim warning)",
+      "surface": "bun scripts/semantic-line-breaks.ts on scratch files",
+      "command": "the reviewer's round-2 repro (a one-line parent with 50 one-line children); 'The proof fails, loudly. (A call is a helper.)'",
+      "observed": "the repro exits 0; the parenthesised second sentence gives 'R1' at line 1, exit 1; the checker is byte-identical to round 4's, whose 15 R3 cases and 12 warning cases passed",
+      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "negativeControl": "the repro on the checker of 362ba0e9 gives 'R3: 51 screen rows: - Parent item.' (round 4)"
     }
   ],
   "notes": [
-    "CI at 7cf8f4e4 was queued at 19:40Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at 362ba0e9 was cancelled by the push (29 cancelled), never completed.",
-    "Once, one diff of the two checkers' R3 lines through process substitution showed 5 lines on the old side instead of 7; six reruns of the same command and every comparison through files gave identical output, so it is recorded as not reproduced."
+    "CI at bb0690b9 was queued at 20:10Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at 7cf8f4e4 never completed: 29 runs cancelled.",
+    "The branch merges clean with main 8b6ea377 (git merge-tree)."
   ]
 }
