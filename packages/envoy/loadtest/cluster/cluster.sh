@@ -306,14 +306,27 @@ manifest_values() {
 
 # apply_manifest NAME [KUBECTL ARGS...]: manifests/NAME rendered from state.json, applied
 # server-side, or given to the kubectl arguments named instead (the runner pod is created: the
-# load-test Role may not patch a pod, and a server-side apply patches).
+# load-test Role may not patch a pod, and a server-side apply patches). Admission charges every
+# new object to the namespace's ResourceQuota, and two objects admitted at once race on the
+# quota's status: the loser is refused with "the object has been modified" and nothing of it is
+# created. That refusal alone is retried, up to 5 tries 3 s apart; any other failure stops.
 apply_manifest() {
-  local name=$1 values=()
+  local name=$1 values=() try err
   shift
   [ $# -gt 0 ] || set -- "${SSA[@]}"
   mapfile -t values < <(manifest_values)
-  render_manifest "$MANIFESTS/$name" "${values[@]}" | kube "$@" >/dev/null ||
-    die "kubectl $1 of manifests/$name failed"
+  err=$RUN_DIR/tmp/apply-$name.err
+  mkdir -p -- "$RUN_DIR/tmp"
+  for try in 1 2 3 4 5; do
+    if render_manifest "$MANIFESTS/$name" "${values[@]}" | kube "$@" >/dev/null 2>"$err"; then
+      return 0
+    fi
+    if ! grep -q 'the object has been modified' "$err" || ((try == 5)); then break; fi
+    note "kubectl $1 of manifests/$name: the quota was updated under it (try $try of 5); retrying in 3 s"
+    sleep 3
+  done
+  cat -- "$err" >&2
+  die "kubectl $1 of manifests/$name failed"
 }
 
 # pg_tier CPU MEMORY_GI: the Cloud SQL tier db-custom-<CPU>-<MB> and its documented default
