@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-492",
+  "completed": "2026-10-28T14:12:00Z",
+  "round": 7,
+  "scope": "Architect's ruling (Envoy, 2026-10-28 13:57Z), a full round because the merge of main 0a921021 (#2225) and its successors changes refresh behaviour: (1) #2225's rule as ported into event-refresh.ts, through recipients-claim.e2e.ts, including whether the implementer's rewrite still proves what the test named; (2) #2233's withdrawal and restore: a close drops the issue's open asks from the Inbox and a reopen restores them, with no reload, in the person's tabs; (3) acceptance 1-2 and the freshness file; (4) claude-envoy check-dist. Plus the controller's relay: record whether recipients-claim.e2e.ts's route-close test passes.",
+  "headTested": "8d32024fac6e719013716ab0f5ab96ae3148f327 (code head 4682d7bf176c; merges of main 0a921021 and c2746962; GitHub mergeable, state blocked)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I re-ran the browser suite myself on the pinned Bun 1.4.4 with my own Postgres 17.11 + pgvector and Chromium, and ran main's own versions of the two tests the implementer rewrote, at the head and at main 5fbd8391, to judge each rewrite."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "#2225's rule as ported: an ask card's recipient rows follow a claim, a release, a follow change and a route change without a reload",
+      "surface": "Dispatch in Chromium (Playwright), production SPA bundle from the head, against the branch's Go server, fake Envoy and the loopback Postgres",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/recipients-claim.e2e.ts e2e/close-withdraws-asks.e2e.ts e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts (plus a copy of main's recipients-claim.e2e.ts)",
+      "observed": "All 6 tests of the branch's recipients-claim.e2e.ts passed on chromium (none is tagged @phone). The 4 that are unchanged from main pass at head too.",
+      "headSha": "8d32024fac6e719013716ab0f5ab96ae3148f327",
+      "negativeControl": "Main's own copy of the file, run at the head, fails exactly its 2 tests whose premises this PR or #2233 removed (next two entries). Its other 4 pass."
+    },
+    {
+      "criterion": "Controller's relay: main's 'a route change that closes the issue moves the open card's route row without a reload', and whether the rewrite still proves the behaviour it named",
+      "surface": "the same rig, and main 5fbd8391 (git archive, its own Go server and bundle)",
+      "command": "main's recipients-claim.e2e.ts at the head (as a throwaway copy, deleted) and at main: `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/recipients-claim.e2e.ts e2e/close-withdraws-asks.e2e.ts`",
+      "observed": "Main's version fails at main and at the head alike, at line 348: the moved route row never shows. #2233's close withdraws the open ask, and a withdrawn card lists no recipients, so a route row that moves in the same write as a close cannot be seen on either build. #2324 does not make main's version pass. The rewrite splits the write. A route change together with a status move (one issue.updated naming both) must move the open card's route row, and it does. The close that follows must withdraw the card ('Withdrawn when alice closed the issue') and leave no Recipients region, and it does. That is the reachable form of the behaviour the original test named.",
+      "headSha": "8d32024fac6e719013716ab0f5ab96ae3148f327",
+      "negativeControl": "Main's version of the test at main itself: 1 failed (line 348), 9 passed in recipients-claim and close-withdraws-asks. Red on main, as the controller said."
+    },
+    {
+      "criterion": "The rewritten in-flight Inbox claim test still proves 'a claim that lands while the Inbox is loading reaches the card that mounts from the earlier list'",
+      "surface": "the same rig",
+      "command": "the branch's test (passed above), and main's version of it at the head (throwaway copy)",
+      "observed": "Main's version times out at the head (30 s). It holds the first Inbox load until a second Inbox request arrives, and that second request only comes when the first is cancelled; spec item 5 removes the cancel. The rewrite checks that the held body names no claimant (expect(staleClaimant).toBeNull()). It releases the body only after an event written after the claim has been handled, then requires the mounted card to list the claimant 'via claim'. It passes, so the behaviour named is still proven.",
+      "headSha": "8d32024fac6e719013716ab0f5ab96ae3148f327",
+      "negativeControl": "Main's version at main passes, because main still cancels the first load. Its failure at head is the spec-mandated no-cancel behaviour, not a lost claim."
+    },
+    {
+      "criterion": "#2233's withdrawal and restore: a close drops the issue's open asks from the person's Inbox tab and a reopen restores them, with no reload",
+      "surface": "the same rig; alice's Inbox and the issue page in two tabs, and a throwaway probe where another session (bob) closes and reopens while alice's Inbox is open",
+      "command": "close-withdraws-asks.e2e.ts in the run above; probe (deleted): bob PATCHes status done, then todo, while alice's Inbox shows the ask",
+      "observed": "close-withdraws-asks.e2e.ts: 4 of 4 passed. A person's Close in one tab removes all 3 asks from her Inbox tab, and Reopen brings them back, without a reload. An agent session's and the daemon's closes name the closer. Probe: the ask left alice's Inbox within 2 s of bob's close and returned within 2 s of his reopen (1 passed).",
+      "headSha": "8d32024fac6e719013716ab0f5ab96ae3148f327",
+      "negativeControl": "The withdrawn decision shows no radio and no answer button, and the Inbox count for each ask id is 0 while closed, asserted by the test itself."
+    },
+    {
+      "criterion": "Spec acceptance 1 and 2, and every freshness test, hold after the merges",
+      "surface": "the same rig, chromium and iphone",
+      "command": "the run above (refresh-freshness.e2e.ts and refetch-budget.e2e.ts)",
+      "observed": "All 15 chromium and 5 iphone tests passed. REFETCH-BUDGET [chromium]: 0 GETs under /api/, 0 untouched-issue reads. REFETCH-SIDEBAR on both: inbox 1, pinned 1, projects 1. Pin 1, Replies 0, board 6, index no GETs. The whole run: 36 tests, 34 passed; the 2 failures are main's copies of the two rewritten tests (entries above).",
+      "headSha": "8d32024fac6e719013716ab0f5ab96ae3148f327",
+      "negativeControl": "refetch-budget.e2e.ts in a git archive of base 16e4bb0f758e (chromium, -g 'budget:|sidebar:') fails on its counts: budget 'Received: 1120' against '<= 5'; sidebar inbox 2, pinned 2, projects 2."
+    },
+    {
+      "criterion": "claude-envoy's committed bundle is fresh after the merges",
+      "surface": "packages/claude-envoy's build script in --check mode on the pinned Bun 1.4.4 after `bun install --frozen-lockfile`",
+      "command": "cd packages/claude-envoy && bun run check-dist",
+      "observed": "'dist/ and legion/ match a fresh build'",
+      "headSha": "8d32024fac6e719013716ab0f5ab96ae3148f327",
+      "negativeControl": "In round 5, the same check at the merge ee6e83db, before a dist rebuild, exited 1 naming three stale bundles."
+    }
+  ],
+  "ciAtHead": "Read at 14:08Z on 4682d7bf (8d32024f is handoff-only): build, changes, lint, test and typecheck queued, none settled. I could not check the controller's note on packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers: no lane has run it on this head yet. A red there is main's (84 against 83). Not waited on."
+}
