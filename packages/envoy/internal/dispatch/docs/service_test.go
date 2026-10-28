@@ -868,6 +868,38 @@ func TestSetAskBlockTextRefusesEveryEditOfAnAskWhoseNewItemHoldsMoreThanItsText(
 	}
 }
 
+// The refusal above tells the caller to move or delete the extra content with a document edit,
+// then edit the ask. Following it - a document edit deleting the quoted text, then an ask edit
+// sending every option - must reach a valid decision, as the repeated-label refusal's removal does.
+func TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	defer_ := model.AskOption{Label: "Defer", Description: "Wait a week"}
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	for name, test := range map[string]struct{ list, extra string }{
+		"nested list":      {"- Defer: Wait a week\n  - only if finance agrees\n", "only if finance agrees"},
+		"second paragraph": {"- Defer: Wait a week\n\n  Finance must sign off first.\n", "Finance must sign off first."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, test.list)))
+			settleCurrentGeneration(t, service, artifactID)
+			every := []model.AskOption{ship, hold, defer_}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &every}); err == nil || !strings.Contains(err.Error(), "dispatch doc-edit") {
+				t.Fatalf("first ask edit: err = %v, want the refusal naming dispatch doc-edit", err)
+			}
+			if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Find: test.extra}}, alice, nil); err != nil {
+				t.Fatalf("document edit deleting %q, as the refusal says: %v", test.extra, err)
+			}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &every}); err != nil {
+				t.Fatalf("ask edit after the document edit: %v", err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", every)
+		})
+	}
+}
+
 // A collaborator's new description of a row option, in the block's first list, is kept: an edit
 // putting back the row's description is refused quoting the block's, which repairs when sent.
 func TestSetAskBlockTextRefusesOptionsRevertingADescriptionTheRowNeverHeld(t *testing.T) {
