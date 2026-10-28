@@ -14,7 +14,7 @@
       "surface": "Real envoy-listener built at the head, ENVOY_STREAM_MAX_BYTES=20000, against a standalone nats-server v2.15.1, driven over HTTP",
       "command": "curl POST /v1/messages/publish (1,500-byte messages) until refused, then publish and send (subscribed ses_target) one more (https://github.com/sjawhar/legion/pull/2362#issuecomment-6466306161)",
       "observed": "9 x 200 then 503; both routes: 'HTTP/1.1 503', 'Retry-After: 1', body 'envoy: the message bus refused the message because its stream is full: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded'; request records 'listener publish' and 'listener send' with outcome stream_full, status 503.",
-      "headSha": "81cf8c12ad433fa1ec6c0c4cd5ed4e8b19a63e44",
+      "headSha": "81cf8c12ad439ac091aa7a35fd9d3850e24bb729",
       "negativeControl": "At 5e2b9517 (without the fix) the tester's red test fails on both routes: 'the refusal reads \"envoy: the message bus did not answer: stream ENVOY_NOTIFICATIONS is full: ...\"' and the real listener recorded outcome bus_unavailable (comment 6465967683)"
     }
   ],
