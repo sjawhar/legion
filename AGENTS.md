@@ -51,7 +51,9 @@ Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`)
 ```bash
 bun install                   # Setup
 bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; CI's required `lint` job runs `bunx biome check .`, and a package's `bun run lint` checks only the paths its recipe names)
-bunx tsc --noEmit             # Type check
+(cd <package> && bun run typecheck)  # Type check one package against its own tsconfig. The root has no tsconfig.json, so a bare `bunx tsc --noEmit` there checks nothing: it prints tsc's help and exits 1. CI runs this command in each of these, in a job that runs when a change touches its paths: packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch (envoy-and-contracts.yaml), and docs/site (docs.yaml)
+bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps  # Type check the two script directories that are no workspace, as pr-and-main.yaml's `test` job does
+(cd packages/daemon && go vet -tags e2e ./...)  # What main's required `typecheck` check runs (pr-and-main.yaml): vet of the Go daemon, its e2e-tagged live proofs included
 bun test                      # Test
 ```
 
