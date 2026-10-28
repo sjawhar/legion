@@ -2015,23 +2015,13 @@ ahead of other blocks, in any order, and whether or not anything refers to it. O
 footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
 one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text. One
 inside a typed block is read like one inside a quote: that parser reads a typed block as a
-container, so a reference anywhere in the document reaches it. One whose first line holds nothing
-past its label, inside a typed block inside a list item with no quote between, is refused, since
-that parser reads that line as a blank line of the typed block, which spreads the item
-(`inTypedBlockInItem`). So is one where that parser spreads an item this reader reads unspread,
-which goldmark's looseness and the quoted spacing rules above do not model: one inside a typed
-block that is one of a list item's own blocks and holds a blank line of its own the item's stored
-markdown would not hold (`unstoredBlankInside`) - the renderer writes one blank line between two
-of a typed block's blocks, so a document holding none there, and its stored markdown, stay
-accepted, as does a typed block holding just those, though that parser spreads the item for them
-too - or, with a quote around the item, an empty
-one before another block of that typed block, whose line that parser reads as a blank line
-(`typedLineSpreadsItem`); and one among a list item's own blocks where a typed block around the
-item stands in a quote, next to a single blank line or to its own empty line before more of the
-item, the next item or a paragraph after the list, which that parser counts as spacing the item
-where this reader counts two (`definitionLineInTypedQuote`). A definition whose label holds
-whitespace is refused, which that parser reads as a paragraph. A label is stored as that parser
-reads it, its escapes and character references decoded
+container, so a reference anywhere in the document reaches it. One inside a typed block with a list
+item around it, inside the typed block or outside it, is refused, since that parser counts the
+definition's lines and the blank lines next to it otherwise when it decides whether the item is
+spread: it reads the first line of a definition opening on a later line, or of an empty one, as a
+blank line of the typed block, and a blank line inside the typed block as spacing the item. A
+definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
+is stored as that parser reads it, its escapes and character references decoded
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
 end, an ampersand opening a character reference, and white space as a numeric one, so each label

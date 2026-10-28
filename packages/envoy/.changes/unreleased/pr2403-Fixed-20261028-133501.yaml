@@ -13,8 +13,8 @@ body: |-
     there already did, and a document write reads it so too; a footnote definition inside a `:::`
     block also defines its footnote for a call in the text before the block, so a document write no
     longer refuses a footnote definition inside a typed block and reads it where it is written, as
-    it reads one inside a quote, except inside a list item where a blank line next to it would space
-    the item in the browser and not in the write, which is still refused; and a link reference definition inside a `:::` block also defines
+    it reads one inside a quote, except one with a list item around it, whose spacing the browser
+    reads otherwise, which is still refused; and a link reference definition inside a `:::` block also defines
     its reference for the text before the block, so `[r]` before a block holding
     `[r]: https://u.example` now shows as a link where it showed as the text `[r]`. A document write
     refuses a link reference definition, so no stored document reads differently, only a body that

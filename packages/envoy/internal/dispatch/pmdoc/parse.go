@@ -721,10 +721,13 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string, depth in
 		if err != nil {
 			return nil, err
 		}
-		spread := readsSpread(item)
-		parsed.Attrs["spread"] = spread
-		if !browser && spread {
-			attrs["spread"] = false
+		if browser {
+			parsed.Attrs["spread"], _ = item.Attribute(browserSpreadAttr)
+		} else {
+			parsed.Attrs["spread"] = !list.IsTight && item.ChildCount() > 1
+			if parsed.Attrs["spread"] == true {
+				attrs["spread"] = false
+			}
 		}
 		children = append(children, parsed)
 	}

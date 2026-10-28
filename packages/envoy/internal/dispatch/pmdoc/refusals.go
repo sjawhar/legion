@@ -18,19 +18,11 @@ import (
 // no block, and the walk does not enter it. firstLine is the number source's first line has in the
 // markdown the caller wrote, so a refusal naming a line names it there.
 func refuseBlocks(root ast.Node, source []byte, firstLine int) error {
-	var built *sourceLines
-	lines := func() sourceLines {
-		if built == nil {
-			read := newSourceLines(source)
-			built = &read
-		}
-		return *built
-	}
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
-		if err := blockRefusal(node, source, lines, firstLine); err != nil {
+		if err := blockRefusal(node, source, firstLine); err != nil {
 			return ast.WalkStop, err
 		}
 		switch node.(type) {
@@ -43,9 +35,8 @@ func refuseBlocks(root ast.Node, source []byte, firstLine int) error {
 
 // blockRefusal is why node cannot be stored: the browser editor's parser reads it differently
 // from goldmark or refuses it, or the Proof schema holds nothing like it. A typed block that passes
-// keeps its attributes' values for conversion (typedDirective.values). lines gives source's lines,
-// read once for every block that needs them.
-func blockRefusal(node ast.Node, source []byte, lines func() sourceLines, firstLine int) error {
+// keeps its attributes' values for conversion (typedDirective.values).
+func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 	refuse := func(reason string) error { return fmt.Errorf("%w: %s", ErrSchema, reason) }
 	switch current := node.(type) {
 	case *ast.Paragraph, *ast.TextBlock:
@@ -91,15 +82,13 @@ func blockRefusal(node ast.Node, source []byte, lines func() sourceLines, firstL
 		if bytes.ContainsAny(current.Ref, " \t") {
 			return refuse("a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph")
 		}
+		// The browser editor's parser reads a typed block as a container, so a definition inside
+		// one reads as one inside a quote does. Where a list item also stands around it, inside the
+		// typed block or outside it, that parser counts the definition's lines and the blank lines
+		// next to it otherwise when it decides whether the item is spread.
 		if _, typed := ancestor[*typedDirective](current); typed {
-			if inTypedBlockInItem(current) && opensOnALaterLine(current, lines()) {
-				return refuse("a footnote definition whose first line holds nothing past its label, inside a typed block inside a list item, which the browser editor reads as a blank line spacing the item")
-			}
-			if reason := typedLineSpreadsItem(current, lines()); reason != "" {
-				return refuse(reason)
-			}
-			if definitionLineInTypedQuote(current, lines()) {
-				return refuse(quotedTypedDefinitionLine)
+			if _, item := ancestor[*ast.ListItem](current); item {
+				return refuse("a footnote definition inside a typed block with a list item around it, whose spacing the browser editor reads otherwise")
 			}
 		}
 	case *typedDirective:
