@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A person's comment on an issue routed to session s1 that also mentions s1 reaches s1 once:
@@ -234,5 +237,122 @@ func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) 
 				t.Fatalf("attempts = %v, want attempt 1 alone, settled failed with the resolution the route was decided on", states)
 			}
 		})
+	}
+}
+
+// receivedDuringTakeOver posts alice's comment on issueKey mentioning s1, with input's fields beside
+// the body and the mention, while the listener is starting - its registry read answers 503 once,
+// and it answers from then on - and returns how many times s1 received the comment: the mention
+// steers the listener published to s1, and the comment.created event's fan-outs to s1's own topic.
+// attempts describes the mention's delivery attempts, for a failure.
+func receivedDuringTakeOver(
+	t *testing.T, listener *takeOverListener, handler http.Handler, database *store.Store, documentService docs.API,
+	issueKey string, input map[string]any,
+) (mentionSends, fanOuts int, attempts string) {
+	t.Helper()
+	body := map[string]any{"body": "@s1, please look at this.", "mentions": []map[string]any{{"target": "session:s1"}}}
+	for field, value := range input {
+		body[field] = value
+	}
+	listener.play(takeOverAnswer{takeOverRegistry, answerJSON(http.StatusServiceUnavailable, `{"error":"service starting"}`)})
+	created := decodeMentionedComment(t, postMentionedComment(t, handler, issueKey, body))
+
+	for _, send := range listener.published() {
+		if send.target == "s1" {
+			mentionSends++
+		}
+	}
+	deliveries := eventDeliveries(t, database, documentService, "comment.created", created.ID)
+	if len(deliveries) != 1 {
+		t.Fatalf("comment.created events for %s = %#v, want one", created.ID, deliveries)
+	}
+	for _, topic := range deliveries[0].Destinations {
+		if topic == contracts.AgentSubject("s1") {
+			fanOuts++
+		}
+	}
+	described := make([]string, 0, len(created.Deliveries))
+	for _, attempt := range created.Deliveries {
+		session := "<none>"
+		if attempt.SessionID != nil {
+			session = *attempt.SessionID
+		}
+		described = append(described, fmt.Sprintf("%s attempt %d %s to %s", attempt.Target, attempt.Attempt, attempt.State, session))
+	}
+	return mentionSends, fanOuts, strings.Join(described, "; ")
+}
+
+// A person's comment on an issue that session s1 claims and that has no route reaches s1 from the
+// claimant route (the outbox's publishClaimantRoute) unless the comment's mention of s1 delivered
+// it. A mention that only resolves on its post-commit take-over retry names no session in the
+// comment.created payload, so the claimant route cannot leave s1's copy to it: the comment must
+// resolve its mentions through the take-over before it commits, as a routed issue's comment does.
+func TestACommentDuringAListenerTakeOverReachesTheClaimantOnce(t *testing.T) {
+	listener := startTakeOverListener(t)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "Claimed take-over", "before")
+	if _, err := database.Pool.Exec(context.Background(), `
+		update issues set claimed_by = '{"kind":"session","id":"s1"}'::jsonb, claimed_at = now() where key = $1
+	`, issue.Key); err != nil {
+		t.Fatalf("claim the issue for s1: %v", err)
+	}
+
+	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, deps.Docs, issue.Key, nil)
+	if heard := mentionSends + fanOuts; heard != 1 {
+		t.Fatalf("session s1 received the comment %d times, want once: %d mention steer(s) and %d claimant fan-out(s) "+
+			"while the mention's delivery is [%s] - the mention committed unresolved and retried through the listener "+
+			"take-over after commit, so the claimant route found no mentioned session to leave s1's copy to",
+			heard, mentionSends, fanOuts, attempts)
+	}
+}
+
+// A person's reply on an ask's thread reaches every session that follows the ask - its asker s1
+// here - from the follower route (the outbox's publishFollowerRoutes) unless the reply's mention
+// of s1 delivered it. The reply names the ask, not a comment to reply to, so it is in a thread with
+// an agent even with no route, no reply_to, no anchor and no document: it must resolve its mentions
+// through the take-over before it commits too.
+func TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce(t *testing.T) {
+	listener := startTakeOverListener(t)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "Ask thread take-over", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which approach?", "actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("s1 asks: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, askResponse)
+
+	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, deps.Docs, issue.Key,
+		map[string]any{"ask_id": ask.ID})
+	if heard := mentionSends + fanOuts; heard != 1 {
+		t.Fatalf("session s1 received the reply %d times, want once: %d mention steer(s) and %d follower fan-out(s) "+
+			"while the mention's delivery is [%s] - the mention committed unresolved and retried through the listener "+
+			"take-over after commit, so the follower route found no mentioned session to leave s1's copy to",
+			heard, mentionSends, fanOuts, attempts)
+	}
+}
+
+// A person's comment on an issue with no route and no session claimant reaches every session the
+// issue's primary document credits - s1, which wrote it, here - from the primary document route
+// (the outbox's publishPrimaryDocumentAuthors) unless the comment's mention of s1 delivered it. A
+// comment on the issue's conversation is on no document itself, so it must resolve its mentions
+// through the take-over before it commits once the issue's primary document credits a session.
+func TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce(t *testing.T) {
+	listener := startTakeOverListener(t)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "Spec author take-over", "before")
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifacts set created_by = '{"kind":"session","id":"s1"}'::jsonb where id = $1
+	`, issue.PrimaryArtifactID); err != nil {
+		t.Fatalf("credit s1 with the issue's primary document: %v", err)
+	}
+
+	mentionSends, fanOuts, attempts := receivedDuringTakeOver(t, listener, handler, database, deps.Docs, issue.Key, nil)
+	if heard := mentionSends + fanOuts; heard != 1 {
+		t.Fatalf("session s1 received the comment %d times, want once: %d mention steer(s) and %d primary document "+
+			"author fan-out(s) while the mention's delivery is [%s] - the mention committed unresolved and retried "+
+			"through the listener take-over after commit, so the author route found no mentioned session to leave "+
+			"s1's copy to", heard, mentionSends, fanOuts, attempts)
 	}
 }
