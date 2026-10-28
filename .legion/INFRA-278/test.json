@@ -2,42 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-28T10:28:00Z",
+  "completed": "2026-10-28T10:33:00Z",
   "generation": 3,
-  "round": 11,
-  "headSha": "72d0eb37ffbb7b902b2e30574130c76c0587bd1a",
-  "codeHeadSha": "a51b7121fff693d6cd5aa89b351be1b1572f8ada",
-  "recheck": "Text-only since the last full pass: dispatch-tools.ts, its pr2225 fragment and the three rebuilt claude-envoy bundles changed. Bare gates plus a check of the sentence",
+  "round": 12,
+  "headSha": "75fe0ca43e0038d61b748d262ab10fc93ce254a8",
+  "codeHeadSha": "ad1d162b0647c41ee8edb0d6e2685d9850e385b4",
+  "recheck": "Text and rebuilt bundles only since the full pass at 32e06ee5 (code 99f818ca, comment 6464976218). The merge of main 460facf5 moved changelog entries only (fingerprint ff48b88f at both heads without the changelog files). No Go code changed",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The description and its fragment carry round 10's clause word for word. The checkout CLI's `dispatch claim --help` prints it. claude-envoy `scripts/build.ts --check` under the pinned Bun 1.4.4 reports 'dist/ and legion/ match a fresh build' (the pod's default Bun 1.3.14 is refused by the pin guard). The smoke script gives 9 ok"
+    "how": "Read dispatch-tools.ts:530-533, the pr2225-claim-description.yaml fragment and the three claude-envoy dist bundles: each carries 'edit of it (other than a quiet edit)'. claude-envoy `scripts/build.ts --check` under Bun 1.4.4 reports the dist fresh. The checkout CLI's help prints the clause. The smoke script gives 9 ok"
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Agent-facing text is true: the dispatch_claim description, checked clause by clause against publishFollowerRoutes (publisher.go:886-912), as the architect asked",
-      "evidence": "Answer, hand-back and resolution map to ask.answered, ask.handed_back and ask.resolved: exact. 'every reply there (new, edited, resolved or reopened)' maps to comment.created/edited/resolved/reopened with an ask_id: exact; a new reply whose mention reached the follower still arrives, as the mention. 'anyone else's' is the event.Actor.SameAs check: exact. 'edit of it' maps to ask.edited, but only a non-quiet one (`if !payloadBool(event.Payload, \"quiet\")`, publisher.go:889-891). A quiet edit, a repeated version move of an approval request, reaches no follower. No other gap remains. Fix, in packages/contracts/src/dispatch-tools.ts and packages/contracts/.changes/unreleased/pr2225-claim-description.yaml, then a rebuild of packages/claude-envoy/dist under Bun 1.4.4: 'edit of it' → 'edit of it (other than a quiet edit)'. A plain-words alternative: '(other than a repeated version move of an approval request)'. No red test: a test of the description's wording is a source-text test, which the repository's test rules forbid"
-    }
-  ],
-  "failed": 1,
-  "passedChecks": [
+      "criterion": "Agent-facing text is true: the dispatch_claim description matches publishFollowerRoutes clause by clause",
+      "surface": "the checkout's dispatch CLI (build-dispatch-cli.sh) and the source of packages/envoy/internal/dispatch/outbox/publisher.go:886-912",
+      "command": "bash packages/envoy-client/scripts/build-dispatch-cli.sh $TMPDIR/infra278-test/cli && bun $TMPDIR/infra278-test/cli/dispatch.js claim --help",
+      "observed": "'… still need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved or reopened), reach you as its follower.' Each clause maps to the follower switch: ask.answered, ask.handed_back, ask.resolved, non-quiet ask.edited, comment.created/edited/resolved/reopened with an ask_id, and the actor check",
+      "headSha": "75fe0ca43e0038d61b748d262ab10fc93ce254a8",
+      "negativeControl": "At a51b7121, 'edit of it' with no exception covered a quiet ask.edited, which publisher.go:889-891 skips (round 11's failure)"
+    },
     {
-      "criterion": "The claude-envoy bundles are fresh, and the CLI shows the new text",
-      "surface": "packages/claude-envoy build check under the pinned Bun; the checkout's dispatch CLI",
-      "command": "cd packages/claude-envoy && /legion/scratch/tmp/bun-1.4.4/bun-linux-x64-baseline/bun scripts/build.ts --check; bash packages/envoy-client/scripts/build-dispatch-cli.sh $TMPDIR/infra278-test/cli && bun $TMPDIR/infra278-test/cli/dispatch.js claim --help",
-      "observed": "'dist/ and legion/ match a fresh build', exit 0. The help prints '… still need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, resolution or edit of it, and every reply there (new, edited, resolved or reopened), reach you as its follower.'",
-      "headSha": "72d0eb37ffbb7b902b2e30574130c76c0587bd1a",
-      "negativeControl": "Under Bun 1.3.14 the check refuses: 'refusing to build under Bun 1.3.14: .bun-version pins 1.4.4'"
+      "criterion": "The claude-envoy bundles embed the current description",
+      "surface": "packages/claude-envoy build check under the pinned Bun",
+      "command": "cd packages/claude-envoy && /legion/scratch/tmp/bun-1.4.4/bun-linux-x64-baseline/bun scripts/build.ts --check",
+      "observed": "'dist/ and legion/ match a fresh build', exit 0. dispatch.js, envoy-channel.js and session-hook.js each contain 'other than a quiet edit'",
+      "headSha": "75fe0ca43e0038d61b748d262ab10fc93ce254a8",
+      "negativeControl": "Under the pod's Bun 1.3.14 the check refuses: '.bun-version pins 1.4.4'"
     },
     {
       "criterion": "Smoke at the new head",
       "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
       "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
       "observed": "summary: 9 ok, 0 FAIL",
-      "headSha": "72d0eb37ffbb7b902b2e30574130c76c0587bd1a",
-      "negativeControl": "Main b295a3fb fails 14 of 23 live cases (round 7); no Go code changed since"
+      "headSha": "75fe0ca43e0038d61b748d262ab10fc93ce254a8",
+      "negativeControl": "Main b295a3fb fails 14 of the tester's 23 live cases (round 7); no Go code changed since"
     }
   ],
-  "ci": "At 72d0eb37, read at 10:25Z: Tests 40671701362, Docs 40671701366 and Worker Image 40671701302 queued; Legion Envoy and Contracts 40671701343 and PR Title 40671701316 pending; not waited for. GitHub reports MERGEABLE.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6466550282"
+  "ci": "At 75fe0ca4, read at 10:30Z: Tests 40672401875, Docs 40672401890, Worker Image 40672401876, Legion Envoy and Contracts 40672401900 and PR Title 40672405103 queued; not waited for. GitHub reports MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6466644426"
 }
