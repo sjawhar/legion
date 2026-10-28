@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-713",
+  "completed": "2026-10-28T21:29:30Z",
+  "decision": "approved",
+  "round": "Re-check at the architect's request (rename of two docs/solutions learnings to -pr2470.md); not a full round, no thermonuclear pass.",
+  "previousApproval": "00163a832785250bad0508dfbbcb19515a8b2ee9 (code head 315813eb6f1b429c0c2aa9aa432d29eecb4f6981)",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "checks": {
+    "scope": "GitHub compare 00163a83...5411182c: only .legion/INFRA-713/* and two added docs/solutions/testing/*-pr2470.md files; nothing under packages/. Commit 59d29784 renames the two *-INFRA-713.md notes and drops the Dispatch key from front matter and one Evidence line; a key grep over both files at 59d29784 finds none.",
+    "requiredChecks": "lint, typecheck, test, pr-title: completed success at CI head 59d2978409f5675ddf44cdeac102a41374497c9a; compare 59d29784...5411182c handoffsOnly true, 2 files.",
+    "threads": "0 review threads on #2470.",
+    "e2e": "E2E (implementer) and E2E (tester) lines present; round-1 A1/A2 CI evidence (runs 40732897855, 40732919704) stands, since no code changed."
+  }
+}
