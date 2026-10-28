@@ -276,4 +276,18 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the package the job now also tests" "$(contains "$out" 'other')"
 
+echo "case: a package added to a claimed go command by its import path, outside the job's filter"
+root=$(fixture appended-import-path)
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test ./cmd/app ./lib example.com/m/other"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the package the job now also tests" "$(contains "$out" 'other')"
+
+echo "case: a package added to a claimed go command on a continuation line, outside the job's filter"
+root=$(fixture appended-continuation)
+replace "$root/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" $'        run: |\n          go test ./cmd/app ./lib \\\n            ./other'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the package the job now also tests" "$(contains "$out" 'other')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
