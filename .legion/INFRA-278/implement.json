@@ -2,25 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-28T09:59:05Z",
+  "completed": "2026-10-28T10:20:00Z",
   "generation": 3,
-  "round": 9,
-  "answersReview": "review round 8 (5680791549), thread PRRT_kwDORFy7ds6xEQCc, replied to and resolved",
+  "round": 10,
+  "answersTest": "test.json (fail): packages/envoy/AGENTS.md's follower exception overclaimed ('every event on that ask but its own'); ask.follower_added/removed reach only the named session and ask.anchor_refreshed never notifies",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "c597c144",
+  "headSha": "2b85c1a909400b8700d5d907f561cb66754c3c12",
   "proof": [
     {
-      "criterion": "The follower exception in packages/envoy/AGENTS.md matches publishFollowerRoutes",
+      "criterion": "The claimant paragraph of packages/envoy/AGENTS.md is true against publishFollowerRoutes",
       "surface": "repository text against packages/envoy/internal/dispatch/outbox/publisher.go",
       "command": "sed -n 2621,2629p packages/envoy/AGENTS.md; sed -n '/^func publishFollowerRoutes/,/^}/p' packages/envoy/internal/dispatch/outbox/publisher.go",
-      "observed": "The sentence now reads '…except that a claimant following the ask gets, as a follower, every event on that ask but its own and a quiet `ask.edited`: an agent's or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs outside the `notify` gate).' That is the reviewer's text word for word. publishFollowerRoutes routes ask.answered, ask.handed_back, ask.resolved, a non-quiet ask.edited, and comment.created/edited/resolved/reopened carrying an ask_id, and skips only the actor and a delivered mention; the paragraph's next sentence states the mention rule",
-      "headSha": "c597c144",
-      "negativeControl": "At 0e96c0ff the exception named only a non-quiet ask.edited and an agent's reply, and left out an agent's answer, hand-back and resolution of the ask (review 5680791549)"
+      "observed": "The text now reads '…except that a claimant following the ask gets, as a follower, these events on that ask, other than its own: an agent's or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs outside the `notify` gate).' That is the architect's and tester's wording. The listed events are exactly the function's switch (ask.answered, ask.handed_back, ask.resolved, non-quiet ask.edited, comment.* with an ask_id)",
+      "headSha": "2b85c1a909400b8700d5d907f561cb66754c3c12",
+      "negativeControl": "The round-8 text 'every event on that ask but its own and a quiet ask.edited' is the one the tester's live follower-added and follower-removed cases disproved (P got neither)"
+    },
+    {
+      "criterion": "The delivery behaviour is unchanged after the forward merge of main 460facf5",
+      "surface": "real envoy-dispatch built from the head, real natsd, rootless Postgres 17 + pgvector",
+      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable CLAIMANT_E2E_DISPATCH_PORT=19251 CLAIMANT_E2E_ENVOY_PORT=19253 bash scripts/e2e/dispatch-claimant-delivery.sh; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=.../outbox_test go test -count=1 -run 'Claimant|Mention|Follower|Defer' ./internal/dispatch/outbox/",
+      "observed": "summary: 9 ok, 0 FAIL; dispatch claimant delivery e2e: PASS in 48s; outbox ok",
+      "headSha": "2b85c1a909400b8700d5d907f561cb66754c3c12",
+      "negativeControl": "Not re-run at this main: a main-built binary failed 4 of these cases earlier in generation 3 (d1f4b8a6)"
+    },
+    {
+      "criterion": "The changelog entries follow main's fragment rule (#2419) and carry no Dispatch key",
+      "surface": "changie v1.26.0, the fold's own tool",
+      "command": "copy packages/envoy/{.changie.yaml,.changes,CHANGELOG.md} to a scratch dir; go run github.com/miniscruff/changie@v1.26.0 batch v0.0.0 --dry-run; jj diff --from main@origin --name-only | grep CHANGELOG.md",
+      "observed": "The three envoy fragments render under ### Added and ### Changed with continuation lines under the bullet. No CHANGELOG.md differs from main. There are eight pr2225-*.yaml fragments across claude-envoy, contracts, envoy-client, envoy and pi-envoy, and no INFRA- key in any of them, in the three renamed docs/solutions learnings, or in any new commit subject",
+      "headSha": "2b85c1a909400b8700d5d907f561cb66754c3c12",
+      "negativeControl": "Before this merge the five CHANGELOG.md files held the entries under the old heading, ending '(INFRA-278)' eight times"
     }
   ],
   "filesChanged": [
-    "c597c144: packages/envoy/AGENTS.md (the one sentence)"
+    "26aa3d5f: packages/envoy/AGENTS.md (the follower exception, the tester's wording)",
+    "bf25fa26: five CHANGELOG.md files lose ' (INFRA-278)'; docs/solutions/*-INFRA-278.md renamed *-pr2225.md with related_issues dropped",
+    "2b85c1a9: merge of main 460facf5; CHANGELOG.md files taken from main; this PR's eight entries moved to packages/{claude-envoy,contracts,envoy-client,envoy,pi-envoy}/.changes/unreleased/pr2225-*.yaml"
   ],
-  "deviations": [],
-  "openQuestions": []
+  "deviations": [
+    "Fragment names are pr2225-<slug>.yaml rather than AGENTS.md's <ISSUE KEY>-<slug>.yaml, following the controller's ruling that no Dispatch key goes into new public text (the same form as the docs/solutions renames)"
+  ],
+  "openQuestions": [
+    "The shipped dispatch_claim description (packages/contracts/src/dispatch-tools.ts:530-531) and its contracts fragment still say 'an agent's events and every other change on the issue still need a subscription', the same overclaim the AGENTS.md sentence had for a claimant that follows the ask. Reported to the architect; not changed under the one-change ruling"
+  ]
 }
