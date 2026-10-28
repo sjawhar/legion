@@ -188,6 +188,15 @@ test("R1 does not end a sentence at the abbreviation incl.", async () => {
   expect(exitCode).toBe(0);
 });
 
+test("R1 finds a second sentence that opens with a parenthesis", async () => {
+  const path = await markdownFile(
+    "The model turns fail, loudly, which is right for a proof. (A call's parent is a helper.)\n"
+  );
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toContain(`${path}:1: R1:`);
+  expect(exitCode).toBe(1);
+});
+
 test("--write refuses, writing nothing, a re-layout that would change how the file renders", async () => {
   // R2's blank line before the nested item would make its `-` an empty item, not text: whitespace
   // only, yet another rendering.
