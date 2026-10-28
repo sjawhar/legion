@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T10:41:33Z",
+  "completed": "2026-10-28T11:47:54Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -132,6 +132,22 @@
       "observed": "the grep prints only .legion/ lines and three generated dist lines whose dispatch:// is main's own dispatch_ask description; the four CHANGELOG.md diffs are empty and six pr2397-*.yaml fragments hold the entries; every Go suite passes, the rank-order collation test included; contracts, envoy-client (1,047) and check-dist pass; live search's two queries are byte-identical to main's; GitHub reports MERGEABLE",
       "headSha": "62c33b1410494072d47a15f009fda1694f2ace88",
       "negativeControl": "before this round the same grep printed 48 added lines outside .legion/ and GitHub reported the head CONFLICTING"
+    },
+    {
+      "criterion": "Review round 4, finding 1: when the read of resolved asks' answers fails, no related item carries an ask state, so an answered ask is never shown as closed with no answer",
+      "surface": "Go handler test on real Postgres (a lock on events and a short context; no CLI surface can make that one read fail on its own)",
+      "command": "go test ./internal/dispatch/api -run TestRelatedCheckCarriesNoAskStateWhenTheAnswersCannotBeRead -count=1",
+      "observed": "with events locked and a 300 ms context, every item has Ask == nil, no ask key on the wire and no decision; without the lock the retracted ask carries its answer",
+      "headSha": "da35e4009a807e90f8fe3dc497b82b46176e3a16",
+      "negativeControl": "with the fix removed the locked case fails: state = &{State:answered …}, want none once the answers could not be read"
+    },
+    {
+      "criterion": "Review round 4, finding 2: the check prints an ask's state with the same renderer dispatch search uses",
+      "surface": "envoy-client tests driving dispatch issue / dispatch ask through executeDispatchTool, and the rebuilt claude-envoy dist",
+      "command": "bun test src (envoy-client, Bun 1.4.4); bun run check-dist (claude-envoy); grep -c askStateLines2 packages/claude-envoy/dist/*.js",
+      "observed": "1,047 pass; ask items and the decision line print `Answered by alice at … · options chosen: Exponential` / `Answer text: …`, `Closed with no answer: retracted by … at …: …`, `Open: no answer yet.`, or `Answer state not reported by this Dispatch; …`; the dist holds one renderer (askStateLines2 count 0) and matches a fresh build",
+      "headSha": "da35e4009a807e90f8fe3dc497b82b46176e3a16",
+      "negativeControl": "a malformed ask state prints `This client could not show where the ask stands: …` under its item instead of throwing"
     }
   ],
   "filesChanged": [
@@ -168,7 +184,8 @@
     "Review round 1: reason 'cancelled' added to 0130's check constraint (unmerged migration edited in place). Coverage now calls issue_embedding_spec per issue at the architect's direction, although the coverage report's issue query measured 421-600 ms against 133-194 ms with the lateral join for 5,000 issues.",
     "Merge of main 2df3353c (34719431): main's migrations reached 0134, so this branch's are 0135_related_checks and 0136_issue_embedding_spec; fingerprint e3e9b588… -> 620fbdda… changed by the renumbering only (https://github.com/sjawhar/legion/pull/2397#issuecomment-6446703938). Earlier entries in this file that name 0129-0131 for this branch's migrations predate it.",
     "Merge of main b295a3fb (9d82a849): claude-envoy dist regenerated with main's newly pinned Bun 1.4.4 (the build refuses another Bun), which alone changed the fingerprint 620fbdda… -> 5860ba95…; migrations stay 0135/0136 (main still at 0134).",
-    "Acceptance round (62c33b14): adopted main's SearchAsk/attachAskStates from #2363 (this branch's copies dropped; the check calls the helper once per check). Main's helper leaves a nil Answer.Selected as null; the client already reads a missing selected as no option chosen. A merge commit pushed earlier (f9688cd2) names the branch legion/INFRA-568 in its subject; pushed commits are not rewritten."
+    "Acceptance round (62c33b14): adopted main's SearchAsk/attachAskStates from #2363 (this branch's copies dropped; the check calls the helper once per check). Main's helper leaves a nil Answer.Selected as null; the client already reads a missing selected as no option chosen. A merge commit pushed earlier (f9688cd2) names the branch legion/INFRA-568 in its subject; pushed commits are not rewritten.",
+    "Review round 4 (da35e400): docs/ask_row.go restored to main's file (its diff against main is empty); an ask item with no state now prints main's 'Answer state not reported by this Dispatch' line where the branch printed nothing."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
