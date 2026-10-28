@@ -31,7 +31,16 @@ function artifactAsk(): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
-    thread: { answers: [], edits: [], followers: [], replies: [] },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
+    },
     question: "Does this design need review?",
     priority: null,
     snoozed_until: null,
@@ -96,7 +105,11 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
       thread: {
         answers: [],
         edits: [],
+        claimant: null,
         followers: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
         replies: [
           {
             ...commentDeliveryFields(),
@@ -156,7 +169,11 @@ test("an unchanged old Inbox cache does not refetch every thread on remount", as
     thread: {
       answers: [],
       edits: [],
+      claimant: null,
       followers: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
       replies: [
         {
           ...commentDeliveryFields(),
@@ -211,7 +228,11 @@ test("Inbox labels an artifact-owned ask with its project and document page link
     ask,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -249,7 +270,11 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -289,7 +314,11 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -339,7 +368,11 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -376,7 +409,11 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
     ask: noted,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -428,7 +465,11 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
     ask: [p0, p2, agentWaits].find((ask) => ask.id === id) ?? p0,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -792,7 +833,11 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([
@@ -861,7 +906,11 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -898,7 +947,11 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
     ask: issueAsk(),
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -947,7 +1000,11 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
     ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1033,7 +1090,11 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: id === askB.id ? repliesB : [],
   }));
   // The server records the clarification: the turn is the agent's, and the inbox says so on
@@ -1145,7 +1206,11 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
     ask: id === askA.id ? askA : threadB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1208,7 +1273,11 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const answerAsk = spyOn(api, "answerAsk").mockImplementation(async () => {
@@ -1266,7 +1335,11 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
     ask: id === askA.id ? askA : threadB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const answerAsk = spyOn(api, "answerAsk").mockRejectedValue(new Error("offline"));
