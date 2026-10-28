@@ -2,32 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T09:02:00Z",
-  "round": 1,
-  "reviewedCodeHead": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
+  "completed": "2026-10-28T13:57:30Z",
+  "round": 2,
+  "reviewedCodeHead": "83dd924b2e06f96a54a9b35d26b1831e028972aa",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 6,
-  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection) completed success at CI head 3d0b23c8; compare 3d0b23c8...b6c3cba1 is handoffs only (2 files). Non-required envoy-go failed: internal/dispatch/api timed out at the 10 min package default (600.2 s; main's runs take 410-482 s for that package on CI). The two api tests that run the outbox take 0.4-1.2 s on this pod at the head, so the timeout is not this diff; the failed job was re-run (run 40552924494).",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 3d0b23c8, plus a role-forward contract read and a docs-against-code read.",
+  "important": 0,
+  "minor": 2,
+  "ci": "Required set (lint, typecheck, test, pr-title) still queued or in progress at CI head 83dd924b when read; compare 83dd924b...a8ee3f11 is handoffs only. The non-required Worker Image build failed on a registry rate limit (toomanyrequests) at docker/setup-buildx-action; re-run requested (run 40694698101). A request for changes does not wait on CI.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 83dd924b, plus a verification of the ten round-1 fixes, the CI path filters, the census and stale text.",
+  "roundOneThreads": "All ten round-1 threads answered with an acceptance at 83dd924b (replies 4401452364-4401455888); the implementer had already resolved each, and every fix holds.",
   "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/envoy-and-contracts.yaml:223-284", "description": "cmd/dispatch now compiles internal/roles, internal/store, internal/session and internal/kvwatch (go list -deps ./cmd/dispatch), and cmd/listener compiles internal/roles; the dispatch_server and listener_command path filters name none of them, so a later change to internal/roles skips dispatch_multiprocess, dispatch_memory and envoy_infra_go. The workflow comment at :167-180 asks the PR that adds the import to add the package."},
-    {"severity": "important", "file": "packages/envoy/internal/bus/nats.go:1152", "description": "The listener's role forward (RequestCoreTo) now sets Nats-Msg-Id for every envelope, without the DedupeKeyNamesTheUpstreamEvent guard the window uses (async.go:189); two distinct role messages that share a caller-chosen dedupe key get their second stored copy dropped by the stream, a lost delivery once INFRA-594 delivers serving-port holders from the stream. Not in the plan or the CHANGELOG."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/store/migrations/0136_outbox_claim.up.sql:22", "description": "0136 starts with alter table events add column and ends with two drop index, each ACCESS EXCLUSIVE held until the migration's transaction commits, so reads of events wait through all three index builds too; the migration comment, cmd/dispatch/README.md:954-955 and CHANGELOG.md:928 say only writes are held."},
-    {"severity": "important", "file": "PR body", "description": "No Contract change census: Dispatch's role-routed events stop being published on notifications.role.<id> (a process boundary), the listener's forward gains a Nats-Msg-Id header, bus.Sender and outbox.Publisher gain methods (package boundary), and two indexes are dropped / one column added under a rollout with the old build."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/lease.go:376", "description": "The grace timer returns natsLost without reading Connected() again; ConnectionChanged is closed from nats.go's serialized callback goroutine, and onReconnect runs restoreSubscriptions and rewatch synchronously (recovery.go:20-82), so a reconnect callback queued behind a slow earlier one releases the hold of a connected holder; ensureConnWithContext (nats.go:779-800) likewise waits on that channel alone where it polled every 10 ms."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/main.go:401", "description": "Nothing waits for outbox Run before shutdown closes the pool (shutdown.go:108-110), so the documented graceful record and Release can fail and the standby waits for the lapse."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/lease.go:317", "description": "A holdLost that came from the record's hold check (publisher.go:286-290) neither releases nor stops the hold, so its renewal goroutine can keep running beside the next TryHold's."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:140", "description": "The deadline is checked before window.pin, which can wait up to 5 s for a connection (async.go:159-170) and then write after the deadline."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:226", "description": "A skipped role route (no claim, holder gone, echo) is recorded as a reached send (batch.go:361-363) and counts the event as sent in the 'sent batch' log line and its span."},
-    {"severity": "minor", "file": ".dispatch/architecture/dispatch-outbox.md:14", "description": "Docs that do not match the code: a stopping holder sends nothing more and releases what is in flight (not 'finishes the one in flight', also lease.go:127); a batch past its deadline is left unrecorded, not released (:67, publisher.go:356); a gone holder's claim is resolved once more, two reads in all (:56, role.go:113); AGENTS.md:2208 names migration 0130 for duty.Hold (it is 0135); running-dispatch.md:293-295's ten seconds does not hold for an idle holder behind a silent cut."}
+    {"severity": "main", "file": "packages/envoy/infra/gcp/dispatch.go:91", "description": "Recorded as main's, not a finding of this round (the INFRA controller's ruling relayed by the INFRA-514 architect at 13:57Z): TestDispatchConnectionsPerPodIsTheServers fails on main since #2233 (expects 84, gets 83), and here (expects 86, gets 85) because this PR adds its +2 to main's stale 83. When the implementer merges main's one-line fix, the result must be 86, with running-dispatch.md:277-282 saying 'up to 11' and '86', and the changelog fragment :33 '86 ... from 84'."},
+    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml:343-346", "description": "dispatch_memory does not name internal/testnats, which this PR's untagged cmd/dispatch/main_test.go now imports (`go list -deps -test -tags memory ./cmd/dispatch` lists it); a later testnats-only change would skip dispatch-memory."},
+    {"severity": "minor", "file": "PR body", "description": "The Contract change census was written at ab5984da before three main merges: re-run at the head it hits lines it does not list (internal/bus/stored.go:80, pi-envoy scripts/README.md:120 and smoke-replay.sh, the ported publisher_mentions_test.go lines, store/pool.go:305, the pr2225 docs/solutions note, the changelog fragment; 20 of 75 pi-envoy envoy.test.ts hits), and it and item 2 still name CHANGELOG.md, which is no longer in the diff."}
   ],
-  "fastFollow": "One send-outcome classification in settle (batch.go:431-441) replacing the errors.Is chains at publisher.go:219-228 and :376-380.",
+  "fastFollow": "One fence: drop fencedSender and errFenced now that WindowUntil fences every send, and check the deadline before checkSubject/StreamCaptures/Marshal in window.send and window.request so async.go:116 is true.",
   "verifiedCorrect": [
-    "duty.Hold: take, renew and release are single statements guarded on holder, expiry on the database clock, local deadline from the renewal's send time on the monotonic clock; Release waits for the renewal goroutine and notifies only when it deleted a row.",
-    "Order per (owner, destination): one send in flight per chain, the next only after reached; not-due events block only destinations they have not reached; the three partial-index predicates match readBatch's clauses; nothing else reads the dropped indexes.",
-    "Listener role lane: outcomes, exceptions and metrics unchanged between base and head; the outbox follows plan decision 10.",
-    "/healthz outbox_publisher: always present, false with NATS disabled, does not decide ok."
+    "Port of main's #2225 into the batch model: addClaimantRoute, leftToMention, the batched mention query and settleEvent's deferral keep main's rules; publisher_claimant_test.go is identical to main's and publisher_mentions_test.go keeps every assertion; a deferred write is hold-guarded, touches no attempt, and blocks no later event.",
+    "WindowUntil: deadline before the pin, pin wait capped at it, re-checked before the write; ErrWindowDeadline read as fenced.",
+    "All ten round-1 fixes, each with a test that fails against 3d0b23c8.",
+    "CI path filters cover go list -deps of ./cmd/dispatch, ./cmd/listener and -tags multiprocess ./cmd/dispatch."
   ]
 }
