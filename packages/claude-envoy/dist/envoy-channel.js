@@ -6792,7 +6792,7 @@ var require_protocol = __commonJS(function(exports) {
     }
     disconnect() {
       this.dispatchStatus({ type: core_1.DebugEvents.StaleConnection, data: "" });
-      this.transport.close();
+      this.transport.disconnect();
     }
     reconnect() {
       if (this.connected) {
@@ -15633,7 +15633,6 @@ var require_node_transport = __commonJS(function(exports) {
         d.resolve(socket);
         socket.removeAllListeners();
       });
-      this.socket = socket;
       socket.on("error", (err) => {
         dialError = err;
       });
@@ -15916,11 +15915,8 @@ var require_node_transport = __commonJS(function(exports) {
     }
     _closed(err_1) {
       return __awaiter(this, arguments, undefined, function* (err, internal = true) {
-        if (!this.connected) {
-          if (this.socket)
-            this.socket.destroy();
+        if (!this.connected)
           return;
-        }
         if (this.done)
           return;
         this.closeError = err;
@@ -43530,22 +43526,6 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
-// ../envoy-client/src/nats-connection.ts
-var NATS_PING_INTERVAL_MS = 1e4;
-var NATS_MAX_PINGS_OUT = 2;
-function natsConnectionOptions(input) {
-  return {
-    servers: [...input.servers],
-    name: input.name,
-    ...natsAuthOptions(input.seed),
-    reconnect: true,
-    maxReconnectAttempts: -1,
-    reconnectTimeWait: 2000,
-    pingInterval: NATS_PING_INTERVAL_MS,
-    maxPingOut: NATS_MAX_PINGS_OUT
-  };
-}
-
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
@@ -44154,9 +44134,7 @@ var SessionWireSchema = object({
   roles: array(string2()).optional(),
   capabilities: array(string2()).optional(),
   self_subscribed: boolean2(),
-  last_seen: number2().int().optional(),
-  plugin: string2().optional(),
-  plugin_version: string2().optional()
+  last_seen: number2().int().optional()
 });
 var RoleWireSchema = object({
   role: string2(),
@@ -44303,9 +44281,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID(),
-      plugin: input.plugin.name,
-      plugin_version: input.plugin.version
+      host: machineID()
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
@@ -44986,10 +44962,9 @@ function createReplayEngine(options) {
 function replaySuppressed(rendered) {
   return rendered.skip || rendered.malformedDelivery === true;
 }
-var REPLAYED_SUFFIX = "while this session's connection was down.";
 function replayedText(content, publishedAt) {
   return `${content}
-Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
+Published at ${publishedAt} while this session's connection was down.`;
 }
 function failureNoticeFields(notice) {
   const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
@@ -48806,9 +48781,7 @@ class StdioServerTransport {
 
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
-
 // package.json
-var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
   daemonApiVersion: 40
@@ -49290,19 +49263,13 @@ function claudeCommandLine(pid, read = processCommandLine, parent = parentProces
   }
   return;
 }
-function pluginCacheSegments(bundlePath) {
+function installedMarketplace(bundlePath) {
   const parts = bundlePath.split(sep);
-  for (let index = 0;index + 1 < parts.length; index++) {
+  for (let index = 0;index + 2 < parts.length; index++) {
     if (parts[index] === "plugins" && parts[index + 1] === "cache")
-      return parts.slice(index + 2);
+      return parts[index + 2];
   }
   return;
-}
-function installedMarketplace(bundlePath) {
-  return pluginCacheSegments(bundlePath)?.[0];
-}
-function installedPluginVersion(bundlePath) {
-  return pluginCacheSegments(bundlePath)?.[2];
 }
 var INLINE_MARKETPLACE = "inline";
 function loadedMarketplace(pluginRoot, bundlePath, commandLine) {
@@ -50455,8 +50422,7 @@ async function startChannelSession(options) {
       title,
       capabilities: options.capabilities,
       driving: false,
-      selfSubscribed: true,
-      plugin: { name, version: options.pluginVersion }
+      selfSubscribed: true
     });
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -50900,10 +50866,9 @@ async function runEnvoyChannelServer() {
   }), directory);
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
-  const bundlePath = process.argv[1] ?? "";
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
-    bundlePath,
+    bundlePath: process.argv[1] ?? "",
     environment: process.env
   }) : { loaded: true };
   if (!channel.loaded) {
@@ -50972,11 +50937,14 @@ async function runEnvoyChannelServer() {
       stampOnce(() => identity.id);
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off });
     } else {
-      connection = await import_nats2.connect(natsConnectionOptions({
-        servers: inbound.natsUrls,
+      connection = await import_nats2.connect({
+        servers: [...inbound.natsUrls],
         name: `claude-envoy-channel-${identity.id}`,
-        seed: inbound.natsSeed
-      }));
+        ...natsAuthOptions(inbound.natsSeed),
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        reconnectTimeWait: 2000
+      });
       session = await startChannelSession({
         identity,
         connection,
@@ -50987,7 +50955,6 @@ async function runEnvoyChannelServer() {
         configFile,
         stateDirectory,
         title,
-        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},
         ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
       });
