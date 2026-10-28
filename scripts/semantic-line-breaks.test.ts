@@ -46,10 +46,22 @@ test("R1 finds a second sentence that starts with a lowercase identifier", async
 });
 
 test("a paragraph that starts with inline HTML is checked for R2 like any other", async () => {
-  const path = await markdownFile("<kbd>Ctrl</kbd> opens the menu.\n- item\n");
+  // Input changed from `<kbd>Ctrl</kbd>` on the architect's authorization: `<kbd>` is now verbatim.
+  const path = await markdownFile("<span>Ctrl</span> opens the menu.\n- item\n");
   const { exitCode, stdout } = run([path]);
   expect(stdout).toContain(`${path}:2: R2:`);
   expect(exitCode).toBe(1);
+});
+
+test("a paragraph that opens a <kbd> element is verbatim: check reports nothing and --write leaves it", async () => {
+  const text = "<kbd>Ctrl</kbd> opens the menu.\n- item\n";
+  const path = await markdownFile(text);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
 });
 
 test("the end of a list item closes a fence the item left open, so later text is checked", async () => {
@@ -356,9 +368,10 @@ test("--write reads a <pre> tag followed by CR LF as an open tag", async () => {
   expect(result.exitCode).toBe(0);
 });
 
-test("--write re-lays out the block after the one that closes a <pre>", async () => {
-  const result = await written("Use <pre>a\nb</pre> here.\n\nNext one. Then two.\n");
-  expect(result.text).toBe("Use <pre>a\nb</pre> here.\n\nNext one.\nThen two.\n");
+test("--write leaves the block after the one that closes a <pre> as it is: close tags are not read", async () => {
+  const text = "Use <pre>a\nb</pre> here.\n\nNext one. Then two.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
   expect(result.exitCode).toBe(0);
 });
 
@@ -398,12 +411,41 @@ test("an inner </pre> keeps the outer <pre> open into later paragraphs", async (
   expect(result.exitCode).toBe(0);
 });
 
-test("the guard refuses a re-layout after a <pre> only micromark reads, in an HTML block", async () => {
-  // The block scanner reads the backticks as a code span; micromark reads the tag as raw HTML.
+test("a <pre> in backticks inside an HTML block counts, so --write leaves the next block as it is", async () => {
+  // An HTML block's raw HTML is its whole text: a backtick there opens no code span.
   const text = "<span>\n`<pre>`\n</span>\n\nNext x. Then y.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+// Each holds `<pre` somewhere in raw HTML that CommonMark and GitHub's HTML parser may read
+// differently: the block holding it and every block after it stay byte for byte, so --write
+// changes nothing and exits 0.
+for (const [shape, text] of [
+  ["inside a processing instruction", "Use <?a > <pre> ?> b\n\nNext x. Then y.\n"],
+  ["inside CDATA", "Use <![CDATA[ > <pre> ]]> b\n\nNext x. Then y.\n"],
+  ["after a comment's --!>", "Use <!-- x --!> <pre> --> b\n\nNext x. Then y.\n"],
+  ["in a tag with no space between attributes", '<span>\nx <pre class="a"b>\n\nNext x. Then y.\n'],
+  ["in a tag with a quote in an unquoted value", '<span>\nx <pre a=b"c>\n\nNext x. Then y.\n'],
+  ["before a malformed comment", "<pre>\n<!-x </pre>\n\nNext x. Then y.\n"],
+  ["before an unclosed processing instruction", "<pre>\n<?x </pre>\n\nNext x. Then y.\n"],
+  ["before an unclosed tag", "<pre>\n<span a=1 </pre>\n\nNext x. Then y.\n"],
+]) {
+  test(`--write leaves the rest of the file as it is after a <pre> ${shape}`, async () => {
+    const result = await written(text);
+    expect(result.text).toBe(text);
+    expect(result.exitCode).toBe(0);
+  });
+}
+
+test("the guard refuses a re-layout after a <pre> only micromark reads, in a blockquote", async () => {
+  // micromark reads an HTML block inside the quote; the block scanner reads the quote's text, where
+  // `<pre a=b"c>` is no valid tag, so it re-lays out the paragraph below.
+  const text = '> <pre a=b"c>\n\nNext x. Then y.\n';
   const path = await markdownFile(text);
   const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
-  expect(result.stderr.toString()).toContain(`${path}: refusing to write: the block at line 5`);
+  expect(result.stderr.toString()).toContain(`${path}: refusing to write: the block at line 3`);
   expect(result.exitCode).toBe(2);
   expect(await readFile(path, "utf8")).toBe(text);
 });

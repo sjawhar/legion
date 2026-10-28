@@ -9,10 +9,12 @@
 // It never joins a line onto the one before when the line could open or interrupt a block, nor
 // cuts a line where the new line would start so. It never joins or cuts inside a code span or
 // inline HTML, read left to right as CommonMark reads them (a tag runs through its quoted attribute
-// values, and a `<` that opens no raw HTML or autolink is text). A block whose text holds an open
-// tag of `<pre>`, `<textarea>`, `<script>`, `<style>`, `<code>`, `<tt>`, `<kbd>` or `<samp>`, in
-// any case, stays byte for byte, and so does every later block while such an element is still
-// open, through the block that closes it or the end of the file; R1 and R2 do not read them.
+// values, and a `<` that opens no raw HTML or autolink is text). The first block whose raw HTML
+// (the text of an HTML block, or an inline tag, comment, processing instruction, declaration or
+// CDATA; never a code span or code block) holds `<pre`, `<code`, `<tt`, `<kbd`, `<samp`,
+// `<textarea`, `<script` or `<style`, in any case and wherever it stands in that HTML, stays byte
+// for byte, and so does every block after it to the end of the file; R1 and R2 do not read them.
+// Close tags are not read: where GitHub's HTML parser ends such an element is not CommonMark's.
 //
 // `--write` then writes a file only when three guards hold: the text is the same once whitespace
 // is folded; the file renders the same, parsed before and after with micromark and its GFM and
@@ -21,10 +23,9 @@
 // changes nothing. A construct this script misreads therefore leaves the file as it was and fails
 // loudly, naming the first block whose rendering would change or the first line a second
 // re-layout would change. The rendering comparison ignores only what a re-layout must change:
-// where a line breaks inside text (not inside a code span, nor in a block that holds HTML opening
-// one of the elements above or comes while one is open), and whether a list is loose (the blank
-// lines R2 puts between items). Only `--write` loads the parser, so check mode runs without
-// `bun install`.
+// where a line breaks inside text (not inside a code span, nor in the block whose HTML holds one of
+// the opens above or any block after it), and whether a list is loose (the blank lines R2 puts
+// between items). Only `--write` loads the parser, so check mode runs without `bun install`.
 //
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
 import { existsSync } from "node:fs";
@@ -91,12 +92,12 @@ const RULE_LIKE_LINE = /^[-=*_|: \t]+$/;
 /** A list item line whose content is only a task box: the line after it must stay apart. */
 const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
 /**
- * A token that is an open tag (group 1) or a close tag (group 2) of an element whose line breaks
- * GitHub shows: a raw-text element, or inline code. Anchored to the whole token, so a tag named
- * inside a comment, an attribute value or another construct is no tag. verbatimCount counts them.
+ * The start of an element whose line breaks GitHub shows, a raw-text element or inline code, as
+ * raw HTML may hold it anywhere: in a tag, an attribute value, a comment, a processing
+ * instruction, CDATA or a malformed tag. The name may be followed by anything but a name
+ * character, so `<preview` is no match.
  */
-const VERBATIM_TAG =
-  /^<(?:(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\r\n/>])|\/(pre|textarea|script|style|code|tt|kbd|samp)[ \t\r\n]*>$)/i;
+const VERBATIM_OPEN = /<(?:pre|code|tt|kbd|samp|textarea|script|style)(?![A-Za-z0-9-])/i;
 /** Whitespace inside inline HTML: spaces and tabs, and at most one line ending. */
 const TAG_SPACE = String.raw`[ \t]*(?:\r?\n[ \t]*)?`;
 /** CommonMark's open tag: a tag name, attributes each led by whitespace, an optional `/`, `>`. */
@@ -177,8 +178,8 @@ interface LineInfo {
   itemStart: boolean;
   paragraph?: Paragraph;
   /**
-   * The line is in a block that holds an open tag VERBATIM_TAG matches, or comes while such an
-   * element is still open: `--write` leaves it byte for byte, and R1 and R2 do not read it.
+   * The line is in the first block whose raw HTML matches VERBATIM_OPEN, or after it: `--write`
+   * leaves it byte for byte, and R1 and R2 do not read it.
    */
   verbatim?: boolean;
 }
@@ -263,50 +264,6 @@ function unescapedIndex(text: string, char: string, from: number): number {
     else if (text[at] === char) return at;
   }
   return -1;
-}
-
-/**
- * Counts the verbatim elements the HTML tokens of `text` open and close into `open`, by lowercase
- * name, nesting included: each token spans one construct htmlEnd reads (a tag, a comment, a
- * processing instruction, a declaration, CDATA, an autolink), and only a token that is itself an
- * open or close tag counts. A name leaves `open` when its count returns to zero, and a close tag
- * of an element not open is ignored. Whether a token opens an element.
- */
-function verbatimCount(
-  text: string,
-  tokens: readonly [number, number][],
-  open: Map<string, number>
-): boolean {
-  let opens = false;
-  for (const [start, end] of tokens) {
-    const [, opened, closed] = VERBATIM_TAG.exec(text.slice(start, end)) ?? [];
-    if (opened !== undefined) {
-      const name = opened.toLowerCase();
-      open.set(name, (open.get(name) ?? 0) + 1);
-      opens = true;
-    } else if (closed !== undefined) {
-      const name = closed.toLowerCase();
-      const count = open.get(name) ?? 0;
-      if (count > 1) open.set(name, count - 1);
-      else open.delete(name);
-    }
-  }
-  return opens;
-}
-
-/**
- * The constructs htmlEnd reads in raw HTML, as [start, end] pairs: the text of an HTML block,
- * where a backtick opens no code span.
- */
-function rawHtmlTokens(text: string): [number, number][] {
-  const tokens: [number, number][] = [];
-  for (let at = text.indexOf("<"); at !== -1; at = text.indexOf("<", at + 1)) {
-    const end = htmlEnd(text, at);
-    if (end === -1) continue;
-    tokens.push([at, end]);
-    at = end - 1;
-  }
-  return tokens;
 }
 
 /** How many cells a table row holds: an outer `|` on either side does not separate two. */
@@ -584,29 +541,29 @@ function scanBlocks(source: readonly string[]): Blocks {
 }
 
 /**
- * Marks the lines that are `verbatim`, reading the blocks in document order from line `from`: a
- * paragraph is one block, and so is a run of lines of one other kind up to the next list item's
- * marker. Tags are counted only where proseMask reads raw HTML, so a tag named in a code span, an
- * autolink or escaped text counts for nothing, and never in fences and indented code.
+ * Marks verbatim the lines of the first block, read in document order from line `from`, whose raw
+ * HTML matches VERBATIM_OPEN, and every line after it to the end of the file. A paragraph is one
+ * block, and so is a run of lines of one other kind up to the next list item's marker. An HTML
+ * block's raw HTML is its whole text; another block's is the inline HTML proseMask reads, so a tag
+ * named in a code span, an autolink or escaped text counts for nothing. Fences and indented code
+ * hold none.
  */
 function markVerbatim(source: readonly string[], lines: LineInfo[], from: number): void {
-  const open = new Map<string, number>();
   for (let first = from; first < lines.length; ) {
     const info = lines[first];
     let last = info?.paragraph?.last ?? first;
     if (info?.paragraph === undefined) {
       while (lines[last + 1]?.kind === info?.kind && lines[last + 1]?.itemStart === false) last++;
     }
-    const wasOpen = open.size > 0;
-    let opens = false;
     if (info?.kind !== "fence" && info?.kind !== "code") {
       const text = source.slice(first, last + 1).join("\n");
       const html: [number, number][] = [];
-      proseMask(text, html);
-      opens = verbatimCount(text, html, open);
-    }
-    if (wasOpen || opens) {
-      for (const line of lines.slice(first, last + 1)) line.verbatim = true;
+      if (info?.kind === "html") html.push([0, text.length]);
+      else proseMask(text, html);
+      if (html.some(([start, end]) => VERBATIM_OPEN.test(text.slice(start, end)))) {
+        for (const line of lines.slice(first)) line.verbatim = true;
+        return;
+      }
     }
     first = last + 1;
   }
@@ -969,23 +926,15 @@ function renderedForm(node: ParsedNode, inText: boolean, exact: boolean): unknow
 }
 
 /**
- * Which top-level blocks render exactly, whitespace in their text included: each whose subtree
- * holds an HTML node that opens an element VERBATIM_TAG matches, and each later one while such an
- * element is still open, the HTML nodes' open and close tags counted by name in document order.
- * An HTML node's value is raw HTML, so its tokens are read with rawHtmlTokens.
+ * Which top-level blocks render exactly, whitespace in their text included: the first whose
+ * subtree holds an HTML node whose raw value matches VERBATIM_OPEN, and every block after it.
  */
 function exactBlocks(blocks: readonly ParsedNode[]): boolean[] {
-  const open = new Map<string, number>();
-  const opens = (node: ParsedNode): boolean => {
-    const value = node.type === "html" ? node.value : undefined;
-    let found = value !== undefined && verbatimCount(value, rawHtmlTokens(value), open);
-    for (const child of node.children ?? []) found = opens(child) || found;
-    return found;
-  };
-  return blocks.map((block) => {
-    const wasOpen = open.size > 0;
-    return opens(block) || wasOpen;
-  });
+  const opens = (node: ParsedNode): boolean =>
+    (node.type === "html" && VERBATIM_OPEN.test(node.value ?? "")) ||
+    (node.children ?? []).some(opens);
+  const first = blocks.findIndex(opens);
+  return blocks.map((_, n) => first !== -1 && n >= first);
 }
 
 /** Parses markdown into its top-level blocks. */
