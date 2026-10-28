@@ -2,68 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-27T13:15:17Z",
-  "testedHead": "a5cc2a56df9319a2f9eb746ec3856ff4a8980d2b",
+  "completed": "2026-10-28T12:27:33Z",
+  "testedHead": "92f0eaa3604ccfd240d4643344adbd0ce849db9a",
+  "round": 2,
+  "scope": "Confirmation round, as the INFRA-514 architect directed (Envoy 8e303d87, 12:26Z): the next head will differ in code and migrations, so the full real-system round runs at the merged head. This round confirms the three items below at this head and re-drives nothing.",
   "implementerProof": {
-    "verdict": "verified",
-    "how": "Re-drove the same surfaces on my own build of a5cc2a56 (its packages/envoy is a4e592e8's), on INFRA-589's harness at /legion/scratch/tmp/infra607/measure (Postgres 16 with log_statement=all, NATS 2.10.29, the Envoy listener, config B with the fake Azure embedder and fake GitHub App): a comment POSTed through the API was embedded about 1 s after its POST; after pg_terminate_backend of the shared hub's backend, a comment written in the outage was embedded 1.5 s later on a re-LISTENed backend; a 3-minute idle window (13:01:30-13:04:30) showed no statement from the embedding scan, coverage, task progress, excerpts or settings poll, and the suggestion sweep ran only at the two settle due times of my own writes; architecture.Parse on .dispatch/architecture returns 40 components with dispatch-duty, dispatch-embedqueue, dispatch-delivery and dispatch-redeliver under dispatch-server. The intake's concurrency claim holds inside one process (below), but not across a hand-over (failure 2)."
+    "verdict": "rejected",
+    "how": "Not re-driven this round. The proof is recorded at 775d9b83, a head that GitHub cannot merge (CONFLICTING) and that still carries the listener-count defect below, so it does not prove the head that will merge. Its claims that the round-1 red tests (TestAHandOverKeepsAPullRequestsMessagesInOrder, TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer, TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues) pass unmodified are to be checked at the merged head in the full round."
   },
   "failures": [
     {
-      "criterion": "CI read at the tested head (the merge gate's static lanes) and the PR mergeable against its base",
-      "evidence": "No CI ran on any head of PR #2391: `gh api repos/sjawhar/legion/commits/a5cc2a56df93.../check-runs` and the same for a4e592e8507c return 0 check runs, the combined status has 0 statuses, and `gh run list -R sjawhar/legion --branch legion/INFRA-607` lists no run. `gh pr view 2391` reports mergeable CONFLICTING, mergeStateStatus DIRTY. main@origin (1b859ea37f) carries b69f636f2c (#2210, block graph) with migrations 0121_block_graph through 0129_document_edit_notices, which collide with this PR's 0121-0126, and also touches refs/excerpts.go, refs/excerpts_test.go, docs/reference_excerpts.go, store/pool.go, cmd/dispatch/main.go, multiprocess_test.go, bus/nats.go and four docs files this PR changes. The implementer merges main (forward merge) and renumbers the migrations; the refs trigger (0123, when new.from_kind = 'artifact') must be checked against main's block-graph refs rows. The merge changes the diff, so the next round is a full test round."
+      "criterion": "The pull request merges with its base and CI runs at its head",
+      "evidence": "`gh pr view 2391 -R sjawhar/legion --json mergeable,mergeStateStatus` at 12:27Z: CONFLICTING, DIRTY. main@origin moved past the branch's merge base 0a92102149 to 2d872499b6 (#2233, #2425, #2358), and those commits change eight files this PR also changes: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md, cmd/dispatch/README.md, cmd/dispatch/main.go, cmd/dispatch/multiprocess_test.go, internal/dispatch/api/copy_lock_order_test.go, internal/dispatch/store/pool.go. They add no migration, so 0135-0140 are still free on main. The check runs on 775d9b83 (build x2, changes, lint, pr-title, test, typecheck) and the workflow runs (Tests, Docs, PR Title, Legion Envoy and Contracts, Worker Image) have been queued since 11:54Z, and none ran. The head 92f0eaa3 is a handoff-only commit (skip-checks)."
     },
     {
-      "criterion": "The GitHub intake processes notifications in order per pull request where order matters (acceptance 2; PR body: 'in order per pull request and per run')",
-      "evidence": "Real surface: two head binaries on one database and one NATS, fake GitHub holding each pulls/<n> GET 3 s; published PR 201 x3, 202-205 through the listener (`pub.sh 0 notifications.github.loadorg.loadrepo.pr.<n>`), SIGTERM to the bound process 1 s later. Fake log: the stopping process GET pulls/201 12:46:27.759 -> 12:46:30.760, while the standby (bound 12:46:30.590) started GET pulls/201 at 12:46:30.598: two fetches of one pull request overlapped, so an older fetch can be written after a newer one (UpsertRun, store.go:570, has no regression guard, so a run's in_progress fetch can overwrite its completed row). Cause: intakeDelivery.stop Naks the messages queued behind a key before that key's in-flight handler returns, and receive Naks buffered messages the same way. Red test (commit e95f54eb): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25432/dispatch_test?sslmode=disable go test ./internal/dispatch/delivery/ -run TestAHandOverKeepsAPullRequestsMessagesInOrder -count=1` fails: events [\"start 1\" \"start 1\" \"end 1\"]. Checked fixable: Naking the queued messages after keys.wait() makes it pass with the rest of the package."
+      "criterion": "No Dispatch project or issue key of the deployment goes into the public tree (AGENTS.md 'This repository is public'; dispatch://INFRA-472)",
+      "evidence": "`jj diff --from 0a92102149f2 --to 92f0eaa3604c --git '~.legion' | grep '^+' | grep -c INFRA-` = 28 added lines, outside .legion/: seven files named packages/envoy/.changes/unreleased/INFRA-607-Changed-20261028-12000{0..6}.yaml, each with 'Issue: INFRA-607' and '(INFRA-607)' in its body; '(INFRA-607)' in cmd/dispatch/README.md ('Dispatch's background loops come in three shapes (INFRA-607)') and in a main.go comment ('The loops come in these shapes (INFRA-607)'); '(INFRA-66)' in a main.go comment ('Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66)'); 'dispatch://INFRA-591' in internal/dispatch/api/suggestion_outcomes.go ('dispatch://INFRA-591 removes that lock'); '-- INFRA-607:' opening migrations 0135_embeddings_notify.up.sql and 0140_delivery_settings_notify.up.sql. The added packages/envoy/AGENTS.md lines name INFRA-66 once (and LEGION-542 three times, Legion's own key, which the rule allows). The fragments' file names need a name without the key as well as bodies without it."
     },
     {
-      "criterion": "Dispatch's shutdown fits its budget (cmd/dispatch/shutdown.go stopGrace = 30 s; the pod's terminationGracePeriodSeconds 35 s, infra/gcp/dispatch_kube.go) now that the intake waits for its handlers",
-      "evidence": "Real surface, fake GitHub holding pulls/<n> 50 s: published PR 401, SIGTERM 2 s later; the head process exited 58.0 s after the signal (log: 'shutting down' 13:06:48.746, the handler's 'context deadline exceeded' 13:07:46.712, after three GitHub attempts). The base build c3d09eec924c under the same test (PR 402 held) exited 0.4 s after SIGTERM. In production the kubelet kills the process at 30 s, so every deploy during a slow GitHub ends with SIGKILL and the deferred closes after stopIntakes never run. Red test (commit e95f54eb): `go test ./internal/dispatch/delivery/ -run TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer -count=1` fails: still waiting 20 s after its context ended. Checked: the three tests (this one, the hand-over test and the existing TestAMessageQueuedBehindItsKeyAtStopIsRedeliveredAtOnce) can all pass with a bounded wait for in-flight handlers, then cancelling them, then Naking what was queued; cancelling at once alone breaks the existing test."
-    },
-    {
-      "criterion": "The suggestion outcome sweep judges a suggestion only once it is settle (60 s) old, so an agent's writes within a minute are judged together (suggestionOutcomeSchedule and judgeSuggestionPage doc comments)",
-      "evidence": "Real surface: suggestions of LGA-404 recorded 12:51:30.97; ses-filer-x commented on the suggested issue LGA-401 at 12:51:50; at 12:52:14 the row was marked acted_on (44 s old, swept still false, cursor moved by one event, 9005 -> 9006): the settled creation event of LGA-401 brought the young suggestion in through touchedSuggestions' suggested_issue_key arm, and the rules then read every event, young ones included. With a comment on the source in that minute the same path marks it overridden before the update of the suggested issue lands. Red test (commit 95809d51): `go test ./internal/dispatch/api/ -run TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues -count=1` fails: outcome overridden while the suggestion is younger than settle. Checked fixable: adding `created_at <= now() - settle` to the three issue/document arms of touchedSuggestions makes it pass with every other suggestion test."
+      "criterion": "store.ConnectionsPerProcess counts every connection one Dispatch process opens, so the deployment's per-pod connection budget holds",
+      "evidence": "cmd/dispatch/main.go:442 dials the new wake hub through database.Pool.Listener (pglisten.Hub{Owner: \"dispatch background wakes\", Dial: database.Pool.Listener}), and store/pool.go:238-241 and :250-252 now name four permanent listeners (the delivery hub, the event stream relay, the stale-room evictor and the shared wake hub), but store/pool.go:302 is still `const permanentListeners = 3` with a comment naming three, so ConnectionsPerProcess = 64+4+1+10+1+3 = 83, one short of the 84 a process opens. Round 1 saw the hub's own backend on the real binary ('listen dispatch_embeddings; listen dispatch_excerpts_owed; listen dispatch_events; listen dispatch_delivery_settings') beside the existing listeners. The figure is mirrored by infra/gcp/dispatch.go:91 `dispatchConnectionsPerPod = 83`, which infra/gcp/dispatch_connections_test.go:14 requires equal to store.ConnectionsPerProcess, so both move to 84 together. Reported first by the implementer (architect's note 12:26Z); no red test: the defect is a constant and the existing equality test pins the mirror."
     }
   ],
-  "failed": 4,
-  "proof": [
-    {
-      "criterion": "The GitHub intake processes notifications concurrently where order does not matter and in order per pull request inside one process",
-      "surface": "The head envoy-dispatch binary's intake, fed through the Envoy listener's POST /v1/messages/publish, against a fake GitHub holding each pulls/<n> GET 3 s",
-      "command": "/legion/scratch/tmp/t607/pub.sh 0 notifications.github.loadorg.loadrepo.pr.<n> '{\"kind\":\"pr\",\"action\":\"closed\",\"merged\":\"true\",...}' for 101, 101, 102, 103, 104, 105",
-      "observed": "GET pulls/101, 102, 103 started within 155 ms of each other; the second 101 started at 16.151, 1 ms after the first returned at 16.150; 104 and 105 started as slots freed (MaxAckPending 4).",
-      "headSha": "a5cc2a56df9319a2f9eb746ec3856ff4a8980d2b",
-      "negativeControl": "Envelopes with a kind pr payload on pr.111.comment and pr.112.mention were acknowledged with no GitHub fetch; a payload 'not json' on pr.113 logged 'decode envelope payload' and fetched nothing."
-    },
-    {
-      "criterion": "A delivery settings change reaches the intake at once, and a freshness write does not reload it",
-      "surface": "PUT /api/v1/settings/delivery on the head binary, then a published PR merge",
-      "command": "api.sh 18778 PUT /api/v1/settings/delivery (population_authors + newbot), then pub.sh for PR 301 by newbot and PR 302 by stranger; psql updates of last_reconcile_at and excluded_repos",
-      "observed": "The cache re-read the row 4 ms after the PUT; PR 301 was fetched 52 ms after the PUT returned; PR 302 was not fetched. Counted settings reads: 150 before, 150 after a last_reconcile_at update, 151 after an excluded_repos change.",
-      "headSha": "a5cc2a56df9319a2f9eb746ec3856ff4a8980d2b",
-      "negativeControl": "update delivery_settings set last_reconcile_at = now() -> no settings read in the next 3 s."
-    },
-    {
-      "criterion": "Suggestion outcomes give the same answers as the full sweep they replace",
-      "surface": "The head binary's sweep over issues filed and commented on through the API (LGA-404..407), then the base build's three rules (c3d09eec924c suggestion_outcomes.go) run over the same rows in a rolled-back transaction",
-      "command": "psql -f /legion/scratch/tmp/t607/oldrules.sql (reset the 12 rows to ignored, run the base rules, select, rollback)",
-      "observed": "All 12 outcomes and details equal: LGA-404->LGA-401 acted_on (direct update), LGA-405->LGA-404 acted_on (citation), the document and comment rows of LGA-405/406 overridden, LGA-407's document and comment rows ignored.",
-      "headSha": "a5cc2a56df9319a2f9eb746ec3856ff4a8980d2b",
-      "negativeControl": "ses-other's comments on the source LGA-407 and the suggested owner LGA-301 resolved nothing: those rows stayed ignored in both."
-    },
-    {
-      "criterion": "Coverage runs once at boot and its rows wake the queue; excerpts wake on the refs trigger",
-      "surface": "The head binary restarted with DISPATCH_AZURE_EMBED_DEPLOYMENT=embed-v-9-9; refs rows cleared with psql as the previous release's ClearExcerpts does",
-      "command": "start3.sh with config-B2.env; python3 /legion/scratch/tmp/t607/excerpt.py",
-      "observed": "The boot coverage pass dropped 10015 foreign vectors and the queue re-embedded 1824 rows in the next 45 s with no other wake. Clearing the excerpts of LGA-408's spec was recorded again 0.50 s later by one leased pass.",
-      "headSha": "a5cc2a56df9319a2f9eb746ec3856ff4a8980d2b",
-      "negativeControl": "update refs set excerpt_version = excerpt_version (not null) -> no reference-excerpts lease statement in 5 s."
-    }
-  ],
+  "failed": 3,
   "notes": [
-    "Measurements (acceptance 3) were not re-run this round: the forced merge with main changes the head, so the re-run belongs to the full test round at the merged head.",
-    "At 12:47:53 my pg_ctl start on /legion/scratch/tmp/infra607/pg/test failed on the port and removed that cluster's postmaster.pid; the implementer's test Postgres on :25432 then shut down (immediate). I restarted it at 12:49 from the tester container (clean recovery); it now runs in the tester's PID namespace, so it stops if the tester container restarts.",
-    "The tester's scratch is /legion/scratch/tmp/t607 (build of the head, fakes with FAKE_PULL_DELAY, start/pub/api scripts, count.py, oldrules.sql)."
+    "No real-system run this round, by the architect's direction; round 1's real-surface results and red tests stand for the full round at the merged head, which must also re-run the before/after measurements there.",
+    "The pod's scratch was recreated since round 1: /legion/scratch/tmp/t607 and the harness's test Postgres on :25432 may be gone; the full round rebuilds what it needs."
   ]
 }
