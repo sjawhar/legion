@@ -193,9 +193,7 @@ const linearSlack = 3
 // labels; a text of many line feeds, whose every line joined the rest of the text to ask whether
 // only whitespace followed; and a run of `~` in a paragraph, which goldmark's strikethrough parser
 // scanned again from every `~` in it. Before the fix 128 KiB of each text took 18-115 s to render
-// and 32 KiB of `[^a` 7.7 s; each CPU-time bound is at least ten times the time measured after it.
-// CPU time excludes a loaded runner's scheduling delay, which says nothing about this code's
-// complexity.
+// and 32 KiB of `[^a` 7.7 s; each bound is at least ten times the time measured after it.
 func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
@@ -216,16 +214,12 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 		{"[^a before one ] with a long label defined", &Node{Type: "doc", Children: []*Node{paragraph(labels), definition(strings.Repeat("b", 1000))}}},
 		{"line feeds", &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("a\n", 2<<20))}}},
 	} {
-		took, err := cpuTimeOf(func() {
-			if _, err := Render(test.doc); err != nil {
-				t.Fatalf("render 4 MiB of %s: %v", test.name, err)
-			}
-		})
-		if err != nil {
-			t.Fatalf("measure rendering 4 MiB of %s: %v", test.name, err)
+		started := time.Now()
+		if _, err := Render(test.doc); err != nil {
+			t.Fatalf("render 4 MiB of %s: %v", test.name, err)
 		}
-		if took > 30*time.Second {
-			t.Errorf("render of 4 MiB of %s used %s CPU time, want under 30 s", test.name, took)
+		if elapsed := time.Since(started); elapsed > 30*time.Second {
+			t.Errorf("render of 4 MiB of %s took %s, want under 30 s", test.name, elapsed)
 		}
 	}
 	// A run after an escaped `~` may open or close, so its run is scanned rather than refused. A
@@ -239,16 +233,12 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 		{"\\~ and a run of 1 MiB of ~", "\\~" + strings.Repeat("~", 1<<20), Parse},
 		{"a\\~~ repeated to 1 MiB", strings.Repeat("a\\~~", (1<<20)/4), ParseRendering},
 	} {
-		took, err := cpuTimeOf(func() {
-			if _, err := test.parse(test.markdown); err != nil {
-				t.Fatalf("parse %s: %v", test.name, err)
-			}
-		})
-		if err != nil {
-			t.Fatalf("measure parsing %s: %v", test.name, err)
+		started := time.Now()
+		if _, err := test.parse(test.markdown); err != nil {
+			t.Fatalf("parse %s: %v", test.name, err)
 		}
-		if took > 30*time.Second {
-			t.Errorf("parse of %s used %s CPU time, want under 30 s", test.name, took)
+		if elapsed := time.Since(started); elapsed > 30*time.Second {
+			t.Errorf("parse of %s took %s, want under 30 s", test.name, elapsed)
 		}
 	}
 }
