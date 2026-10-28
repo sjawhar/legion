@@ -1929,6 +1929,10 @@ A fenced code block whose language - the info string's first word - holds a back
 character reference is refused: that parser decodes both, and goldmark keeps them as written. What
 it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
 both drop.
+A whitespace-only line inside fenced code whose opening fence stands past its container's content
+is an empty line of the code when it holds fewer columns past that content than the fence does:
+that parser takes up to the fence's indentation from each line, and goldmark kept the whole line,
+so `  ~~~\n \nx` holds the code `\nx` (`fenceClosure`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
