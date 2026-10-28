@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,77 @@ func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth(t 
 		if send.session == "s1" {
 			copies++
 		}
+	}
+	if copies != 1 {
+		t.Fatalf("s1 received %d copies of the comment (route copy published: %v, mention sends: %#v), want exactly 1",
+			copies, routeCopy, state.sent())
+	}
+}
+
+// A process killed while its mention send was in flight leaves the attempt pending with a claim
+// that lapses a lease later, though the send may already have reached the listener: here it did,
+// so s1 already holds the comment. Whatever then settles the attempt - the outbox's copy or the
+// stranded pass's resend, which the listener drops as a repeat of the same message - s1 must end
+// up with exactly one copy of the comment, not the mention and the route copy both.
+func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *testing.T) {
+	listener, state := newMentionListener(t)
+	stopping, stop := context.WithCancel(t.Context())
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
+	issue := createInteractionIssue(t, handler, "TEST", "A send in flight at a kill", "before")
+	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"route": "session:s1",
+	}, "alice"); patched.Code != http.StatusOK {
+		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	stop()
+	const body = "In flight when the process was killed."
+	inFlight := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": body, "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	// The killed process claimed the attempt and its send reached the listener; it died before it
+	// recorded the outcome, and its claim has lapsed.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' - interval '1 second'
+		where comment_id = $1
+	`, inFlight.ID); err != nil {
+		t.Fatalf("lapse the killed process's claim: %v", err)
+	}
+	ageAttempts(t, database, inFlight.ID)
+	landed, err := http.Post(listener.URL+"/v1/messages/send", "application/json",
+		strings.NewReader(`{"target_session":"s1","message":"`+body+`"}`))
+	if err != nil {
+		t.Fatalf("land the killed process's send: %v", err)
+	}
+	landed.Body.Close()
+
+	routeCopy := publishedToSession(t, deps, issue.Key, inFlight.ID, "s1")
+	passes := make(chan struct{}, 1)
+	lifetime, end := context.WithCancel(t.Context())
+	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
+	next.start()
+	awaitPasses(t, passes, 3)
+	waitForCommentDeliveries(t, database, inFlight.ID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
+		for _, attempt := range attempts {
+			if attempt.State == "pending" {
+				return false
+			}
+		}
+		return true
+	})
+	end()
+	next.wait()
+
+	// The listener stores one message per (session, text): a resend of what already landed is a
+	// repeat it drops, so distinct texts count copies.
+	mentionCopies := map[string]struct{}{}
+	for _, send := range state.sent() {
+		if send.session == "s1" {
+			mentionCopies[send.body] = struct{}{}
+		}
+	}
+	copies := len(mentionCopies)
+	if routeCopy {
+		copies++
 	}
 	if copies != 1 {
 		t.Fatalf("s1 received %d copies of the comment (route copy published: %v, mention sends: %#v), want exactly 1",
