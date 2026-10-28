@@ -2,37 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-28T09:58:00Z",
+  "completed": "2026-10-28T10:05:00Z",
   "generation": 3,
-  "round": 8,
-  "headSha": "ecfdba034cac173e607d53e464ab9987e48d97a2",
-  "codeHeadSha": "0e96c0ff9bc9dcf97dd4dee74c835df11978abe7",
-  "recheck": "docs re-check 32e06ee5 → ecfdba03: since the last full pass at code head 99f818ca, only retro's three docs/solutions files, the removal of .legion/INFRA-278/ and one sentence in packages/envoy/AGENTS.md changed (jj diff 99f818ca..0e96c0ff --stat). No code changed, so bare gates only. The full pass at 32e06ee5 (comment 6464976218) stands",
+  "round": 9,
+  "headSha": "ac25d944ad7a8ad1c27a4e5a5255df8723f4c9e4",
+  "codeHeadSha": "c597c1440ff6",
+  "recheck": "Docs-only since the full pass at code head 99f818ca: the round changed one sentence of packages/envoy/AGENTS.md (c597c144). Bare gates plus a check of the sentence",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
-    "verdict": "verified",
-    "how": "Read the new sentence at packages/envoy/AGENTS.md:2621-2625 against publishFollowerRoutes (publisher.go:886-908). A non-quiet ask.edited and any comment.* with an ask_id reach the ask's followers from any actor but the follower itself, and no Notify check guards it, so the sentence is true. Round 3's live case (an agent's ask reply reaching a follower-claimant with no subscription, {C:1,P:1}) shows the same behaviour"
+    "verdict": "rejected",
+    "how": "The implementer's sentence claims more than the code does: 'every event on that ask'. The enumerated list after the colon matches publishFollowerRoutes (publisher.go:886-897); the leading absolute does not (failure below)"
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Smoke at the new head: claimant delivery is unchanged",
+      "criterion": "packages/envoy/AGENTS.md's claimant paragraph is true (the architect's check of the widened follower exception)",
+      "evidence": "Line 2624 says a claimant following the ask 'gets, as a follower, every event on that ask but its own and a quiet `ask.edited`'. ask.follower_added and ask.follower_removed reach only the added or removed session (publisher.go:1002-1006), and ask.anchor_refreshed never notifies (events/broker.go:258) and is not in publishFollowerRoutes' switch. Live at this head ($TMPDIR/infra278-test/mini.sh, a one-case copy of the e2e runner): C opened an ask on the claimed issue and claimant P followed it. A person adding R as a follower gave {\"adv-r\":1}; removing R gave {\"adv-r\":1}; P got neither. Control: an agent's reply in that ask reached {\"adv-c\":1,\"adv-p\":1}. Corrected sentence: '… except that a claimant following the ask gets, as a follower, any session's but its own or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs outside the `notify` gate).' A shorter fix: replace 'every event on that ask but its own and a quiet `ask.edited`:' with 'these events on that ask, other than its own:'. No red test: a test of the document's wording is a source-text test, which the repository's test rules forbid"
+    }
+  ],
+  "failed": 1,
+  "passedChecks": [
+    {
+      "criterion": "Smoke at the new head",
       "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
       "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
       "observed": "summary: 9 ok, 0 FAIL, PASS in 50s",
-      "headSha": "ecfdba034cac173e607d53e464ab9987e48d97a2",
-      "negativeControl": "Main b295a3fb's binary fails 14 of the tester's 23 live cases (round 7, comment 6465087370); no code changed since"
-    },
-    {
-      "criterion": "packages/envoy/AGENTS.md's claimant paragraph is true",
-      "surface": "repository text against packages/envoy/internal/dispatch/outbox/publisher.go",
-      "command": "sed -n 2612,2632p packages/envoy/AGENTS.md; grep -n 'func publishFollowerRoutes' -A 22 packages/envoy/internal/dispatch/outbox/publisher.go",
-      "observed": "The paragraph names the follower route as the exception for a claimant that follows the ask: either party's non-quiet ask.edited, and an agent's reply in that ask. publishFollowerRoutes handles ask.edited when not quiet, ask.answered, ask.handed_back, ask.resolved, and comment.created, edited, resolved and reopened with an ask_id, for any actor but the follower",
-      "headSha": "ecfdba034cac173e607d53e464ab9987e48d97a2",
-      "negativeControl": "Before 0e96c0ff the paragraph said an agent's event reaches a claimant 'only through that subscription', which round 3's live case disproved"
+      "headSha": "ac25d944ad7a8ad1c27a4e5a5255df8723f4c9e4",
+      "negativeControl": "Main b295a3fb fails 14 of 23 live cases (round 7); no code changed since"
     }
   ],
-  "ci": "At code head ecfdba03, read at 09:54Z: Tests 40667643892, Docs 40667643936, Worker Image 40667644048, Legion Envoy and Contracts 40667644249 and PR Title 40667643970 all queued. Cited as queued, not waited for. GitHub reports MERGEABLE.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6465911293"
+  "ci": "At ac25d944, read at 10:02Z: Tests 40668552413, Docs 40668552396, Worker Image 40668552445, Legion Envoy and Contracts 40668552381 and PR Title 40668552460 queued; not waited for. GitHub reports MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6466070884"
 }
