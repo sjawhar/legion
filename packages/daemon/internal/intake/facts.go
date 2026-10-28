@@ -581,13 +581,14 @@ type Push struct {
 
 func (Push) isFact() {}
 
-// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
-// Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
-// `.github/workflows/` file) in Repo finished on HeadBranch, whatever its conclusion.
-// Envoy publishes none for a run of a pull request. The workflow compares it with the project's
-// deploy workflows (config.Project.Deploys) and queues a GitHub read of the run for each open
-// production check it may wake; the envelope is anyone's who holds an Envoy bearer, so nothing in
-// it is trusted beyond choosing what to read.
+// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope of a run of one of the
+// project's deploy workflows (ConsumerSpec.Deploys; the decoder makes no fact of any other run):
+// attempt Attempt of GitHub Actions run RunID of the workflow file Path (GitHub's
+// `workflow_run.path`, the run's top-level `.github/workflows/` file) in Repo finished on
+// HeadBranch, whatever its conclusion. Envoy publishes none for a run of a pull request. The
+// workflow takes the deploy's step from the project's deploy workflows (config.Project.Deploys) and
+// queues a GitHub read of the run for each open production check it may wake; the envelope is
+// anyone's who holds an Envoy bearer, so nothing in it is trusted beyond choosing what to read.
 type WorkflowRunCompleted struct {
 	Repo       string
 	Path       string

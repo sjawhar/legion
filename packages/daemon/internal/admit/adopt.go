@@ -112,9 +112,13 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 // for the next pass, so nested queued roots join the live tree at the top once each, rather than
 // passing through the queued tree between; candidates whose parents form a cycle are each other's
 // targets and stay roots of their own.
+//
+// It reads the project's live records (record.Store.LiveIssues). A candidate's parent may be a
+// finished child of a live tree, which that read leaves out, so the parents it does not hold are
+// read by key (record.Store.IssuesOf); a target is a live tree's root, which it always holds.
 func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) ([]record.Issue, []record.Slot, error) {
 	for {
-		issues, err := a.store.Issues(ctx, tx)
+		issues, err := a.store.LiveIssues(ctx, tx, a.project)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list admission issues: %w", err)
 		}
@@ -128,11 +132,26 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 		for _, issue := range issues {
 			recorded[issue.Key] = issue
 		}
-		var candidates []adoption
+		var queued []record.Issue
+		var unread []string
 		for _, issue := range issues {
 			if issue.Project != a.project || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Status != "todo" || issue.Parent == nil {
 				continue
 			}
+			queued = append(queued, issue)
+			if _, ok := recorded[*issue.Parent]; !ok && !slices.Contains(unread, *issue.Parent) {
+				unread = append(unread, *issue.Parent)
+			}
+		}
+		parents, err := a.store.IssuesOf(ctx, tx, a.project, unread)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read the parents of the queued roots: %w", err)
+		}
+		for _, parent := range parents {
+			recorded[parent.Key] = parent
+		}
+		var candidates []adoption
+		for _, issue := range queued {
 			parent, ok := recorded[*issue.Parent]
 			if !ok {
 				continue

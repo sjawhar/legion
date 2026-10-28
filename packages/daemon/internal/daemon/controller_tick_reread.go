@@ -65,7 +65,7 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	issues, err := w.records.Issues(ctx, tx)
+	issues, err := w.records.LiveIssues(ctx, tx, w.dispatchProject)
 	if err != nil {
 		return nil, fmt.Errorf("list the issues of %s: %w", w.dispatchProject, err)
 	}
@@ -73,13 +73,14 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list the admission slots: %w", err)
 	}
-	rows, err := blockers.Load(ctx, tx, w.records, w.dispatchProject)
+	waiting := record.Waiting(issues, slots)
+	rows, err := blockers.Load(ctx, tx, w.records, w.dispatchProject, blockers.Judged(issues, waiting))
 	if err != nil {
 		return nil, err
 	}
 	var keys []string
 	seen := make(map[string]struct{})
-	for _, blocked := range blockers.Blocked(rows, issues, record.Waiting(issues, slots)) {
+	for _, blocked := range blockers.Blocked(rows, issues, waiting) {
 		for _, blocker := range blocked.BlockedBy {
 			if _, repeated := seen[blocker]; repeated {
 				continue

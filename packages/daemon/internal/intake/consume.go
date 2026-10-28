@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -30,9 +31,13 @@ const (
 type ConsumerSpec struct {
 	Project      string
 	Repositories []ghrepo.Repository
-	AckWait      time.Duration
-	NakDelay     time.Duration
-	Logger       *slog.Logger
+	// Deploys are the project's deploy workflows (`projects.<KEY>.deploys`), fixed for the boot:
+	// only a completed run of one of them is decoded (decodeWorkflowRun), since only such a run can
+	// wake a production check; every other workflow run is acknowledged without a transaction.
+	Deploys  []config.Deploy
+	AckWait  time.Duration
+	NakDelay time.Duration
+	Logger   *slog.Logger
 	// ReviewPermission answers whether review's author has write access or higher to its
 	// repository, which is what lets a review decide a review round
 	// (PullRequestReview.AuthorCanWrite). The workflow decides inside a transaction and performs no
@@ -325,7 +330,7 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 }
 
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -345,6 +350,17 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 			nakResolve(spec, message, decoded.EventID, "read the project's repository mapping again", "nak the mapping read", err)
 			return
 		}
+		ackMessage(spec.Logger, message)
+		return
+	}
+	recorded, err := recordedPullRequest(ctx, spec, pool, decoded.Fact)
+	if err != nil {
+		nakResolve(spec, message, decoded.EventID, "read whether the pull request is recorded", "nak the pull request read", err)
+		return
+	}
+	if !recorded {
+		logMessage(spec.Logger, slog.LevelDebug, "a GitHub event of a pull request the daemon does not record is acknowledged without a transaction", message,
+			"event_id", decoded.EventID)
 		ackMessage(spec.Logger, message)
 		return
 	}
@@ -383,6 +399,35 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		)
 	}
 	ackMessage(spec.Logger, message)
+}
+
+// recordedPullRequest says whether the daemon records the pull request a review or a checks
+// settlement names (PullRequestReview, PullRequestChecks), by repository and number as the workflow
+// looks it up, and is true for every other fact. It is one read of the pool within AckWait, in no
+// transaction and under no lock, made before the review's GitHub reads (resolveReviewBody,
+// resolveReviewPermission): the workflow applies either fact only to a recorded pull request, so
+// one of any other pull request is acknowledged with no transaction under the fact lock
+// (ApplyFact) and no GitHub read, whatever the number of other pull requests a mapped repository
+// reviews and checks. A pull request recorded after this read, by a later opened, gets its checks
+// and reviews from their next event or from the pass's read.
+func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.Pool, fact Fact) (bool, error) {
+	var repo string
+	var number int
+	switch fact := fact.(type) {
+	case PullRequestReview:
+		repo, number = fact.Repo, fact.Number
+	case PullRequestChecks:
+		repo, number = fact.Repo, fact.Number
+	default:
+		return true, nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	var recorded bool
+	if err := pool.QueryRow(read, `select exists(select 1 from pull_requests where repo = $1 and number = $2)`, repo, number).Scan(&recorded); err != nil {
+		return false, fmt.Errorf("read whether %s#%d is recorded: %w", repo, number, err)
+	}
+	return recorded, nil
 }
 
 // readMapping runs ConsumerSpec.RepositoryMapping within AckWait; no reader reads nothing.

@@ -25,7 +25,8 @@ type projectionStore struct {
 	checks       []record.ProductionCheck
 	held         []record.HeldRow
 	// mirror is what Dispatch says each issue of the project waits on, as the store lists it: by
-	// key, which is the order the state's `blocked` is judged from.
+	// key, which is the order the state's `blocked` is judged from. DispatchIssuesOf serves the rows
+	// of the keys asked for and of what they wait on, as the real store does.
 	mirror []record.DispatchIssueRow
 }
 
@@ -51,8 +52,25 @@ func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
 	return s.checks, nil
 }
-func (s projectionStore) DispatchIssues(context.Context, pgx.Tx, string) ([]record.DispatchIssueRow, error) {
-	return s.mirror, nil
+func (s projectionStore) DispatchIssuesOf(_ context.Context, _ pgx.Tx, _ string, keys []string) ([]record.DispatchIssueRow, error) {
+	wanted := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			for _, blocker := range row.Blockers {
+				wanted[blocker] = true
+			}
+		}
+	}
+	var rows []record.DispatchIssueRow
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
 }
 
 // projectedAt is the fixed instant every test here projects at.

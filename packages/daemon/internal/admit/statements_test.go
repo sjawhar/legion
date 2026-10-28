@@ -20,15 +20,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// statementCounter counts every statement a pool's connections send.
-type statementCounter struct{ sent atomic.Int64 }
+// statementCounter counts every statement a pool's connections send, and the rows every query
+// among them returns.
+type statementCounter struct{ sent, rows atomic.Int64 }
 
 func (c *statementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
 	c.sent.Add(1)
 	return ctx
 }
 
-func (c *statementCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (c *statementCounter) TraceQueryEnd(_ context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if data.CommandTag.Select() {
+		c.rows.Add(data.CommandTag.RowsAffected())
+	}
+}
 
 // countedPool is a pool on pool's database whose statements counter counts.
 func countedPool(t *testing.T, pool *pgxpool.Pool, counter *statementCounter) *pgxpool.Pool {

@@ -118,6 +118,23 @@ func TestAQueuedRootReparentedUnderALiveTreeJoinsItAndTakesNoSlot(t *testing.T) 
 	assertJoinedAndPlanning(t, pool, child, tree, 2)
 }
 
+// A person can put a queued root under a child of a running tree that has already finished. That
+// child is done, so admission's read of the project's live records leaves it out; the queued
+// root's parent is read by its key, and the root joins the tree the parent finished in as it
+// would under a running child.
+func TestAQueuedRootUnderAFinishedChildOfALiveTreeJoinsTheTree(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, finished, child = "LEGION-168", "LEGION-169", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, record.Issue{Key: finished, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: finished,
+		Tree: tree, Parent: record.ParentOf(tree), Phase: phase.Done, Generation: 1, Status: "done", DispatchStatus: "done", Rank: "A", LastDispatchSeq: 3})
+	putIssue(t, pool, queuedRoot(child, finished, "B", 1))
+
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	assertJoinedAndPlanning(t, pool, child, tree, 2)
+}
+
 // The boot read adopts the same queued root when the re-parent happened while the daemon was down:
 // the listing's parent reaches the record and the root joins the running tree before promotion.
 func TestBootReconcileAdoptsAQueuedRootUnderALiveTree(t *testing.T) {

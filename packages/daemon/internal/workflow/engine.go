@@ -487,7 +487,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, []string{child.Key})
 	if err != nil {
 		return err
 	}
@@ -987,7 +987,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(members, nil))
 	if err != nil {
 		return err
 	}
@@ -1171,18 +1171,10 @@ func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullR
 	return pr, nil
 }
 
+// treeMembers is every issue of root's tree, the root included, read by tree (record.Store.TreeIssues),
+// never from the project's whole record.
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-	members := []record.Issue{}
-	for _, issue := range issues {
-		if issue.Tree == root.Tree {
-			members = append(members, issue)
-		}
-	}
-	return members, nil
+	return e.store.TreeIssues(ctx, tx, root.Tree)
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
