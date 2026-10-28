@@ -2,13 +2,11 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"maps"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -57,24 +55,6 @@ func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
 	if !maps.Equal(recorded, want) {
 		t.Fatalf("recorded marks = %v, want %v", recorded, want)
 	}
-}
-
-// markedAnchor marks quote in artifactID's document and returns the stored anchor of a row that
-// records the mark, so a settlement's anchor refresh finds the row's mark and leaves it alone.
-func markedAnchor(t *testing.T, service *Service, artifactID string, kind MarkKind, id, quote string) []byte {
-	t.Helper()
-	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: kind,
-		ID:   id,
-		By:   model.Actor{Kind: "user", ID: "alice"},
-	}, quote, nil); err != nil {
-		t.Fatalf("mark %s: %v", kind, err)
-	}
-	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
-	if err != nil {
-		t.Fatalf("encode %s anchor: %v", kind, err)
-	}
-	return anchor
 }
 
 func insertRecordedMarkRow(t *testing.T, service *Service, statement string, args ...any) {

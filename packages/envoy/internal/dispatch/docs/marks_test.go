@@ -815,20 +815,28 @@ type storedAnchor struct {
 	Orphaned   bool   `json:"orphaned"`
 }
 
-func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+// markedAnchor marks quote in artifactID's document with a kind mark of id and returns the stored
+// anchor of a row that records that mark.
+func markedAnchor(t *testing.T, service *Service, artifactID string, kind MarkKind, id, quote string) []byte {
 	t.Helper()
-	const id = "00000000-0000-4000-8000-000000000001"
 	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: MarkAsk,
+		Kind: kind,
 		ID:   id,
 		By:   model.Actor{Kind: "user", ID: "alice"},
 	}, quote, nil); err != nil {
-		t.Fatalf("mark ask: %v", err)
+		t.Fatalf("mark %q with %s mark %s: %v", quote, kind, id, err)
 	}
 	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
 	if err != nil {
-		t.Fatalf("encode ask anchor: %v", err)
+		t.Fatalf("encode the anchor of %s mark %s: %v", kind, id, err)
 	}
+	return anchor
+}
+
+func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+	t.Helper()
+	const id = "00000000-0000-4000-8000-000000000001"
+	anchor := markedAnchor(t, service, artifactID, MarkAsk, id, quote)
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		insert into asks (id, issue_key, author, question, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored ask', $2)
@@ -858,17 +866,7 @@ func insertAnchoredComment(t *testing.T, service *Service, artifactID, quote str
 
 func insertAnchoredCommentWithID(t *testing.T, service *Service, artifactID, id, quote string) string {
 	t.Helper()
-	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: MarkComment,
-		ID:   id,
-		By:   model.Actor{Kind: "user", ID: "alice"},
-	}, quote, nil); err != nil {
-		t.Fatalf("mark comment: %v", err)
-	}
-	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
-	if err != nil {
-		t.Fatalf("encode comment anchor: %v", err)
-	}
+	anchor := markedAnchor(t, service, artifactID, MarkComment, id, quote)
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		insert into comments (id, issue_key, author, body, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $2)
