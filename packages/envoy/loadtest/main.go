@@ -24,6 +24,10 @@ commands:
   series-sessions  print the session count of the series step at a load factor
   trigger-sql      print the commit-time trigger SQL (commit-trigger.sql)
   box-busy         print the box's busy fraction over the next 5 s, from /proc/stat
+  replay-fetch     read a project's state at -at and its writes to -until from a Dispatch, read-only;
+                   writes a replay bundle (DISPATCH_URL, DISPATCH_TOKEN_FILE)
+  replay-pack      pack a replay bundle as deterministic zstd tar parts
+  replay-unpack    unpack replay-pack's parts into a directory
 
 Run "loadgen <command> -h" for a command's flags.
 `
@@ -45,6 +49,12 @@ func main() {
 		err = runTables(os.Args[2:])
 	case "series-sessions":
 		err = runSeriesSessions(os.Args[2:])
+	case "replay-fetch":
+		err = runReplayFetch(os.Args[2:])
+	case "replay-pack":
+		err = runReplayPack(os.Args[2:])
+	case "replay-unpack":
+		err = runReplayUnpack(os.Args[2:])
 	case "trigger-sql":
 		fmt.Print(commitTriggerSQL)
 	case "box-busy":

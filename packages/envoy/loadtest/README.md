@@ -17,7 +17,7 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
@@ -35,6 +35,9 @@ same step before and after its change, and compares the two rows.
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
 | `util.go` | Helpers that several files share: the sleep, the profile fetch, the JSON file write and the collector of a step's records |
+| `replay_bundle.go` | The replay bundle: a project's state at an instant plus its window of writes (`state.json`, `docs/`, `window.jsonl`, `created-docs/`, `roster.json`, `bundle.meta.json`), `readBundle`, which verifies every file's sha256, and `keepIssue`, the per-issue sample |
+| `replay_fetch.go` | `loadgen replay-fetch`: reads a project's issues, event logs, artifact listings and document texts from a Dispatch, read-only (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`), caches every response under `<out>/raw/`, and reconstructs the bundle |
+| `replay_pack.go` | `loadgen replay-pack` and `replay-unpack`: a bundle (not `raw/`) as deterministic zstd tar parts, and back |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
 | `routes-2026-10-26-1719Z.txt` | The default route mix |
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen` |
