@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider, QueryObserver, useQuery } from "@tans
 import { type RenderResult, render, renderHook, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { EVENT_REPLAY_HEADER, getConnectionState } from "../api/live";
+import { EVENT_REPLAY_HEADER, getConnectionState, RECONNECT_SPREAD_MS } from "../api/live";
 import { DispatchQueryClient } from "../api/query-client";
 import { useEventStream, WHOLE_CACHE_REFRESH_MS } from "../api/sse";
 import { countWholeCacheRefreshes, openStreamResponse } from "./sse-test-harness";
@@ -211,7 +211,7 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
 // stream covering none of what followed; `forceReconnect` resets the backoff counter, so the
 // `online` route reopens at attempt 0 like a first connection would.
 const firstAttemptReopenCases = [
-  ["the backoff timer", 2_000, () => {}],
+  ["the backoff timer", RECONNECT_SPREAD_MS + 1_000, () => {}],
   ["an online event", 500, () => window.dispatchEvent(new Event("online"))],
 ] as const;
 

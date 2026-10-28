@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -11,8 +12,9 @@ import (
 )
 
 const (
-	tlsProbeTimeout = 20 * time.Second
-	tlsDetailLimit  = 300
+	tlsDefaultProbeTimeout  = 20 * time.Second
+	tlsChromiumProbeTimeout = 90 * time.Second
+	tlsDetailLimit          = 300
 )
 
 type tlsSite struct {
@@ -103,7 +105,7 @@ func verifyTLSPositiveControls(sites []tlsSite, probe func(tlsSite) tlsOutcome) 
 
 func probeTLSPositiveControls(ctx context.Context, env []string, workDir string) error {
 	return verifyTLSPositiveControls(compromisedTLSSites(), func(site tlsSite) tlsOutcome {
-		client := tlsCommandClient{clientName: "positive-control", env: env, workDir: workDir, command: func(site tlsSite) (string, []string, []string) {
+		client := tlsCommandClient{clientName: "positive-control", env: env, workDir: workDir, timeout: tlsDefaultProbeTimeout, command: func(site tlsSite) (string, []string, []string) {
 			return "curl", []string{"--cacert", site.root, "--capath", "/nonexistent", "--fail", "--silent", "--show-error", site.url}, nil
 		}}
 		return client.probe(ctx, site)
@@ -143,6 +145,7 @@ type tlsCommandClient struct {
 	clientName      string
 	env             []string
 	workDir         string
+	timeout         time.Duration
 	command         func(tlsSite) (string, []string, []string)
 	applicationSeen func(string) bool
 }
@@ -151,6 +154,9 @@ func (c tlsCommandClient) name() string { return c.clientName }
 
 func (c tlsCommandClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 	stderr, err := c.run(ctx, site)
+	if tlsProbeDeadlineExceeded(ctx, err) {
+		return tlsOutcome{status: tlsNetworkUnavailable, detail: "probe deadline"}
+	}
 	message := tlsCommandMessage(err, stderr)
 	detail := trimTLSDetail(message)
 	switch {
@@ -165,7 +171,7 @@ func (c tlsCommandClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 
 func (c tlsCommandClient) run(ctx context.Context, site tlsSite) (string, error) {
 	program, args, extraEnv := c.command(site)
-	commandCtx, cancel := context.WithTimeout(ctx, tlsProbeTimeout)
+	commandCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(commandCtx, program, args...)
 	cmd.Env = tlsEnvironment(c.env, append(extraEnv, "LEGION_TLS_URL="+site.url))
@@ -177,6 +183,10 @@ func (c tlsCommandClient) run(ctx context.Context, site tlsSite) (string, error)
 	return stderr.String(), err
 }
 
+func tlsProbeDeadlineExceeded(ctx context.Context, err error) bool {
+	return err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
 // tlsChromiumClient reads Chromium's navigation result from stderr because its headless DOM dump
 // exits successfully after a failed navigation.
 type tlsChromiumClient struct {
@@ -185,6 +195,9 @@ type tlsChromiumClient struct {
 
 func (c tlsChromiumClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 	stderr, err := c.run(ctx, site)
+	if tlsProbeDeadlineExceeded(ctx, err) {
+		return tlsOutcome{status: tlsNetworkUnavailable, detail: "probe deadline"}
+	}
 	if failure := chromiumNavigationFailure(stderr); failure != "" {
 		detail := trimTLSDetail(failure)
 		if tlsCertificateError(failure) {
@@ -273,16 +286,17 @@ func tlsCertificateError(detail string) bool {
 const tlsFetchProgram = `const response = await fetch(process.env.LEGION_TLS_URL); if (!response.ok) throw new Error("HTTP " + response.status);`
 
 type tlsClientSpec struct {
-	name  string
-	build func(invocation string, env []string, workDir string) tlsClient
+	name    string
+	timeout time.Duration
+	build   func(invocation string, env []string, workDir string, timeout time.Duration) tlsClient
 }
 
-func tlsCommandClientSpec(name, program string, args func(tlsSite) []string, applicationSeen func(string) bool, extraEnv ...string) tlsClientSpec {
+func tlsCommandClientSpec(name string, timeout time.Duration, program string, args func(tlsSite) []string, applicationSeen func(string) bool, extraEnv ...string) tlsClientSpec {
 	return tlsClientSpec{
-		name: name,
-		build: func(_ string, env []string, workDir string) tlsClient {
+		name: name, timeout: timeout,
+		build: func(_ string, env []string, workDir string, timeout time.Duration) tlsClient {
 			return tlsCommandClient{
-				clientName: name, env: env, workDir: workDir, applicationSeen: applicationSeen,
+				clientName: name, env: env, workDir: workDir, timeout: timeout, applicationSeen: applicationSeen,
 				command: func(site tlsSite) (string, []string, []string) {
 					return program, args(site), extraEnv
 				},
@@ -292,38 +306,38 @@ func tlsCommandClientSpec(name, program string, args func(tlsSite) []string, app
 }
 
 // workerTLSClients is the complete TLS client inventory the worker image exposes. The probe and
-// its fakes derive their client names from this list, so a client cannot silently fall out of tests.
+// its fakes derive their client names and timeout bounds from this list, so neither can silently fall out of tests.
 var workerTLSClients = []tlsClientSpec{
-	tlsCommandClientSpec("node", "node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
-	tlsCommandClientSpec("bun", "bun", func(tlsSite) []string { return []string{"--eval", tlsFetchProgram} }, nil),
+	tlsCommandClientSpec("node", tlsDefaultProbeTimeout, "node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
+	tlsCommandClientSpec("bun", tlsDefaultProbeTimeout, "bun", func(tlsSite) []string { return []string{"--eval", tlsFetchProgram} }, nil),
 	{
-		name: "omp",
-		build: func(invocation string, env []string, workDir string) tlsClient {
+		name: "omp", timeout: tlsDefaultProbeTimeout,
+		build: func(invocation string, env []string, workDir string, timeout time.Duration) tlsClient {
 			return tlsCommandClient{
-				clientName: "omp", env: env, workDir: workDir,
+				clientName: "omp", env: env, workDir: workDir, timeout: timeout,
 				command: func(tlsSite) (string, []string, []string) {
 					return "sh", []string{"-c", "exec " + invocation + " --eval \"$1\"", "sh", tlsFetchProgram}, []string{"BUN_BE_BUN=1"}
 				},
 			}
 		},
 	},
-	tlsCommandClientSpec("codegraph-node", "/opt/codegraph/node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
-	tlsCommandClientSpec("uv", "uv", func(site tlsSite) []string {
+	tlsCommandClientSpec("codegraph-node", tlsDefaultProbeTimeout, "/opt/codegraph/node", func(tlsSite) []string { return []string{"--input-type=module", "--eval", tlsFetchProgram} }, nil),
+	tlsCommandClientSpec("uv", tlsDefaultProbeTimeout, "uv", func(site tlsSite) []string {
 		return []string{"pip", "install", "--system", "--break-system-packages", "--dry-run", "--no-deps", "--no-cache", "--index-url", site.url, "legion-tls-probe-not-a-package"}
 	}, uvResponseSeen),
-	tlsCommandClientSpec("aws", "aws", func(site tlsSite) []string {
+	tlsCommandClientSpec("aws", tlsDefaultProbeTimeout, "aws", func(site tlsSite) []string {
 		return []string{"sts", "get-caller-identity", "--no-sign-request", "--region", "us-east-1", "--endpoint-url", site.url}
 	}, awsResponseSeen),
-	tlsCommandClientSpec("curl", "curl", func(site tlsSite) []string { return []string{"--fail", "--silent", "--show-error", site.url} }, nil),
-	tlsCommandClientSpec("python3", "python3", func(tlsSite) []string {
+	tlsCommandClientSpec("curl", tlsDefaultProbeTimeout, "curl", func(site tlsSite) []string { return []string{"--fail", "--silent", "--show-error", site.url} }, nil),
+	tlsCommandClientSpec("python3", tlsDefaultProbeTimeout, "python3", func(tlsSite) []string {
 		return []string{"-c", "import os, urllib.request; urllib.request.urlopen(os.environ['LEGION_TLS_URL']).read(1)"}
 	}, nil),
-	tlsCommandClientSpec("gh", "/usr/local/bin/gh", func(site tlsSite) []string { return []string{"api", site.url} }, ghResponseSeen, "GH_TOKEN=legion-tls-probe"),
+	tlsCommandClientSpec("gh", tlsDefaultProbeTimeout, "/usr/local/bin/gh", func(site tlsSite) []string { return []string{"api", site.url} }, ghResponseSeen, "GH_TOKEN=legion-tls-probe"),
 	{
-		name: "chromium",
-		build: func(_ string, env []string, workDir string) tlsClient {
+		name: "chromium", timeout: tlsChromiumProbeTimeout,
+		build: func(_ string, env []string, workDir string, timeout time.Duration) tlsClient {
 			return tlsChromiumClient{tlsCommandClient: tlsCommandClient{
-				clientName: "chromium", env: env, workDir: workDir,
+				clientName: "chromium", env: env, workDir: workDir, timeout: timeout,
 				command: func(site tlsSite) (string, []string, []string) {
 					return "chromium", []string{"--headless", "--no-sandbox", "--dump-dom", site.url}, nil
 				},
@@ -337,7 +351,7 @@ var workerTLSClients = []tlsClientSpec{
 func imageTLSClients(invocation string, env []string, workDir string) []tlsClient {
 	clients := make([]tlsClient, 0, len(workerTLSClients))
 	for _, spec := range workerTLSClients {
-		clients = append(clients, spec.build(invocation, env, workDir))
+		clients = append(clients, spec.build(invocation, env, workDir, spec.timeout))
 	}
 	return clients
 }

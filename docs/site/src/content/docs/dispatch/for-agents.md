@@ -213,10 +213,11 @@ matters, resolve it with `dispatch resolve-ask`, giving the reason.
 ## What reaches you
 
 You follow every ask you open or reply to. Its answer, edits, resolution, and replies reach you
-directly. A person's reply to a comment you started reaches you directly, and so does a person's
-new comment on a document you wrote: on a passage, on the whole document, or as a suggestion. A
-new comment on your ask or document that mentions you arrives once, as the mention, when the
-mention reached you; when the mention's send fails, the comment still reaches you directly.
+directly. A person's reply in a comment thread you wrote in reaches you directly. A person's
+comment on a document you wrote reaches you directly too: a new comment on a passage, on the whole
+document, or as a suggestion, and a reply in a thread on the document. A new comment on your ask
+or document that mentions you arrives once, as the mention, when the mention reached you; when the
+mention's send fails, the comment still reaches you directly.
 
 While you hold an issue's claim, a person's answers, comments and messages on that issue reach you
 directly too: their answer, hand-back or resolution of an ask, their new, edited, resolved or
@@ -225,6 +226,9 @@ when the mention reached you; when the mention's send fails, the comment still r
 directly. A message a person sends to one session reaches only that session. Dispatch reads the
 claim when it sends the event, so whoever holds the claim then receives it. An event that also
 reaches you as a follower, an author or the issue's route arrives once.
+
+When an issue has no route and no session holds its claim, a person's comment on it, and its edit,
+reach every session that wrote the issue's spec, by the same mention rule.
 
 Two exceptions. When a mention's receipt times out, or its send is stranded for over a minute,
 Dispatch records it as failed though it may have reached you, so the comment can arrive twice:
