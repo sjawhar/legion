@@ -1,5 +1,7 @@
 import {
+  afterAll,
   afterEach,
+  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -34,6 +36,14 @@ import {
   sessionDirectory,
 } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
+import { ReplayStateSchema } from "@legion/envoy-client/replay";
+import {
+  type EnvoyStack,
+  envoyStackEnabled,
+  startEnvoyStack,
+} from "@legion/envoy-client/test/envoy-stack";
+import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
+import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -58,7 +68,9 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
+import { REPLAY_STATE_ENTRY } from "../src/missed-messages";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -200,9 +212,9 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
-// that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
-// before the mock replaces it: a static import's live bindings would read the mock.
+// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports, and
+// a row that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the
+// module before the mock replaces it: a static import's live bindings would read the mock.
 const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   Events,
@@ -2970,6 +2982,8 @@ describe("envoy OMP extension", () => {
           self_subscribed: true,
           capabilities: ["aside", "steer"],
           host: machineID(),
+          plugin: "@sjawhar/pi-envoy",
+          plugin_version: packageVersion,
         },
       },
       // The opened agent subject's first sweep, which starts its cursor.
@@ -10169,6 +10183,8 @@ console.log(JSON.stringify(args));
         self_subscribed: true,
         capabilities: ["aside", "steer"],
         host: machineID(),
+        plugin: "@sjawhar/pi-envoy",
+        plugin_version: packageVersion,
       },
     });
   });
@@ -16623,4 +16639,98 @@ describe("messages missed while the subscription was down", () => {
       expect(notices[0]?.options).toMatchObject({ triggerTurn: false });
     });
   });
+});
+
+describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", () => {
+  let stack: EnvoyStack | undefined;
+  beforeAll(async () => {
+    stack = await startEnvoyStack();
+  }, 120_000);
+  afterAll(async () => {
+    await stack?.stop();
+  }, 60_000);
+
+  // The session runs on nats.js's real ping and dial timers and a real listener, so each wait polls
+  // the real clock until its condition holds or its deadline passes.
+  async function waitFor(
+    condition: () => boolean | Promise<boolean>,
+    deadline: number,
+    what: string
+  ): Promise<void> {
+    while (!(await condition())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(100);
+    }
+  }
+
+  test("a session whose NATS path freezes reconnects within 60 s and shows the message sent meanwhile once, replayed", async () => {
+    if (stack === undefined) throw new Error("the Envoy stack did not start");
+    const { envoyUrl } = stack;
+    const proxy = await startStallProxy(stack.natsHostPort);
+    const originalHeartbeat = process.env.ENVOY_HEARTBEAT_MS;
+    // No heartbeat sweep runs in the test's window: the reconnect is the only catch-up trigger.
+    process.env.ENVOY_HEARTBEAT_MS = "240000";
+    process.env.ENVOY_URL = envoyUrl;
+    process.env.ENVOY_NATS_URL = proxy.url;
+    globalThis.fetch = originalFetch;
+    natsState.realConnect = true;
+    const sessionID = `ses_stall_${crypto.randomUUID().replaceAll("-", "")}`;
+    const agentSubject = `notifications.agent.${sessionID}`;
+    const { default: envoyExtension } = await import("./envoy.ts?nats-stall");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext(sessionID);
+    try {
+      await fixture.handlers.get("session_start")?.({}, context);
+      const started = Date.now();
+      await waitFor(
+        async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
+        started + 30_000,
+        "the session's registration"
+      );
+      const registration = {
+        session_id: sessionID,
+        plugin: "@sjawhar/pi-envoy",
+        plugin_version: packageVersion,
+      };
+      expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
+        registration
+      );
+      expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
+        expect.objectContaining(registration)
+      );
+      // The first sweep started the agent subject's cursor, and the subscription went out first.
+      await waitFor(
+        () =>
+          fixture.entries.some(
+            (entry) =>
+              entry.customType === REPLAY_STATE_ENTRY &&
+              ReplayStateSchema.safeParse(entry.data).data?.subjects[agentSubject]?.after !==
+                undefined
+          ) && proxy.connections[0]?.subscribedAt !== undefined,
+        started + 30_000,
+        "the session's first sweep"
+      );
+
+      await runFreezeScenario({
+        label: "pi-envoy stall",
+        envoyUrl,
+        sessionID,
+        proxy,
+        shown: (marker) =>
+          fixture.deliveries
+            .filter(
+              (delivery) =>
+                delivery.customType === "envoy-message" && delivery.content.includes(marker)
+            )
+            .map((delivery) => delivery.content),
+        waitFor,
+      });
+    } finally {
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+      await proxy.close();
+      if (originalHeartbeat === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHeartbeat;
+    }
+  }, 120_000);
 });

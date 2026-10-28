@@ -291,9 +291,15 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 - `web/src/api/live-socket.ts` owns the one `GET /ws/live` socket per `QueryClient`, the delivery
   view subscriptions, `useLiveSocketState`, and the shell's `useLiveSocketPill`. It reconnects
   subscriptions from their delivery revisions or event cursor: a 4001 rotation reopens at once
-  without a gap (a reopen that fails is then a loss like any other), a 1012 restart reopens at
-  once after marking a gap, and every other loss backs off, 1 s doubling to 30 s, give or take a
-  quarter. A socket silent for 45 s is replaced, a handshake that never ends included; `offline`
+  without a gap (a reopen that fails is then a loss like any other), and every other loss waits
+  `reconnectDelayMs` (which the document socket's `features/doc/connection.ts` waits on too)
+  before the next socket opens. The first attempt after a lost connection waits a uniform draw in
+  [0, 2 s) (`RECONNECT_SPREAD_MS`), so the tabs one restart or roll dropped together reconnect
+  spread over two seconds rather than in one burst, and so do the whole-cache refreshes of the
+  ones Dispatch does not replay in full; each later attempt backs off exponentially with equal
+  jitter, half of d = min(1 s × 2^attempt, 30 s) plus a random share of the other half. A 1012
+  restart marks a gap and starts the backoff over at that first attempt. A socket silent for 45 s
+  is replaced, a handshake that never ends included; `offline`
   lets the socket go at once, `online` opens one at once, and a `visibilitychange` to visible
   replaces a socket that went silent while hidden. A socket refused before it opened, or closed
   with 1008, reads `["whoami"]` again, at most every 30 s, so a person who was signed out reaches
@@ -976,9 +982,10 @@ document tab mounts. `loadDocumentTransport` resolves to a synchronous `connect`
 `shell/DeploymentResilience.tsx` because the two are one policy: a chunk that fails while the
 browser is offline is retried once the network returns (Chromium caches a failed module fetch,
 so the retry can reject too); a failure while online, or a retry that rejects, reaches
-`DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
-That budget is spent when the page actually goes, at `pagehide`, not before `reload()` is called:
-a reload the reader cancels at a leave prompt leaves the next failure its one reload.
+`DeploymentResilience`, which treats it as a replaced deployment and reloads the page while fewer
+than three of the tab's recovery reloads fall in the last five minutes. A reload is spent from
+that budget when the page actually goes, at `pagehide`, not before `reload()` is called: a reload
+the reader cancels at a leave prompt spends nothing, and the next failure still has it.
 `pending-edits.ts` keeps each local Yjs update in IndexedDB until its own Hocuspocus `SyncStatus`
 acknowledgement arrives: `pending-sync.ts` pairs acknowledgements with frames by update payload
 rather than a provider counter, so reconnect queues cannot clear an earlier unconfirmed edit, and
@@ -1016,7 +1023,7 @@ or answered by the server with a download fires no event of its own.
 It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so
 every importer sees the load failure itself: a route's error box names the failed download, and
 the first editor a page mounts after its stylesheet failed shows the document's failed state. A
-load that still rejects (the session's reload already spent) sets the document's connection state
+load that still rejects (the tab's reloads already spent) sets the document's connection state
 to `failed` — a rose dot — and renders the error under the toolbar rather than staying
 "connecting". `DocumentRuntime` supplies the transport and editor creation seams
 (`loadTransport`, `createEditor`); happy-dom tests use its doubles from
@@ -1041,7 +1048,11 @@ file is called) that repairs it, `409 DOCUMENT_UNLOADABLE` offers the rebuild fr
 version, and any other failure says the document could not load. A blocked admission is admitted
 again by the next successful read of the text - the refetch a repair upload's or a rebuild's
 invalidation makes - so a repair reconnects the editor. After admission the provider owns
-reconnects, and the server is what stops one into an unreadable room: it closes the socket with
+reconnects: the first connect opens at once, and once a socket has opened, the reconnect after it
+closes waits a fresh draw of `reconnectDelayMs(0)`'s two-second spread (`connection.ts` sets the
+provider's `initialDelay` on every open), so the tabs one restart closed come back spread; a try
+that fails inside one connect keeps the provider's own jittered backoff. The server is what stops
+a reconnect into an unreadable room: it closes the socket with
 code `4409` (`DOCUMENT_SCHEMA_CLOSE_CODE` in `packages/contracts`) before any sync, and
 `connection.ts` stops the provider and calls `onOutsideSchema`, where `ProofDocument` tears the
 editor down and admits again after 0, 1, 2, 4 and 8 seconds for successive refusals; the sixth in a
@@ -1059,31 +1070,46 @@ the one headless Markdown engine cached per schema version; the connection carri
 owns their schema and version, while Dispatch owns host rendering for `render: "host"` types; the
 SPA must not invent node schemas or parse a second directive grammar.
 After the first paint, Dispatch warms that schema and headless Markdown engine so a long-lived tab
-holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page once per
-session (never while the browser is offline — that is an outage, not a deployment); if rendering
-still fails, `MarkdownBody` exposes its literal-text fallback with `data-markdown-fallback`.
-A stale entry chunk reloads the page too, from that same budget. During a rolling deploy the load
-balancer can send a page's HTML to one server and its hashed assets to the other, which never
-built them and answers 404 before any bundle code has run, so `web/index.html` holds an inline
-script that reloads the page when a script of this origin under `/assets/` (the entry chunk, or
-one it imports statically) fails to load. A script of another origin is never this build's,
-whatever its path: an extension's `chrome-extension://<id>/assets/…` that fails leaves the page
-alone. It spends `installChunkFailureRecovery`'s sessionStorage key (`CHUNK_RELOAD_STORAGE_KEY`),
-so the two reload a page at most once per session between them, keeps its offline rule, and skips
-a page being left from `beforeunload` or `pagehide` until `pageshow` (no `navigate` handler: a
-page whose entry has not run has no link to follow). `pagehide` fires as a navigation commits,
+holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page, at most
+three times in any five minutes (never while the browser is offline — that is an outage, not a
+deployment); if rendering still fails, `MarkdownBody` exposes its literal-text fallback with
+`data-markdown-fallback`. The budget renews, so a tab open across many deployments recovers from
+each, and a page whose assets fail on every load stops after three reloads. A stale entry chunk or
+stylesheet reloads the page too, from that same budget. During a rolling deploy the load balancer
+can send a page's HTML to one server and its hashed assets to another, which never built them.
+Every server answers another build's assets from the database (`packages/envoy/cmd/dispatch/AGENTS.md`,
+"Routes"), but a server of a release older than that store, a build pruned from it, or a read
+that failed still answers an error before any bundle code has run, so `web/index.html` holds an
+inline script that reloads the page when a script, module
+preload or stylesheet of this origin under `/assets/` (the entry chunk, one it imports
+statically, the main stylesheet, or a lazy chunk's preload) fails to load. A file of another
+origin is never this build's, whatever its path: an extension's `chrome-extension://<id>/assets/…`
+that fails leaves the page alone. It keeps `installChunkFailureRecovery`'s rule on the same
+sessionStorage key (`CHUNK_RELOADS_STORAGE_KEY`, `dispatch.chunk-reloads`: a JSON array of the
+times of the tab's recovery reloads, a value that does not parse read as none), so the two share
+the three reloads in five minutes whichever failed first; storage it cannot read or write reloads
+nothing. The once-only key of earlier builds, `dispatch.reloaded-for-chunk`, is neither read nor
+written. It keeps the offline rule, and skips a page being left from `beforeunload`, `pagehide`, or
+a Navigation API `navigate` to another document that is not a download, until `pageshow`; it never
+clears that before `pageshow`, since a failure of a preload or stylesheet Vite inserted also
+reaches the bundle's own handler, which judges it. `pagehide` fires as a navigation commits,
 after Firefox has already cancelled the entry's download, so in a browser that fires no
 `beforeunload` it does not stop that reload; Chromium and WebKit fire no error for a download a
 navigation cancels. `shell.e2e.ts` misses the entry once (the page reloads and renders), on every
-load (it reloads once and stays blank), after a page chunk spent the reload (it stays), while
-offline (it stays), and after each leaving event (it stays until `pageshow`, then recovers), and
-fails another origin's `/assets/` script on a rendered page (it stays, budget unspent). Dispatch
+load (it reloads three times and stays blank), after a page chunk spent the tab's reloads (it
+stays), with an entry's reloads and a page chunk's sharing the three, fails the main stylesheet
+once (it reloads and renders styled), renews the budget once the three reloads are older than
+five minutes and keeps it spent while they are not, and checks offline (it stays), each leaving
+event (it stays until `pageshow`, then recovers), and another origin's `/assets/` script failing on
+a rendered page (it stays, budget unspent). Dispatch
 sends no Content-Security-Policy; one would have to allow that script by its hash. The server
 makes the browser revalidate every page and keep every hashed asset
 (`packages/envoy/cmd/dispatch/AGENTS.md`, "Routes"), so no cached page from an older build asks
 for assets that are gone.
-On focus no more than once a minute, the SPA checks the server health and fresh `index.html`; a
-new entry chunk offers a dismissible **Reload** notice.
+On focus no more than once a minute, the SPA asks `GET /api/v1/dashboard/builds` once; a `200`
+whose `live` names exactly one entry chunk, other than the page's own, offers a dismissible
+**Reload** notice. Two live builds (a rolling update or a rollback in progress), a `404` from a
+process older than the route, a `401`, a `5xx` or a network failure offer nothing.
 
 A paste whose clipboard holds only `text/plain` goes through Milkdown's clipboard plugin, which
 parses the text as markdown and pastes the result as an open slice.
@@ -1234,7 +1260,8 @@ database must be isolated because `e2e/seed.ts` truncates it before every
 scenario and never falls back to `dispatch_c`. It runs the server in cookie
 identity, the production mode, and signs `alice` and `bob` in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
-origin, listener and database, with a per-process signing key):
+origin, listener and database, with a per-process signing key, or one key per run
+in two-process mode, below):
 `e2e/users.ts`'s `signIn`/`asUser` for a browser context, `e2e/api.ts`'s
 `userHeaders` for a plain fetch, which also sends the dashboard origin the CSRF
 guard requires on writes. A cookie names its login's generation in
@@ -1279,7 +1306,8 @@ one checkout serialise their builds; Go rewrites it only when the source
 changed, and a running server keeps the inode it started from. The script
 unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies a fresh App
 key, passes no cookie signing key (the server generates one for its process, as
-`DISPATCH_DEV_SIGNIN` requires), and gives the server no caller Home or XDG
+`DISPATCH_DEV_SIGNIN` requires, or in two-process mode derives one from the
+`DISPATCH_DEV_SIGNIN_SHARED_KEY` the script passes on), and gives the server no caller Home or XDG
 directory. A caller's environment or `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
@@ -1455,8 +1483,10 @@ this paragraph is where the harness-port rule lives — `README.md` and the `doc
 learnings point here rather than restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
-`PLAIN_HTTP_PORT` and `FAKE_BROKER_PORT` for every reader in `e2e/`, the Playwright config and the
-four Bun listeners included. `harnessPorts()` reads the environment when it is called, not when the
+`PLAIN_HTTP_PORT`, `FAKE_BROKER_PORT`, two-process mode's `DISPATCH_E2E_PORT_A` and
+`DISPATCH_E2E_PORT_B`, and the sign-in issuer's `DISPATCH_E2E_SIGNIN_ISSUER_PORT` (below), for
+every reader in `e2e/`, the Playwright config and the Bun listeners
+included. `harnessPorts()` reads the environment when it is called, not when the
 module is imported, because the starters import it before the listeners have reported. Unset or
 empty is port `0`: the listener serves on a port the OS chooses and holds until it serves (the
 server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by binding port 0)
@@ -1469,7 +1499,8 @@ raw string points somewhere else, or writing one port two ways). Two set variabl
 are refused together, naming both: each port passes a per-port check on its own, and every
 consumer would otherwise fail in its own words — the second Bun listener dying on `EADDRINUSE`.
 Because the check lives with the resolution, those listeners refuse it too, not only the
-Playwright config.
+Playwright config. A's and B's ports take part in it only in two-process mode, the one mode that
+listens on them, and the issuer's only under `DISPATCH_E2E_SIGNIN=oidc`.
 
 `e2e/harness-start.ts` is the harness's one starter. It starts the rows of
 `e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its
@@ -1482,12 +1513,14 @@ its set port was taken. A deployed run (`PLAYWRIGHT_BASE_URL`) starts only the r
 (`bun e2e/run.ts -- <command>`) starts it, exports the ports and
 `DISPATCH_E2E_REUSE_SERVERS=1`, runs the command, stops the harness when the command exits (a
 Ctrl-C reaches the command, a SIGTERM to the wrapper is passed on), and exits with the command's
-status; `bun run e2e`, `bun run e2e:deployed` and CI's browser step run Playwright through it, so
-the config, every worker that re-imports it and every helper that reads a port at import
-(`e2e/api.ts`'s `baseUrl`, `e2e/plain-http-origin.ts`'s `plainHttpOrigin`) see the real ports.
+status; `bun run e2e`, `bun run e2e:multiprocess`, `bun run e2e:deployed` and CI's browser steps
+run Playwright through it, so the config, every worker that re-imports it and every helper that
+reads a port at import (`e2e/api.ts`'s `baseUrl`, `e2e/plain-http-origin.ts`'s
+`plainHttpOrigin`) see the real ports.
 
 `e2e/playwright.config.ts` starts no server. It refuses, before a single spec runs, a run whose
-targeted ports are not all set — all five for a local run, `FAKE_ENVOY_PORT` and
+targeted ports are not all set — all five for a local run (with `DISPATCH_E2E_PORT_A` and
+`DISPATCH_E2E_PORT_B` in two-process mode), `FAKE_ENVOY_PORT` and
 `PLAIN_HTTP_PORT` for a deployed run — naming the unset variables and `e2e/run.ts`, and a run
 without `DISPATCH_E2E_REUSE_SERVERS=1`, whose only accepted value is `1` (any other is refused
 naming the variable and the value). Every port set by hand plus that flag runs against a harness
@@ -1500,6 +1533,78 @@ so the config lets it evaluate with no harness. The argv test is loose, and Play
 `--list` of `--grep --list` as `--grep`'s value, a real run; with no port set that run fails at
 `e2e/preflight.ts`, and with any port set a listing meets the reuse refusal like any other run, so
 it asks for `DISPATCH_E2E_REUSE_SERVERS=1` or the ports unset.
+
+`DISPATCH_E2E_PROCESSES` picks how many Dispatch servers the harness runs
+(`e2e/harness-processes.ts`): unset or `1` is the one server above, `2` is two-process mode, and
+any other value is refused by every importer and by `run-server.sh`, naming the allowed values. In
+two-process mode the listener table starts `e2e/round-robin-proxy.ts` on `DISPATCH_E2E_PORT`, so
+`baseUrl` and every helper address one origin as before, then Dispatch A on `DISPATCH_E2E_PORT_A`
+and B on `DISPATCH_E2E_PORT_B`, each a `run-server.sh` against the one `DATABASE_URL` and each with
+`DISPATCH_NATS_DISABLED=1`. Both serve the proxy's origin, so the proxy starts first, and it must
+name their ports: an unset `DISPATCH_E2E_PORT_A` or `_B` is held before any row starts, by a
+`scripts/e2e/lib/held-port.py keep` that `e2e/harness-start.ts` runs for that server until the
+harness stops (the row's `heldAhead`), and the port is in every row's environment. `run-server.sh`
+takes each server's own inputs: its port as `DISPATCH_E2E_SERVER_PORT` when A's or B's variable is
+set, or else `DISPATCH_E2E_LISTEN_FROM`, the keeper's socket, which it serves on; then
+`DISPATCH_E2E_SERVER_WEB_DIST` (default `../dispatch/web/dist`, a path from `packages/envoy`, as
+`DISPATCH_WEB_DIST` is), and `DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it passes on as the
+server's `DISPATCH_DEV_SIGNIN_SHARED_KEY`. It requires the key and `DISPATCH_E2E_PORT` in
+two-process mode, and sets both servers' `DISPATCH_SERVER_URL` to the proxy's origin. The harness
+generates that key once per run and hands it to both, so a person signed in through one process
+is signed in on the other, and points B at `DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's
+dist). The proxy alternates each HTTP
+request and each websocket upgrade between A and B (two turns, each starting at A), streams each
+response back as it arrives, and forwards `Host` and `Origin` unchanged. `X-Dispatch-E2E-Process: a|b` on any request
+pins it, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
+upgrades included; a pinned request takes no turn, and any other value is refused (400). A path
+containing `/_test/` goes to both processes, answering A's response or the first non-2xx of the
+two. A path containing `/_proxy/` is the proxy's own and never forwarded: `GET /_proxy/requests`
+(`[{path, method, upstream}]`), `GET /_proxy/sockets` (`[{id, path, upstream, open, openedAt}]` in
+open order, `openedAt` in epoch milliseconds) and `POST /_proxy/reset`, which empties both lists
+and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` to pin, and
+`pinnedTo` in `e2e/harness-processes.ts` builds the header for a plain fetch. `e2e/preflight.ts`
+asks each process, pinned, for this run's fake Envoy session, then signs a person in on A and
+requires B to know them. The proxy shares its relay with the plain-HTTP proxy
+(`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it),
+and `e2e/__tests__/round-robin-proxy.test.ts` (`bun run test`) runs it against two Bun servers.
+Specs named `*.multiprocess.e2e.ts` run only there: the default run ignores them, and two-process
+mode runs them alone (the sign-in spec only under `DISPATCH_E2E_SIGNIN=oidc`, below), in the
+`chromium` project. `bun run e2e:multiprocess` builds the dashboard
+twice (`web/dist`, then `web/dist-b` with `DISPATCH_BUILD=e2e-b`, so its entry chunk differs from
+A's even where CI sets `GITHUB_SHA`; `web/vite.config.ts` takes `DISPATCH_BUILD` first) and runs
+Playwright through `e2e/run.ts` in two-process mode with B on `dist-b`, passing on extra arguments
+(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). CI's
+`dispatch-browser-multiprocess` job runs it. Two-process mode starts its own servers, so the
+Playwright config refuses it with `PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
+
+`DISPATCH_E2E_SIGNIN` picks how the harness's servers sign a person in (`e2e/harness-signin.ts`):
+unset or empty is dev sign-in, above, and `oidc` is the production sign-in, through
+`packages/envoy/cmd/dev-oidc-issuer`; any other value is refused by every importer and by
+`run-server.sh`, naming the allowed ones, and every importer refuses `oidc` without
+`DISPATCH_E2E_PROCESSES=2`. Under `oidc` the listener table starts `e2e/run-signin-issuer.sh`
+after the fakes and before the proxy: it builds the issuer as `run-server.sh` builds the server
+(`packages/envoy/dev-oidc-issuer-e2e`, gitignored, under its own lock), serves the code flow for
+the client `dispatch-e2e` with the secret the harness generates per run, which the script hands
+the issuer through a pipe, never a file or an argv, and signs in `alice@example.com`, a member of
+the group `dispatch-e2e-people`, at every authorization. It
+reports `issuer listening url=http://127.0.0.1:<port>` and the harness reads
+`DISPATCH_E2E_SIGNIN_ISSUER_PORT` from it; the issuer cannot bind a given port, so that variable set
+is refused. Each `run-server.sh` then takes `DISPATCH_E2E_SIGNIN_ISSUER_PORT`,
+`DISPATCH_E2E_SIGNIN_CLIENT_ID`, `DISPATCH_E2E_SIGNIN_CLIENT_SECRET`, `DISPATCH_E2E_SIGNIN_GROUP`
+and `DISPATCH_E2E_SIGNING_KEY` (one per run, in place of the dev shared key) as the server's
+`DISPATCH_SIGNIN_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_GROUP` and `DISPATCH_SIGNING_KEY`,
+requires them all, and sets no `DISPATCH_DEV_SIGNIN`. The Playwright config runs
+`e2e/signin.multiprocess.e2e.ts` alone under `oidc` and leaves it out otherwise, and
+`e2e/preflight.ts` skips its dev sign-in check there. The spec pins `/auth/start` to A and
+`/auth/callback` to B with two `dispatch-e2e-process` cookies, each with that path, since a route's
+header reaches only a navigation's first request and the callback is the issuer's redirect, and
+checks that the browser lands on the page `next` named, signed in on both processes, and that
+`/_proxy/requests` saw each served where it was pinned; against a server that kept the sign-in in
+the memory of the process that started it, B answers the callback 400 `invalid or expired state`.
+`e2e/__tests__/harness-signin.test.ts` (`bun run test`) holds the refusals and the listener table's
+wiring. Run it as `DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess`; CI's
+`dispatch-browser-multiprocess` job runs it after the dev sign-in specs, on the dashboard the step
+before built.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port
@@ -1541,8 +1646,8 @@ measure are equal, exiting 1 when one does not. `docs/site/src/content/docs/disp
 ("For agents") is its user's guide. `e2e/__tests__/delivery-live-probe.test.ts` (`bun run test`)
 runs it as a process against a Bun websocket server that replays `packages/contracts/fixtures/live`
 and holds the body it applies to `after.json`. It also checks that the probe reopens at once
-after a 4001 and after a 1012: its second subscribe arrives within 500 ms of the close, where any
-other close waits out a first backoff of at least 750 ms.
+after a 4001, its second subscribe arriving within 500 ms of the close, and within the first
+attempt's spread after a 1012 (`RECONNECT_SPREAD_MS`, two seconds).
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,

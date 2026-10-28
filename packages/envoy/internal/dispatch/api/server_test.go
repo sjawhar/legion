@@ -101,6 +101,9 @@ type testServerOptions struct {
 	// liveKinds adds view kinds to the ones a live socket serves beside the delivery views, or
 	// replaces them, before any socket opens.
 	liveKinds map[string]liveKind
+	// dashboardEntry is the entry chunk of the dashboard build the server serves; empty is a
+	// server with no dashboard, as the Go test rigs are.
+	dashboardEntry string
 }
 
 // testSigningKey is the one-key set the package's session cookies are signed with.
@@ -197,6 +200,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		AgentStream:      options.agentStream,
 		Embedder:         options.embedder,
 		Files:            options.files,
+		DashboardEntry:   options.dashboardEntry,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

@@ -39,19 +39,34 @@ export const LIVE_SOCKET_SILENT_MS = 45_000;
 /** Reconnecting this long reads as stuck: the page says live updates are not reaching it. */
 export const LIVE_SOCKET_STUCK_MS = 120_000;
 
+/** The window the first reconnect after a dropped connection is spread over: uniformly in
+ *  [0, 2 s), a mean of 1 s. A Dispatch restart or roll drops every tab at the same moment;
+ *  spread, their reconnects and the refreshes that follow each one reach the new process over two
+ *  seconds instead of in one burst. */
+export const RECONNECT_SPREAD_MS = 2_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
-/** Exponential backoff for stream reconnect attempts, capped at 30s. */
-export function reconnectDelayMs(attempt: number): number {
-  return Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+/**
+ * The wait before reconnect attempt `attempt` (0 for the first after a connection was lost).
+ * Attempt 0 is spread over `RECONNECT_SPREAD_MS`. Each later attempt backs off exponentially
+ * with equal jitter: half of `d = min(1 s × 2^attempt, 30 s)` plus a random share of the other
+ * half, so tabs whose first try failed together stay spread without any waiting less than d/2.
+ */
+export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+  if (attempt === 0) {
+    return random() * RECONNECT_SPREAD_MS;
+  }
+  const ceiling = Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+  return ceiling / 2 + random() * (ceiling / 2);
 }
 
 /** How often the socket is checked for silence, from its creation until the page lets it go. */
 const SILENCE_CHECK_MS = 15_000;
 /** A lost sign-in is checked at most this often, however often the socket fails. */
 const SIGN_IN_CHECK_MS = 30_000;
-/** Dispatch closes every socket with this code when it shuts down: the page reconnects at once. */
+/** Dispatch closes every socket with this code when it shuts down: the page reconnects within the
+ *  first attempt's spread (`reconnectDelayMs(0)`), whatever backoff earlier failures built. */
 const SERVICE_RESTART = 1012;
 /** Dispatch closes a socket with this code once its caller no longer resolves (signed out). */
 const CALLER_GONE = 1008;
@@ -199,10 +214,13 @@ function after(ms: number, fn: () => void): () => void {
   return () => clearTimeout(handle);
 }
 
-/** The backoff of attempt `attempt`, give or take a quarter, so pages that lost Dispatch together
- *  do not all come back at the same moment. */
-function jittered(attempt: number): number {
-  return reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
+/** The wait before an events subscription Dispatch refused or ended unstarted is sent again, the
+ *  `refusals`-th in a row: 1 s doubling to 30 s, give or take a quarter, so pages Dispatch refused
+ *  together do not all ask again at the same moment. The socket is still open, so this is not a
+ *  reconnect and keeps no first-attempt spread. */
+function resubscribeDelayMs(refusals: number): number {
+  const ceiling = Math.min(BASE_RECONNECT_DELAY_MS * 2 ** refusals, MAX_RECONNECT_DELAY_MS);
+  return ceiling * (0.75 + Math.random() * 0.5);
 }
 
 export function createLiveSocket(queryClient: QueryClient): LiveSocket {
@@ -277,7 +295,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
   /** Sends `sub` again once the backoff of its refusals and ends in a row (`refusals`) is over. */
   const resendLater = (sub: EventsSubscription) => {
     sub.cancelRetry?.();
-    sub.cancelRetry = after(jittered(sub.refusals), () => {
+    sub.cancelRetry = after(resubscribeDelayMs(sub.refusals), () => {
       sub.cancelRetry = undefined;
       sendSubscribe(sub);
     });
@@ -579,15 +597,16 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     markGap();
     if (!wasOpen || code === CALLER_GONE) checkSignIn();
     reconnecting();
-    if (wasOpen && code === SERVICE_RESTART) {
-      open();
-      return;
-    }
+    // Dispatch's restart close starts the backoff over: another process is already serving, or
+    // this one is coming back, so the page reconnects within the first attempt's spread. Every
+    // page the restart closed gets that close at the same moment; spread, they reach the next
+    // process over two seconds rather than in one burst.
+    if (wasOpen && code === SERVICE_RESTART) attempt = 0;
     retryLater();
   };
 
   const retryLater = () => {
-    cancelReconnect = after(jittered(attempt), open);
+    cancelReconnect = after(reconnectDelayMs(attempt), open);
     attempt += 1;
   };
 

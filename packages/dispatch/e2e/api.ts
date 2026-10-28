@@ -50,6 +50,7 @@ import type {
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
+import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
 // The harness server's port, which e2e/run.ts exports from the server's report before anything
 // imports this module (e2e/harness-ports.ts).
@@ -74,6 +75,9 @@ interface ApiOptions {
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+  /** In two-process mode, the process the round-robin proxy sends the call to; absent, whichever
+   *  takes its turn (e2e/round-robin-proxy.ts). */
+  process?: DispatchProcess;
 }
 
 /** The name of the session cookie the server issues at sign-in, dev or GitHub. */
@@ -83,6 +87,14 @@ export const sessionCookieName = "dsession";
  *  sign-in with a 302 that sets the session cookie. */
 export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
+}
+
+/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
+export function sessionCookieFrom(response: Response): string | undefined {
+  return response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookieName}=`))
+    ?.split(";")[0];
 }
 
 export function devSignInError(login: string, status: number, responseText: string): Error {
@@ -103,10 +115,7 @@ function sessionCookie(login: string): Promise<string> {
   }
   const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
     async (response) => {
-      const value = response.headers
-        .getSetCookie()
-        .find((header) => header.startsWith(`${sessionCookieName}=`))
-        ?.split(";")[0];
+      const value = sessionCookieFrom(response);
       if (response.status !== 302 || value === undefined) {
         throw devSignInError(login, response.status, await response.text());
       }
@@ -157,6 +166,7 @@ async function request<T>(
   if (options.idempotencyKey !== undefined) {
     headers["Idempotency-Key"] = options.idempotencyKey;
   }
+  if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
   const response = await fetch(new URL(path, baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),

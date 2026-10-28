@@ -961,9 +961,10 @@ test("the connection pill follows the live socket: none while it connects, Recon
     expect(pill.textContent).toContain("Live updates are not reaching this page");
     expect(within(pill).getByRole("button", { name: "Reload" })).toBeTruthy();
 
-    // The next attempt, at 121 s, opens, and the pill goes.
+    // With every draw at half, the retries open at 113.5 s and 136 s (each waits 22.5 s once the
+    // backoff is capped): the next attempt, at 136 s, opens, and the pill goes.
     const attempts = sockets.sockets.length;
-    act(() => jest.advanceTimersByTime(1_000));
+    act(() => jest.advanceTimersByTime(16_000));
     expect(sockets.sockets).toHaveLength(attempts + 1);
     act(() => sockets.latest().open());
     expect(screen.queryByTestId("connection-pill")).toBeNull();

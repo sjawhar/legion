@@ -164,12 +164,12 @@ test("with no broker, a gap in the event feed asks the list again once, and a fo
     expect(getCredentialPending).toHaveBeenCalledTimes(1);
 
     const watch = watchEmptyState();
-    // Dispatch restarted: the socket closes (1012), the page's next one opens at once, and once
-    // Dispatch starts the feed on it, saying its replay does not cover the gap, the page refreshes
-    // for the gap.
-    act(() => sockets.latest().drop(1012));
+    // Dispatch restarted: the socket closes (1012), the page's next one opens within the first
+    // attempt's spread, and once Dispatch starts the feed on it, saying its replay does not cover
+    // the gap, the page refreshes for the gap.
+    act(() => sockets.latest().restart());
+    await waitFor(() => expect(sockets.sockets).toHaveLength(2));
     act(() => sockets.latest().open());
-    expect(sockets.sockets).toHaveLength(2);
     act(() => {
       const socket = sockets.latest();
       socket.receive({

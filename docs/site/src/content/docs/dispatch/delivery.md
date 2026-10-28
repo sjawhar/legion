@@ -170,22 +170,27 @@ An events subscription first receives `events_start` with the decimal id it star
 when the subscription resumed from an id at or below the log's head: Dispatch replays every event
 after it, so the page refreshes only what those events change. It is false with no resume, and for
 a resume above the head (a log that was reset), whose replay cannot cover the gap: then the page
-refreshes everything it holds. An agent subscription receives `agent` frames whose
-`event` is `responder`, `replay`, or `frame`; their `data` is the session's JSON. Either kind may
-receive `ended` with `behind` or `dropped`; subscribe that view again at once. An events view that
-ends with no `events_start` since it was sent is one Dispatch could not start, which it ends a
-second after each subscription while its database does not answer: subscribe it again after a
-backoff from 1 s, doubling up to 30 s, as after an events `error`, and refresh what the page holds
-once, at the next `events_start`, unless that start says its replay is complete. An agent refusal is terminal for that view (`HUMAN_ONLY`,
-`SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
+refreshes everything it holds. An agent subscription receives `agent` frames whose `event` is
+`responder`, `replay`, or `frame`; their `data` is the session's JSON. Either kind may receive
+`ended` with `behind` or `dropped`; subscribe that view again at once. An events view that ends
+with no `events_start` since it was sent is one Dispatch could not start, which it ends a second
+after each subscription while its database does not answer: subscribe it again after a backoff
+from 1 s, doubling up to 30 s, as after an events `error`, and refresh what the page holds once, at
+the next `events_start`, unless that start says its replay is complete. An agent refusal is
+terminal for that view (`HUMAN_ONLY`, `SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
+
+A client that reconnects subscribes a delivery view again with `"resume": {"seq", "revs"}`, the
+last change it applied and the revisions it holds, and is sent a delta of what changed since; a
+resume from before the day of changes Dispatch keeps is answered with a snapshot.
 
 Reconnect every subscription when the socket closes. A 4001 `max age` close is routine: Dispatch
-chooses an age in [30, 60) minutes, and the page reconnects at once without refreshing. A 1012
-restart close reconnects at once and resumes; the `events_start` that follows decides what the
-page refreshes, as above. A 1008 close means the caller no longer resolves; re-check sign-in
-before retrying. A 1013 full-queue close, 1009 oversized frame, 1011 internal error, or an ordinary
-connection loss backs off and resumes. The page may close a silent socket with 4000 before it opens
-its replacement.
+chooses an age in [30, 60) minutes, and the page reconnects at once without refreshing. Dispatch
+closes every socket with code 1012 when it restarts, and the page reconnects after a random wait of
+under two seconds, so the pages one restart closed do not all reach the next server at the same
+moment, and resumes; the `events_start` that follows decides what the page refreshes, as above. A
+1008 close means the caller no longer resolves; re-check sign-in before retrying. A 1013 full-queue
+close, 1009 oversized frame, 1011 internal error, or an ordinary connection loss backs off and
+resumes. The page may close a silent socket with 4000 before it opens its replacement.
 
 `packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch one delivery subscription from
 a checkout:

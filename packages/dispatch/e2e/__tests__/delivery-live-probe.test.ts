@@ -10,6 +10,7 @@ import delta from "../../../contracts/fixtures/live/delta.json";
 import error from "../../../contracts/fixtures/live/error.json";
 import heartbeat from "../../../contracts/fixtures/live/heartbeat.json";
 import snapshot from "../../../contracts/fixtures/live/snapshot.json";
+import { RECONNECT_SPREAD_MS } from "../../web/src/api/live-socket";
 import type {
   DeliveryLiveDelta,
   DeliveryLiveSnapshot,
@@ -437,13 +438,10 @@ test(
   PROCESS_TEST_MS
 );
 
-// Dispatch's rotation (4001) and its restart (1012) are the two closes the probe answers by opening
-// again at once; any other waits out a backoff whose first step is at least 750 ms (1 s, jittered by
-// a quarter either way), so a second subscribe within 500 ms of the close is the at-once reopen.
-for (const [code, reason, what] of [
-  [4001, "max age", "rotation"],
-  [1012, "service restart", "restart"],
-] as const) {
+// Dispatch's rotation (4001) is the one close the probe answers by opening again at once; its
+// restart (1012) and any other close wait at least a draw of the first attempt's spread, so a
+// second subscribe within 500 ms of the close is the at-once reopen only for the rotation.
+for (const [code, reason, what] of [[4001, "max age", "rotation"]] as const) {
   test(
     `after a ${what} close the probe reconnects at once and resumes with the change and revisions it holds`,
     async () => {
@@ -482,6 +480,43 @@ for (const [code, reason, what] of [
     PROCESS_TEST_MS
   );
 }
+
+test(
+  "after a restart close the probe reconnects within the spread and resumes with the change and revisions it holds",
+  async () => {
+    const dispatch = fakeDispatch({
+      onSubscribe(socket, sub, count) {
+        if (count > 1) return;
+        socket.send(forSub(snapshot, sub));
+        socket.send(forSub(delta, sub));
+        socket.close(1012, "service restart");
+      },
+    });
+    const run = runProbe(args(dispatch));
+    await run.until(() => dispatch.received.length === 2);
+    run.kill("SIGINT");
+    expect(await run.exited()).toBe(0);
+
+    expect(dispatch.received).toEqual([
+      { sub: "probe", type: "subscribe", view },
+      { resume: { revs: next.revs, seq: change.seq }, sub: "probe", type: "subscribe", view },
+    ]);
+    expect(
+      run.lines.map((line) => {
+        if (line.type === "open") return `open ${line.resume}`;
+        if (line.type === "close") return `close ${line.code}`;
+        return line.type;
+      })
+    ).toEqual(["open null", "snapshot", "delta", "close 1012", `open ${change.seq}`]);
+    // The page's first attempt after a restart close waits up to `RECONNECT_SPREAD_MS`; the
+    // probe, a process of its own, draws its own wait, so this holds the bound rather than the
+    // draw. A second of slack covers the loopback handshake on a shared box.
+    const closedAt = Date.parse(run.lines[3]?.at ?? "");
+    const reopenedAt = Date.parse(run.lines[4]?.at ?? "");
+    expect(reopenedAt - closedAt).toBeLessThan(RECONNECT_SPREAD_MS + 1_000);
+  },
+  PROCESS_TEST_MS
+);
 
 test(
   "a refused upgrade ends the probe with exit 1, naming the refusal",

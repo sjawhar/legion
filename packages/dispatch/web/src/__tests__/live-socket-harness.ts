@@ -1,5 +1,7 @@
+import { spyOn } from "bun:test";
 import type { QueryClient } from "@tanstack/react-query";
 
+import { RECONNECT_SPREAD_MS } from "../api/live-socket";
 import { deliveryRunQuery, deliveryTimelineQuery } from "../api/queries";
 import type {
   DeliveryLiveBody,
@@ -16,6 +18,11 @@ import type {
 } from "../api/types";
 
 type Listener = (event: Event) => void;
+
+/** How long the page waits before it reconnects after `FakeLiveSocket.restart`: its draw of the
+ *  first reconnect's spread, taken near the spread's start. Not 0, a timer Bun's fake clock does
+ *  not always fire. */
+export const RESTART_RECONNECT_MS = 10;
 
 /** A WebSocket the test drives: `open`, `receive` and `drop` act as the server; `sent` is every
  *  frame the page sent. `close`, called by the page, only records its code, as a browser fires its
@@ -69,6 +76,20 @@ export class FakeLiveSocket {
   drop(code = 1006): void {
     this.readyState = 3;
     this.emit("close", Object.assign(new Event("close"), { code }));
+  }
+
+  /** Dispatch restarts under this socket (close 1012). The page reconnects within the first
+   *  attempt's spread, `reconnectDelayMs(0)`; the draw here is `RESTART_RECONNECT_MS` into it, so
+   *  its next socket opens once that much time has passed, on the test's clock or the real one. */
+  restart(): void {
+    const random = spyOn(Math, "random").mockReturnValue(
+      RESTART_RECONNECT_MS / RECONNECT_SPREAD_MS
+    );
+    try {
+      this.drop(1012);
+    } finally {
+      random.mockRestore();
+    }
   }
 
   /** The browser reports a connection error before it has delivered a close event. */

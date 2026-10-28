@@ -1434,14 +1434,6 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
 			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
 		},
-		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
-				t.Errorf("AssetStoreBucket = %q", boot.AssetStoreBucket)
-			}
-			if boot := resolveWith(t, nil); boot.AssetStoreBucket != "" {
-				t.Errorf("unset AssetStoreBucket = %q, want disabled", boot.AssetStoreBucket)
-			}
-		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
 				t.Errorf("web dist = %q, %v", dir, err)
@@ -1482,6 +1474,56 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					}
 				}
 			})
+		},
+		"DISPATCH_DEV_SIGNIN_SHARED_KEY": func(t *testing.T) {
+			// Without dev sign-in nothing would sign with it, so a boot that sets it is refused.
+			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": "harness-secret"}, "DISPATCH_DEV_SIGNIN_SHARED_KEY")
+			// The key set one dev-sign-in process signs cookies with, each in a data dir of its own:
+			// always one key, so the registry of live server processes compares one fingerprint.
+			devKey := func(t *testing.T, shared string) auth.SigningKeys {
+				t.Helper()
+				boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": shared}))
+				if err != nil {
+					t.Fatalf("dev sign-in with DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %v", shared, err)
+				}
+				keys, err := sessionSigningKey(boot, t.TempDir())
+				if err != nil || len(keys.Fingerprints()) != 1 {
+					t.Fatalf("DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %d keys, %v; want one", shared, len(keys.Fingerprints()), err)
+				}
+				return keys
+			}
+			cookieOf := func(t *testing.T, login string, keys auth.SigningKeys) string {
+				t.Helper()
+				cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, keys, false))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cookie.Value
+			}
+			// Two processes of one harness: a session minted on A authenticates on B.
+			a, b := devKey(t, "harness-secret"), devKey(t, "harness-secret")
+			if session, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), b); !ok || session.Login != "alice@example.com" {
+				t.Errorf("a cookie process A minted verified on process B as %#v, %t; want alice@example.com", session, ok)
+			}
+			// The value is never the key itself: a production DISPATCH_SIGNING_KEY pasted here mints
+			// nothing its own server accepts, and that server's cookies sign no one in here.
+			production := auth.SingleSigningKey("harness-secret")
+			if slices.Equal(a.Fingerprints(), production.Fingerprints()) {
+				t.Error("dev sign-in signs with DISPATCH_DEV_SIGNIN_SHARED_KEY's own value")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), production); ok {
+				t.Error("a production server keyed with the shared value accepted a dev sign-in cookie")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", production), a); ok {
+				t.Error("a dev-sign-in process accepted a cookie signed with the shared value itself")
+			}
+			// Another harness's value is another key, and with none each process keeps its own.
+			if slices.Equal(devKey(t, "another-harness").Fingerprints(), a.Fingerprints()) {
+				t.Error("two shared values derived one key")
+			}
+			if slices.Equal(devKey(t, "").Fingerprints(), devKey(t, "").Fingerprints()) {
+				t.Error("two dev-sign-in processes with no shared value signed with one key")
+			}
 		},
 		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {

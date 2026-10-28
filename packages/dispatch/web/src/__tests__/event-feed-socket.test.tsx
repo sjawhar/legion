@@ -20,6 +20,7 @@ import {
   type FakeLiveSocket,
   type FakeLiveSockets,
   installFakeLiveSockets,
+  RESTART_RECONNECT_MS,
 } from "./live-socket-harness";
 
 let sockets: FakeLiveSockets;
@@ -393,9 +394,10 @@ test("repeated gaps cost one refresh plus a trailing one", async () => {
     // socket after it reports a gap whose replay Dispatch does not say is complete (`openFeed`);
     // each gap's refresh is unfiltered and reaches the GitHub proxy queries.
     for (let index = 0; index < 6; index += 1) {
-      act(() => sockets.latest().drop(1012));
+      act(() => sockets.latest().restart());
+      await advance(RESTART_RECONNECT_MS);
       openFeed();
-      await advance(100);
+      await advance(100 - RESTART_RECONNECT_MS);
     }
     expect(sockets.sockets).toHaveLength(7);
     await advance(500);
@@ -432,7 +434,9 @@ test("the credential list held null is asked again after a gap", async () => {
 
     // A gap is the one moment the server may have restarted, perhaps with a broker configured. A
     // replay that covers the gap says nothing of that, so the list is asked again even then.
-    act(() => sockets.latest().drop(1012));
+    const before = sockets.sockets.length;
+    act(() => sockets.latest().restart());
+    await waitFor(() => expect(sockets.sockets).toHaveLength(before + 1));
     openFeed("0", true);
     await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
   } finally {
@@ -813,9 +817,9 @@ test("a resume whose replay Dispatch says is complete refreshes nothing, and one
 
     // The socket is lost, and the page resumes after the event it applied: Dispatch's log still
     // holds it, so every event after it is replayed.
-    act(() => socket.drop(1012));
+    act(() => socket.restart());
+    await waitFor(() => expect(sockets.latest()).not.toBe(socket));
     const again = sockets.latest();
-    expect(again).not.toBe(socket);
     act(() => again.open());
     expect(again.subscribed("events").resume).toEqual({ since: "5" });
     receive(again, { type: "events_start", sub, since: "5", replay_complete: true });
@@ -824,7 +828,8 @@ test("a resume whose replay Dispatch says is complete refreshes nothing, and one
 
     // Lost again, and the log was reset under the cursor: Dispatch starts at its new head and
     // says the replay does not cover the gap.
-    act(() => again.drop(1012));
+    act(() => again.restart());
+    await waitFor(() => expect(sockets.latest()).not.toBe(again));
     const third = sockets.latest();
     act(() => third.open());
     receive(third, { type: "events_start", sub, since: "2", replay_complete: false });

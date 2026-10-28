@@ -6,6 +6,7 @@
 import { fileURLToPath } from "node:url";
 
 import { harnessVariables } from "./harness-ports";
+import { harnessProcessCount } from "./harness-processes";
 import { type Harness, startHarness } from "./harness-start";
 import {
   agentViewRefusal,
@@ -82,6 +83,14 @@ async function main(): Promise<void> {
   // 1. Preconditions: no deployed-server override, the tools, a loopback database.
   if (process.env.PLAYWRIGHT_BASE_URL) {
     throw new Error("unset PLAYWRIGHT_BASE_URL: this command starts its own servers");
+  }
+  // It builds, seeds and hands out one server, where two-process mode needs B's build of its own
+  // (DISPATCH_E2E_WEB_DIST_B) and serves only the multiprocess specs `bun run e2e:multiprocess` runs.
+  if (harnessProcessCount !== 1) {
+    throw new Error(
+      "unset DISPATCH_E2E_PROCESSES: this command runs one Dispatch server; " +
+        "`bun run e2e:multiprocess` runs two"
+    );
   }
   const given = process.env.DATABASE_URL?.trim();
   for (const tool of ["go", "psql", "flock", "openssl", "python3", ...(given ? [] : ["docker"])]) {

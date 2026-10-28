@@ -2,10 +2,10 @@
  * Delivery and Pipeline pages keep themselves current over. It subscribes one view under a bearer
  * token and writes one JSON line per frame Dispatch sends, applying each to the body it holds with
  * the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: at once after
- * Dispatch's restart (1012) or rotation (4001), with backoff after any other close, and by
- * replacing a socket that has carried no frame for three heartbeats; each new connection resumes
- * from the last change it applied. The watch ends after `--minutes`, on Ctrl-C, or when Dispatch
- * refuses the view.
+ * Dispatch's rotation (4001), within the first attempt's spread (up to 2 s) after Dispatch's
+ * restart close (1012), with backoff after any other close, and by replacing a socket that has
+ * carried no frame for three heartbeats; each new connection resumes from the last change it
+ * applied. The watch ends after `--minutes`, on Ctrl-C, or when Dispatch refuses the view.
  *  Then `--body-file` writes the body it holds, and `--compare` reads the matching GET routes for
  *  the last window it applied and writes, for each, whether the pull request ids, run ids and every
  *  measure are equal.
@@ -126,7 +126,8 @@ const USAGE =
 
 /** The probe's one subscription. */
 const SUB = "probe";
-/** Dispatch closes every socket with this code when it shuts down; the page reconnects at once. */
+/** Dispatch closes every socket with this code when it shuts down; the page reconnects within the
+ *  first attempt's spread (`reconnectDelayMs(0)`). */
 const SERVICE_RESTART = 1012;
 /** The code the page closes a silent socket with before it opens another (api/live-socket.ts). */
 const REPLACED = 4000;
@@ -497,13 +498,15 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
       fail(`Dispatch refused the connection to ${liveUrl.href}: ${reason || `close ${code}`}`);
       return;
     }
-    if (code === SERVICE_RESTART || code === LIVE_SOCKET_MAX_AGE_CLOSE) {
+    if (code === LIVE_SOCKET_MAX_AGE_CLOSE) {
       open();
       return;
     }
-    const delay = reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
+    // As the page does: Dispatch's restart close starts the backoff over, so the next attempt
+    // waits within the first attempt's spread.
+    if (code === SERVICE_RESTART) attempt = 0;
+    const handle = setTimeout(open, reconnectDelayMs(attempt));
     attempt += 1;
-    const handle = setTimeout(open, delay);
     cancelReconnect = () => clearTimeout(handle);
   };
 

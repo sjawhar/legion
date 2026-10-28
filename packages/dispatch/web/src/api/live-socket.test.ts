@@ -18,6 +18,7 @@ import {
   type LiveSocket,
   type LiveSocketState,
   liveSocketFor,
+  RECONNECT_SPREAD_MS,
   reconnectDelayMs,
   useLiveSocketPill,
 } from "./live-socket";
@@ -278,6 +279,7 @@ test("a query collected before its observer subscribed still gets its snapshot",
 
 test("a drop reconnects with backoff and resumes with seq and revs", async () => {
   jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.25);
   const { unsubscribe } = observe();
   try {
     const { socket, sub } = await opened();
@@ -289,10 +291,11 @@ test("a drop reconnects with backoff and resumes with seq and revs", async () =>
     socket.drop(1006);
     expect(live.state().state).toBe("reconnecting");
     expect(sockets.sockets).toHaveLength(1);
-    // The first attempt waits a second, give or take its jitter, then opens a new socket.
+    // The first attempt waits its draw of the 2 s spread (0.25 of it here), then opens a new
+    // socket.
     jest.advanceTimersByTime(499);
     expect(sockets.sockets).toHaveLength(1);
-    jest.advanceTimersByTime(1_200);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
 
     const again = sockets.latest();
@@ -311,45 +314,64 @@ test("a drop reconnects with backoff and resumes with seq and revs", async () =>
       },
     });
 
-    // A second drop before anything arrived waits twice as long.
+    // A second drop before anything arrived backs off: half of 2 s plus its draw of the other
+    // half, 1,250 ms.
     again.drop(1006);
-    jest.advanceTimersByTime(1_400);
+    jest.advanceTimersByTime(1_249);
     expect(sockets.sockets).toHaveLength(2);
-    jest.advanceTimersByTime(1_200);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(3);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });
 
 test("a connection error before open reconnects with backoff", async () => {
   jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.75);
   const { unsubscribe } = observe();
   try {
     await settle();
     sockets.latest().fail();
 
     expect(live.state().state).toBe("reconnecting");
-    // The first attempt waits a second, give or take a quarter for its jitter: 750 to 1,250 ms.
-    jest.advanceTimersByTime(749);
+    // The first attempt waits its draw of the 2 s spread: 0.75 of it, 1,500 ms.
+    jest.advanceTimersByTime(1_499);
     expect(sockets.sockets).toHaveLength(1);
-    jest.advanceTimersByTime(502);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });
 
-test("close 1012 reconnects at once", async () => {
+test("close 1012 reconnects within the first attempt's spread, whatever backoff came before", async () => {
   jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.25);
   const { unsubscribe } = observe();
   try {
     const { socket, sub } = await opened();
     socket.receive(snapshot(sub));
-    socket.drop(1012);
-    // No backoff timer: the new socket is already opening.
+    // A drop the page backs off from: a failure after it would wait the second attempt's delay.
+    socket.drop(1006);
+    jest.advanceTimersByTime(500);
     expect(sockets.sockets).toHaveLength(2);
+    const again = sockets.latest();
+    again.open();
+
+    // Dispatch restarts before this socket carried a frame. Every page gets that close at the
+    // same moment, so none opens at once: each waits its draw of the 2 s spread (500 ms here),
+    // not the second attempt's backoff (1,250 ms).
+    again.drop(1012);
+    expect(sockets.sockets).toHaveLength(2);
+    jest.advanceTimersByTime(499);
+    expect(sockets.sockets).toHaveLength(2);
+    jest.advanceTimersByTime(1);
+    expect(sockets.sockets).toHaveLength(3);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });
@@ -587,12 +609,45 @@ test("refreshQueries neither cancels nor invalidates a live query on its first l
   }
 });
 
-test("reconnectDelayMs doubles from a 1s base and caps at 30s", () => {
-  expect(reconnectDelayMs(0)).toBe(1_000);
-  expect(reconnectDelayMs(1)).toBe(2_000);
-  expect(reconnectDelayMs(2)).toBe(4_000);
-  expect(reconnectDelayMs(3)).toBe(8_000);
-  expect(reconnectDelayMs(10)).toBe(30_000);
+test("the first reconnect is spread over [0, 2 s); later ones back off within [d/2, d), capped at 30 s", () => {
+  expect(reconnectDelayMs(0, () => 0)).toBe(0);
+  expect(reconnectDelayMs(0, () => 0.5)).toBe(1_000);
+  expect(reconnectDelayMs(0, () => 0.999)).toBeCloseTo(1_998);
+  // d = min(1 s × 2^attempt, 30 s): the lowest draw waits d/2, the highest just under d.
+  for (const [attempt, d] of [
+    [1, 2_000],
+    [2, 4_000],
+    [3, 8_000],
+    [4, 16_000],
+    [5, 30_000],
+    [10, 30_000],
+  ] as const) {
+    expect(reconnectDelayMs(attempt, () => 0)).toBe(d / 2);
+    expect(reconnectDelayMs(attempt, () => 0.999)).toBeCloseTo(d / 2 + 0.999 * (d / 2));
+    expect(reconnectDelayMs(attempt, () => 0.999)).toBeLessThan(d);
+  }
+});
+
+test("first reconnects drawn from a seeded source spread evenly over the 2 s window", () => {
+  // mulberry32: a small seeded generator, so the draw is the same on every run.
+  let state = 0x5eed;
+  const seeded = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+  const buckets = new Array<number>(RECONNECT_SPREAD_MS / 100).fill(0);
+  for (let draw = 0; draw < 1_000; draw += 1) {
+    const delay = reconnectDelayMs(0, seeded);
+    expect(delay).toBeGreaterThanOrEqual(0);
+    expect(delay).toBeLessThan(RECONNECT_SPREAD_MS);
+    const bucket = Math.floor(delay / 100);
+    buckets[bucket] = (buckets[bucket] ?? 0) + 1;
+  }
+  // A uniform spread puts about 50 of the 1,000 in each 100 ms bucket; a fixed delay, or one
+  // bunched near any moment, puts far more than 100 in one.
+  expect(Math.max(...buckets)).toBeLessThanOrEqual(100);
 });
 
 /** An event feed as the page keeps one: it adopts `events_start`'s id while it holds no cursor and
@@ -629,6 +684,19 @@ function startFeed(socket: FakeLiveSocket, since = "0", replayComplete = false) 
     since,
     replay_complete: replayComplete,
   });
+}
+
+/** Dispatch restarts under `socket` (close 1012), and the page's reconnect, which waits within the
+ *  first attempt's spread, opens the next socket on the fake clock. The draw is near the spread's
+ *  start but not at it: a timer of 0 ms on Bun's fake clock does not always fire. */
+function restart(socket: FakeLiveSocket): void {
+  const random = spyOn(Math, "random").mockReturnValue(0.01);
+  try {
+    socket.drop(1012);
+    jest.advanceTimersByTime(RECONNECT_SPREAD_MS);
+  } finally {
+    random.mockRestore();
+  }
 }
 
 /** An agent live view's handlers, recording every call in order. */
@@ -789,7 +857,9 @@ test("a 4001 whose reopen fails reads reconnecting, shows the pill and reports a
   }
 });
 
-test("a 1012 reopens at once and reports a gap to the event feed", () => {
+test("a 1012 reopens within the first attempt's spread and reports a gap to the event feed", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
   const feed = eventFeed();
   const stop = live.subscribeEvents(feed.handlers);
   try {
@@ -799,12 +869,17 @@ test("a 1012 reopens at once and reports a gap to the event feed", () => {
 
     sockets.latest().drop(1012);
     expect(live.state().state).toBe("reconnecting");
+    // Half of the 2 s spread: every page Dispatch's restart closed comes back over two seconds.
+    jest.advanceTimersByTime(999);
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
     sockets.latest().open();
     expect(live.state()).toMatchObject({ state: "open", since: null });
     startFeed(sockets.latest());
     expect(feed.gaps).toEqual([false, true]);
   } finally {
+    random.mockRestore();
     stop();
   }
 });
@@ -812,17 +887,18 @@ test("a 1012 reopens at once and reports a gap to the event feed", () => {
 // The feed decides what a gap costs from what Dispatch says of its replay, so the socket hands each
 // start's `replay_complete` over beside the gap it reports.
 test("each events_start hands the event feed whether its replay covers the gap", () => {
+  jest.useFakeTimers();
   const feed = eventFeed();
   const stop = live.subscribeEvents(feed.handlers);
   try {
     sockets.latest().open();
     startFeed(sockets.latest(), "4", false);
 
-    sockets.latest().drop(1012);
+    restart(sockets.latest());
     sockets.latest().open();
     startFeed(sockets.latest(), "4", true);
 
-    sockets.latest().drop(1012);
+    restart(sockets.latest());
     sockets.latest().open();
     startFeed(sockets.latest(), "2", false);
     expect(feed.gaps).toEqual([false, true, true]);
@@ -901,8 +977,8 @@ test("an ended frame resubscribes only its subscription", async () => {
 
 test("a failed handshake invalidates whoami at most every 30 s", () => {
   jest.useFakeTimers();
-  // No jitter: each retry waits exactly reconnectDelayMs, so the attempts fail at 0, 1, 3, 7, 15,
-  // 31 and 61 s.
+  // Every draw at half: each retry waits half of its spread or backoff window and half of the rest,
+  // so the attempts fail at 0, 1, 2.5, 5.5, 11.5, 23.5 and 46 s.
   const random = spyOn(Math, "random").mockReturnValue(0.5);
   const whoami = ["whoami"];
   const signedIn = () => queryClient.setQueryData(whoami, { kind: "user", login: "alice" });
@@ -921,7 +997,7 @@ test("a failed handshake invalidates whoami at most every 30 s", () => {
       refuseEveryOpen(500);
     }
     expect(sockets.sockets).toHaveLength(7);
-    expect(invalidations).toEqual([0, 31_000, 61_000]);
+    expect(invalidations).toEqual([0, 46_000]);
   } finally {
     random.mockRestore();
     stop();
@@ -940,7 +1016,7 @@ test("a 1008 invalidates whoami and reconnects with backoff", () => {
     expect(queryClient.getQueryState(whoami)?.isInvalidated).toBe(true);
     expect(live.state().state).toBe("reconnecting");
     expect(sockets.sockets).toHaveLength(1);
-    jest.advanceTimersByTime(1_250);
+    jest.advanceTimersByTime(RECONNECT_SPREAD_MS);
     expect(sockets.sockets).toHaveLength(2);
   } finally {
     stop();
@@ -994,9 +1070,10 @@ test("two minutes of failed reconnects read as stuck, and the next open clears i
     refuseEveryOpen(500);
     expect(live.state()).toMatchObject({ state: "reconnecting", since: lostAt, stuck: true });
 
-    // The page keeps trying underneath: the next attempt, at 121 s, opens.
+    // The page keeps trying underneath: with every draw at half, the retries open at 113.5 s and
+    // 136 s (each waits 22.5 s once the backoff is capped), and the second opens.
     const attempts = sockets.sockets.length;
-    jest.advanceTimersByTime(1_000);
+    jest.advanceTimersByTime(16_000);
     expect(sockets.sockets).toHaveLength(attempts + 1);
     sockets.latest().open();
     expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
@@ -1074,6 +1151,7 @@ test("one socket carries a delivery view, the event feed and two agent views", a
 });
 
 test("an agent error frame reaches onUnavailable and is not retried", () => {
+  jest.useFakeTimers();
   const agent = agentView();
   const stopFeed = live.subscribeEvents(eventFeed().handlers);
   const stopAgent = live.subscribeAgent(SESSION_A, agent.handlers);
@@ -1096,7 +1174,7 @@ test("an agent error frame reaches onUnavailable and is not retried", () => {
     expect(socket.subscribes()).toHaveLength(2);
 
     // A reconnect resubscribes the feed and not the refused view, which the page no longer holds.
-    socket.drop(1012);
+    restart(socket);
     sockets.latest().open();
     expect(
       sockets
@@ -1325,7 +1403,7 @@ test("an error frame for the event feed resubscribes it after the socket's backo
 
     // A retry still waiting when the socket is lost is sent once, by the next socket's open.
     socket.receive(refusal(sub));
-    socket.drop(1012);
+    restart(socket);
     sockets.latest().open();
     expect(sockets.latest().subscribes()).toHaveLength(1);
     jest.advanceTimersByTime(10_000);

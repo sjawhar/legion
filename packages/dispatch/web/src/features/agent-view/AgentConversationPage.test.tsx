@@ -950,10 +950,10 @@ test("the live view connects, goes live on the session's answer, and reconnects 
   expect(relayStatus()).toEqual(["Live"]);
 
   // Dispatch restarting (1012) is a gap the page shows until the next socket opens.
-  act(() => first.drop(1012));
+  act(() => first.restart());
   expect(relayStatus()).toEqual(["Reconnecting"]);
+  await waitFor(() => expect(sockets.latest()).not.toBe(first));
   const second = sockets.latest();
-  expect(second).not.toBe(first);
   act(() => second.open());
   expect(relayStatus()).toEqual(["Live"]);
   expect(agentSubscription(second)).toBe(agentSubscription(first));
@@ -1016,10 +1016,10 @@ test("a human-only refusal shows the view unavailable", async () => {
   );
   expect(relayStatus()).toEqual(["This session's conversation is unavailable"]);
 
-  act(() => first.drop(1012));
+  act(() => first.restart());
   expect(relayStatus()).toEqual(["This session's conversation is unavailable"]);
+  await waitFor(() => expect(sockets.latest()).not.toBe(first));
   const second = sockets.latest();
-  expect(second).not.toBe(first);
   act(() => second.open());
   expect(second.subscribes().map((frame) => frame.view.kind)).toEqual(["events"]);
   expect(relayStatus()).toEqual(["This session's conversation is unavailable"]);

@@ -377,6 +377,15 @@ What a reader sees while two servers are serving:
   text. They see a brief reconnect, never stale text they can act on.
 - Live co-editing of one document across two servers — two live sessions with the typing flowing
   between them — is not there yet; it is a separate piece of work.
+- A page of either version keeps loading. Each server stores its version of the dashboard's files
+  in the database when it starts, before it takes traffic, and serves the other version's files
+  from there, so a page one server sent finds its files whichever server answers next. A server
+  that cannot store them does not start, and the roll keeps the servers it would have replaced. A
+  version older than the first that stores them stores nothing, so a roll away from one of those
+  versions can still leave a page asking for files no server has.
+- The dashboard's **A new version is available** notice waits until every server runs one
+  version: while two versions are serving, nobody is told to reload. A page that fails to load one
+  of its files reloads itself, at most three times in five minutes.
 - Signing in works whichever server each step reaches, and a sign-in made on one server is good on
   the other.
 

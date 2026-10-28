@@ -7,6 +7,7 @@ import {
   DeploymentResilience,
   importWhenOnline,
   installChunkFailureRecovery,
+  spendChunkReload,
 } from "./DeploymentResilience";
 
 function withOnLine<T>(onLine: boolean, run: () => Promise<T>): Promise<T> {
@@ -45,6 +46,14 @@ afterEach(() => {
   recoveryUninstalls.clear();
 });
 
+/** The tab's recorded recovery reloads, under the key `web/index.html`'s inline script shares. */
+function storedChunkReloads(): unknown {
+  const value = window.sessionStorage.getItem("dispatch.chunk-reloads");
+  return value === null ? null : JSON.parse(value);
+}
+
+const minute = 60_000;
+
 test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
   const warm = spyOn(markdownEngine, "warmMarkdownRenderer").mockResolvedValue(undefined);
   const view = render(<DeploymentResilience />);
@@ -57,28 +66,102 @@ test("warms the block schema and headless Markdown renderer once after the first
   }
 });
 
-test("a Vite preload error reloads once per session and always reaches its importer", async () => {
+test("Vite preload errors reload the page three times in five minutes, then not, and always reach their importer", () => {
   window.sessionStorage.clear();
   installChunkFailureRecoveryForTest();
+  const start = 1_800_000_000_000;
+  let now = start;
+  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
-  const view = render(<DeploymentResilience />);
-  const first = new Event("vite:preloadError", { cancelable: true });
-  const second = new Event("vite:preloadError", { cancelable: true });
+  const failAt = (time: number) => {
+    now = time;
+    const failure = new Event("vite:preloadError", { cancelable: true });
+    window.dispatchEvent(failure);
+    // The page goes (`pagehide`), which spends the reload the failure asked for.
+    window.dispatchEvent(new Event("pagehide"));
+    return failure.defaultPrevented;
+  };
 
   try {
-    window.dispatchEvent(first);
-    window.dispatchEvent(second);
+    const prevented = [
+      failAt(start),
+      failAt(start + minute),
+      failAt(start + 2 * minute),
+      failAt(start + 4 * minute),
+    ];
 
-    expect(first.defaultPrevented).toBe(false);
-    expect(second.defaultPrevented).toBe(false);
-    expect(reload).toHaveBeenCalledTimes(1);
-    // W20. The session's one reload is spent as the page goes, not when one is asked for.
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
-    window.dispatchEvent(new Event("pagehide"));
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(prevented).toEqual([false, false, false, false]);
+    expect(reload).toHaveBeenCalledTimes(3);
+    expect(storedChunkReloads()).toEqual([start, start + minute, start + 2 * minute]);
   } finally {
     reload.mockRestore();
-    view.unmount();
+    dateNow.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
+test("a failure after the oldest recovery reload has left the five minutes reloads again", () => {
+  window.sessionStorage.clear();
+  const start = 1_800_000_000_000;
+
+  try {
+    expect([
+      spendChunkReload(start),
+      spendChunkReload(start + minute),
+      spendChunkReload(start + 2 * minute),
+      spendChunkReload(start + 5 * minute - 1),
+    ]).toEqual([true, true, true, false]);
+    expect(storedChunkReloads()).toEqual([start, start + minute, start + 2 * minute]);
+
+    // Five minutes after the first reload it has left the window, and only the other two count.
+    expect(spendChunkReload(start + 5 * minute)).toBe(true);
+    expect(storedChunkReloads()).toEqual([start + minute, start + 2 * minute, start + 5 * minute]);
+    expect(spendChunkReload(start + 5 * minute + 1)).toBe(false);
+  } finally {
+    window.sessionStorage.clear();
+  }
+});
+
+test("a stored value that does not parse as a list of times reads as no reloads and is overwritten", () => {
+  const now = 1_800_000_000_000;
+  const stored = ["true", "not json", "{}", '"3"', `[null, "x", ${now}]`].map((value) => {
+    window.sessionStorage.clear();
+    window.sessionStorage.setItem("dispatch.chunk-reloads", value);
+    return { reloads: spendChunkReload(now), value, after: storedChunkReloads() };
+  });
+  window.sessionStorage.clear();
+
+  expect(stored).toEqual([
+    { reloads: true, value: "true", after: [now] },
+    { reloads: true, value: "not json", after: [now] },
+    { reloads: true, value: "{}", after: [now] },
+    { reloads: true, value: '"3"', after: [now] },
+    // The one time the list holds counts; the entries that are not times are dropped.
+    { reloads: true, value: `[null, "x", ${now}]`, after: [now, now] },
+  ]);
+});
+
+test("the once-only key of earlier builds is neither read nor written", () => {
+  window.sessionStorage.clear();
+  // A page of an earlier build in this tab already spent its one reload.
+  window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true");
+  installChunkFailureRecoveryForTest();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+
+  try {
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    // Nor written: a reload with the old key absent leaves it absent.
+    window.sessionStorage.removeItem("dispatch.reloaded-for-chunk");
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    window.dispatchEvent(new Event("pagehide"));
+    expect(reload).toHaveBeenCalledTimes(2);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+  } finally {
+    reload.mockRestore();
     window.sessionStorage.clear();
   }
 });
@@ -96,7 +179,7 @@ test("a chunk that fails while the page is being left does not reload over the n
 
     expect(whileLeaving.defaultPrevented).toBe(false);
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
 
     // A page the back/forward cache restores is shown again, and its own failures reload it.
     window.dispatchEvent(new Event("pageshow"));
@@ -104,8 +187,9 @@ test("a chunk that fails while the page is being left does not reload over the n
 
     expect(afterReturning.defaultPrevented).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
+    // The page goes, and spends the reload the failure asked for.
     window.dispatchEvent(new Event("pagehide"));
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     reload.mockRestore();
@@ -114,10 +198,10 @@ test("a chunk that fails while the page is being left does not reload over the n
 });
 
 // W20. A reload asked for is not a reload taken: an unconfirmed keyed send raises a leave prompt,
-// and a reader who answers "stay" keeps the page they are on. The session's one reload is spent
-// as the page actually goes (`pagehide`), so the next failed chunk can still reload it; the
-// reader's press says the page is plainly still theirs.
-test("a reload the reader cancels at the leave prompt does not spend the session's one reload", () => {
+// and a reader who answers "stay" keeps the page they are on. A recovery reload is spent from the
+// tab's budget as the page actually goes (`pagehide`), so the budget is as it was and the next
+// failed chunk can still reload; the reader's press says the page is plainly still theirs.
+test("a reload the reader cancels at the leave prompt spends nothing of the tab's budget", () => {
   window.sessionStorage.clear();
   installChunkFailureRecoveryForTest();
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
@@ -125,19 +209,22 @@ test("a reload the reader cancels at the leave prompt does not spend the session
   try {
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
+    // A second failure before the page goes asks for no second reload.
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(1);
 
     // The prompt is answered "stay": no `pagehide`, and the reader goes on using the page.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
     window.dispatchEvent(new Event("pagehide"));
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
 
-    // So the next failure still has this session's reload to spend, and spends it when the page
-    // does go.
+    // So the next failure still has the whole budget to spend, and spends one reload when the
+    // page does go.
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(2);
     window.dispatchEvent(new Event("pagehide"));
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     reload.mockRestore();
     window.sessionStorage.clear();
@@ -159,7 +246,7 @@ test("a navigation to another document marks the page as left where the browser 
     navigate(false);
     failChunk();
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
 
     // A route change inside the app stays in this document, so the page's failures reload it.
     window.dispatchEvent(new Event("pageshow"));
@@ -188,8 +275,9 @@ test("a link answered with a download does not mark the page as left", () => {
     navigation.dispatchEvent(navigateEvent(false, ""));
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
+    // The page goes, and spends the reload the failure asked for.
     window.dispatchEvent(new Event("pagehide"));
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     Reflect.deleteProperty(window, "navigation");
@@ -214,7 +302,7 @@ test("a page shown after a download marks a later navigation to that URL as leav
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
 
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     Reflect.deleteProperty(window, "navigation");
@@ -326,7 +414,7 @@ test("a chunk that fails while the browser is offline is not a stale deployment:
 
     expect(failure.defaultPrevented).toBe(false);
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
   } finally {
     reload.mockRestore();
     Reflect.deleteProperty(navigator, "onLine");
@@ -364,23 +452,57 @@ test("a chunk that fails while online is a real failure, not a network blip", as
   });
 });
 
-test("shows a reloadable update notice when focused after the running index chunk changes", async () => {
-  const currentScript = document.createElement("script");
-  currentScript.type = "application/json";
-  currentScript.src = "/assets/index-current.js";
-  document.head.append(currentScript);
-  function responseForUpdate(input: RequestInfo | URL): Promise<Response> {
+/** The tab's running page: a script naming its entry chunk, as the built page's module script does. */
+function runningPage(entry: string): HTMLScriptElement {
+  const script = document.createElement("script");
+  script.type = "application/json";
+  script.src = entry;
+  document.head.append(script);
+  return script;
+}
+
+/** Answers GET /api/v1/dashboard/builds with `builds` (a status and a body, or a network failure),
+ *  `/healthz` with 200, and `/` with a page naming `pageEntry`, so a check that still read `/`
+ *  would see another build there. */
+function serverAnswering(
+  builds: { status: number; body: unknown } | "network failure",
+  pageEntry = "/assets/index-new.js"
+) {
+  function respond(input: RequestInfo | URL): Promise<Response> {
+    if (input === "/api/v1/dashboard/builds") {
+      if (builds === "network failure") {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return Promise.resolve(Response.json(builds.body, { status: builds.status }));
+    }
     if (input === "/healthz") {
       return Promise.resolve(new Response("{}", { status: 200 }));
     }
     return Promise.resolve(
-      new Response('<script src="/a.js"></script><script src="/assets/index-new.js"></script>', {
-        status: 200,
-      })
+      new Response(`<script type="module" src="${pageEntry}"></script>`, { status: 200 })
     );
   }
-  responseForUpdate.preconnect = () => {};
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(responseForUpdate);
+  respond.preconnect = () => {};
+  return respond;
+}
+
+/** Lets the check a focus started run to its end: its request, its body and its state update. */
+async function settleCheck(): Promise<void> {
+  for (let round = 0; round < 5; round++) {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 10);
+    await promise;
+  }
+}
+
+test("shows a reloadable update notice when one build other than the tab's is live", async () => {
+  const currentScript = runningPage("/assets/index-current.js");
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    serverAnswering({
+      status: 200,
+      body: { serving: "/assets/index-new.js", live: ["/assets/index-new.js"] },
+    })
+  );
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
   const view = render(<DeploymentResilience />);
 
@@ -389,11 +511,11 @@ test("shows a reloadable update notice when focused after the running index chun
 
     const notice = await screen.findByRole("status", { name: "A new version is available" });
     expect(notice.textContent).toContain("A new version is available - Reload");
-    expect(fetch).toHaveBeenCalledWith("/healthz", {
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
       cache: "no-store",
       signal: expect.any(AbortSignal),
     });
-    expect(fetch).toHaveBeenCalledWith("/", { cache: "no-store", signal: expect.any(AbortSignal) });
 
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalledTimes(1);
@@ -405,37 +527,114 @@ test("shows a reloadable update notice when focused after the running index chun
   }
 });
 
-test("waits one minute before checking for another deployment on focus", async () => {
-  const currentScript = document.createElement("script");
-  currentScript.type = "application/json";
-  currentScript.src = "/assets/index-current.js";
-  document.head.append(currentScript);
-  let now = 100_000;
-  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
-  function responseForThrottle(input: RequestInfo | URL): Promise<Response> {
-    if (input === "/healthz") {
-      return Promise.resolve(new Response("{}", { status: 200 }));
+const noNotice: [string, { status: number; body: unknown } | "network failure"][] = [
+  [
+    "two builds are live, one newer, while / names the newer one",
+    {
+      status: 200,
+      body: {
+        serving: "/assets/index-new.js",
+        live: ["/assets/index-current.js", "/assets/index-new.js"],
+      },
+    },
+  ],
+  [
+    "the one live build is the tab's own",
+    {
+      status: 200,
+      body: { serving: "/assets/index-current.js", live: ["/assets/index-current.js"] },
+    },
+  ],
+  [
+    "a process older than the route answers 404",
+    { status: 404, body: { code: "NOT_FOUND", error: "no route" } },
+  ],
+  ["the caller is signed out (401)", { status: 401, body: { error: "unauthorized" } }],
+  ["the server fails (500)", { status: 500, body: { error: "internal" } }],
+  ["the request fails on the network", "network failure"],
+];
+
+for (const [when, builds] of noNotice) {
+  test(`shows no update notice when ${when}, from one request`, async () => {
+    const currentScript = runningPage("/assets/index-current.js");
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(serverAnswering(builds));
+    const view = render(<DeploymentResilience />);
+
+    try {
+      fireEvent.focus(window);
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      await settleCheck();
+
+      expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
+        cache: "no-store",
+        signal: expect.any(AbortSignal),
+      });
+    } finally {
+      fetch.mockRestore();
+      currentScript.remove();
+      view.unmount();
     }
-    return Promise.resolve(
-      new Response('<script type="module" src="/assets/index-current.js"></script>', {
-        status: 200,
-      })
-    );
-  }
-  responseForThrottle.preconnect = () => {};
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(responseForThrottle);
+  });
+}
+
+test("shows no update notice on a page that names no entry chunk, as Vite's dev server's does", async () => {
+  // Vite defines the build ID in its dev server as in a build; bun's test runner defines nothing.
+  const globals = globalThis as { __DISPATCH_BUILD__?: string };
+  globals.__DISPATCH_BUILD__ = "dev-build";
+  const devScript = runningPage("/src/main.tsx");
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    serverAnswering({
+      status: 200,
+      body: { serving: "/assets/index-new.js", live: ["/assets/index-new.js"] },
+    })
+  );
   const view = render(<DeploymentResilience />);
 
   try {
     fireEvent.focus(window);
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await settleCheck();
+
+    expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
+      cache: "no-store",
+      signal: expect.any(AbortSignal),
+    });
+  } finally {
+    fetch.mockRestore();
+    devScript.remove();
+    view.unmount();
+    Reflect.deleteProperty(globals, "__DISPATCH_BUILD__");
+  }
+});
+
+test("waits one minute before checking for another deployment on focus", async () => {
+  const currentScript = runningPage("/assets/index-current.js");
+  let now = 100_000;
+  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    serverAnswering(
+      {
+        status: 200,
+        body: { serving: "/assets/index-current.js", live: ["/assets/index-current.js"] },
+      },
+      "/assets/index-current.js"
+    )
+  );
+  const view = render(<DeploymentResilience />);
+
+  try {
+    fireEvent.focus(window);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
     fireEvent.focus(window);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
 
     now += 60_000;
     fireEvent.focus(window);
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   } finally {
     fetch.mockRestore();
     dateNow.mockRestore();
@@ -445,13 +644,10 @@ test("waits one minute before checking for another deployment on focus", async (
 });
 
 // A check Dispatch never answers would hold one of the browser's few connections to it for good,
-// as an unbounded read did (INFRA-258): each of its two requests is given up at the read deadline,
-// the index's body included, and the check then reports nothing.
+// as an unbounded read did (INFRA-258): its request is given up at the read deadline, its body
+// included, and the check then reports nothing.
 test("a deployment check Dispatch does not answer is given up at the read deadline", async () => {
-  const currentScript = document.createElement("script");
-  currentScript.type = "application/json";
-  currentScript.src = "/assets/index-current.js";
-  document.head.append(currentScript);
+  const currentScript = runningPage("/assets/index-current.js");
   let now = 100_000;
   const dateNow = spyOn(Date, "now").mockImplementation(() => now);
   const deadlines: { controller: AbortController; ms: number }[] = [];
@@ -461,23 +657,22 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
     return controller.signal;
   });
   const signals: (AbortSignal | null | undefined)[] = [];
-  // The index's body, for the test to finish once the check has been given up: a check still
-  // waiting on it would then read a changed asset and show the notice (below).
-  let indexBody: ReadableStreamDefaultController<Uint8Array> | undefined;
-  function stalled(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // The second check's body, for the test to finish once the check has been given up: a check
+  // still waiting on it would then read another live build and show the notice (below).
+  let buildsBody: ReadableStreamDefaultController<Uint8Array> | undefined;
+  function stalled(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     signals.push(init?.signal);
-    if (input === "/healthz" && signals.length > 1) {
-      return Promise.resolve(new Response("{}", { status: 200 }));
-    }
     const signal = init?.signal;
-    // The index answers its headers at once, with a body that never ends.
-    if (input === "/") {
+    // The second check's answer has its headers at once, with a body that never ends.
+    if (signals.length > 1) {
       return Promise.resolve(
         new Response(
           new ReadableStream<Uint8Array>({
             start(body) {
-              indexBody = body;
-              body.enqueue(new TextEncoder().encode('<script src="/assets/index-'));
+              buildsBody = body;
+              body.enqueue(
+                new TextEncoder().encode('{"serving":"/assets/index-new.js","live":["/')
+              );
               signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
             },
           }),
@@ -494,43 +689,33 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
   const view = render(<DeploymentResilience />);
 
   try {
-    // The health check gets no answer: given up at the deadline, the check ends there.
+    // The first check gets no answer: given up at the deadline, it ends there.
     fireEvent.focus(window);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS]);
     expect(signals[0]).toBe(deadlines[0]?.controller.signal);
     deadlines[0]?.controller.abort(new DOMException("timed out", "TimeoutError"));
-    const healthGivenUp = Promise.withResolvers<void>();
-    setTimeout(healthGivenUp.resolve, 0);
-    await healthGivenUp.promise;
+    await settleCheck();
     expect(fetch).toHaveBeenCalledTimes(1);
 
-    // The index answers its headers and stalls in its body: given up at its own deadline.
+    // The next check's answer has its headers and stalls in its body: given up at its deadline.
     now += 60_000;
     fireEvent.focus(window);
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
-    expect(deadlines.map(({ ms }) => ms)).toEqual([
-      REQUEST_DEADLINE_MS,
-      REQUEST_DEADLINE_MS,
-      REQUEST_DEADLINE_MS,
-    ]);
-    expect(signals[2]).toBe(deadlines[2]?.controller.signal);
-    deadlines[2]?.controller.abort(new DOMException("timed out", "TimeoutError"));
-    const indexGivenUp = Promise.withResolvers<void>();
-    setTimeout(indexGivenUp.resolve, 0);
-    await indexGivenUp.promise;
-    // The body finishes, naming a changed asset, after the check was given up: a check still
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS, REQUEST_DEADLINE_MS]);
+    expect(signals[1]).toBe(deadlines[1]?.controller.signal);
+    deadlines[1]?.controller.abort(new DOMException("timed out", "TimeoutError"));
+    await settleCheck();
+    // The body finishes, naming another live build, after the check was given up: a check still
     // waiting on it would read it and show the notice, so this assertion fails if the deadline
     // did not cut the read.
     try {
-      indexBody?.enqueue(new TextEncoder().encode('new.js"></script>'));
-      indexBody?.close();
+      buildsBody?.enqueue(new TextEncoder().encode('assets/index-new.js"]}'));
+      buildsBody?.close();
     } catch {
       // The abort errored the stream, which is the behaviour under test.
     }
-    const bodyFinished = Promise.withResolvers<void>();
-    setTimeout(bodyFinished.resolve, 0);
-    await bodyFinished.promise;
+    await settleCheck();
     expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
   } finally {
     fetch.mockRestore();
