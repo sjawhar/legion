@@ -2,43 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T19:55:00Z",
-  "round": 7,
-  "headTested": "855a4bcb54f0",
-  "handoffHead": "b6041c3b2240cad720946feda99e1b4bfd393446",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round7-tar-gz (RESULTS.md, claimant-e2e.log, claimant-e2e-base2.log); earlier rounds' artifacts infra606-tester-evidence-tar-gz, infra606-tester-round2..6-tar-gz",
-  "ci": "On 855a4bcb every check was queued (one pr-title run cancelled) when read; not waited for. Main's reds, not this pull request's: recipients-claim.e2e.ts route-close test (#2324), TestDispatchConnectionsPerPodIsTheServers (#2464), mermaid.e2e.ts:194 (INFRA-138's tree).",
+  "completed": "2026-10-28T20:30:00Z",
+  "round": 8,
+  "headTested": "3e96e81cc3f7",
+  "handoffHead": "7c0d6f864aaadaedba6415059652c863e78aaf15",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round8-tar-gz (claimant-e2e-r8.log, and round 7's failing and main's passing runs); rounds 1-7: infra606-tester-evidence-tar-gz, infra606-tester-round2..7-tar-gz",
+  "ci": "On 3e96e81c every required check (lint, typecheck, test, pr-title, build) was queued when read; 855a4bcb's runs were cancelled as superseded. Not waited for. Main's reds, not this pull request's: recipients-claim.e2e.ts route-close test (#2324), TestDispatchConnectionsPerPodIsTheServers (#2464), mermaid.e2e.ts:194 (INFRA-138's tree).",
+  "scope": "Since round 7's tested head 855a4bcb the diff touches only scripts/e2e/dispatch-claimant-delivery.ts, scripts/e2e/README.md and .legion/ handoffs: no runtime code, so round 7's stack verification (kill recovery with the listener up, down and after a landed send, the reopen race, the shared dedupe key, the NATS-down retries, the stuck burst) and rounds 1-6's (catch-up bounds, relay and hub reads, agent-stream budget, audit, browser resume, Activity tab, restart replay bytes) stand for this runtime.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Built Dispatch from the workspace (855a4bcb) on the round-3 stack and drove round 7's two changes. Reopen after a failed resend: after a kill with the listener down from the restart, the claimed comment reaches the route session once (round 6: never); round 6's red test and every earlier red test pass, unmodified. Shared dedupe key: after a kill whose send had landed, the fallback copy is published with the mention's key and the ENVOY_NOTIFICATIONS stream keeps one message. The architect's race and loop checks hold (below). The failure is a live proof the change breaks, outside the implementer's proofs."
+    "how": "Ran the implementer's command myself: scripts/e2e/dispatch-claimant-delivery.sh against envoy-dispatch built from the workspace at this head, 9 of 9 ok. Every earlier red test passes at this runtime (round 7's run, unchanged runtime)."
   },
-  "failures": [
-    {
-      "criterion": "The pull request breaks no repository live proof; every reader of a changed contract is in the contract change census (entry 3: POST .../comments answers every mention attempt pending).",
-      "evidence": "`DATABASE_URL=postgres://postgres@127.0.0.1:35432/claimant_e2e?sslmode=disable DISPATCH_BIN=<envoy-dispatch built from 855a4bcb> bash scripts/e2e/dispatch-claimant-delivery.sh` exits 1: 6 ok, 3 FAIL - mention-delivered-claimant ('expected the mention's delivery row sent, read pending'), mention-failed-claimant and mention-failed-follower ('expected the mention's delivery row failed, read pending'). The driver (scripts/e2e/dispatch-claimant-delivery.ts personMentions, lines 229-268) reads GET /api/v1/comments/{id} right after the POST; this PR answers the attempt pending and settles it after the response. The topics the cases check are right at the head (failed -> notifications.agent.<P or C> carries the comment; delivered -> no agent topic). The same command with main's build c27469629a9b passes 9 of 9 (claimant-e2e-base2.log). The script arrived with the merge of #2225; the census's search for readers of a comment's deliveries (entry 3) does not name it. The failing script is the red test; no workflow runs it."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "A mention a killed process claimed reaches its session once, also when the resend fails and when the killed process's send had landed.",
-      "surface": "The load-test stack; a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into the drain; ENVOY_NOTIFICATIONS read with $JS.API.STREAM.MSG.GET",
-      "command": "STOP_LISTENER=1 AS_PERSON=1 crash.sh r7down (listener at 4 s, stopped after the restart); STOP_LISTENER=1 AS_PERSON=1 crash.sh r7landed (listener at 2 s); AS_PERSON=1 crash.sh r7person (listener up)",
-      "observed": "r7down: ses-a stores c1..c8 once each; c1's comment.created published to agent.ses-a after its resend failed. r7landed: the outbox published c1's fallback to agent.ses-a and the stream holds one message for it (seq 9, the landed mention, same Nats-Msg-Id). r7person: every session stores each comment once.",
-      "headSha": "855a4bcb54f0",
-      "negativeControl": "Round 6's head ab61c138, r6down: ses-a never received c1."
+      "criterion": "The pull request breaks no repository live proof; the claimant-delivery proof's mention cases read the settled delivery row (round 7's failure).",
+      "surface": "scripts/e2e/dispatch-claimant-delivery.sh: the real envoy-dispatch, its own NATS and the harness's fake Envoy listener, over HTTP",
+      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:35432/claimant_e2e?sslmode=disable DISPATCH_BIN=<envoy-dispatch built from the workspace at 3e96e81c> bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "summary: 9 ok, 0 FAIL; PASS in 35s. mention-delivered-claimant: row sent, no agent topic; mention-failed-claimant and mention-failed-follower: row failed ('no live session ...'), the comment on notifications.agent.<P or C>.",
+      "headSha": "3e96e81cc3f7",
+      "negativeControl": "Round 7's driver against the same runtime (855a4bcb): 3 FAIL, 'expected the mention's delivery row sent/failed, read pending'."
     },
     {
-      "criterion": "A reopen racing an in-flight outbox batch never leaves the event marked published without the session's copy, and a reopened row does not loop (the architect's checks).",
-      "surface": "Two outbox.Run processes over the API's real reopen (throwaway Go stress, not committed); the stack with NATS stopped after a kill",
-      "command": "25 runs: a claimed, lapsed attempt, the listener silent, two outbox processes whose acknowledgements stall 0-1.5 s, then the stranded pass's failing resend; STOP_NATS=1 STOP_LISTENER=1 AS_PERSON=1 crash.sh r7nats with the event rows sampled every 10 s, then NATS started",
-      "observed": "Stress: 25 of 25 runs end with comment.created published and notifications.agent.s1 among its destinations. NATS down: c1's reopened row and every other unpublished row are re-claimed every 10 s with attempt_count 0 and no further reopen; NATS back: each comment published once with the copy, ses-a stores each once.",
+      "criterion": "A mention reaches each session exactly once through a Dispatch kill, with the listener up or down, and a session's route or author copy follows a failed mention (rounds 3-7).",
+      "surface": "The load-test stack and NATS JetStream store (round 7, same runtime)",
+      "command": "crash.sh r7person / r7down / r7landed / r7nats, stuck.sh r7head 30, and the red tests TestASilentListener..., TestAnAbandonedMention..., TestAMentionInFlightAtAKill..., TestAMentionClaimedByAKilledProcess..., TestAListenerThatAnswersNoLookup... (round 7)",
+      "observed": "Every session stores each comment exactly once in every kill case; 30 + 30 events for a stuck burst; every red test passes, unmodified.",
       "headSha": "855a4bcb54f0",
-      "negativeControl": "A stuck burst of 30 commits 30 comment.created and 30 comment.delivery events (no extra reopen event), 1 copy per comment."
+      "negativeControl": "Round 6's head ab61c138: with the listener down after a kill, the claimed comment never reached the route session."
+    },
+    {
+      "criterion": "A reconnecting stream receives a bounded catch-up or a signal to refetch once; the relay and hub read nothing while nobody subscribes; agent-stream viewers hold bounded bytes; before and after on the restart step.",
+      "surface": "GET /api/v1/events, the stack's Postgres statement log, the browser on the issue page, the agent stream test hooks, run-step.sh (rounds 1-4)",
+      "command": "sse_probe.py, reconnect_flap.py, hubflap.sh, the headless Chromium resume, agent.sh, measure.sh (rounds 1-4)",
+      "observed": "256 events replayed with complete, 257 none; no event lost over reconnects; 0 reads idle; the browser refetches after a resume past the bound; a paused agent viewer ended past 8 MiB; restart replay bytes 0.5-1.5 MB against 122 MB on base.",
+      "headSha": "da4434188526",
+      "negativeControl": "Base c3d09eec: a stale stream replays 12 MB, no reconnect carries the complete header, a paused agent viewer holds 14 MiB."
     }
   ],
   "observations": [
-    "Host-side drop of the fallback is by the same key: dedupeKeyNamesItsEvent (packages/contracts/src/envelope.ts:69) is true for any source 'dispatch' envelope, and the stream already drops it by Nats-Msg-Id before a host sees it.",
-    "Mentioned sessions that are neither route nor author (ses-b, ses-c) get no copy when the listener is down after the restart, as on main: there is no copy of theirs to fall back to."
+    "Criterion 5's restart measurement still runs on the uncommitted restart-scenario patch (INFRA-589's PR #2369 is open); the architect scheduled the committed harness and five runs per side for after it merges. Dispatch CPU in the minute after the restart is not below base (single runs).",
+    "The Stage 3 audit needs GET /api/v1/events/log only once production runs this build; against an older Dispatch it falls back to the stream replay (proven against base in round 3)."
   ]
 }
