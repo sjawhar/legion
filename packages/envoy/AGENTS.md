@@ -2675,8 +2675,8 @@ predicates, package constants): the settle reads use them as they are and the se
 (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch. Of
 two senders that find one attempt owed - the sweep and a repeat, or two processes' sweeps - the
 one that claims it sends and the other sends nothing. The sweep's reads stay as small as the work
-still owed: migration `0130` indexes the pending attempts (`message_deliveries_pending`,
-`comment_deliveries_pending`, partial on `state = 'pending'`), and `0129` the keyed sends still
+still owed: migration `0138` indexes the pending attempts (`message_deliveries_pending`,
+`comment_deliveries_pending`, partial on `state = 'pending'`), and `0137` the keyed sends still
 owed (`request_keys_owed_sends`, on `created_at`, partial on rows with no status whose recovery
 names a message). `cmd/dispatch/keyed_kill_multiprocess_test.go` proves the takeover on two real
 processes: one killed mid-handler (held there by the slow-write hook), the other answers
