@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 )
 
 // keyedPost posts body to the rig's route on server as alice under key, giving up after timeout as
@@ -441,14 +442,14 @@ func TestARunPastItsLimitStopsRenewingItsLease(t *testing.T) {
 	awaitResponse(t, answered)
 }
 
-// A keyed close whose own work waits on a lock ends at the keyed run's bound (keyedRunLimit), as
-// every keyed handler does, and releases its key, so the repeat runs it once the lock is free. The
-// close settles the issue's documents before its transaction and sweeps them after it, on a
-// context that must outlive the client; a keyed request's context already does, and
-// context.WithoutCancel on it dropped the bound with the cancellation, so a close held on the
-// issue's row kept its background-work slot, and the shutdown's wait for it, as long as the row
-// stayed held.
-func TestAKeyedCloseHeldOnTheIssuesRowEndsAtItsRunsBound(t *testing.T) {
+// A keyed close whose settlement, before its transaction, waits on a lock ends at the keyed run's
+// bound (keyedRunLimit), as every keyed handler does, and releases its key, so the repeat runs it
+// once the lock is free. The close settles the issue's documents before its transaction and
+// sweeps them after it (the next test), on a context that must outlive the client; a keyed
+// request's context already does, and context.WithoutCancel on it dropped the bound with the
+// cancellation, so a close held on the issue's row kept its background-work slot, and the
+// shutdown's wait for it, as long as the row stayed held.
+func TestAKeyedCloseWhoseSettlementIsHeldOnTheIssuesRowEndsAtItsRunsBound(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	served.requestKeyRunLimit = time.Second
 	issue := createInteractionIssue(t, handler, "TEST", "Closed while its row is held", "Context\n")
@@ -498,5 +499,77 @@ func TestAKeyedCloseHeldOnTheIssuesRowEndsAtItsRunsBound(t *testing.T) {
 	if repeat.Code != http.StatusOK || replayed(repeat) {
 		t.Fatalf("the repeat once the row is free: status=%d body=%s, want the key released and the close run",
 			repeat.Code, repeat.Body.String())
+	}
+}
+
+// closeCommitHold is the document service with a pause between a close's commit and its sweep:
+// its SetIssueClosed, which the close calls once its transaction commits and before it sweeps the
+// issue's ask blocks (patchIssue), closes committed and returns only once release is closed.
+type closeCommitHold struct {
+	docs.API
+	committed chan struct{}
+	release   chan struct{}
+}
+
+func (h closeCommitHold) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
+	h.API.SetIssueClosed(ctx, issueKey, closed)
+	if closed {
+		close(h.committed)
+		<-h.release
+	}
+}
+
+// A keyed close whose sweep, after its commit, waits on the issue's row ends at the keyed run's
+// bound too, and answers the close it committed. The sweep takes the issue's row in a transaction
+// of its own (sweepClosedIssueAsksTx); on context.WithoutCancel of the keyed request's context it
+// waited for as long as another writer held the row, past the bound, holding the keyed run's
+// background-work slot all the while.
+func TestAKeyedCloseWhoseSweepIsHeldOnTheIssuesRowEndsAtItsRunsBound(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.requestKeyRunLimit = time.Second
+	hold := closeCommitHold{API: served.deps.Docs, committed: make(chan struct{}), release: make(chan struct{})}
+	served.deps.Docs = hold
+	issue := createInteractionIssue(t, handler, "TEST", "Swept while its row is held", "Context\n")
+	awaitSettled(t, database, issue.PrimaryArtifactID)
+	ctx := context.Background()
+
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- keyedRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{"status": "done"}, "alice", "close-swept")
+	}()
+	select {
+	case <-hold.committed:
+	case <-time.After(15 * time.Second):
+		close(hold.release)
+		t.Fatal("the close did not commit within 15 s")
+	}
+	// Another writer takes the issue's row between the close's commit and its sweep.
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		close(hold.release)
+		t.Fatalf("begin the holder's transaction: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `select 1 from issues where key = $1 for no key update`, issue.Key); err != nil {
+		close(hold.release)
+		t.Fatalf("hold the issue's row: %v", err)
+	}
+	close(hold.release)
+	select {
+	case response := <-answered:
+		if response.Code != http.StatusOK {
+			t.Fatalf("a close whose sweep ended at its run's bound: status=%d body=%s, want the committed close's 200",
+				response.Code, response.Body.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("a keyed close's sweep still waited on the held issue row 15 s after its run's 1 s bound")
+	}
+	var closed bool
+	if err := database.Pool.QueryRow(ctx,
+		`select closed_at is not null from issues where key = $1`, issue.Key).Scan(&closed); err != nil {
+		t.Fatalf("read the issue: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close whose sweep ended at its bound left the issue open")
 	}
 }
