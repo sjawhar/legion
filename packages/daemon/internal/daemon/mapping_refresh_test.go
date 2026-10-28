@@ -1546,66 +1546,37 @@ func childEnvelope(t *testing.T, key, parent, repo string, id, seq int64) []byte
 	return envelope
 }
 
-// A recovery whose listing stays held, here because the todo parent's own event fails at every
-// delivery and keeps the Dispatch consumer below the stream's last position, tells the architect
-// of the child its release left under that parent once the hold has lasted recoveryHoldBound, and
-// only once; when the fault clears, the parent's event records the parent, the recovery runs in
-// full and records the child, and nothing more is told. Before, the notice waited for the hold to
-// release, so while the fault lasted the child was neither recorded nor named.
+// A recovery whose listing stays held, here because the todo parent's own event waits on a paused
+// Dispatch consumer and keeps it below the stream's last position, tells the architect of the child
+// its release left under that parent once the hold has lasted recoveryHoldBound, and only once;
+// when the consumer runs, the parent's event records the parent, the hold releases, the child is
+// recorded, and nothing more is told. Before, the notice waited for the hold to release, so while
+// the hold lasted the child was neither recorded nor named.
 func TestARecoveryHeldPastItsBoundTellsItsReleaseWaitsOnce(t *testing.T) {
-	ctx := context.Background()
-	quickInstallReads(t)
-	bound := recoveryHoldBound
-	recoveryHoldBound = 300 * time.Millisecond
-	t.Cleanup(func() { recoveryHoldBound = bound })
-	installs := &installations{}
-	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
-	w, client, installs, _, js := mappingRigJS(t, installs)
-	engine, admission := rigHandlers(w)
-	w.bootID, w.holdPollInterval = "held-bound-boot", 10*time.Millisecond
-	const tree, parent, child = "LEGION-1800", "LEGION-1801", "LEGION-1802"
-	liveRoot(t, w, client, tree)
-	client.show(issue(parent, "acme/widgets", "todo", false, tree, 1), issue(child, "zeta/tools", "todo", false, parent, 1))
-	w.awaitRecovery("zeta/tools", tree, child, parent)
-	if _, err := js.Publish(ctx, "notifications.dispatch.issue."+parent+".issue.updated", childEnvelope(t, parent, tree, "acme/widgets", 1801, 1)); err != nil {
-		t.Fatal(err)
-	}
-	var failing atomic.Bool
-	failing.Store(true)
-	failParent := applyFunc(func(_ context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
-		if issue, ok := fact.(intake.DispatchIssue); ok && issue.Key == parent && failing.Load() {
-			return intake.Result{}, errors.New("the parent's apply fails at every delivery")
-		}
-		return intake.Result{}, nil
-	})
-	run, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, w.pool, failParent, engine, admission) }()
-	polled := make(chan struct{})
-	go func() { w.pollHoldRelease(run); close(polled) }()
-	t.Cleanup(func() { cancel(); <-done; <-polled })
-
-	before := len(treeNotices(t, w, tree))
-	installs.setFailing(nil, "implement zeta/tools")
-	testwait.Eventually(t, "the recovery's listing held", func() bool { return served(w, "zeta/tools") && admission.Held() })
-	testwait.Eventually(t, "the release wait told past the bound", func() bool { return len(treeNotices(t, w, tree)) > before })
-	notices := treeNotices(t, w, tree)[before:]
-	if len(notices) != 1 || !strings.Contains(notices[0], child+" (its parent "+parent+" is not recorded: release "+parent+" first, then "+child+")") {
-		t.Fatalf("notices once the hold outlasted its bound = %q, want one naming %s and %s", notices, child, parent)
+	h := newHeldRecovery(t, 40*time.Millisecond, 300*time.Millisecond)
+	before := h.notices(t)
+	h.behind(t, heldParent)
+	h.serve()
+	testwait.Eventually(t, "the recovery's listing held", func() bool { return served(h.w, "zeta/tools") && h.admission.Held() })
+	testwait.Eventually(t, "the release wait told past the bound", func() bool { return h.notices(t) > before })
+	notices := treeNotices(t, h.w, heldTree)[before:]
+	if len(notices) != 1 || !strings.Contains(notices[0], heldChild+" (its parent "+heldParent+" is not recorded: release "+heldParent+" first, then "+heldChild+")") {
+		t.Fatalf("notices once the hold outlasted its bound = %q, want one naming %s and %s", notices, heldChild, heldParent)
 	}
 	time.Sleep(4 * recoveryHoldBound)
-	if got := treeNotices(t, w, tree)[before:]; len(got) != 1 || !admission.Held() {
-		t.Fatalf("notices = %d with the hold still %t, want the one only while the fault lasts", len(got), admission.Held())
+	if n := h.notices(t) - before; n != 1 || !h.admission.Held() {
+		t.Fatalf("notices = %d with the hold still %t, want the one only while the hold lasts", n, h.admission.Held())
 	}
 
-	failing.Store(false)
-	testwait.Eventually(t, "parent and child recorded once the fault clears", func() bool {
-		p, c := recordedIssue(t, w, parent), recordedIssue(t, w, child)
-		return p != nil && p.Tree == tree && c != nil && c.Tree == tree
+	h.consume()
+	testwait.Eventually(t, "parent and child recorded once the consumer catches up", func() bool {
+		p, c := recordedIssue(t, h.w, heldParent), recordedIssue(t, h.w, heldChild)
+		return p != nil && p.Tree == heldTree && c != nil && c.Tree == heldTree
 	})
-	testwait.Eventually(t, "nothing left to recover", func() bool { return len(w.recoveringReasons()) == 0 })
-	if got := treeNotices(t, w, tree)[before:]; len(got) != 1 {
-		t.Fatalf("notices after the fault cleared = %q, want the one only", got)
+	testwait.Eventually(t, "nothing left to recover", func() bool { return len(h.w.recoveringReasons()) == 0 })
+	time.Sleep(4 * recoveryHoldBound)
+	if n := h.notices(t) - before; n != 1 {
+		t.Fatalf("notices after the hold released = %d, want the one only", n)
 	}
 }
 
