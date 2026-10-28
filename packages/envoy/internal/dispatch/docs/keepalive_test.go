@@ -30,12 +30,19 @@ type heardFrame struct {
 
 // A browser's provider closes a document socket that has delivered nothing for 30 s, and an idle
 // peer is sent nothing by the room once its sync is done. So the socket sends each peer a keep-alive
-// at least every documentKeepAlive: here a peer that opens as the dashboard's provider does - its
-// token, then its sync step 1 - and then says nothing hears a frame within 15 s of the last, over
-// 90 s, and is still served at the end, its sync step 1 answered. Each keep-alive is an awareness
-// update naming no client, which the provider applies as no change at all.
+// at least every documentKeepAlive (15 s): here, with the interval shortened to a second so the test
+// takes seconds, not minutes, a peer that opens as the dashboard's provider does - its token, then
+// its sync step 1 - and then says nothing hears a frame within an interval and a second of the last,
+// over six intervals, and is still served at the end, its sync step 1 answered. Each keep-alive is
+// an awareness update naming no client, which the provider applies as no change at all.
 func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
+	t.Parallel()
+	if documentKeepAlive*2 > 30*time.Second {
+		t.Fatalf("documentKeepAlive is %v; the provider closes a socket silent for 30 s, so it must be at most 15 s", documentKeepAlive)
+	}
 	service, artifactID := newTestService(t)
+	const interval = time.Second
+	service.keepAlive = interval
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	schemaVersion := strconv.Itoa(pmdoc.SchemaVersion())
@@ -82,8 +89,8 @@ func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
 	applied := awareness.New(7)
 	changes := 0
 	applied.OnUpdate(func(awareness.UpdateEvent) { changes++ })
-	const idle = 90 * time.Second
-	allowed := documentKeepAlive + time.Second
+	const idle = 6 * interval
+	allowed := interval + time.Second
 	end := opened.Add(idle)
 	last, keepAlives := opened, 0
 	for {
@@ -104,7 +111,7 @@ func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
 					t.Fatalf("apply the awareness frame %x: %v", frame.message, err)
 				}
 				// The room's own awareness goes out as the sync ends; a keep-alive comes later.
-				if bytes.Equal(awarenessUpdate, noAwarenessChange) && frame.at.Sub(opened) > documentKeepAlive/2 {
+				if bytes.Equal(awarenessUpdate, noAwarenessChange) && frame.at.Sub(opened) > interval/2 {
 					keepAlives++
 					if changes != before {
 						t.Fatalf("a keep-alive changed the provider's awareness: states %v", applied.GetStates())
@@ -117,11 +124,11 @@ func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
 		if !time.Now().Before(end) {
 			break
 		}
-		t.Fatalf("the idle socket heard nothing for %v, past the %v the keep-alive allows; the provider closes at 30 s",
+		t.Fatalf("the idle socket heard nothing for %v, past the %v the keep-alive allows",
 			time.Since(last).Round(time.Millisecond), allowed)
 	}
 	if keepAlives < 5 {
-		t.Fatalf("the idle socket was sent %d keep-alives in %v, want one every %v", keepAlives, idle, documentKeepAlive)
+		t.Fatalf("the idle socket was sent %d keep-alives in %v, want one every %v", keepAlives, idle, interval)
 	}
 
 	send(0, ygsync.EncodeSyncStep1(crdt.New()))
@@ -130,13 +137,13 @@ func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
 		select {
 		case frame, open := <-frames:
 			if !open {
-				t.Fatal("the socket closed after 90 s idle instead of answering its sync step 1")
+				t.Fatalf("the socket closed after %v idle instead of answering its sync step 1", idle)
 			}
 			if isSyncStep2(frame.message) {
 				return
 			}
 		case <-answered:
-			t.Fatal("the socket, idle 90 s, did not answer its sync step 1 within 5 s")
+			t.Fatalf("the socket, idle %v, did not answer its sync step 1 within 5 s", idle)
 		}
 	}
 }
