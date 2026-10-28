@@ -28,7 +28,9 @@
 # turns memory off (memory.backend), so the run writes no memory into the operator's database.
 #
 # The Oh My Pi build. Processes that share one agent.db refresh its OAuth token safely only on a
-# build that carries the refresh-race fix, first released as 18.12.2-sami.20261026-004924. A build
+# build that carries the refresh-race fix, which base 18.12.2 first released as
+# 18.12.2-sami.20261026-004924 and which base 18.13.2 carries from its first build,
+# 18.13.2-sami.20261027-235348 (upstream's own form of the fix, in 18.13.x). A build
 # without it can spend the shared refresh token in one process while another still holds the old
 # one, which disables the login for every session on the box. So the panes must run the operator's
 # own build, the one the operator's sessions already run against this database, not the
@@ -37,7 +39,7 @@
 #   cd / && HOME=<operator-home> mise ls --global --json
 # from the filesystem root, so no project's mise config (this checkout's or the caller's working
 # directory's) can answer instead of the operator's global one, and refuses it unless it is
-# 18.12.2-sami.<stamp> with a build stamp at or after the fix's. Any other base version is refused
+# $fix_base-sami.<stamp> with a build stamp at or after the fix's. Any other base version is refused
 # rather than guessed at; raise $fix_base and $fix_stamp below once a later base is known to carry
 # the fix.
 #
@@ -52,8 +54,8 @@ set -euo pipefail
 me=install-box-login-route
 model=anthropic/claude-opus-4-8
 tool=github:sjawhar/oh-my-pi
-fix_base=18.12.2
-fix_stamp=20261026-004924
+fix_base=18.13.2
+fix_stamp=20261027-235348
 
 # refuse is for arguments (exit 2); fail is for the box the run is on (exit 1).
 refuse() {
