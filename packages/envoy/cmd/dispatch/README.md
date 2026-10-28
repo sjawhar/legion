@@ -931,7 +931,9 @@ Migration 0010 added stored generated `search` columns.
 Migrations `0057`–`0061` made them plain columns that a `BEFORE INSERT OR UPDATE` trigger per table fills (`issues_search`, `artifact_versions_search`, `comments_search`, `asks_search`, `messages_search`), so no application code writes or refreshes a search vector.
 Every indexed text, headline, and duplicate-title comparison first passes through `search_text` (0056), which puts a space after every sixteenth underscore-joined segment.
 A query is not normalised and is limited to 1,000 characters.
-Search covers issue titles, the latest settled document text, comments, asks (questions and free-text answers), and messages.
+Search covers issue titles, the latest settled document text, comments, asks (questions, option labels and descriptions, free-text answers and the options an answer chose), and messages.
+An ask hit's excerpt is cut from that same indexed text (the question, then `ask_search_suffix`), never from the options' raw JSON, and the hit carries `ask`, where the ask stands when the search ran:
+`open`, `answered` with its latest answer, or `resolved` with its resolution and, when anyone answered it, the last answer it had, which for an ask that document settlement retracted while it was answered is read from its `ask.answered` events, since its row keeps none.
 Live document text takes up to the 2 s settle delay to appear in search results.
 
 Every trigger builds its vector with `search_vector` (0087; the issues trigger's from 0088).
@@ -1293,6 +1295,9 @@ Each item below names a path with its method and identity, then its purpose.
   each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s.
   One page `{results, total, reachable, limit, offset, took_ms}`:
   `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100).
+  Every `ask` hit carries `ask`, where the ask stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or `{state: "resolved", resolution, answer?}` with the last answer it had, absent when nobody answered;
+  its excerpt is cut from the ask's indexed text ([Search](#search)).
   An under-two-character query returns `400 INVALID_QUERY`;
   a stop-word-only query returns `200` with no results;
   `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL;
