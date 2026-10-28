@@ -323,11 +323,11 @@ func (s *Service) coldRead(ctx context.Context, artifactID string) (*documentRea
 }
 
 // foldDocument loads artifactID's stored history decoded once (LoadDocument), reads its tree and
-// renders it, storing the rendering under the stamp the load read in its own transaction, never
-// the one read before the miss, so a write between the two cannot store old content under a new
-// stamp. Its error is the load's, or a panic recovered from any of it: singleflight re-panics an
-// unrecovered panic of a call it has waiters for in a goroutine nothing can recover, where a read
-// panicking on the request's own goroutine would fail that one request.
+// renders it (foldLoaded), storing the rendering under the stamp the load read in its own
+// transaction, never the one read before the miss, so a write between the two cannot store old
+// content under a new stamp. Its error is the load's, or a panic recovered from any of it:
+// singleflight re-panics an unrecovered panic of a call it has waiters for in a goroutine nothing
+// can recover, where a read panicking on the request's own goroutine would fail that one request.
 func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold coldFold, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -344,23 +344,32 @@ func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold col
 		}
 		return coldFold{}, err
 	}
+	// A rendering refused leaves the fold its tree, from which each read computes its own answer
+	// and refusal, as it would without the cache.
+	fold, _ = foldLoaded(artifactID, loaded)
+	if fold.read != nil {
+		s.reads.put(fold.read)
+	}
+	return fold, nil
+}
+
+// foldLoaded is the fold of loaded, a document its caller has just decoded and holds alone: its
+// tree read once and validated once (pmdoc.ReadUnshared) and rendered without validating it again
+// (buildDocumentRead). A tree the read refuses is the fold's treeErr, the read's error through
+// documentSchemaError as treeOf gives it; a tree the rendering refuses is the fold's tree without
+// a read, and renderErr is the rendering's refusal. A loaded state without a document is the
+// empty fold.
+func foldLoaded(artifactID string, loaded LoadedDocument) (fold coldFold, renderErr error) {
 	if loaded.Doc == nil {
 		return coldFold{}, nil
 	}
-	tree, err := treeOf(loaded.Doc)
+	valid, err := pmdoc.ReadUnshared(loaded.Doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		return coldFold{treeErr: err}, nil
-	}
-	// buildDocumentRead reads the tree without validating it again, once ValidateDocument has
-	// validated it here, refusing it as the placement walk did when that walk validated it itself.
-	valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
-	if err != nil {
-		return coldFold{tree: tree}, nil
+		return coldFold{treeErr: documentSchemaError(err)}, nil
 	}
 	read, err := buildDocumentRead(artifactID, loaded.Stamp, valid)
 	if err != nil {
-		return coldFold{tree: tree}, nil
+		return coldFold{tree: valid.Node()}, err
 	}
-	s.reads.put(read)
-	return coldFold{read: read, tree: tree}, nil
+	return coldFold{read: read, tree: valid.Node()}, nil
 }

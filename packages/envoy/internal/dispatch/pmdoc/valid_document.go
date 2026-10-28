@@ -3,11 +3,11 @@ package pmdoc
 import "fmt"
 
 // ValidDocument is a document tree that has been validated once (Validate), so that several reads
-// of it pay for one validation rather than one each. Only ValidateDocument makes one, after the
-// validation passes. The contract is the holder's: nothing changes the tree after it was
-// validated, and every method reads the tree without validating it again, so a method's answer is
-// the answer its exported counterpart (BlockPathsAndTableRows, TableRows, TableDescendantIDs,
-// RenderWithBlockOffsets, EncodeTokenJSON) gives the same tree.
+// of it pay for one validation rather than one each. Only ValidateDocument and ReadUnshared make
+// one, after the validation passes. The contract is the holder's: nothing changes the tree after
+// it was validated, and every method reads the tree without validating it again, so a method's
+// answer is the answer its exported counterpart (BlockPathsAndTableRows, TableRows,
+// TableDescendantIDs, RenderWithBlockOffsets, EncodeTokenJSON) gives the same tree.
 //
 // The zero ValidDocument holds no tree and is not valid: each method returns the error its
 // exported counterpart returns for a nil tree.
