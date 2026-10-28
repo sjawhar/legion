@@ -2,32 +2,31 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-642",
-  "completed": "2026-10-28T13:09:44Z",
-  "decision": "approved",
-  "reviewedCodeHead": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
-  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection). CI head 1834eeb8: every required check completed success, all dispatch/envoy lanes success; compare 1834eeb8...6f0c5e30 handoffsOnly true, 2 files.",
-  "threads": "0 review threads (GraphQL totalCount 0).",
-  "e2eLines": "E2E (implementer) and E2E (tester) both present at 1834eeb8, each with surface, command, observation and negative control.",
-  "mergeRule": "Architect's rule (dispatch://INFRA-642 comment 50350dd4): whole-process passes (implementer max head 428.37 < min base 432.10; tester max head 437.81 < min base 444.58). Function share fell ~1.9 points vs ~4.6 needed (0.084/0.912/2); it fell in every run, so it does not contradict. Recorded under Not proven / risk.",
-  "thermonuclear": "At 6f0c5e30: deep review found no defect. Code quality found 4 cleanup-only items; 3 went to Fast-follow, and the 4th (livewrite.go:118-122 comment wording) is not a defect: that sentence is about ApplyOps/ReplaceText, each still once per Join.",
+  "completed": "2026-10-28T15:54:03Z",
+  "round": 2,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "9bac6d86f930e99354784b014d19089574beb113",
+  "ci": "Required set (lint, typecheck, test, pr-title) all success at CI head 9bac6d86; compare to a090c832 handoffsOnly true. Non-required reds: dispatch (mermaid.e2e.ts:194 and recipients-claim route-close, main's per the architect), envoy-infra-go (TestDispatchConnectionsPerPodIsTheServers, main's), envoy-go-race (api TestEventStreamRelayRecoversWhenTheEventLogIsReset: 'the relay ended a subscription opened after the reset'; this PR does not touch the event stream relay; not on the architect's list of main's reds).",
+  "threads": "0 review threads.",
+  "mergeResolution": "applyLive matches main: the forkHeld snapshot is read before OnUpdate/watchMargin, the drop happens only when mutate returned no error, and abandon keeps the fork when updates are dropped; the lifecycle credit guard is kept. applyMargin cannot drop a real margin write: ygo v1.51.3-sami.4 YMap.Set always appends a new item, so the state vector advances.",
   "critical": 0,
-  "important": 0,
-  "minor": 3,
+  "important": 1,
+  "minor": 2,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
-      "description": "Cleanup (Fast-follow): lines 608-697 copy appendSchemaInvalidUpdate, appendTextEmbed, appendNestedLink and the corruption table from api/schema_repair_test.go:17-100; move them into docs/testhooks.go."
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
+      "description": "Line 122: the merge moved main's no-change check (StateVector + DeleteSetFromDoc before mutate, forkHeld after) into the shared liveOperation.change, so every margin write now does two whole-store walks (buildDeleteSet over every item, then an IDSet copy) for a check that can never fire for it. This is avoidable CPU on the path this PR exists to make cheap. Move the snapshot and the drop back into applyLive around its op.change call, as main has them, and restore change's doc comment."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
-      "description": "Cleanup (Fast-follow): the new file has 1,567 lines; split it into fixtures, flows and comparison."
+      "file": "packages/envoy/internal/dispatch/docs/testhooks.go",
+      "description": "Lines 144-147 and 158-216 copy docstest.NestedValue, NestedLinkUpdate and FirstText into a file linked into the server binary; round 1's duplication was moved, not removed. Put the error-returning helpers in one leaf package that does not import testing, used by testhooks.go, with docstest.NestedLinkUpdate as a wrapper that fails the test."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
-      "description": "Cleanup (Fast-follow): errors are compared by name strings and turned back with a hand-kept asError switch; keep the real error and use errors.Is."
+      "file": "packages/envoy/internal/dispatch/docs/ledger.go",
+      "description": "Stale pointers to applyLive for steps that now run in recordLiveOperation for both write paths: ledger.go:442-443, persistence.go:835-837, livewrite.go:48."
     }
   ]
 }
