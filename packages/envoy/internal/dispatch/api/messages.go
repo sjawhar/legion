@@ -497,40 +497,52 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 // mistake; it is not an authorization boundary. Direct-conversation text also reaches every
 // authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
+	read, ok := s.readableMessageThread(w, r)
+	if !ok {
+		return
+	}
+	WriteJSON(w, http.StatusOK, read)
+}
+
+// readableMessageThread is the conversation message {id} belongs to, when the caller may read it
+// under getMessageThread's rule: a human reads any, a bearer an issue thread and only a direct
+// conversation its ?session= is in. Every route that reads a message by its id alone (the
+// conversation, the message's blocks) asks it. ok is false once it has written the refusal.
+func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageRead, bool) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
-		return
+		return messageRead{}, false
 	}
 	if !requireUUIDPath(w, r, "message") {
-		return
+		return messageRead{}, false
 	}
 	var rootID string
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), messageThreadCTE+`
 		select id::text from thread where in_reply_to is null
 	`, r.PathValue("id")).Scan(&rootID); err != nil {
 		s.writeHandlerError(w, err)
-		return
+		return messageRead{}, false
 	}
 	read, err := s.readMessage(r.Context(), "", rootID)
 	if err != nil {
 		s.writeHandlerError(w, err)
-		return
+		return messageRead{}, false
 	}
 	if !human && read.Message.IssueKey == nil {
 		session := strings.TrimSpace(r.URL.Query().Get("session"))
 		if session == "" {
 			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,
 				"a direct conversation is read as a session in it: name yours in ?session=")
-			return
+			return messageRead{}, false
 		}
 		if !read.hasSession(session) {
 			writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
 				"session "+session+" is not in this direct conversation: its root targets another session and it has not replied in it")
-			return
+			return messageRead{}, false
 		}
 	}
-	WriteJSON(w, http.StatusOK, read)
+	return read, true
 }
 
 // hasSession reports whether session is in this conversation: the root targets it, or it

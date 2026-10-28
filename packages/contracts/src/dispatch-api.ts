@@ -1145,6 +1145,35 @@ export interface ReplyBlock {
   readonly removed: boolean;
 }
 
+/** What `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` answer: the
+ *  comment or message as a graph node, the comment's revision (absent for a message, which is
+ *  never edited), whether its blocks are indexed from the body it stores, and its current blocks
+ *  in body order. While the item is owed an index, or was indexed from another body than it
+ *  stores, `indexed` is false and `blocks` is empty (the read writes nothing): an editor then
+ *  edits the comment without carrying block ids. */
+export interface ItemBlocks {
+  readonly item: GraphNode;
+  readonly revision?: number;
+  readonly indexed: boolean;
+  readonly blocks: readonly ItemBlock[];
+}
+
+/** One current block of a comment or message: its id (`b2`), its type, its whole text as its
+ *  author wrote it, its reference (absent for a block of a direct message, which has no address),
+ *  and `from`/`to`, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
+ *  string index). A comment block also carries the revision its text last changed in and that
+ *  revision's time; a message block has neither. */
+export interface ItemBlock {
+  readonly id: string;
+  readonly type: string;
+  readonly text: string;
+  readonly ref?: string;
+  readonly from: number;
+  readonly to: number;
+  readonly changed_revision?: number;
+  readonly changed_at?: string;
+}
+
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
  *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
  *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that

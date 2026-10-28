@@ -5289,9 +5289,9 @@ describe("executeDispatchTool", () => {
       );
     });
 
-    // A block of a comment or message reads as a document's block does, its item printed in place
-    // of its document; a comment's pin names a revision of the comment. A block of a comment or
-    // message citing the node is listed as its item, then the block.
+    // A block of a comment or message reads as one line naming the block, its item and the comment
+    // revision its text last changed in, then its text; a comment's pin names a revision of the
+    // comment. A block of a comment or message citing the node is listed as its item, then the block.
     describe("of a comment or message", () => {
       const comment = "11111111-1111-4111-8111-111111111111";
       const message = "33333333-3333-4333-8333-333333333333";
@@ -5317,7 +5317,46 @@ describe("executeDispatchTool", () => {
       };
       const sections = ["Referenced by:", "- none", "Links:", "- none"];
 
-      test("a comment block prints its comment, the revision its text last changed in, and its pin's revision", async () => {
+      test("read prints a block of a comment", async () => {
+        const block = `dispatch://DSP-1/comment/${comment}#b-b2`;
+        const node = {
+          ...commentBlock,
+          issue_key: "DSP-1",
+          project: "DSP",
+          ref: block,
+          parent: { kind: "comment", id: comment, ref: `dispatch://DSP-1/comment/${comment}` },
+          changed_version: 1,
+          made_by: [{ kind: "user", id: "alice@example.com" }],
+          made_at: "2026-10-20T00:00:00Z",
+          changed_by: [{ kind: "user", id: "alice@example.com" }],
+          changed_at: "2026-10-20T00:00:00Z",
+          parent_version: 1,
+          text: "Beta.\nIts second line.",
+        };
+        const { result } = readBlock(
+          block,
+          () => response({ node, edges: [] }),
+          () => response({ node, edges: [] })
+        );
+
+        expect(await result).toEqual({
+          text: [
+            `Block b2 of comment ${comment} (changed in revision 1):`,
+            "Beta.\nIts second line.",
+            `Node: block ${block} · made by user alice@example.com at 2026-10-20T00:00:00Z · changed by user alice@example.com at 2026-10-20T00:00:00Z · part of dispatch://DSP-1/comment/${comment} (revision 1)`,
+            ...sections,
+          ].join("\n"),
+          details: { issue: "DSP-1", block: "b2" },
+        });
+
+        // Once an edit removed the block, no current revision holds it: the read fails, naming it.
+        const removed = () => notFound(`no block "b2" in comment ${comment}`);
+        await expect(readBlock(block, removed, removed).result).rejects.toThrow(
+          new Error(`No block b2 in dispatch://DSP-1/comment/${comment}.`)
+        );
+      });
+
+      test("a pinned comment block prints the revision its text last changed in and how it stands against its pin", async () => {
         const pinned = `${commentRef}#b-b2@v1`;
         const { result } = readBlock(
           pinned,
@@ -5349,10 +5388,7 @@ describe("executeDispatchTool", () => {
 
         expect(await result).toEqual({
           text: [
-            "Block: b2",
-            `Comment: ${commentRef}`,
-            "Changed in revision: 2",
-            "Text:",
+            `Block b2 of comment ${comment} (changed in revision 2):`,
             "Beta, as edited.",
             "Pinned to revision: 1",
             "Changed since revision 1; last changed in revision 2.",
@@ -5368,13 +5404,11 @@ describe("executeDispatchTool", () => {
         });
       });
 
-      test("a message block prints its message, and its page's link is the same block", async () => {
+      test("a message block prints its message and its text", async () => {
         const block = `${messageRef}#b-b1`;
         const node = { ...messageBlock, text: "The first paragraph." };
         const expected = [
-          "Block: b1",
-          `Message: ${messageRef}`,
-          "Text:",
+          `Block b1 of message ${message}:`,
           "The first paragraph.",
           ...sections,
         ].join("\n");
@@ -5701,7 +5735,11 @@ describe("executeDispatchTool", () => {
         "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
         "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
         "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
-        "dispatch read), or " +
+        "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+        "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
+        "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
+        "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
+        "read), or " +
         "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
         "for dispatch doc-read)"
     );

@@ -31,6 +31,7 @@ import {
   type EditCommentInput,
   IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
+  type ItemBlocks,
   type Message,
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
@@ -952,6 +953,45 @@ test("keeps document read tokens optional for older Dispatch servers", () => {
 
   expect(block.token).toBeUndefined();
   expect(text.token).toBeUndefined();
+});
+
+test("models a comment's and a direct message's blocks", () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const commentBlocks: ItemBlocks = {
+    item: {
+      kind: "comment",
+      id: comment,
+      issue_key: "CORE-1",
+      ref: `dispatch://CORE-1/comment/${comment}`,
+    },
+    revision: 2,
+    indexed: true,
+    blocks: [
+      {
+        id: "b1",
+        type: "paragraph",
+        text: "Alpha 😀.",
+        ref: `dispatch://CORE-1/comment/${comment}#b-b1`,
+        from: 0,
+        to: "Alpha 😀.".length,
+        changed_revision: 1,
+        changed_at: "2026-10-28T00:00:00Z",
+      },
+    ],
+  };
+  // A direct message has no address and no revision; neither has any of its blocks.
+  const directBlocks: ItemBlocks = {
+    item: { kind: "message", id: "33333333-3333-4333-8333-333333333333" },
+    indexed: true,
+    blocks: [{ id: "b1", type: "paragraph", text: "Where?", from: 0, to: 6 }],
+  };
+  // An item owed an index lists no block.
+  const owed: ItemBlocks = { ...commentBlocks, indexed: false, blocks: [] };
+
+  expect(commentBlocks.blocks[0]?.to).toBe(9);
+  expect(directBlocks.revision).toBeUndefined();
+  expect(directBlocks.blocks[0]?.ref).toBeUndefined();
+  expect(owed.blocks).toEqual([]);
 });
 
 test("a Kubernetes service subject renders as namespace/name, and anything else renders whole", () => {

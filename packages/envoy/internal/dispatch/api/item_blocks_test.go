@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -727,4 +728,192 @@ func TestAPinnedCommentBlockReadsItsRevision(t *testing.T) {
 	}
 	requireNotFound("the unpinned read after the deletion", blockRef, `no block \"b2\" in comment `+x.ID)
 	requireNotFound("a pin to the revision that removed it", blockRef+"@v3", `no block \"b2\" in comment `+x.ID+" at revision 3")
+}
+
+// describeItemBlocks reads a blocks route's blocks as one line: each block as
+// <id>:<type>:<from>-<to>:<changed revision>:<text>:<ref>, the changed revision 0 when absent.
+func describeItemBlocks(blocks []model.ItemBlock) string {
+	parts := make([]string, len(blocks))
+	for index, block := range blocks {
+		changed := 0
+		if block.ChangedRevision != nil {
+			changed = *block.ChangedRevision
+		}
+		parts[index] = fmt.Sprintf("%s:%s:%d-%d:%d:%s:%s", block.ID, block.Type, block.From, block.To, changed, block.Text, block.Ref)
+	}
+	return strings.Join(parts, " | ")
+}
+
+// describeRevision is a blocks route's revision for a failure message: absent, or its number.
+func describeRevision(revision *int) string {
+	if revision == nil {
+		return "absent"
+	}
+	return fmt.Sprint(*revision)
+}
+
+// The blocks routes list a comment's or message's current blocks in body order: each block's id,
+// type, whole text, reference, and where it stands in the stored body in UTF-16 code units (an
+// emoji counts two, as a JavaScript string index does); a comment's revision and each block's
+// changed revision and time, which a message has none of. An item owed an index, or indexed from
+// another body than it stores, reads indexed false with no blocks, and the read leaves it owed. A
+// message is read under GET /api/v1/messages/{id}'s rule: a session reads a direct message's
+// blocks only in a conversation it is in, and they have no reference.
+func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
+	handler, database, direct, reply, _ := directConversationFrom(t, "alice")
+	issue := createInteractionIssue(t, handler, "TEST", "Blocks routes", "before")
+	read := func(step, path string, human bool) (model.ItemBlocks, string) {
+		t.Helper()
+		var response *httptest.ResponseRecorder
+		if human {
+			response = dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+		} else {
+			response = bearerRequest(t, handler, http.MethodGet, path, nil)
+		}
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: GET %s: status=%d body=%s", step, path, response.Code, response.Body.String())
+		}
+		return decodeBody[model.ItemBlocks](t, response), response.Body.String()
+	}
+	requireRead := func(step string, got model.ItemBlocks, kind, id string, revision *int, indexed bool, blocks string) {
+		t.Helper()
+		if got.Item.Kind != kind || got.Item.ID != id {
+			t.Fatalf("%s: item = %s %s, want %s %s", step, got.Item.Kind, got.Item.ID, kind, id)
+		}
+		if (got.Revision == nil) != (revision == nil) || (revision != nil && *got.Revision != *revision) {
+			t.Fatalf("%s: revision = %s, want %s", step, describeRevision(got.Revision), describeRevision(revision))
+		}
+		if got.Indexed != indexed || got.Blocks == nil {
+			t.Fatalf("%s: indexed = %v with blocks %v, want indexed %v and a list", step, got.Indexed, got.Blocks, indexed)
+		}
+		if described := describeItemBlocks(got.Blocks); described != blocks {
+			t.Fatalf("%s: blocks = %q, want %q", step, described, blocks)
+		}
+	}
+
+	// A comment whose first block holds an emoji: the blocks after it start two units after
+	// their character count, four bytes in the body.
+	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha 😀.\n\nBeta.\n\n- one\n- two"}, "alice")
+	commentRef := "dispatch://" + issue.Key + "/comment/" + comment.ID
+	created, _ := read("a new comment", "/api/v1/comments/"+comment.ID+"/blocks", true)
+	requireRead("a new comment", created, "comment", comment.ID, new(1), true,
+		"b1:paragraph:0-9:1:Alpha 😀.:"+commentRef+"#b-b1 | b2:paragraph:11-16:1:Beta.:"+commentRef+"#b-b2 | "+
+			"b3:bullet_list:18-29:1:- one\n- two:"+commentRef+"#b-b3")
+	if created.Item.Ref != commentRef || created.Item.Parent == nil || created.Item.Parent.ID != issue.Key {
+		t.Fatalf("a new comment: item = %#v, want the comment's node under its issue", created.Item)
+	}
+	for _, block := range created.Blocks {
+		if block.ChangedAt == nil || !block.ChangedAt.Equal(comment.CreatedAt) {
+			t.Fatalf("a new comment: %s changed at %v, want the comment's created_at %v", block.ID, block.ChangedAt, comment.CreatedAt)
+		}
+	}
+	// A bearer reads a comment as GET /api/v1/comments/{id} lets it.
+	bearer, _ := read("a bearer", "/api/v1/comments/"+comment.ID+"/blocks", false)
+	requireRead("a bearer", bearer, "comment", comment.ID, new(1), true, describeItemBlocks(created.Blocks))
+
+	// An edit that rewords b2 moves its changed revision and time; the others keep theirs.
+	requireEdit(t, "reword", editCommentAs(t, handler, comment.ID, "Alpha 😀.\n\nBeta, reworded.\n\n- one\n- two", nil, nil))
+	edited, _ := read("after an edit", "/api/v1/comments/"+comment.ID+"/blocks", true)
+	requireRead("after an edit", edited, "comment", comment.ID, new(2), true,
+		"b1:paragraph:0-9:1:Alpha 😀.:"+commentRef+"#b-b1 | b2:paragraph:11-26:2:Beta, reworded.:"+commentRef+"#b-b2 | "+
+			"b3:bullet_list:28-39:1:- one\n- two:"+commentRef+"#b-b3")
+	var editedAt time.Time
+	if err := database.Pool.QueryRow(context.Background(), `select edited_at from comments where id = $1`, comment.ID).Scan(&editedAt); err != nil {
+		t.Fatalf("read the comment's edited_at: %v", err)
+	}
+	if at := edited.Blocks[1].ChangedAt; at == nil || !at.Equal(editedAt) || !edited.Blocks[0].ChangedAt.Equal(comment.CreatedAt) {
+		t.Fatalf("after an edit: b2 changed at %v and b1 at %v, want the edit's %v and the comment's %v", at, edited.Blocks[0].ChangedAt, editedAt, comment.CreatedAt)
+	}
+
+	// A suggestion stored with no rationale has a first revision and no block.
+	suggestion := createThreadComment(t, handler, issue.Key, map[string]any{"body": "", "suggestion": map[string]string{"replace_with": "after"}}, "alice")
+	empty, _ := read("an empty suggestion", "/api/v1/comments/"+suggestion.ID+"/blocks", true)
+	requireRead("an empty suggestion", empty, "comment", suggestion.ID, new(1), true, "")
+
+	if malformed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/7430fab3/blocks", nil, "alice"); malformed.Code != http.StatusBadRequest ||
+		!strings.Contains(malformed.Body.String(), `"code":"COMMENT_ID_INPUT"`) {
+		t.Fatalf("a non-uuid comment id: status=%d body=%s, want 400 COMMENT_ID_INPUT", malformed.Code, malformed.Body.String())
+	}
+	if missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/5a660655-04ad-4ce0-8a9b-93dd03c412b7/blocks", nil, "alice"); missing.Code != http.StatusNotFound {
+		t.Fatalf("a missing comment: status=%d body=%s, want 404", missing.Code, missing.Body.String())
+	}
+
+	// An item owed an index, as an older build's write leaves it, or whose index was made from
+	// another body, reads as not indexed; the read writes nothing, so it stays owed.
+	stillOwed := func(step, table, column, id string) {
+		t.Helper()
+		var owed bool
+		if err := database.Pool.QueryRow(context.Background(),
+			`select owed_at is not null from `+table+` where `+column+` = $1`, id).Scan(&owed); err != nil || !owed {
+			t.Fatalf("%s: owed after the read = %v (%v), want still owed", step, owed, err)
+		}
+	}
+	if _, err := database.Pool.Exec(context.Background(), `update comment_block_state set owed_at = now() where comment_id = $1`, comment.ID); err != nil {
+		t.Fatalf("owe the comment an index: %v", err)
+	}
+	owed, _ := read("an owed comment", "/api/v1/comments/"+comment.ID+"/blocks", true)
+	requireRead("an owed comment", owed, "comment", comment.ID, new(2), false, "")
+	stillOwed("an owed comment", "comment_block_state", "comment_id", comment.ID)
+	if _, err := database.Pool.Exec(context.Background(),
+		`update comment_block_state set owed_at = null, body_sha256 = $2 where comment_id = $1`, comment.ID, refs.BodySHA256("another body")); err != nil {
+		t.Fatalf("index the comment from another body: %v", err)
+	}
+	stale, _ := read("a comment indexed from another body", "/api/v1/comments/"+comment.ID+"/blocks", true)
+	requireRead("a comment indexed from another body", stale, "comment", comment.ID, new(2), false, "")
+
+	// An issue message: its blocks have references and no revision; nor has the message.
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "One 😀.\n\nTwo."}, "alice")
+	messageRef := "dispatch://" + issue.Key + "/message/" + message.ID
+	onIssue, raw := read("an issue message", "/api/v1/messages/"+message.ID+"/blocks", false)
+	requireRead("an issue message", onIssue, "message", message.ID, nil, true,
+		"b1:paragraph:0-7:0:One 😀.:"+messageRef+"#b-b1 | b2:paragraph:9-13:0:Two.:"+messageRef+"#b-b2")
+	var fields struct {
+		Revision json.RawMessage              `json:"revision"`
+		Blocks   []map[string]json.RawMessage `json:"blocks"`
+	}
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		t.Fatalf("an issue message: decode %s: %v", raw, err)
+	}
+	if fields.Revision != nil || len(fields.Blocks) != 2 {
+		t.Fatalf("an issue message: %s, want two blocks and no revision", raw)
+	}
+	for _, block := range fields.Blocks {
+		if _, changed := block["changed_revision"]; changed || block["changed_at"] != nil {
+			t.Fatalf("an issue message: %s, want no block's changed revision or time", raw)
+		}
+	}
+
+	// A direct message is read as its conversation is: a human reads it, a bearer as a session
+	// in it, never as another session. Its blocks have no reference.
+	directBlocks := "/api/v1/messages/" + direct.ID + "/blocks"
+	const directLayout = "b1:paragraph:0-23:0:Where is the dashboard?:"
+	human, raw := read("a human reading a direct message", directBlocks, true)
+	requireRead("a human reading a direct message", human, "message", direct.ID, nil, true, directLayout)
+	if strings.Contains(raw, `"ref"`) {
+		t.Fatalf("a direct message: %s, want no reference anywhere", raw)
+	}
+	inIt, _ := read("its session", directBlocks+"?session=s1", false)
+	requireRead("its session", inIt, "message", direct.ID, nil, true, directLayout)
+	if response := reply("On it."); response.Code != http.StatusCreated {
+		t.Fatalf("s1's reply: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if other := bearerRequest(t, handler, http.MethodGet, directBlocks+"?session=s2", nil); other.Code != http.StatusForbidden ||
+		!strings.Contains(other.Body.String(), `"code":"THREAD_FORBIDDEN"`) || strings.Contains(other.Body.String(), "dashboard") {
+		t.Fatalf("another session: status=%d body=%s, want 403 THREAD_FORBIDDEN with no text", other.Code, other.Body.String())
+	}
+	if unnamed := bearerRequest(t, handler, http.MethodGet, directBlocks, nil); unnamed.Code != http.StatusBadRequest ||
+		!strings.Contains(unnamed.Body.String(), `"code":"SESSION_REQUIRED"`) {
+		t.Fatalf("a bearer naming no session: status=%d body=%s, want 400 SESSION_REQUIRED", unnamed.Code, unnamed.Body.String())
+	}
+	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab3/blocks?session=s1", nil); malformed.Code != http.StatusBadRequest ||
+		!strings.Contains(malformed.Body.String(), `"code":"MESSAGE_ID_INPUT"`) {
+		t.Fatalf("a non-uuid message id: status=%d body=%s, want 400 MESSAGE_ID_INPUT", malformed.Code, malformed.Body.String())
+	}
+
+	if _, err := database.Pool.Exec(context.Background(), `update message_block_state set owed_at = now() where message_id = $1`, message.ID); err != nil {
+		t.Fatalf("owe the message an index: %v", err)
+	}
+	owedMessage, _ := read("an owed message", "/api/v1/messages/"+message.ID+"/blocks", true)
+	requireRead("an owed message", owedMessage, "message", message.ID, nil, false, "")
+	stillOwed("an owed message", "message_block_state", "message_id", message.ID)
 }

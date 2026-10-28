@@ -1178,7 +1178,11 @@ const refGrammarProblem =
   "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
   "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
   "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
-  "dispatch read), or " +
+  "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+  "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
+  "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
+  "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
+  "read), or " +
   "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
   "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 
@@ -2116,22 +2120,31 @@ function nodeLine(node: GraphNode): string[] {
 }
 
 /**
- * A block read's head, from the node its reference names: the block, the document it is in (or,
- * for a block of a comment or message, that item in its place; `holder` is the reference before
- * the `#b-`), the version or comment revision its text last changed in and that text (a block no
- * current version or revision holds has neither), then for a pinned ref how the block stands
- * against the version or revision it pins and its text there.
+ * A block read's head, from the node its reference names. A document's block: the block, the
+ * document it is in (`holder` is the reference before the `#b-`), the version its text last
+ * changed in and that text. A comment's or message's block: one line naming the block, its item
+ * and the comment revision its text last changed in (`Block b2 of comment <id> (changed in
+ * revision 1):`), then its text. A block no current version or revision holds has neither a
+ * changed version nor text. Then for a pinned ref how the block stands against the version or
+ * revision it pins and its text there.
  */
 function blockLines(node: GraphNode, ref: ParsedDispatchRef, holder: string): string[] {
   const unit = ref.item === undefined ? "version" : "revision";
-  const head = [
-    `Block: ${node.block_id ?? ref.block}`,
+  const blockID = node.block_id ?? ref.block;
+  const head =
     ref.item === undefined
-      ? `Document: ${node.document ?? holder}`
-      : `${ref.item.kind === "comment" ? "Comment" : "Message"}: ${node.parent?.ref ?? holder}`,
-    ...(node.changed_version === undefined ? [] : [`Changed in ${unit}: ${node.changed_version}`]),
-    ...(node.text === undefined ? [] : ["Text:", node.text]),
-  ];
+      ? [
+          `Block: ${blockID}`,
+          `Document: ${node.document ?? holder}`,
+          ...(node.changed_version === undefined
+            ? []
+            : [`Changed in version: ${node.changed_version}`]),
+          ...(node.text === undefined ? [] : ["Text:", node.text]),
+        ]
+      : [
+          `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+          ...(node.text === undefined ? [] : [node.text]),
+        ];
   const { pin } = node;
   if (pin === undefined) return head;
   const state =

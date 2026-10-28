@@ -1149,6 +1149,35 @@ type ReplyBlock struct {
 	Removed bool   `json:"removed"`
 }
 
+// ItemBlocks is the answer of GET /api/v1/comments/{id}/blocks and GET
+// /api/v1/messages/{id}/blocks: the comment or message as a graph node, the comment's revision (a
+// message, which is never edited, has none), whether its blocks are indexed from the body it
+// stores, and its current blocks in body order. While the item is owed an index, or its index was
+// made from another body than the stored one, Indexed is false and Blocks is empty: a read writes
+// nothing, and the dashboard's editor then edits the comment without carrying block ids.
+type ItemBlocks struct {
+	Item     GraphNode   `json:"item"`
+	Revision *int        `json:"revision,omitempty"`
+	Indexed  bool        `json:"indexed"`
+	Blocks   []ItemBlock `json:"blocks"`
+}
+
+// ItemBlock is one current block of a comment or message: its id, its Proof type, its whole text as
+// its author wrote it, its reference (none for a block of a direct message, which has no address),
+// and From and To, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
+// string index). A comment block also carries the revision its text last changed in and that
+// revision's time; a message block has neither.
+type ItemBlock struct {
+	ID              string     `json:"id"`
+	Type            string     `json:"type"`
+	Text            string     `json:"text"`
+	Ref             string     `json:"ref,omitempty"`
+	From            int        `json:"from"`
+	To              int        `json:"to"`
+	ChangedRevision *int       `json:"changed_revision,omitempty"`
+	ChangedAt       *time.Time `json:"changed_at,omitempty"`
+}
+
 // Suggestion carries a proposed document replacement and its resolution.
 type Suggestion struct {
 	ReplaceWith string `json:"replace_with"`
