@@ -2,35 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T21:44:11Z",
-  "round": 9,
-  "headSha": "5e1477d1e8438a733b4d7199ed500f21f2b2d072",
+  "completed": "2026-10-28T23:08:25Z",
+  "round": 10,
+  "headSha": "73d363c5dd413f89fea18c05c0bd70d9329625db",
   "implementerProof": {
     "verdict": "verified",
-    "how": "My red test TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply is byte-identical in the tree and passes at 5e1477d1. I followed each refusal's own steps with the real dispatch CLI. Re-ran the browser specs: 17 passed in chromium and iphone."
+    "how": "Followed every refusal with the real dispatch CLI on decisions real editors broke, using the ids parsed from the refusal text. Re-ran its refusal tests (4 pass) and the browser specs (17 passed, chromium and iphone) at 73d363c5. My round 2 and round 8 red tests were removed or replaced under the architect's design change (the route no longer rebuilds a broken decision), as the implement handoff records."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Every step each ask-edit refusal names applies when followed, ending in a valid decision with every word the agent did not delete (the architect's rule, round 8)",
-      "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI (packages/envoy-client/bin/dispatch.ts) against the real Go server and Postgres 17; decisions broken by two real editors in headless Chromium",
-      "command": "Throwaway Playwright probes N1, N3 and P9: edit-ask; then doc-edit with the ops parsed from the refusal text (or the move it names); then edit-ask again. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6481424828",
-      "observed": "N1: the refusal quotes 'the list block \"<id>\", which reads \"- Option B\\n\\n  - only if finance agrees\"' with ops '[{\"op\":\"delete\",\"block\":\"<id>\"}]'. The doc-edit with those ops applies and the decision becomes valid. edit-ask [Option A, 'Option B: only if finance agrees'] then stores '- Option A\\n- Option B: only if finance agrees'; both pages unmarked. N3: the refusal names both lists in full with both deletes; they apply, and edit-ask stores '- Option A: needs legal\\n- Option B: only if finance agrees'. P9: doc-edit move after block:a1 applies, then edit-ask applies.",
-      "headSha": "5e1477d1e8438a733b4d7199ed500f21f2b2d072",
-      "negativeControl": "The first edit-ask on each broken decision exits 1 and writes nothing"
-    },
-    {
-      "criterion": "Round 8 red test: the new-option content refusal names steps that apply",
-      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run 'TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply|TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds' -v",
-      "observed": "Both tests pass, nested_list and second_paragraph included",
-      "headSha": "5e1477d1e8438a733b4d7199ed500f21f2b2d072",
-      "negativeControl": "At 4c243317, in a scratch copy, the same test failed at the quote check on both subtests: 'the refusal does not quote \"Defer\"'"
+      "criterion": "Architect's design change: every ask edit of a broken decision is refused, quoting every block with its id as data; following the named path (doc-edit deleting blocks by id, then edit-ask) ends valid with every word the agent did not delete",
+      "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI against the real Go server and Postgres 17; decisions broken by two or three real editors in headless Chromium",
+      "command": "Throwaway Playwright probes W1-W5: edit-ask --urgency high; doc-edit deleting block ids parsed from the refusal; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6483048479",
+      "observed": "Each refusal exits 1, quoting every block as 'block \"<id>\" (<type>) reads \"<markdown>\"', with no shell command or --ops-json. Two lists: delete the 2nd list, then edit-ask → '- Option A\\n- Option B'. Three lists: both extra lists deleted in one doc-edit, then edit-ask → '- Option A\\n- Option B\\n- Option C'. Repeated label, with 'Option C' in the duplicate's list: that list is quoted whole and deleted, then edit-ask [Option A: cheap, Option A2: fast, Option C] → every word kept. Paragraph after the list: delete it, then edit-ask → valid. Nested sub-item: the list is quoted whole and deleted, then edit-ask 'Option B: only if finance agrees' → every word kept. In every final state the pages are unmarked and the row equals the options sent.",
+      "headSha": "73d363c5dd413f89fea18c05c0bd70d9329625db",
+      "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged"
     }
   ],
-  "ci": "Read on GitHub at 5e1477d1 during testing: build x2, changes, lint, pr-title, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
+  "findings": [
+    {
+      "severity": "minor (wording; a path exists)",
+      "description": "The refusal says 'delete the block or blocks to drop with a document edit … until it holds its question and at most one list'. With three lists, deleting one list per doc-edit, as 'until' suggests, is refused with only the content-rule text, because doc-edit refuses an edit that leaves the decision broken. Deleting both extra lists in one doc-edit applies. Sent to the architect; not counted as a failure, because the named step ('with a document edit', the blocks to drop) applies when the deletes go in one edit."
+    }
+  ],
+  "ci": "Read on GitHub at 73d363c5 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
   "notes": [
+    "The merge of main (635805f8) carries main's one-line pmdoc import fix (docstest → crafted), as the controller described.",
     "Throwaway probe specs were moved out of the workspace. The working copy holds only this handoff."
   ]
 }
