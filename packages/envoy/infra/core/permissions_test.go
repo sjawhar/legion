@@ -13,13 +13,15 @@ import (
 
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
 // Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
-// every exception lane and any ad-hoc topic), the stream and its durable, then each bucket in turn,
-// then the interest bucket's purge.
+// every exception lane and any ad-hoc topic), the stream (its stored-message get the read
+// /v1/replay makes) and its durable, then each bucket in turn, then the interest bucket's purge.
+// TestSessionPermissions's exact list holds none of it: no session gets the replay read.
 var listenerPublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS",
+	"$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS",
 	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host-a.>",

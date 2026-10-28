@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -30,14 +31,17 @@ import (
 // settings.repo_project.updated, each repository served once both GitHub Apps are installed on it
 // and every other one left out with the reason, for legion state. The mapping also files people's
 // issues, so it can name a repository that lacks one of Legion's Apps; leaving it out costs only its
-// issues' admission. Readers take the read lock; the readers of the mapping swap it whole under the
-// write lock.
+// issues' admission. unverified is each served repository a later read of the mapping could not
+// read the installation of: it stays served on its last answer, and is read again
+// (refreshOnMappingChange). Readers take the read lock; the readers of the mapping swap it whole
+// under the write lock.
 type repositories struct {
 	project string
 
-	mu       sync.RWMutex
-	accepted map[string]mappedRepository
-	refused  map[string]refusedRepository
+	mu         sync.RWMutex
+	accepted   map[string]mappedRepository
+	refused    map[string]refusedRepository
+	unverified []string
 }
 
 // mappedRepository is a repository Legion serves, as GitHub names it, and whether it is the
@@ -48,9 +52,15 @@ type mappedRepository struct {
 }
 
 // refusedRepository is a mapped repository Legion leaves out, as Dispatch maps it, and why.
+// readErr is the first failed installation read when that alone is why (no App answered not
+// installed): GitHub gave no answer, so the refusal is for now, and refreshOnMappingChange reads
+// the mapping again until GitHub answers. mappedDefault is whether Dispatch maps it as the
+// project's default.
 type refusedRepository struct {
-	Repo   string
-	Reason string
+	Repo          string
+	Reason        string
+	readErr       error
+	mappedDefault bool
 }
 
 func newRepositories(project string) *repositories {
@@ -137,18 +147,47 @@ func (r *repositories) Refused() []refusedRepository {
 }
 
 // lookup is the served repository resolved names, in any spelling, or why Legion does not serve
-// it: left out (leftOut) with its reason, or not mapped to the project at all.
-func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut bool) {
+// it: left out (leftOut) with its reason, or not mapped to the project at all. unread is a
+// repository left out for now because its installation read failed (refusedRepository.readErr).
+func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut, unread bool) {
 	key := strings.ToLower(resolved)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if mapped, ok := r.accepted[key]; ok {
-		return mapped, "", false
+		return mapped, "", false, false
 	}
 	if refused, ok := r.refused[key]; ok {
-		return mappedRepository{}, refused.Reason, true
+		return mappedRepository{}, refused.Reason, true, refused.readErr != nil
 	}
-	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false
+	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false, false
+}
+
+// setUnverified records the served repositories the last read of the mapping kept on their last
+// answer, its installation read having failed.
+func (r *repositories) setUnverified(names []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unverified = names
+}
+
+// kept is whether repo, in any spelling, is served on its last answer (setUnverified).
+func (r *repositories) kept(repo string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return slices.ContainsFunc(r.unverified, func(name string) bool { return strings.EqualFold(name, repo) })
+}
+
+// awaitingRead is every repository a failed installation read left as it stands, by reason: each
+// left out for its failed read, and each served one kept on its last answer. While any is, the
+// mapping is read again of the daemon's own (refreshOnMappingChange).
+func (r *repositories) awaitingRead() []string {
+	waiting := refusalReasons(readFailures(r.Refused()))
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, name := range r.unverified {
+		waiting = append(waiting, name+": served on its last answer, its installation read having failed")
+	}
+	return waiting
 }
 
 // view is the mapping as the daemon's state shows it, with caches, the Kubernetes runtime's
@@ -214,17 +253,24 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 // checkMapping checks, for each repository mappings maps to project, that both GitHub Apps are
 // installed on it (installs, under each App's JWT; per repository, since an installation on an
 // owner may cover only some of its repositories). A repository an App is not installed on is
-// refused, naming the App; any read that fails is an error that fails the whole check, so nothing
-// is left out on a guess. Accepted repositories carry Dispatch's spelling until nameAccepted reads
-// GitHub's. The installation reads run at once, mappingReads at a time, so a check takes about as
-// long as its slowest read rather than the sum of them.
+// refused, naming the App. A repository whose installation read fails, and that no App GitHub
+// answered for lacks (any failure, a read longer than installReadAttempt among them), is refused
+// for now, naming the App, the repository and the failure (refusedRepository.readErr), and the
+// rest of the mapping is checked as it stands: one repository GitHub will not answer for leaves
+// out only its own issues, whose admission waits for it (prepareUnrecorded), and
+// refreshOnMappingChange reads it again until GitHub answers, so nothing is left out for good on
+// a guess. The check fails only when ctx ends. Accepted
+// repositories carry Dispatch's spelling until nameAccepted reads GitHub's. The installation
+// reads run at once, mappingReads at a time, so a check takes about as long as its slowest read
+// rather than the sum of them.
 func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
 	type mapped struct {
 		mapping dispatch.RepoProject
 		repo    ghrepo.Repository
 		parse   error
-		// installed is each App's answer, in appauth.Roles order.
+		// installed and failed are each App's answer, in appauth.Roles order.
 		installed []bool
+		failed    []error
 	}
 	var entries []mapped
 	for _, mapping := range mappings {
@@ -232,9 +278,10 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 			continue
 		}
 		repo, err := ghrepo.Parse("the repository Dispatch maps to "+project, mapping.Repo)
-		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err, installed: make([]bool, len(appauth.Roles))})
+		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err,
+			installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles))})
 	}
-	group, read := errgroup.WithContext(ctx)
+	var group errgroup.Group
 	group.SetLimit(mappingReads)
 	for _, m := range entries {
 		if m.parse != nil {
@@ -242,17 +289,16 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 		}
 		for index, role := range appauth.Roles {
 			group.Go(func() error {
-				installed, err := installs.InstalledOn(read, role, m.repo)
-				if err != nil {
-					return fmt.Errorf("check the %s App's installation on %s: %w", role, m.repo, err)
-				}
-				m.installed[index] = installed
+				read, cancel := context.WithTimeout(ctx, installReadAttempt)
+				defer cancel()
+				m.installed[index], m.failed[index] = installs.InstalledOn(read, role, m.repo)
 				return nil
 			})
 		}
 	}
-	if err := group.Wait(); err != nil {
-		return nil, nil, err
+	_ = group.Wait() // every read keeps its own failure, so none fails the group
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("check the GitHub Apps' installations: %w", err)
 	}
 	var accepted []mappedRepository
 	var refused []refusedRepository
@@ -261,24 +307,74 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue
 		}
-		var missing []string
+		var missing, unread []string
+		var readErr error
 		for index, role := range appauth.Roles {
-			if !m.installed[index] {
+			switch {
+			case m.failed[index] != nil:
+				unread = append(unread, fmt.Sprintf("the %s App's installation on %s could not be read: %v", role, m.repo, m.failed[index]))
+				if readErr == nil {
+					readErr = fmt.Errorf("check the %s App's installation on %s: %w", role, m.repo, m.failed[index])
+				}
+			case !m.installed[index]:
 				missing = append(missing, string(role))
 			}
 		}
+		var reasons []string
 		switch len(missing) {
 		case 0:
 		case 1:
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: fmt.Sprintf("the %s App is not installed on %s", missing[0], m.repo)})
-			continue
+			reasons = append(reasons, fmt.Sprintf("the %s App is not installed on %s", missing[0], m.repo))
 		default:
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), m.repo)})
+			reasons = append(reasons, fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), m.repo))
+		}
+		if len(missing) > 0 {
+			// An App GitHub answered is not installed leaves the repository out whatever the
+			// other read says: it is refused as today, and read again only on request.
+			readErr = nil
+		}
+		if len(unread) > 0 {
+			reason := strings.Join(unread, "; ")
+			if readErr != nil {
+				reason += "; Legion reads it again"
+			}
+			reasons = append(reasons, reason)
+		}
+		if len(reasons) > 0 {
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: strings.Join(reasons, "; "), readErr: readErr, mappedDefault: m.mapping.Default})
 			continue
 		}
 		accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
 	}
 	return accepted, refused, nil
+}
+
+// installReadRetry is how long refreshOnMappingChange waits before it reads the mapping again of
+// its own while a failed installation read leaves a repository as it stands (awaitingRead): 30 s
+// doubling to 10 min, without limit (Attempts is unused), back to 30 s once none is left.
+var installReadRetry = bootprobe.Retry{Initial: 30 * time.Second, Max: 10 * time.Minute}
+
+// recoveryHoldBound is how long a recovery's release waits stay untold while its listing is held
+// for the Dispatch consumer (recoverRepositories): the hold watchdog's warning interval
+// (defaultHoldWarnEvery), by which a hold that has not released is a fault worth naming.
+var recoveryHoldBound = defaultHoldWarnEvery
+
+// installReadAttempt bounds one installation read: as long as any one GitHub call the boot waits
+// for (appMintAttempt), so a GitHub that answers slowly is still answered for, while a read GitHub
+// has not answered by then is a failed read, and a repository GitHub hangs on is left out for now
+// rather than holding up the mapping. Nothing bounds the check as a whole: mappingReads reads run at
+// once, so a check of n repositories takes at most ceil(2n / mappingReads) of these.
+var installReadAttempt = 15 * time.Second
+
+// readFailures is the refusals of refused that a failed installation read made (readErr).
+func readFailures(refused []refusedRepository) []refusedRepository {
+	var failed []refusedRepository
+	for _, refusal := range refused {
+		if refusal.readErr != nil {
+			failed = append(failed, refusal)
+		}
+	}
+	return failed
 }
 
 // mappingReads is how many of a mapping read's GitHub reads run at once.
@@ -307,19 +403,22 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 	return out, nil
 }
 
-// loadMapping is the boot's read of the repository mapping, in two steps, each run again after a
-// failure its own dependency reports as its own trouble; any other failure refuses the boot.
-// Dispatch's read (listMapping) waits out an unreachable Dispatch (dispatch.Unreachable) on
-// readinessRetry, without limit, as the boot's Dispatch listing for admission does: a Dispatch
-// down for longer than any bound (no ready endpoint, every dial refused) would otherwise exit the
-// daemon into a supervisor that restarts it straight back into the same refusal, and the API does
-// not listen until the read passes, so the daemon serves nothing meanwhile. The installation check
-// (checkMapping) is run again after a failure GitHub reports as its own trouble
-// (appauth.TransientError) on the App mint's schedule. A project with no repository mapped refuses
-// the boot too. One whose every mapped repository lacks an App boots serving none, each left out
-// and reported: it admits nothing, saying why on each issue, until an App is installed and a read
-// of the mapping finds it, one the next mapping change or an issue held for it asks for
-// (requestMappingRead). nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
+// loadMapping is the boot's read of the repository mapping. Dispatch's read (listMapping) waits
+// out an unreachable Dispatch (dispatch.Unreachable) on readinessRetry, without limit, as the
+// boot's Dispatch listing for admission does: a Dispatch down for longer than any bound (no ready
+// endpoint, every dial refused) would otherwise exit the daemon into a supervisor that restarts it
+// straight back into the same refusal, and the API does not listen until the read passes, so the
+// daemon serves nothing meanwhile; any other failure of it refuses the boot. The installation
+// check (checkMapping) never refuses the boot: a repository whose read fails is left out for now
+// and read again by refreshOnMappingChange, on installReadRetry, until GitHub answers, and served
+// then with no restart. A boot whose every repository's read fails comes up serving none and logs
+// so at ERROR with the first failure, since a daemon that exits instead restarts straight into
+// GitHub's same refusal with its API and its recovery down, while one that runs heals once GitHub
+// answers. A project with no repository mapped refuses the boot. One whose every mapped
+// repository lacks an App boots serving none, each left out and reported: it admits nothing,
+// saying why on each issue, until an App is installed and a read of the mapping finds it, one the
+// next mapping change or an issue held for it asks for (requestMappingRead). nameMapping, once the
+// Apps' tokens are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var mappings []dispatch.RepoProject
 	err := bootprobe.Run(ctx, "repository mapping read", readinessRetry, w.log, readinessAttempt(func(ctx context.Context) error {
@@ -330,18 +429,21 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var accepted []mappedRepository
-	var refused []refusedRepository
-	err = bootprobe.Run(ctx, "repository installation check", appMintRetry, w.log, readinessAttempt(func(ctx context.Context) error {
-		var err error
-		accepted, refused, err = checkMapping(ctx, mappings, w.dispatchProject, w.installs)
-		return err
-	}, appMintAttempt, appTransient))
+	accepted, refused, err := checkMapping(ctx, mappings, w.dispatchProject, w.installs)
 	if err != nil {
 		return err
 	}
 	if len(accepted) == 0 && len(refused) == 0 {
 		return fmt.Errorf("project %s has no repository mapped in Dispatch (Settings → Repositories → Projects)", w.dispatchProject)
+	}
+	switch failed := readFailures(refused); {
+	case len(failed) == 0:
+	case len(accepted) == 0 && len(failed) == len(refused):
+		w.log.Error("workflow: every mapped repository's GitHub App installation read failed, so the daemon boots serving none and reads them again",
+			"repositories", len(failed), "retryIn", installReadRetry.Initial.String(), "error", failed[0].readErr)
+	default:
+		w.log.Warn("workflow: a mapped repository's GitHub App installation read failed, so the daemon boots leaving it out and reads it again",
+			"refused", refusalReasons(failed), "retryIn", installReadRetry.Initial.String())
 	}
 	w.repositories.set(accepted, refused)
 	return nil
@@ -368,7 +470,19 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 }
 
 // refreshMapping reads the repository mapping again: refreshOnMappingChange's read, which a
-// mapping change in Dispatch or an admission held for it asks for (requestMappingRead). It has
+// mapping change in Dispatch, an admission held for it (requestMappingRead) or a repository whose
+// installation read failed (installReadRetry) asks for. A repository the daemon serves whose
+// installation read fails stays served on its last answer, with the name GitHub last gave it and
+// no read of GitHub, recorded as unverified so it is read again: GitHub's failure to answer is no
+// reason to stop serving a repository it answered for, and no reason either to hold back the rest
+// of the mapping. One left out whose read fails stays left out, with the new failure. Dispatch's
+// read, and the naming and publication after the check, are each bounded by appMintAttempt; the
+// check itself is bounded per read (installReadAttempt), so a GitHub that answers slowly is
+// answered for whatever the mapping's size. Each repository the mapping as last read left out for
+// its failed read, and that this read no longer does (now served, refused for a missing App, or no
+// longer mapped), is to be recovered (recoverRepositories): an event of an issue on it applied
+// while it was unread said nothing and recorded nothing, so the issues it left are taken from
+// Dispatch's listing once. It has
 // GitHub intake hear every repository the new mapping serves and every repository a record of the
 // project names, so a repository unmapped while an issue is recorded on it is still heard, and
 // only then publishes the new mapping: a read that fails before the subscription took publishes
@@ -377,13 +491,35 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
-	accepted, refused, err := readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
+	listing, cancel := context.WithTimeout(ctx, appMintAttempt)
+	mappings, err := listMapping(listing, w.dispatch)
+	cancel()
 	if err != nil {
 		return err
 	}
+	accepted, refused, err := checkMapping(ctx, mappings, w.dispatchProject, w.installs)
+	if err != nil {
+		return err
+	}
+	var kept []mappedRepository
+	var unverified []string
+	refused = slices.DeleteFunc(refused, func(failed refusedRepository) bool {
+		mapped, refusal, _, _ := w.repositories.lookup(failed.Repo)
+		if failed.readErr == nil || refusal != "" {
+			return false
+		}
+		kept = append(kept, mappedRepository{Repo: mapped.Repo, Default: failed.mappedDefault})
+		unverified = append(unverified, mapped.Repo.String())
+		w.log.Warn("workflow: a served repository's GitHub App installation read failed, so the daemon keeps serving it on its last answer and reads it again",
+			"repo", mapped.Repo.String(), "error", failed.readErr)
+		return true
+	})
+	ctx, cancel = context.WithTimeout(ctx, appMintAttempt)
+	defer cancel()
 	if accepted, err = nameAccepted(ctx, accepted, w.defaultBranches); err != nil {
 		return err
 	}
+	accepted = append(accepted, kept...)
 	served := make([]ghrepo.Repository, 0, len(accepted))
 	for _, mapped := range accepted {
 		served = append(served, mapped.Repo)
@@ -406,7 +542,10 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		if err := w.consumers.SetRepositories(ctx, heard); err != nil {
 			return err
 		}
+		before := readFailures(w.repositories.Refused())
 		added, removed = w.repositories.set(accepted, refused)
+		w.repositories.setUnverified(unverified)
+		w.markRecovered(before, readFailures(w.repositories.Refused()))
 		return nil
 	}); err != nil {
 		return err
@@ -438,40 +577,359 @@ func (w *workflowRuntime) requestMappingRead() uint64 {
 	return request
 }
 
-// refreshOnMappingChange reads the mapping (refreshMapping) on each request, until ctx ends. Each
-// attempt is bounded by appMintAttempt, and a failed one is logged and tried again on the App
-// mint's backoff, with no limit, until it applies: a read takes the whole mapping, so retrying
-// loses no request, and a daemon stopped before one applies reads the mapping at boot. A finished
-// read covers every request made before it started.
+// refreshOnMappingChange reads the mapping (refreshMapping, which bounds each of its own parts) on
+// each request, until ctx ends. A failed read is logged and tried again on the App mint's backoff,
+// with no limit, until it applies: a read takes the whole mapping, so retrying loses no request,
+// and a daemon stopped before one applies reads the mapping at boot. A finished read covers every
+// request made before it started, and then recovers each repository the read stopped leaving out
+// for a failed installation read (recoverRepositories). While a failed installation read leaves a
+// repository as it stands (awaitingRead: left out for now, or served on its last answer), or a
+// recovery has not committed yet, it reads the mapping again of its own on installReadRetry's
+// backoff, 30 s doubling to 10 min, reset once nothing waits, so the repository is served, or
+// confirmed, and its issues recovered, once GitHub answers, with no restart and no mapping change.
+// While a held recovery has release waits to tell and time left to recoveryHoldBound
+// (recoveryHoldLeft), the next wait is cut to that time, so the bound is checked when it falls, not
+// up to a backoff later; such a cut wait does not move the backoff on. Once the bound has passed,
+// a run that did not tell the waits (its listing or its notice failed) waits the backoff as any
+// failed read does, so a failure past the bound never turns the refresher into a busy loop.
 func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
+	after := w.recheckAfter
+	if after == nil {
+		after = time.After
+	}
+	recheckIn := installReadRetry.Initial
 	for {
+		var recheck <-chan time.Time
+		waiting := append(w.repositories.awaitingRead(), w.recoveringReasons()...)
+		wait, cut := recheckIn, false
+		if len(waiting) == 0 {
+			recheckIn = installReadRetry.Initial
+		} else {
+			if left, held := w.recoveryHoldLeft(); held && left > 0 && left < wait {
+				wait, cut = left, true
+			}
+			recheck = after(wait)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-w.mappingChanged:
+		case <-recheck:
+			w.log.Info("workflow: reading the repository mapping again for what a failed installation read left as it stands",
+				"waiting", waiting, "waited", wait.String())
+			if !cut {
+				recheckIn = min(2*recheckIn, installReadRetry.Max)
+			}
 		}
-		wait := appMintRetry.Initial
+		retry := appMintRetry.Initial
 		for {
 			covers := w.mappingRequested.Load()
-			attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-			err := w.refreshMapping(attempt)
-			cancel()
+			err := w.refreshMapping(ctx)
 			if err == nil {
 				w.mappingApplied.Store(covers)
+				w.recoverRepositories(ctx)
 				break
 			}
 			if ctx.Err() != nil {
 				return
 			}
-			w.log.Warn("workflow: the repository mapping read failed, so the daemon serves the mapping it last read; reading it again", "retryIn", wait.String(), "error", err)
+			w.log.Warn("workflow: the repository mapping read failed, so the daemon serves the mapping it last read; reading it again", "retryIn", retry.String(), "error", err)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(wait):
+			case <-time.After(retry):
 			}
-			wait = min(2*wait, appMintRetry.Max)
+			retry = min(2*retry, appMintRetry.Max)
 		}
 	}
+}
+
+// markRecovered adds to the repositories to recover (recovering) each repository before names, a
+// refusal for a failed installation read in the mapping as last read, that after, the same of the
+// mapping just published, does not name: GitHub answered for it, or it is no longer mapped. A
+// repository after names is dropped from the set: it is unread again, and the read that next stops
+// leaving it out adds it back. It runs under the fact lock, with the publication, so every event
+// applied after it sees the new mapping, and every one applied before it is in the listing the
+// recovery reads afterwards.
+func (w *workflowRuntime) markRecovered(before, after []refusedRepository) {
+	unread := make(map[string]bool, len(after))
+	for _, refusal := range after {
+		unread[strings.ToLower(refusal.Repo)] = true
+	}
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	for repo := range w.recovering {
+		if unread[repo] {
+			delete(w.recovering, repo)
+			// The repository left the recovery: a later one is held on a clock of its own.
+			w.recoveryHeldSince = time.Time{}
+		}
+	}
+	for _, refusal := range before {
+		repo := strings.ToLower(refusal.Repo)
+		if unread[repo] {
+			continue
+		}
+		if w.recovering == nil {
+			w.recovering = map[string]bool{}
+		}
+		w.recovering[repo] = true
+	}
+}
+
+// recoveryHoldLeft is the time left to recoveryHoldBound for a recovery whose listing is held with
+// release waits to tell, zero once the bound has passed, and whether one is.
+func (w *workflowRuntime) recoveryHoldLeft() (time.Duration, bool) {
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	if w.recoveryHeldSince.IsZero() {
+		return 0, false
+	}
+	waits := false
+	for repo := range w.recovering {
+		waits = waits || len(w.releaseWaits[repo]) != 0
+	}
+	if !waits {
+		return 0, false
+	}
+	return max(0, recoveryHoldBound-time.Since(w.recoveryHeldSince)), true
+}
+
+// recoveringReasons is every repository still to recover, as the refresher logs what it waits on.
+func (w *workflowRuntime) recoveringReasons() []string {
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	reasons := make([]string, 0, len(w.recovering))
+	for repo := range w.recovering {
+		reasons = append(reasons, repo+": its issues are to be recovered from Dispatch's listing")
+	}
+	slices.Sort(reasons)
+	return reasons
+}
+
+// recoverRepositories recovers the repositories markRecovered named, after a read of the mapping
+// that published them as no longer unread: one read of Dispatch's project listing, applied as the
+// boot's reconcile applies it (reconcileListing), scoped to the issues the workflow does not record
+// that resolve to one of them, whose parent chain in the listing reaches one that does (a child on
+// a served repository under a parent that was unread), or whose apply said nothing while one of
+// them was unread (noteUnread: an issue that took its repository from a parent, or from the
+// project's default, changed meanwhile). Those are what an event applied while the repository was
+// unread left: it said nothing and recorded nothing. A recorded issue is left out: its own events
+// carried it, and a snapshot with no actor applied mid-run could overwrite a session's write. Each
+// issue then ends where its event would have ended had the repository been served: a labelled
+// root admitted or queued, a child of a live tree recorded under it (parents first), and a
+// person's issue left as it is. A listing the consumer may still be behind is held as the boot's
+// is (admission's pending), and released by pollHoldRelease. Then each tree's architect is told,
+// once, of every child its release_children left unrecorded on one of them that is still
+// unrecorded (tellReleaseWaits). While the listing stays held, that telling waits, but for
+// recoveryHoldBound at most: a hold that outlasts it (the consumer stuck below the stream's last
+// position, an event that fails at every delivery, say) is told the waits still unrecorded then,
+// once, and the full recovery still runs when the hold releases. The clock starts when a run first
+// finds the listing held with waits to tell, and runs on across holds released and made again,
+// so a hold that flaps is told at the bound all the same; it stops when the recovery commits or a
+// repository leaves the recovery (markRecovered). The repositories are let go once
+// both commit; a failed one stays to recover, tried again on the refresher's backoff. A restart
+// loses the set, and the boot's reconcile is that recovery; what a release left waiting is told to
+// no one then.
+func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
+	w.recoveringMu.Lock()
+	repos := maps.Clone(w.recovering)
+	silenced := map[string]bool{}
+	waits := map[string]releaseWait{}
+	for repo := range repos {
+		maps.Copy(silenced, w.silenced[repo])
+		maps.Copy(waits, w.releaseWaits[repo])
+	}
+	w.recoveringMu.Unlock()
+	if len(repos) == 0 {
+		return
+	}
+	names := slices.Sorted(maps.Keys(repos))
+	attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
+	defer cancel()
+	issues, err := w.dispatch.ListIssues(attempt, w.dispatchProject, nil)
+	if err == nil {
+		err = w.reconcileListing(attempt, issues, recoveredOn(repos, silenced, issues), false)
+	}
+	if err == nil && len(waits) != 0 && w.admission != nil && w.admission.Held() {
+		// The listing waits on the consumer (admission's pending), so a child it records is not
+		// recorded yet: the waits are told once it is released, or once the hold has lasted
+		// recoveryHoldBound, whichever comes first.
+		w.recoveringMu.Lock()
+		if w.recoveryHeldSince.IsZero() {
+			w.recoveryHeldSince = time.Now()
+		}
+		bounded := time.Since(w.recoveryHeldSince) >= recoveryHoldBound
+		w.recoveringMu.Unlock()
+		if !bounded {
+			w.log.Info("workflow: the recovery's listing waits on the Dispatch consumer; its release waits are told once it is released", "repositories", names)
+			return
+		}
+		if err := w.tellReleaseWaits(attempt, names, waits); err != nil {
+			w.log.Warn("workflow: the release waits of a recovery held past its bound were not told; telling them again", "repositories", names, "error", err)
+			return
+		}
+		w.log.Warn("workflow: the recovery's listing has waited on the Dispatch consumer past its bound, so its release waits still unrecorded are told now",
+			"repositories", names, "bound", recoveryHoldBound.String())
+		w.recoveringMu.Lock()
+		for _, repo := range names {
+			for key := range waits {
+				delete(w.releaseWaits[repo], key)
+			}
+		}
+		w.recoveringMu.Unlock()
+		return
+	}
+	if err == nil {
+		err = w.tellReleaseWaits(attempt, names, waits)
+	}
+	if err != nil {
+		w.log.Warn("workflow: the issues of the repositories GitHub answered for again were not recovered from Dispatch's listing; recovering them again",
+			"repositories", names, "error", err)
+		return
+	}
+	w.recoveringMu.Lock()
+	w.recoveryHeldSince = time.Time{}
+	for _, repo := range names {
+		delete(w.recovering, repo)
+		for key := range silenced {
+			delete(w.silenced[repo], key)
+		}
+		for key := range waits {
+			delete(w.releaseWaits[repo], key)
+		}
+	}
+	w.recoveringMu.Unlock()
+	w.log.Info("workflow: recovered the issues of the repositories GitHub answered for again", "repositories", names)
+}
+
+// releaseWait is a child release_children left unrecorded while a repository was unread
+// (awaitRecovery): the tree it was released in, and its Dispatch parent.
+type releaseWait struct {
+	tree, parent string
+}
+
+// noteUnread is the workflow's Config.NoteUnread: key's apply said nothing because resolved was
+// unread. It is called inside the apply's transaction, so it is noted before any read of the
+// mapping can publish resolved again, under the fact lock, and so before that recovery's scope is
+// read. A rolled-back apply leaves a note that only takes an unrecorded issue into the scope.
+func (w *workflowRuntime) noteUnread(key, resolved string) {
+	repo := strings.ToLower(resolved)
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	if w.silenced == nil {
+		w.silenced = map[string]map[string]bool{}
+	}
+	if w.silenced[repo] == nil {
+		w.silenced[repo] = map[string]bool{}
+	}
+	w.silenced[repo][key] = true
+}
+
+// awaitRecovery is api.Options.AwaitRecovery: child, released in tree under parent, is left
+// unrecorded while repo is unread, and the recovery of repo tells tree's architect if it is still
+// unrecorded then.
+func (w *workflowRuntime) awaitRecovery(repo, tree, child, parent string) {
+	repo = strings.ToLower(repo)
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	if w.releaseWaits == nil {
+		w.releaseWaits = map[string]map[string]releaseWait{}
+	}
+	if w.releaseWaits[repo] == nil {
+		w.releaseWaits[repo] = map[string]releaseWait{}
+	}
+	w.releaseWaits[repo][child] = releaseWait{tree: tree, parent: parent}
+}
+
+// tellReleaseWaits tells each tree's architect, in one child-release-stalled notice, which of waits
+// the recovery of repos left unrecorded, each with whether its parent is recorded now: what to
+// release again. A child recorded since is told nothing; its record's own notices carry it.
+func (w *workflowRuntime) tellReleaseWaits(ctx context.Context, repos []string, waits map[string]releaseWait) error {
+	if len(waits) == 0 {
+		return nil
+	}
+	byTree := map[string][]string{}
+	for _, child := range slices.Sorted(maps.Keys(waits)) {
+		wait := waits[child]
+		recorded, err := w.recordOf(ctx, child)
+		if err != nil {
+			return err
+		}
+		if recorded != nil {
+			continue
+		}
+		parent, err := w.recordOf(ctx, wait.parent)
+		if err != nil {
+			return err
+		}
+		line := fmt.Sprintf("%s (its parent %s is recorded now: release %s again)", child, wait.parent, child)
+		if parent == nil {
+			line = fmt.Sprintf("%s (its parent %s is not recorded: release %s first, then %s)", child, wait.parent, wait.parent, child)
+		}
+		byTree[wait.tree] = append(byTree[wait.tree], line)
+	}
+	if len(byTree) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		for _, tree := range slices.Sorted(maps.Keys(byTree)) {
+			row, err := record.NewOutboxRow(tree, record.Notice{Kind: "child-release-stalled", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
+				"GitHub answered %s's App installation read again, and the daemon recovered its issues from Dispatch's listing, but these children your release_children released while it was unread are still not recorded: %s",
+				strings.Join(repos, ", "), strings.Join(byTree[tree], "; "))}, now)
+			if err != nil {
+				return err
+			}
+			if err := w.records.Enqueue(scoped, tx, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("tell the architects of the children the recovery left unrecorded: %w", err)
+	}
+	committed()
+	return nil
+}
+
+// recoveredOn is recoverRepositories' scope over listing: an issue records does not hold whose
+// repository repos names (lowercased), one of whose ancestors in listing resolves to one, or one
+// silenced names.
+func recoveredOn(repos, silenced map[string]bool, listing []dispatch.IssueSummary) func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool {
+	byKey := make(map[string]dispatch.IssueSummary, len(listing))
+	for _, summary := range listing {
+		byKey[summary.Key] = summary
+	}
+	return func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool {
+		if records[summary.Key] != nil {
+			return false
+		}
+		if silenced[summary.Key] || repos[strings.ToLower(summary.ResolvedRepo)] {
+			return true
+		}
+		seen := map[string]bool{summary.Key: true}
+		for parent := parentKey(summary.Parent); parent != "" && !seen[parent]; {
+			above, listed := byKey[parent]
+			if !listed {
+				return false
+			}
+			if silenced[parent] || repos[strings.ToLower(above.ResolvedRepo)] {
+				return true
+			}
+			seen[parent] = true
+			parent = parentKey(above.Parent)
+		}
+		return false
+	}
+}
+
+// repositoryUnread is whether resolved is left out for now because its installation read failed:
+// release_children's answer for a child whose apply recorded nothing (api.Options.RepositoryUnread).
+func (w *workflowRuntime) repositoryUnread(resolved string) bool {
+	_, _, _, unread := w.repositories.lookup(resolved)
+	return unread
 }
 
 // awaitMappingRead holds back the admission event of issue delivered at seq, on a repository the
@@ -883,7 +1341,13 @@ func parentKey(parent *string) string {
 
 // prepareUnrecorded readies the event of an issue the workflow does not record, as
 // prepareRepository says, holding back an admission on a repository not served for a read of the
-// mapping, under the sequence the event was delivered at (held), when await is set.
+// mapping, under the sequence the event was delivered at (held), when await is set. An admission
+// on a repository a failed installation read leaves out is not held back: GitHub is being read
+// again for it already, so the event is returned to be applied and acknowledged, its apply says
+// nothing and keeps nothing (workflow.Resolution.Unread), and the issue is taken from Dispatch's
+// listing once GitHub answers for the repository (recoverRepositories). A served repository kept
+// on its last answer (repositories.kept) is read from GitHub no further: its default branch is the
+// last read of it, so an admission on it waits for no GitHub read that is failing.
 func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.DispatchIssue, await bool, held int64) (intake.DispatchIssue, error) {
 	if issue.ResolvedRepoMissing {
 		detail, err := w.dispatch.GetIssue(ctx, issue.Key)
@@ -895,15 +1359,20 @@ func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.Di
 	if issue.Status != "todo" || issue.ResolvedRepo == "" {
 		return issue, nil
 	}
-	mapped, refusal, _ := w.repositories.lookup(issue.ResolvedRepo)
-	if refusal != "" && await && admissionBound(issue) {
+	mapped, refusal, _, unread := w.repositories.lookup(issue.ResolvedRepo)
+	if refusal != "" && !unread && await && admissionBound(issue) {
 		if err := w.awaitMappingRead(issue, held); err != nil {
 			return issue, err
 		}
-		mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
+		mapped, refusal, _, _ = w.repositories.lookup(issue.ResolvedRepo)
 	}
 	if refusal != "" {
 		return issue, nil
+	}
+	if w.repositories.kept(mapped.Repo.String()) {
+		if _, read := w.defaultBranches.Kept(mapped.Repo.String()); read {
+			return issue, nil
+		}
 	}
 	_, err := w.defaultBranches.Named(ctx, mapped.Repo)
 	return issue, err
@@ -914,9 +1383,9 @@ func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.Di
 // Legion does not serve it. A served repository whose default branch was never read is an error:
 // its event's preparation (prepareRepository) did not run.
 func (w *workflowRuntime) ResolveRepository(resolved string) (workflow.Resolution, error) {
-	mapped, refusal, leftOut := w.repositories.lookup(resolved)
+	mapped, refusal, leftOut, unread := w.repositories.lookup(resolved)
 	if refusal != "" {
-		return workflow.Resolution{Refusal: refusal, LeftOut: leftOut}, nil
+		return workflow.Resolution{Refusal: refusal, LeftOut: leftOut, Unread: unread}, nil
 	}
 	read, ok := w.defaultBranches.Kept(mapped.Repo.String())
 	if !ok {

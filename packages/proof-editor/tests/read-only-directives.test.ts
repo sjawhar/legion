@@ -6,11 +6,10 @@
  */
 
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { BlockSchema } from "../src/block-schema.js";
 import { createHeadlessProof, type SoftBreaks } from "../src/lib-headless.js";
 import { remarkReadOnlyDirectives } from "../src/read-only-directives.js";
+import { blocks, runs, serverBlockSchema } from "./block-schema-fixture";
 
 const blockSchema: BlockSchema = {
   version: 1,
@@ -29,24 +28,6 @@ const blockSchema: BlockSchema = {
 async function readOnlyParse(markdown: string, softBreaks?: SoftBreaks) {
   const proof = await createHeadlessProof({ blockSchema, readOnly: true });
   return proof.parseMarkdown(markdown, softBreaks);
-}
-
-/** Each child block of `node` as its type name and its text. */
-function blocks(node: ProseMirrorNode): [string, string][] {
-  const out: [string, string][] = [];
-  node.forEach((child) => {
-    out.push([child.type.name, child.textContent]);
-  });
-  return out;
-}
-
-/** Each inline child of `node` as its text and the names of its marks. */
-function runs(node: ProseMirrorNode): { text: string; marks: string[] }[] {
-  const out: { text: string; marks: string[] }[] = [];
-  node.forEach((child) => {
-    out.push({ text: child.text ?? "", marks: child.marks.map((mark) => mark.type.name) });
-  });
-  return out;
 }
 
 test("the default mode still refuses a directive the schema does not know", async () => {
@@ -278,14 +259,6 @@ test("read-only keeps an outer typed block typed when a drawn directive's lines 
   ]);
 });
 
-/** The document service's own block schema, the one Dispatch parses its bodies with. */
-const serverBlockSchema: BlockSchema = JSON.parse(
-  readFileSync(
-    new URL("../../envoy/internal/dispatch/pmdoc/schema/blocks.json", import.meta.url),
-    "utf8"
-  )
-);
-
 async function readOnlyServerParse(markdown: string) {
   const proof = await createHeadlessProof({ blockSchema: serverBlockSchema, readOnly: true });
   return proof.parseMarkdown(markdown);
@@ -434,4 +407,45 @@ test("read-only draws a directive inside a mark span inside a refused directive 
     ["paragraph", "body"],
     ["paragraph", ":::"],
   ]);
+});
+
+test("read-only reads a kept typed block's server attributes at their schema defaults", async () => {
+  const doc = await readOnlyServerParse(
+    ':::ask{#a1 urgency="high" state="answered" answered_by="sami" ' +
+      'answered_at="2026-01-01T00:00:00Z" selected=\'["A"]\' answer="done" invalid="x" ' +
+      'copied_from="ask-9" copied_from_document="dispatch://CORE-1"}\nWhich?\n\n- A: a\n:::\n'
+  );
+  expect(blocks(doc).map(([type]) => type)).toEqual(["ask"]);
+  const ask = doc.child(0);
+  expect(ask.attrs.blockId).toBe("a1");
+  expect(ask.attrs.urgency).toBe("high");
+  expect(ask.attrs.state).toBe("open");
+  const server = Object.entries(
+    serverBlockSchema.types.find((type) => type.name === "ask")?.attributes ?? {}
+  ).filter(([, attribute]) => attribute.server);
+  // The source above forges every server attribute the schema declares.
+  expect(server.map(([name]) => name)).toEqual([
+    "state",
+    "answered_by",
+    "answered_at",
+    "selected",
+    "answer",
+    "invalid",
+    "copied_from",
+    "copied_from_document",
+  ]);
+  for (const [name, attribute] of server) {
+    expect([name, ask.attrs[name]]).toEqual([name, attribute.default]);
+  }
+});
+
+test("read-only still draws a typed block whose forged server attribute the schema refuses", async () => {
+  for (const opening of [':::ask{state="bogus"}', ":::ask{selected='nope'}"]) {
+    const doc = await readOnlyServerParse(`${opening}\nWhich?\n:::\n`);
+    expect(blocks(doc)).toEqual([
+      ["paragraph", opening],
+      ["paragraph", "Which?"],
+      ["paragraph", ":::"],
+    ]);
+  }
 });
