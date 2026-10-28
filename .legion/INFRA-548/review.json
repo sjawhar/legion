@@ -2,51 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T09:34:39Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedHead": "c6eb2bda1b471f7032c51ff90922a3a7c7bf3a11",
-  "previousApprovedHead": "ccdc02ea46e519a7ce4e0ca39946a332e2f7f545",
-  "fingerprint": "ccdc02ea 96bdc922b067b0c92f343c35711e262cb1dbf8620e9c8876e80b16f3436cb051 -> c6eb2bda 4428016b0e74b6120b473257d2373573e76662359f6e8a7d58bd60920d5cff6b: changed (#2228's lines left the diff with its merge, and the tester's a5a67218 changed row C), so a new round",
+  "completed": "2026-10-28T10:28:28Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedHead": "291a248a09f8a6aa0f771af448d241ad11a80ff9",
+  "codeHead": "daa4e51373c458fe17944118b29299ba88fc6014",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": ".github/workflows/envoy-and-contracts.yaml",
-      "description": "The envoy-session-stall job's setup-go (line 1641-1644) keeps cache-dependency-path, so every pull-request run saves a Go cache entry under refs/pull/<n>/merge. Main's #2328 (INFRA-584), brought in by the merge 790a7969, changed every other setup-go that caches to cache: false plus an actions/cache/restore and a main-only actions/cache/save (pi-legion :865-930, envoy-infra-go :1202-1247, envoy-e2e-local :1582-1618; rule 5 of docs/solutions/github/only-main-saves-an-actions-cache-...-INFRA-584.md). This job is now the only one that writes PR-ref entries, which no other PR reads and which push main's entries out. Use envoy-e2e-local's pattern with the go-envoy key family."
-    },
-    {
-      "severity": "important",
-      "file": "PR body (E2E (implementer) negative control)",
-      "description": "The implementer's proof line records the row C negative control at 790a7969 as 'reconnect none ... (fail) [60261.41ms]', the round-2 figure at 4 MiB. The tester's test.json records that it does not reproduce on Bun 1.4.4 (main's pin): 4 MiB drains, so row C passed without the patch until a5a67218 raised it to 32 MiB. A proof's negative control must be one observed at the head it names; re-run it at the new head (32 MiB, protocol.js hunk reverted) and record what was seen."
-    },
-    {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-proxy.ts",
-      "description": "Cleanup still open from round 2 (Fast-follow): closedAt doc does not say a paused connection never records its close; dead frozen guards in the data handlers."
+      "description": "Cleanup (Fast-follow): closedAt doc does not say a connection paused by freeze() never records its close; dead frozen guards in the data handlers."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-scenario.ts",
-      "description": "Cleanup still open from round 2 (Fast-follow): RECOVERY_BOUND_MS duplicated in nats-stall.test.ts and a bare 60_000 in envoy-channel-stall.test.ts."
+      "description": "Cleanup (Fast-follow): RECOVERY_BOUND_MS duplicated in nats-stall.test.ts and a bare 60_000 in claude-envoy's envoy-channel-stall.test.ts."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/README.md",
-      "description": "Cleanup still open from round 2 (Fast-follow): name handleAuthError as the other caller of the patched disconnect()."
+      "description": "Cleanup (Fast-follow): name handleAuthError as the other caller of the patched disconnect()."
     }
   ],
-  "verified": [
-    "Per-file interdiff of this issue's 58 files, old a92387a8->48bef8d1 vs new b295a3fb->c6eb2bda: 48 identical; the rest differ only by main's newer text (CHANGELOG neighbours, AGENTS.md and architecture.md rows, the askgate-marker build entry), the rebuilt claude-envoy dist, and the tester's 4->32 MiB row C change. Plugin fields are present in the merged AGENTS.md rows; all INFRA-548 CHANGELOG entries sit under [Unreleased].",
-    "Both thermonuclear agents ran check-dist with Bun 1.4.4: 'dist/ and legion/ match a fresh build'; dist/envoy-channel.js carries this.transport.close() and this.socket = socket."
+  "roundThreeFindings": [
+    "setup-go cache in envoy-session-stall: fixed in c2db0543; steps match envoy-e2e-local line for line; no setup-go in the file keeps cache-dependency-path; caches API for refs/pull/2331/merge total_count 0. Thread PRRT_kwDORFy7ds6xDx3g answered and accepted (resolved by the implementer).",
+    "Stale implementer negative control: E2E (implementer) now records row C at 32 MiB on Bun 1.4.4 at c2db0543 with the protocol.js hunk reverted: 'reconnect none ... [60268.24ms]', passing at 30.0 s with the patch restored."
   ],
-  "thermonuclear": {
-    "head": "c6eb2bda",
-    "deepReview": "Verdict: APPROVE at c6eb2bda (Minor: stale PR body lines)",
-    "codeQuality": "Verdict: CHANGES at c6eb2bda (setup-go cache convention in envoy-session-stall)"
-  },
-  "ci": "Required lint, typecheck, test and pr-title at c6eb2bda (the newest pull_request run's head, which is the PR head) were queued at 09:34Z. A request for changes does not wait on CI.",
-  "mergeGate": "sjawhar/legion#2228 merged as 85713740 and main carrying it is merged into the branch; the plan's merge gate is met."
+  "thermonuclear": "Not run this round: the change since round 3's review (c2db0543) touches only .github/workflows/envoy-and-contracts.yaml's envoy-session-stall cache steps, no runtime code; the reviewer compared it with envoy-e2e-local's steps by hand. The pair ran at c6eb2bda in round 3 over the merge (deep-review APPROVE; code-quality CHANGES only for this cache step).",
+  "ci": "Required checks at code head daa4e513 (newest pull_request run's head): lint, typecheck, test and pr-title completed success at 10:28Z; compare daa4e513...291a248a changes only .legion/ (1 file). Non-required jobs, envoy-session-stall among them, were still queued under the repository's runner backlog.",
+  "proofLines": "E2E (implementer) names c2db0543 on Bun 1.4.4 with a negative control observed there; E2E (tester) names c2db0543 (round 5), actionlint exit 0, restore key equal to main's entry, 0 PR-ref cache entries."
 }
