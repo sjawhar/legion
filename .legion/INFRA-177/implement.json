@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T20:14:35Z",
+  "completed": "2026-10-28T21:49:39Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
       "criterion": "A9 / round 2: under the records' daemon the import does not push a held, merging or awaiting_merge branch, and re-reads the phase before each removal",
       "surface": "legion handoffs import (handoffimport.Run) against the GitHub REST and Dispatch stand-ins",
       "command": "cd packages/daemon && go test -count=1 -p 1 ./internal/handoffimport/",
-      "observed": "package ok at c0ee85bd",
-      "headSha": "c0ee85bdd9f40a60f3476954b32e9507708f15f8",
+      "observed": "package ok at cb8fc31c",
+      "headSha": "cb8fc31ca5592b926c2979a9bdeb2bf4e3c3d337",
       "negativeControl": "with 4dbcd232's handoffimport.go: the held branch LEG-2 moved (c0005 -> c0021) and TestThePhaseIsReadAgainBeforeTheRemoval failed; with the merging guard removed, the merging branch LEG-3 was moved"
     },
     {
@@ -24,9 +24,9 @@
     {
       "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
       "surface": "the real `dispatch` CLI against the real Dispatch server, in scripts/e2e/handoff-records.sh",
-      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m9?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "all checks ok at c0ee85bd, PASS in 58s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.z0cnQHuA)",
-      "headSha": "c0ee85bdd9f40a60f3476954b32e9507708f15f8",
+      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m11?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
+      "observed": "all checks ok at cb8fc31c, PASS in 59s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.JtNwcJqf)",
+      "headSha": "cb8fc31ca5592b926c2979a9bdeb2bf4e3c3d337",
       "negativeControl": "a 262145-byte body: the CLI refuses it before sending, and a raw POST is answered 413 CAP_EXCEEDED"
     },
     {
@@ -122,10 +122,10 @@
     "Main's #2287 (an approval stands across handoff-only commits) extended the machinery this issue removes. In the merge, its classification and carry code, its approval-carry pass and its fixtures were dropped. Kept: its CI flag change, and its round-ends-on-the-approved-head case as an adapted test."
   ],
   "openQuestions": [],
-  "round": 12,
+  "round": 13,
   "mergeRound": [
-    "After retro (b1dbc6bf) GitHub reported #2354 CONFLICTING. Forward merge c0ee85bd with main 8b6ea377 (9 commits); retro's learnings and the .legion removal kept.",
-    "Main took Dispatch migration 0136 (dashboard_assets, #2323): this PR's migration is now 0137_handoffs. The PR's own lines the merge changed: the two migration file names and their first lines, handoffs.go:19's comment, routes_table_test.go registeredRoutes = 146 (main 142 + 4), the envoy AGENTS.md handoffs row, cmd/dispatch/README.md's paragraph, and the envoy pr2354-Added fragment. No logic changed; an interdiff of the PR's diff against its fork point before and after the merge shows only these. Contract 42 and daemon migration 0062 unchanged.",
-    "gh: #2354 MERGEABLE at c0ee85bd. Fingerprint 66ef5deb… → ae8fccd6… (changed), posted on the PR."
+    "Approved at d2b8e999; GitHub reported #2354 CONFLICTING. Forward merge cb8fc31c with main bb9fe49c (5 commits); retro's commits kept.",
+    "No line of this PR's own code changed: the PR's diff against its fork point is identical before and after the merge (fingerprint ae8fccd6… unchanged). The one conflict was the packages/envoy/AGENTS.md table, where main's Load test row and this PR's Phase handoffs row were added at the same place; both kept. No renumbering (contract 42, daemon 0062, Dispatch 0137 still free).",
+    "gh: #2354 MERGEABLE at cb8fc31c."
   ]
 }
