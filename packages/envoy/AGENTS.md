@@ -787,14 +787,21 @@ Cross-process live co-editing of one document, two rooms with updates streaming 
 a follow-up issue and out of scope here.
 
 The document socket's caps of 1,000 rooms and 1,000 browser connections (`DISPATCH_MAX_LIVE_ROOMS`
-and `DISPATCH_MAX_DOC_CONNECTIONS` set others; `canOpenRoom`, `canAddConnection`) count ygo's live
+and `DISPATCH_MAX_DOC_CONNECTIONS` set others; `reserveRoom`, `reserveConnection`) count ygo's live
 rooms, never documents touched since the process started (LEGION-513), and the connections
-registered on them. Each is a counter the rooms' loads and unloads, and the browsers' joins and
-leaves, keep, so admission walks no rooms. A socket's admission resolves the caller and reads the
-issue once each and hands both to ygo's authorization of the same request; a warm room's schema
-verdict is the one its replica observer recorded, and a cold open renders its document once. A
-room an `Apply` opened with no
-peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
+registered on them, together with the rooms and connections the sockets being admitted reserved.
+A socket takes both places before it loads anything, each in the same step that checks its cap (a
+compare-and-swap on the connection count, a lock around the room places), so sockets that open at
+once never pass a cap, and a socket either cap turns away is refused `503`, never ygo's `401`. A
+room's place is shared by every socket and load that holds it, so a reserved room ygo then loads
+keeps the one place, and a room an API `Apply` loads takes a place from its load like any other.
+Every refused admission, failed load and closed socket gives its places back; a connection's place
+is its count from the reservation to `removeConnection`. Each is a count kept as rooms load and
+unload and browsers come and go, so admission walks no rooms. A socket's admission resolves the
+caller and reads the issue once each and hands both to ygo's authorization of the same request; a
+warm room's schema verdict is the one its replica observer recorded, and a cold open renders its
+document once. A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply`
+stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
 The room's update observer renders a replica of the room, the one its reads walk, not the live

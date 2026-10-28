@@ -45,12 +45,14 @@ var (
 const maxSettleFailures = 3
 
 const (
-	// maxLiveRooms is how many resident rooms - ygo's rooms, loaded or loading through their
-	// OnLoadDocument, whoever opened them - a document socket may find before it is refused a
-	// room of its own (canOpenRoom), unless Deps.MaxLiveRooms names another number.
+	// maxLiveRooms is how many rooms may hold a place - ygo's rooms, loaded or loading through
+	// their OnLoadDocument, whoever opened them, and the rooms document sockets reserved - before
+	// a document socket is refused a room of its own (reserveRoom), unless Deps.MaxLiveRooms names
+	// another number.
 	maxLiveRooms = 1_000
-	// maxRoomConnections is how many browser connections the service holds before it refuses the
-	// next document socket (canAddConnection), unless Deps.MaxDocConnections names another number.
+	// maxRoomConnections is how many browser connections, registered or reserved by a socket being
+	// admitted, the service holds before it refuses the next document socket (reserveConnection),
+	// unless Deps.MaxDocConnections names another number.
 	maxRoomConnections = 1_000
 	// roomIdleTimeout is how long a room stays resident after its last peer leaves, or after the
 	// last Server.Apply on a room no peer is in returns (New). A peer that returns within it
@@ -244,7 +246,7 @@ type Service struct {
 	settlementWoke func(room string)
 	// roomScanned runs at each walk over the room records, or copy of ygo's room names, that a
 	// document socket's admission makes. Admission makes none - its caps are counts
-	// (canOpenRoom, canAddConnection) - so nothing calls it, and a walk added to admission would.
+	// (reserveRoom, reserveConnection) - so nothing calls it, and a walk added to admission would.
 	// Nil outside tests; tests count through it (CountRoomScansForTest) that one socket open walks
 	// no rooms.
 	roomScanned func()
@@ -322,14 +324,16 @@ type Service struct {
 	// it was rendered from (coldRead), within the budget New gives it from the Go memory limit
 	// (readBudgetFor).
 	reads *documentReads
-	// roomCap and connectionCap are the most resident rooms and browser connections a document
-	// socket may find before it is refused (canOpenRoom, canAddConnection): Deps.MaxLiveRooms and
-	// Deps.MaxDocConnections, else maxLiveRooms and maxRoomConnections. residentRooms counts the
-	// rooms ygo holds from each one's OnLoadDocument to its OnUnloadDocument, and connections the
-	// browsers registered on the room records (addConnection, removeConnection), so neither cap
-	// walks the rooms.
+	// roomCap and connectionCap are the most room places and browser connections a document socket
+	// may find before it is refused (reserveRoom, reserveConnection): Deps.MaxLiveRooms and
+	// Deps.MaxDocConnections, else maxLiveRooms and maxRoomConnections. roomSlots holds the room
+	// places, residentRooms counts the rooms ygo holds from each one's OnLoadDocument to its
+	// OnUnloadDocument, and connections the browsers registered on the room records and the sockets
+	// that reserved a connection (reserveConnection, removeConnection), so neither cap walks the
+	// rooms.
 	roomCap       int
 	connectionCap int
+	roomSlots     roomSlots
 	residentRooms atomic.Int64
 	connections   atomic.Int64
 	// residentBytes is the encoded bytes the resident rooms took, each room's load and every
@@ -756,8 +760,9 @@ func (s *Service) ProcessID() string {
 // loopback profiler's /debug/vars serves it (cmd/dispatch publishes it as dispatch_rooms), so an
 // operator can read room memory and append cost from a running process:
 //
-//   - ResidentRooms, the rooms ygo holds (canOpenRoom's count), RoomRecords, the room records the
-//     service keeps, and Connections, the browsers registered on them (canAddConnection's count);
+//   - ResidentRooms, the rooms ygo holds (the loads among reserveRoom's places), RoomRecords, the
+//     room records the service keeps, and Connections, the browsers registered on them and the
+//     sockets that reserved a connection while they are admitted (reserveConnection's count);
 //   - PendingUpdates, the updates the rooms' persistence has yet to take, PendingUpdateBytes, the
 //     bytes of the updates the rooms' queues hold, and DurableAppends, the appends not landed;
 //   - AppendBatches, AppendedUpdates and AppendRoundTrips, what the rooms' browser append

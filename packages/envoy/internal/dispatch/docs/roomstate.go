@@ -226,12 +226,13 @@ func (s *Service) releaseIfUnused(room string) {
 }
 
 // releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so it no longer counts among
-// the resident rooms (residentRooms, which its load counted in onLoadDocument), the bytes it took
-// no longer count as resident, and its state goes too unless something still holds it, whose end
-// releases it instead. ygo calls it exactly once for each room whose load succeeded, whichever way
-// the room goes: the idle sweep, the last peer leaving, CloseRoom.
+// the resident rooms, nor holds a place under the room cap unless a socket still holds a
+// reservation on it (roomUnloaded, which takes back what its load counted in onLoadDocument), the
+// bytes it took no longer count as resident, and its state goes too unless something still holds
+// it, whose end releases it instead. ygo calls it exactly once for each room whose load succeeded,
+// whichever way the room goes: the idle sweep, the last peer leaving, CloseRoom.
 func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
-	s.residentRooms.Add(-1)
+	s.roomUnloaded(room)
 	if state := s.lockExistingState(room); state != nil {
 		s.dropResidentBytesLocked(state)
 		s.unlockState(room, state)
@@ -714,20 +715,115 @@ func (s *Service) releaseAdmission(room string, state *roomState) {
 	s.unlockState(room, state)
 }
 
-// canOpenRoom is whether a document socket may open room: one already live, or a new one while
-// fewer than the service's room cap of rooms are resident. The resident rooms are a count
-// (residentRooms) that each room's load raises (onLoadDocument) and ygo's OnUnloadDocument lowers
-// (releaseUnloadedRoom), so the answer walks no list of rooms: an eviction or a deploy reconnects
-// every browser at once, and a walk on each open would cost every room for each of them. A
-// document whose room has gone counts for nothing, whatever the service once kept for it.
-func (s *Service) canOpenRoom(room string) bool {
-	return s.srv.GetDoc(room) != nil || s.residentRooms.Load() < int64(s.roomCap)
+// roomSlots is the places the room cap (roomCap) counts: every room ygo holds, from its load
+// (onLoadDocument) to its unload (releaseUnloadedRoom), whoever opened it, and every room a
+// document socket reserved a place for (reserveRoom) and has not given back, each room once however
+// many loads and sockets hold it. A socket reserves before it loads anything, and the check and the
+// taking are one step under mu, so sockets that open at once each see the places the others took,
+// and a reserved room ygo then loads keeps the one place it had. The count is the map's length, so
+// the answer walks no list of rooms: an eviction or a deploy reconnects every browser at once, and
+// a walk on each open would cost every room for each of them. A document whose room has gone and
+// that no socket holds counts for nothing, whatever the service once kept for it.
+type roomSlots struct {
+	mu    sync.Mutex
+	rooms map[string]roomSlot
 }
 
-// canAddConnection is whether the service holds fewer browser connections than its connection
-// cap. The connections are a count (connections) that addConnection and removeConnection keep as
-// browsers join and leave, outside the room records: a failed room's eviction hands its
-// browsers to the record that replaces it (handOverFailedRoomLocked), which moves no connection.
-func (s *Service) canAddConnection() bool {
-	return s.connections.Load() < int64(s.connectionCap)
+// roomSlot is what holds one room's place: resident, the loads of it ygo holds (one, save while a
+// closed instance's unload and its successor's load overlap), and sockets, the document sockets
+// holding a reservation on it. The room keeps its place while either is above zero.
+type roomSlot struct {
+	resident int
+	sockets  int
+}
+
+// setLocked records slot as room's, and forgets the room once nothing holds its place. Its caller
+// holds slots.mu.
+func (slots *roomSlots) setLocked(room string, slot roomSlot) {
+	if slot.resident <= 0 && slot.sockets <= 0 {
+		delete(slots.rooms, room)
+		return
+	}
+	if slots.rooms == nil {
+		slots.rooms = make(map[string]roomSlot)
+	}
+	slots.rooms[room] = slot
+}
+
+// reserveRoom takes a place under the room cap for a document socket on room, and is whether it
+// did: the room's own place when it holds one already - resident, loading, or reserved by another
+// socket - or a new one while fewer than roomCap rooms hold places. A room an API path loads
+// (Server.Apply) holds its place from its load (roomLoaded) though no socket asked for it, and is
+// refused nothing, so it counts against the sockets that come after it. The socket gives the
+// reservation back when it ends, whatever ended it (releaseRoom); a room ygo loaded meanwhile keeps
+// the place until it unloads.
+func (s *Service) reserveRoom(room string) bool {
+	s.roomSlots.mu.Lock()
+	defer s.roomSlots.mu.Unlock()
+	slot, held := s.roomSlots.rooms[room]
+	if !held && len(s.roomSlots.rooms) >= s.roomCap {
+		return false
+	}
+	slot.sockets++
+	s.roomSlots.setLocked(room, slot)
+	return true
+}
+
+// releaseRoom gives back a socket's reservation on room (reserveRoom).
+func (s *Service) releaseRoom(room string) {
+	s.roomSlots.mu.Lock()
+	defer s.roomSlots.mu.Unlock()
+	slot := s.roomSlots.rooms[room]
+	slot.sockets--
+	s.roomSlots.setLocked(room, slot)
+}
+
+// roomLoaded counts a load of room among the resident rooms (residentRooms) and among the room
+// cap's places, where it takes the place a socket reserved for the room, if one did, rather than
+// a second one.
+func (s *Service) roomLoaded(room string) {
+	s.roomSlots.mu.Lock()
+	defer s.roomSlots.mu.Unlock()
+	slot := s.roomSlots.rooms[room]
+	slot.resident++
+	s.roomSlots.setLocked(room, slot)
+	s.residentRooms.Add(1)
+}
+
+// roomUnloaded takes back what roomLoaded counted for a load of room. The room keeps its place
+// while a socket still holds a reservation on it.
+func (s *Service) roomUnloaded(room string) {
+	s.roomSlots.mu.Lock()
+	defer s.roomSlots.mu.Unlock()
+	slot := s.roomSlots.rooms[room]
+	slot.resident--
+	s.roomSlots.setLocked(room, slot)
+	s.residentRooms.Add(-1)
+}
+
+// reserveConnection takes a place under the connection cap for a document socket, and is whether
+// it did. connections counts the browsers registered on the room records and the sockets holding a
+// place for the connection they are about to register. The check and the taking are one
+// compare-and-swap, so sockets that open at once never hold more places than the cap. A socket's
+// place is its connection's count from here: authorize registers the connection without counting
+// it again, and removeConnection, which drops the count as it forgets the browser, ends it; a
+// socket that ends unregistered gives it back (releaseConnection). The count lives outside the
+// room records: a failed room's eviction hands its browsers to the record that replaces it
+// (handOverFailedRoomLocked), which moves no connection.
+func (s *Service) reserveConnection() bool {
+	for {
+		held := s.connections.Load()
+		if held >= int64(s.connectionCap) {
+			return false
+		}
+		if s.connections.CompareAndSwap(held, held+1) {
+			return true
+		}
+	}
+}
+
+// releaseConnection gives back the place reserveConnection took for a socket that registered no
+// connection.
+func (s *Service) releaseConnection() {
+	s.connections.Add(-1)
 }

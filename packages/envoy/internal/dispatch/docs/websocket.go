@@ -28,8 +28,10 @@ import (
 // authorization of the same request (authorize) registered it: the caller, resolved once
 // (requestActor), and the admission's one read of the document's issue, which authorize takes
 // rather than resolving or reading either again; then the room, the connection id the service gave
-// the browser, and whether it is registered (addConnection). What else a socket's admission reads
-// off its request goes here too.
+// the browser, and whether authorize registered it, which tells the socket's end whether its place
+// under the connection cap is the connection's count to forget (removeConnection) or a reservation
+// to give back (releaseConnection). What else a socket's admission reads off its request goes here
+// too.
 type connectionState struct {
 	room  string
 	id    uint64
@@ -256,10 +258,20 @@ func socketRoom(r *http.Request) string {
 
 // ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A socket's admission
 // resolves the caller and reads the document's issue once each, here, and hands both to ygo's
-// authorization of the same request (authorize) on the connection's state; the caps it checks are
-// counts (canOpenRoom, canAddConnection), and a warm room's schema verdict is the one its update
-// observer recorded (residentVerdict), so admitting a socket to a warm room walks no rooms and
-// renders nothing, and a cold one renders its document once (admitDocument).
+// authorization of the same request (authorize) on the connection's state; a warm room's schema
+// verdict is the one its update observer recorded (residentVerdict), so admitting a socket to a
+// warm room walks no rooms and renders nothing, and a cold one renders its document once
+// (admitDocument).
+//
+// Before it loads anything the socket takes its places under the caps, a connection's
+// (reserveConnection) and its room's (reserveRoom), and a socket that cannot take either is
+// refused 503 before the upgrade. Each place is taken in the same step that checks the cap, so
+// sockets that open at once never pass it, and each is a count, so the check walks no rooms. The
+// socket holds both until it ends. The connection's place is the connection's count once
+// authorize registers it, and removeConnection, which forgets the browser as the socket closes,
+// ends it; a socket that ends unregistered - its admission or its authorization refused, its room's
+// load failed or panicked - gives it back. The room's place the socket gives back however it ends,
+// and a room ygo loaded keeps a place of its own until it unloads (releaseUnloadedRoom).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room := socketRoom(r)
 	actor, err := s.requestActor(r)
@@ -280,10 +292,24 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if !s.canOpenRoom(room) || !s.canAddConnection() {
+	if !s.reserveConnection() {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	if !s.reserveRoom(room) {
+		s.releaseConnection()
+		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	connection := &connectionState{actor: actor, issue: issue}
+	defer func() {
+		s.releaseRoom(room)
+		if connection.added {
+			s.removeConnection(connection.room, connection.id)
+		} else {
+			s.releaseConnection()
+		}
+	}()
 	held := s.holdForAdmission(room, issue)
 	defer s.releaseAdmission(room, held)
 	if s.afterSocketIssueRead != nil {
@@ -299,12 +325,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer withdraw()
-	connection := &connectionState{actor: actor, issue: issue}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
 	s.srv.ServeHTTP(w, r.WithContext(ctx))
-	if connection.added {
-		s.removeConnection(connection.room, connection.id)
-	}
 }
 
 // admitDocument decides whether a socket may join room's document. A browser editor normalizes a
@@ -361,16 +383,19 @@ func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, tree
 }
 
 // authorize is ygo's authorization of a document socket ServeHTTP admitted. It registers the
-// browser (addConnection) as the caller ServeHTTP resolved, and takes the issue read ServeHTTP
-// made, so it resolves and reads neither again. The issue is closed for the socket when that read
-// says so or the room's state records it closed: ServeHTTP's hold on the state
-// (holdForAdmission) is where a close made while the socket loaded its document is recorded
-// (SetIssueClosed), so such a socket is admitted read-only, as one opened after the close is. A
-// closed issue, or a client schema version other than the server's, admits the socket read-only;
-// a request no admission read the issue for is read-only too.
+// browser as the caller ServeHTTP resolved, and takes the issue read ServeHTTP made, so it resolves
+// and reads neither again. The connection is counted already: ServeHTTP took its place under the
+// connection cap (reserveConnection) before it loaded anything, so registering it counts nothing
+// more, and no cap refuses it here, where a refusal would reach the browser as ygo's 401, which
+// says it is not signed in. The issue is closed for the socket when that read says so or the
+// room's state records it closed: ServeHTTP's hold on the state (holdForAdmission) is where a close
+// made while the socket loaded its document is recorded (SetIssueClosed), so such a socket is
+// admitted read-only, as one opened after the close is. A closed issue, or a client schema version
+// other than the server's, admits the socket read-only; a request no admission read the issue for
+// is refused, as is a socket to a failed room.
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	connection, _ := r.Context().Value(connectionContextKey{}).(*connectionState)
-	if connection == nil || !s.canAddConnection() {
+	if connection == nil {
 		return websocket.ConnectionConfig{}, false
 	}
 	room := socketRoom(r)
@@ -384,7 +409,7 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	connection.room = room
 	connection.id = s.nextConnection.Add(1)
 	connection.added = true
-	s.addConnectionLocked(state, connection.id, connection.actor)
+	state.connected[connection.id] = connection.actor
 	s.unlockState(room, state)
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
@@ -508,14 +533,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err := s.roomFailure(room); err != nil {
 		return err
 	}
-	// The room counts among the resident rooms from here (canOpenRoom) until ygo's
-	// OnUnloadDocument (releaseUnloadedRoom), unless this load fails: ygo then drops the room
-	// with no OnUnloadDocument, so the load takes its own count back.
-	s.residentRooms.Add(1)
+	// The room counts among the resident rooms, and holds its place under the room cap
+	// (reserveRoom), from here until ygo's OnUnloadDocument (releaseUnloadedRoom), unless this
+	// load fails: ygo then drops the room with no OnUnloadDocument, so the load takes its own count
+	// back.
+	s.roomLoaded(room)
 	resident := false
 	defer func() {
 		if !resident {
-			s.residentRooms.Add(-1)
+			s.roomUnloaded(room)
 		}
 	}()
 	// Everything this load needs comes from the pool that owns loads. A writer holding a
@@ -774,21 +800,16 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 
 // addConnection registers a browser connected to room. It is credited only with browser edits
 // observed while it is connected (creditContentChange), never for connecting or for an agent's
-// edit.
+// edit. The service's count of connections (connections, which reserveConnection reads) counts
+// each id once, however often it is registered. A document socket's browser is registered by
+// authorize instead, whose count is the place ServeHTTP reserved for it.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.lockState(room)
-	s.addConnectionLocked(state, id, actor)
-	s.unlockState(room, state)
-}
-
-// addConnectionLocked is addConnection on state, which its caller holds state.mu on. The service's
-// count of connections (connections, which canAddConnection reads) counts each id once, however
-// often it is registered.
-func (s *Service) addConnectionLocked(state *roomState, id uint64, actor model.Actor) {
 	if _, registered := state.connected[id]; !registered {
 		s.connections.Add(1)
 	}
 	state.connected[id] = actor
+	s.unlockState(room, state)
 }
 
 // removeConnection forgets a browser that left room, and with the last one, once ygo has retired
