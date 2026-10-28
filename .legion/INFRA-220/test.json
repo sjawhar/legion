@@ -2,44 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-28T11:17:00Z",
-  "round": 12,
-  "testedHead": "59c7f77cc69223a082de3bc63df4a1d99881241e (code head; 3e8092ca above it changes only .legion/)",
-  "verdict": "fail, on the architect's decision (11:15Z): three defects for the implementer's one push. The live runs move to the next head.",
+  "completed": "2026-10-28T15:12:00Z",
+  "round": 13,
+  "testedHead": "8a2bfae7e21832f55d84a5723e33eba44159c976 (code head; ec8efe54d8ef603f397063888d2a00bd16b96f76 above it changes only .legion/INFRA-220/implement.json and is what CI, the image and the live runs built). Red test 70f689e2 is above it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove lib/model-endpoint.sh's model_key_preflight myself against stand-in gateways in this pod (results below). The implementer's stand-in runs of both scripts' preflight match. The live proofs at this head were not run (below)."
+    "how": "Round 12's three items are fixed at 8a2bfae7e21832f55d84a5723e33eba44159c976. (1) `git grep -n 'LEGION_ANTHROPIC_API_KEY\\|ANTHROPIC_API_KEY_HDO\\|OSSV_LEGION_GATEWAY_KEY' 8a2bfae7e21832f55d84a5723e33eba44159c976 -- scripts docs AGENTS.md packages` finds nothing, and README 748-762 now fetches '<GATEWAY_KEY_NAME>' through '<runner>'. (2) The seven fragments are pr2186-<slug>.yaml, each with `custom: Issue: pr2186`. (3) No '+' line the branch adds under docs/solutions, packages/*/CHANGELOG.md or .changes carries a tracker key (grep for (INFRA|LEGION|LINUX|BET)-<n>: nothing)."
   },
   "failures": [
     {
-      "criterion": "The README tells operators how to run the Claude Code proofs on an allowed model route",
-      "evidence": "scripts/e2e/README.md lines 748-762, in the claude-backend-tmux.sh section this PR edits, tell an operator to fetch `agent-secrets LEGION_ANTHROPIC_API_KEY` into the key file. That key belongs to another company and is disabled, and must never be used. `git grep -n 'LEGION_ANTHROPIC_API_KEY\\|ANTHROPIC_API_KEY_HDO\\|OSSV_LEGION_GATEWAY_KEY' 59c7f77cc69223a082de3bc63df4a1d99881241e -- scripts/e2e/README.md scripts/e2e/claude-backend-tmux.sh scripts/e2e/claude-backend-sandbox.sh scripts/e2e/lib/ docs/ AGENTS.md` finds only README:749 and :758. The text came from main's #2206 (b4bea385). Fix: replace the example with the gateway route this PR adds (LEGION_E2E_MODEL_BASE_URL plus a 0600 gateway key file), naming no deployment's key or secret, and re-run the grep to show it finds nothing."
+      "criterion": "Each live proof's transcript names the gateway key's alias (the architect's requirement: alias legion-infra), the run's only record of which key the gateway saw",
+      "evidence": "lib/model-endpoint.sh:68 asks `$endpoint/v1/key/info`. The LiteLLM gateway serves key info at `/key/info`, not under /v1. From this pod, with no key, against the cluster gateway: /v1/key/info -> 404 (the same as /nonexistent-path -> 404), /key/info -> 401, /v1/models -> 401. With the key, the INFRA lead read /key/info -> key_alias legion-infra. So both live runs at ec8efe54d8ef603f397063888d2a00bd16b96f76 note 'names no key alias … GET /v1/key/info answered 404' instead of 'the model key is legion-infra' (dispatch://INFRA-220/artifact/infra220-ec8efe54-tmux-transcript-log, -sandbox-transcript-log). Red test 70f689e2: `cd scripts/e2e/lib && bun test model-endpoint.test.ts` -> 0 pass, 1 fail ('names no key alias … GET /v1/key/info answered 404'). With `/v1/key/info` changed to `/key/info` in model-endpoint.sh it passes: 1 pass. The comments and README lines that name `/v1/key/info` (claude-backend-tmux.sh:33, claude-backend-sandbox.sh:113, model-endpoint.sh:40/73/75, README.md:847/1050/3310) need the same correction."
     },
     {
-      "criterion": "Changelog fragments follow the package's changie configuration and carry no Dispatch key",
-      "evidence": "The seven fragments this branch adds are named INFRA-220-*.yaml: packages/claude-envoy/.changes/unreleased/ (claude-code-pin-install, claude-envoy-in-worker-image, claude-session-survives-pod, phase-reminder-on-claude-code, tmux-title-bound, workspace-recreated-notice) and packages/pi-legion/.changes/unreleased/phase-reminder-every-turn. None sets the `Issue` custom field that .changie.yaml declares. Three put '(INFRA-220)' in the entry text: claude-session-survives-pod.yaml:3, phase-reminder-on-claude-code.yaml:3, phase-reminder-every-turn.yaml:4. Fix (controller ruling): name the files without a Dispatch key, set Issue: pr2186, and remove the key from the text."
-    },
-    {
-      "criterion": "No learning or CHANGELOG line the branch adds carries a Dispatch key",
-      "evidence": "At 59c7f77cc69223a082de3bc63df4a1d99881241e the branch's diff (fork point to head) touches no docs/solutions file and no packages/*/CHANGELOG.md, so today the only carriers are the fragments in failure 2. Whatever the implementer adds in its next push must follow the same rule."
+      "criterion": "The branch breaks no existing test of a script it changes",
+      "evidence": "CI run 40682524430 (Legion Envoy and Contracts, job pi-legion) at ec8efe54d8ef603f397063888d2a00bd16b96f76 failed 2 tests in packages/pi-legion/scripts/skill-scenarios/rig.test.ts: 'a setup that fails after install_model_route > cmd_profile removes the label's model-key and marks nothing ready' and '> judge_profiles removes both profiles' model-key and marks nothing ready'. Cause: f5d3866c made scripts/e2e/lib/install-key-file-model-route.sh source lib/model-endpoint.sh (line 63), and the test's fixture checkout copies only install-key-file-model-route.sh (rig.test.ts:128-131), so the installer fails with 'the model route (key-file) could not be installed'. Reproduced here: `cd packages/pi-legion && bun test scripts/skill-scenarios/rig.test.ts -t 'a setup that fails after install_model_route'` -> 0 pass, 2 fail. With the fixture also copying model-endpoint.sh: 2 pass, 0 fail. These existing tests are the red tests for this failure. Main's runs of that workflow are green before #2186."
     }
   ],
-  "failed": 3,
-  "passingInPodChecks": [
+  "failed": 2,
+  "liveRuns": [
     {
-      "what": "Gateway preflight (lib/model-endpoint.sh model_key_preflight), against stand-in Anthropic-compatible endpoints in this pod",
-      "result": "Right key: 'checks keys: GET /v1/models with no key answered 401' and 'the model key is <alias>'. Wrong key: 'refuses the key … answered 401'. An endpoint that answers 200 with no key: 'it does not check keys'. Unreachable: refused, 'curl exited 7'. No header file is left behind. model_base_url_refusal refused user:password@, a trailing slash, a trailing colon and ftp://, and accepted the cluster gateway URL."
+      "run": "(a) claude-backend-tmux.sh",
+      "result": "PASS, 14:05:31-14:16:34Z, exit 0, 10/10 ok, binaries stamped ec8efe54d8ef603f397063888d2a00bd16b96f76 modified=false. Gateway only: 'checks keys: GET /v1/models with no key answered 401'. Alias not named (failure 1). No anthropic.com in the transcript. LEGION_E2E_ANTHROPIC_KEY_FILE was the gateway key file. I read dispatch://INFRA-220/artifact/infra220-ec8efe54-tmux-transcript-log."
     },
     {
-      "what": "Script tests",
-      "result": "bash -n ok on claude-backend-sandbox.sh, claude-backend-tmux.sh, lib/model-endpoint.sh and lib/install-key-file-model-route.sh. `bun test claude-backend-key-runner.test.ts app-logins.test.ts claude-backend-guards.test.ts install-key-file-model-route.test.ts`: 52 pass, 0 fail."
+      "run": "(b) claude-backend-sandbox.sh",
+      "result": "PASS, 14:19:39-14:52:41Z, exit 0, 15/15 ok incl. pod-deleted-resumes-the-same-claude-session (58 earlier turns, 701495 bytes unchanged in the table and the restored file, marker quoted back) and namespace-clean (0 before and after). Image sha256:f2039af6a5280cb2bf53588d2e07ac3db8b8805040160db33b7ca7d55d73edac (Worker Image run 40682524400, label ec8efe54d8ef603f397063888d2a00bd16b96f76, accepted since ec8efe54d8ef603f397063888d2a00bd16b96f76 adds only .legion/ over 8a2bfae7e21832f55d84a5723e33eba44159c976 and no image of 8a2bfae7e21832f55d84a5723e33eba44159c976 is built). Binaries stamped ec8efe54d8ef603f397063888d2a00bd16b96f76 modified=false. Gateway in-cluster address for the pods, model claude-sonnet-5. Alias not named (failure 1). No anthropic.com."
     },
     {
-      "what": "Forbidden key names in tracked files",
-      "result": "OSSV_LEGION_GATEWAY_KEY is named only in .legion/INFRA-220/implement.json (the handoff, which retro removes)."
+      "run": "(c) SIGINT control",
+      "result": "14:56:25-15:00:56Z. The interrupt landed during architect-registers-the-gate, not right after prerequisites. Transcript: 'FAIL (check architect-registers-the-gate)', no 'FAIL cleanup' (so remove_app_keys removed the key directory), teardown deleted both Sandboxes, the ConfigMap, the providers Secret and the smoke branch, 'left of project ccs4790229: nothing', namespace-clean identical. The exit was 1, not 130: the interrupt ended a child of a polling check, which then failed, before bash ran its INT trap. The script reports that as a check failure rather than an interrupt. The clean-teardown property the control checks holds. I note it, not a failure. dispatch://INFRA-220/artifact/infra220-ec8efe54-sandbox-sigint-transcript-log"
     }
   ],
-  "liveProofs": "Not run at 59c7f77cc69223a082de3bc63df4a1d99881241e. The INFRA lead staged them (key legion-gateway-key-infra, alias legion-infra; the gateway answers 401 to no key), but put them behind production applies and the Dispatch Cloud SQL major upgrade. The architect moved them to the next head. That head needs all three runs (tmux, sandbox, SIGINT control), one after another, on the gateway route with INFRA's key only. Each transcript must show alias legion-infra and that no raw Anthropic key was read.",
-  "forbiddenKeyRecord": "The tmux pass at 3a451bc1 (2026-10-27 17:48Z, round 11) ran on LEGION_ANTHROPIC_API_KEY, another company's key, now disabled. It is not evidence. Every live run before round 12 used that key and is not evidence either.",
-  "ci": "At 59c7f77cc69223a082de3bc63df4a1d99881241e, read at 11:16Z: Tests 40663925245 (lint, typecheck, test) success, Docs 40663925222 success, PR Title 40664087406 success, Worker Image 40663925439 success. Legion Envoy and Contracts 40663925424 was still running."
+  "mainReds": "The architect named two known main reds (dispatch recipients-claim e2e; envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers). Neither appears in this head's required CI.",
+  "ci": "At ec8efe54d8ef603f397063888d2a00bd16b96f76: Tests 40682524363 (lint, typecheck, test) success, Docs success, PR Title success, Worker Image 40682524400 success. Legion Envoy and Contracts 40682524430 failure (pi-legion, failure 2).",
+  "nextRound": "Failure 1 changes the preflight both proofs run, so after the fix all three live runs are needed again at the new head, gateway only, and each transcript must show 'the model key is legion-infra'."
 }
