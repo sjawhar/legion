@@ -58,7 +58,7 @@ import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmat
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
-import { relaxAskContentCheck } from './ask-content';
+import { guardBrokenAskKeys, relaxAskContentCheck } from './ask-content';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
@@ -376,6 +376,7 @@ export async function createProofEditor(
 
   let currentReadOnly = Boolean(opts.readOnly);
   view.setProps({ editable: () => !currentReadOnly });
+  view.setProps({ handleKeyDown: guardBrokenAskKeys }); // no key throws in an off-rule ask (./ask-content.ts)
   const setReadOnly = (readOnly: boolean) => {
     currentReadOnly = readOnly;
     view.setProps({ editable: () => !currentReadOnly });
@@ -391,7 +392,7 @@ export async function createProofEditor(
     const collabService = ctx.get(collabServiceCtx);
     // Before the shared document renders: an ask two collaborators left off its content rule
     // must not be deleted from it (see ./ask-content.ts).
-    relaxAskContentCheck(ctx.get(schemaCtx), opts.blockSchema);
+    relaxAskContentCheck(ctx.get(schemaCtx));
     collabService.bindDoc(opts.ydoc);
     collabService.mergeOptions({
       yCursorOpts: { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },

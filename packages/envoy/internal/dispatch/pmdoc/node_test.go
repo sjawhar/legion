@@ -12,6 +12,15 @@ func TestValidateRejectsUnknownNodeType(t *testing.T) {
 	}
 }
 
+func TestBlockNodeTypesLoadFromEmbeddedList(t *testing.T) {
+	if len(blockNodeTypes) == 0 {
+		t.Fatal("blockNodeTypes is empty")
+	}
+	if _, ok := blockNodeTypes["paragraph"]; !ok {
+		t.Fatalf("blockNodeTypes = %v, want it to hold paragraph", blockNodeTypes)
+	}
+}
+
 func TestEqualIgnoresAttrKeyOrder(t *testing.T) {
 	a := &Node{Type: "text", Text: "x", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "h", "title": nil}}}}
 	b := &Node{Type: "text", Text: "x", Marks: []Mark{{Type: "link", Attrs: Attrs{"title": nil, "href": "h"}}}}

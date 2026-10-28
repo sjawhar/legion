@@ -332,3 +332,22 @@ test("the headless default mode and the live editor read a drawn ask alike", asy
     );
   });
 });
+
+/** An answered decision as a past version's text carries it: the server writes every attribute. */
+const ANSWERED_ASK =
+  ':::ask{#a1 urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-01T00:00:00Z" selected="[&#x22;Option A&#x22;]"}\nWhich one?\n\n- Option A\n- Option B\n:::\n';
+
+test("the live editor's version view keeps an answered decision's server attributes", async () => {
+  await withMarksEditor(
+    "",
+    ({ handle, view }) => {
+      handle.setMarkdown(ANSWERED_ASK);
+      const ask = view.state.doc.child(0);
+      expect(ask.type.name).toBe("ask");
+      expect(ask.attrs.state).toBe("answered");
+      expect(ask.attrs.answered_by).toBe("alice");
+      expect(ask.attrs.selected).toEqual(["Option A"]);
+    },
+    { blockSchema }
+  );
+});

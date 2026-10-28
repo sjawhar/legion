@@ -10,13 +10,24 @@ import {
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { withDomWindow } from "./dom-window";
 
+/**
+ * The keydown each chord `press` sends, as a browser reports it. A browser reports Shift+Z as key
+ * "Z" with key code 90; prosemirror-keymap finds "Mod-Shift-z" through the key code.
+ */
+const KEYS = {
+  "Mod-z": { key: "z", keyCode: 90, ctrlKey: true, shiftKey: false },
+  "Mod-Shift-z": { key: "Z", keyCode: 90, ctrlKey: true, shiftKey: true },
+  Backspace: { key: "Backspace", keyCode: 8, ctrlKey: false, shiftKey: false },
+  Enter: { key: "Enter", keyCode: 13, ctrlKey: false, shiftKey: false },
+} as const;
+
 export interface MarksEditor {
   readonly handle: ProofEditorHandle;
   readonly view: EditorView;
   /** Presses Mod-z (undo) or Mod-Shift-z (redo), or a bare Backspace or Enter, in the editor, as a
    *  reader does: the history keymap takes Mod-z first, and the collab keymap when that one
    *  declines. */
-  press(chord: "Mod-z" | "Mod-Shift-z" | "Backspace" | "Enter"): void;
+  press(chord: keyof typeof KEYS): void;
   /** The undo steps each manager holds: prosemirror-history's, and y-prosemirror's UndoManager's. */
   depths(): { history: number; yjs: number };
   /** The Y.Doc the editor is bound to, for a test that applies a collaborator's update to it. */
@@ -59,17 +70,10 @@ export async function withMarksEditor(
         }),
         handle,
         press: (chord) => {
-          const redo = chord === "Mod-Shift-z";
-          const bare = chord === "Backspace" || chord === "Enter";
-          // A browser reports Shift+Z as key "Z" with key code 90; prosemirror-keymap finds
-          // "Mod-Shift-z" through the key code.
           const event = new window.KeyboardEvent("keydown", {
             bubbles: true,
             cancelable: true,
-            ctrlKey: !bare,
-            key: bare ? chord : redo ? "Z" : "z",
-            keyCode: chord === "Backspace" ? 8 : chord === "Enter" ? 13 : 90,
-            shiftKey: redo,
+            ...KEYS[chord],
           }) as unknown as KeyboardEvent;
           // What ProseMirror's own keydown listener does with the event: offer it to every
           // plugin's handleKeyDown in order. happy-dom does not deliver a synthetic keydown to

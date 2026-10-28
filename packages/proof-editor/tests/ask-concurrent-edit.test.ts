@@ -6,11 +6,11 @@
  */
 
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import * as Y from "yjs";
-import { SERVER_BLOCK_TYPES } from "../src/ask-content";
 import { BLOCK_ID_ATTR } from "../src/lib-headless.js";
 import { serverBlockSchema as blockSchema, blocks } from "./block-schema-fixture";
 import { withMarksEditor } from "./marks-editor";
@@ -264,14 +264,21 @@ test("a list a collaborator leaves holding a bare paragraph is still deleted", a
   );
 });
 
-test("the server's block types and the schema's typed blocks are the live schema's block group", async () => {
+test("the server's block node types and the schema's typed blocks are the live schema's block group", async () => {
+  // The list pmdoc's isBlockNodeType embeds (packages/envoy/internal/dispatch/pmdoc/node.go).
+  const serverBlockNodeTypes: string[] = JSON.parse(
+    readFileSync(
+      new URL("../../envoy/internal/dispatch/pmdoc/schema/block-node-types.json", import.meta.url),
+      "utf8"
+    )
+  );
   await withMarksEditor(
     "",
     ({ view }) => {
       const blockGroup = Object.values(view.state.schema.nodes)
         .filter((type) => type.isInGroup("block"))
         .map((type) => type.name);
-      const accepted = [...SERVER_BLOCK_TYPES, ...blockSchema.types.map((type) => type.name)];
+      const accepted = [...serverBlockNodeTypes, ...blockSchema.types.map((type) => type.name)];
       expect(accepted.sort()).toEqual(blockGroup.sort());
     },
     { blockSchema }
@@ -291,6 +298,51 @@ test("Enter at the end of a valid ask's question splits it as before", async () 
         ["paragraph", ""],
         ["bullet_list", "Option AAfter"],
       ]);
+    },
+    { blockSchema }
+  );
+});
+
+test("Enter twice at the end of the second option list's option keeps the ask and every word", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ press, view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const optionEnd = textblockStart(view.state.doc, "Option B") + "Option B".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, optionEnd)));
+      expect(() => press("Enter")).not.toThrow();
+      expect(() => press("Enter")).not.toThrow();
+      requireAsk(view.state.doc);
+      expectEveryWord(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("Backspace at the start of the first option in an ask holding two option lists keeps every word", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ press, view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const optionStart = textblockStart(view.state.doc, "Option A");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, optionStart)));
+      expect(() => press("Backspace")).not.toThrow();
+      expectEveryWord(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("Backspace over a selection from the question into an option of a two-list ask keeps every word", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ press, view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const from = textblockStart(view.state.doc, "Which one?") + "Which".length;
+      const to = textblockStart(view.state.doc, "Option A") + "Opt".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)));
+      expect(() => press("Backspace")).not.toThrow();
+      expectEveryWord(view, ydoc);
     },
     { blockSchema }
   );

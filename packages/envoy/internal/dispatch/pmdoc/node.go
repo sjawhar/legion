@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -414,14 +415,33 @@ func childrenAreInline(children []*Node) bool {
 	return true
 }
 
-func isBlockNodeType(typeName string) bool {
-	switch typeName {
-	case "paragraph", "heading", "blockquote", "bullet_list", "ordered_list", "code_block", "hr", "table", "footnote_definition", "frontmatter":
-		return true
-	default:
-		_, typed := typedBlock(typeName)
-		return typed
+// blockNodeTypesJSON lists the block node types besides the typed blocks. The proof editor's
+// schema drift test reads the same file, so the editor's `block` group and this set stay equal.
+//
+//go:embed schema/block-node-types.json
+var blockNodeTypesJSON []byte
+
+var blockNodeTypes = func() map[string]struct{} {
+	var names []string
+	if err := json.Unmarshal(blockNodeTypesJSON, &names); err != nil {
+		panic(fmt.Sprintf("pmdoc: decode embedded block node types: %v", err))
 	}
+	if len(names) == 0 {
+		panic("pmdoc: embedded block node types are empty")
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
+func isBlockNodeType(typeName string) bool {
+	if _, ok := blockNodeTypes[typeName]; ok {
+		return true
+	}
+	_, typed := typedBlock(typeName)
+	return typed
 }
 
 func isInlineNodeType(typeName string) bool {

@@ -150,7 +150,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
   const marks = Object.fromEntries(ctx.get(marksCtx) as never);
   const schema = new Schema({ nodes, marks });
   // An ask a live document holds off its content rule is built, not refused (./ask-content.ts).
-  relaxAskContentCheck(schema, options.blockSchema);
+  relaxAskContentCheck(schema);
 
   // Match the browser editor's GFM features (tables, task lists, strikethrough,
   // autolinks, ...), plus proof span and dispatchAsk span parsing. The schema and plugin list
