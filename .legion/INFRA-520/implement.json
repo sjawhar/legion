@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T18:13:43Z",
+  "completed": "2026-10-28T19:15:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review at cad74205: a step script is read as bash reads it, only allowlisted env names keep a go line reduced, and the check states what it does not read",
+      "surface": "check-ci-filters.sh and its test suite on the branch tree (main 53f39ba0 merged in)",
+      "command": "PATH=$TMPDIR/pyenv/bin:$PATH bash .github/scripts/check-ci-filters.test.sh; .github/scripts/check-ci-filters.sh",
+      "observed": "Tests 131 passed, 0 failed; the six new cases (YAML \\r and \\_ before a hidden command; XDG_CONFIG_HOME with a go/env file setting GOFLAGS, HOME, PATH, an arbitrary name) failed 15 checks against the engine at 75722984 (113 passed, 15 failed). Check exit 0, 24 gates 0 uncovered with ENV_ALLOWED holding the 13 test-configuration names the Go jobs use. Header and router guide state the boundary (no environment writes inside local actions or scripts are read). actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0; ci-ok 42/0. PR MERGEABLE.",
+      "headSha": "20e98c18ba3fc6b018618c648029cdd60f22da68",
+      "negativeControl": "On the real tree, `env: HOME: /home/runner/elsewhere` on 'Test the Go daemon' fails naming the command ('step \"Test the Go daemon\"'s env sets HOME') and 411 files the test filter misses. Reverted."
+    },
     {
       "criterion": "Review 5686812253 findings 1-4: the filter-drift check reduces only whole-script simple steps, reads -race, pins non-simple steps whole, and falls to every file under a Go module",
       "surface": "check-ci-filters.sh and its test suite on the merged tree (main 53f39ba0)",
@@ -389,7 +397,8 @@
     "Review round 1: docs-deploy is gated on the docs job's newest output; check-ci-filters.sh holds -tags and mode; the router guide's cache recipe matches ci.yaml; main merged with #2358 and the three check-image-trigger-paths.sh tidy-ups carried. Known, pre-existing: the image reverse check does not model a widening || term in an image-only gate's filters clause (no workflow has one).",
     "Round 7: docs-deploy replaced by the push-only docs-pages.yaml (architect comment 6c83c); the drift check made conservative (architect, at the INFRA controller's direction): simple commands reduced, everything else counts as the whole module; go_notices and envoy_smoke widened. Script runs are held exact (the script line must equal the pinned text) rather than parsed. Main's two reds from #2233 are not fixed here (architect).",
     "Round 8: the three Postgres 16 jobs main added as non-required are in ci-ok's needs, as every router job is, so after the flip a selected one that fails fails ci-ok.",
-    "Round 9: envoy_go also selects any Go change, besides go_notices and envoy_smoke: its `go list ./... | grep -Ev ... | xargs go test` and inline `GOOS=linux GOARCH=$arch go build` lines cannot be written in the simple form without changing what they run, so envoy-go now runs on a daemon-only change too."
+    "Round 9: envoy_go also selects any Go change, besides go_notices and envoy_smoke: its `go list ./... | grep -Ev ... | xargs go test` and inline `GOOS=linux GOARCH=$arch go build` lines cannot be written in the simple form without changing what they run, so envoy-go now runs on a daemon-only change too.",
+    "Round 3 finding 1 (environment writes inside local actions or scripts) is a stated boundary, not a check, by the architect's decision (dispatch://INFRA-520/comment/bafbc258-757d-4ef1-a6ab-1f3ad62b5bdd)."
   ],
   "openQuestions": [],
   "productionCheck": [
