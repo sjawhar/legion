@@ -142,6 +142,33 @@ test("deleting a block's whole text removes its span", () => {
   ]);
 });
 
+test("typing over a block's whole text rewords it, and typing over several blocks removes them", () => {
+  const body = "Alpha\n\nBeta\n\nGamma";
+  const spans = spansOf(body, ["b1", "Alpha"], ["b2", "Beta"], ["b3", "Gamma"]);
+  // The first key typed over the selected block replaces its whole text; the next one grows it.
+  let state = edit(spans, body, { end: 11, start: 7 }, "O", "insertText");
+  state = edit(state.spans, state.value, { end: 8, start: 8 }, "ther", "insertText");
+
+  expect(state.value).toBe("Alpha\n\nOther\n\nGamma");
+  expect(state.spans.live).toEqual([
+    { end: 5, id: "b1", start: 0 },
+    { end: 12, id: "b2", start: 7 },
+    { end: 19, id: "b3", start: 14 },
+  ]);
+  expect(carried(state)).toEqual([
+    { from: 0, id: "b1" },
+    { from: 7, id: "b2" },
+    { from: 14, id: "b3" },
+  ]);
+
+  // A paste over the selected block is a rewording too; words pasted over two blocks are neither.
+  const pasted = edit(spans, body, { end: 11, start: 7 }, "\n\nPasted", "insertFromPaste");
+  expect(pasted.spans.live).toContainEqual({ end: 15, id: "b2", start: 9 });
+  const overTwo = edit(spans, body, { end: 18, start: 7 }, "Both", "insertText");
+  expect(overTwo.value).toBe("Alpha\n\nBoth");
+  expect(overTwo.spans.live).toEqual([{ end: 5, id: "b1", start: 0 }]);
+});
+
 test("a block cut and pasted elsewhere keeps its id", () => {
   const body = "Alpha\n\nBeta\n\nGamma";
   let state = {

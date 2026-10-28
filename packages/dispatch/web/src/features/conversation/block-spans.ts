@@ -143,10 +143,12 @@ function editRange(before: string, after: string, range: TextEditRange | undefin
  * - An edit over a span's start but not its end leaves the span starting where the edit ends; one
  *   over its end leaves it ending there. Joining two blocks (Backspace across the boundary) leaves
  *   both starts in one block, and the server keeps the first.
- * - An edit over a span's whole text removes it, except a cut (`deleteByCut`) or a drag
- *   (`deleteByDrag`), which holds it - the newest cut or drag holds the only held spans, as the
- *   clipboard holds only the newest cut. A paste (`insertFromPaste`) or a drop (`insertFromDrop`)
- *   holding a held span's text puts the span back where the text lands.
+ * - An edit that replaces the whole text of one span, and of no other, with new words keeps the
+ *   span over them: a block whose text is selected and typed over is reworded, as the server's
+ *   text rules read it too. Any other edit over a span's whole text removes it, except a cut
+ *   (`deleteByCut`) or a drag (`deleteByDrag`), which holds it - the newest cut or drag holds the
+ *   only held spans, as the clipboard holds only the newest cut. A paste (`insertFromPaste`) or a
+ *   drop (`insertFromDrop`) holding a held span's text puts the span back where the text lands.
  */
 export function mapSpans(
   spans: BlockSpans,
@@ -162,6 +164,9 @@ export function mapSpans(
   const holding = inputType === "deleteByCut" || inputType === "deleteByDrag";
   const taken: HeldSpan[] = [];
   const live: BlockSpan[] = [];
+  const covered = spans.live.filter((span) => start <= span.start && end >= span.end);
+  const words = inserted.trim();
+  const reworded = !holding && covered.length === 1 && words !== "" ? covered[0] : undefined;
   for (const span of spans.live) {
     if (start === end && start === span.end && !inserted.includes("\n")) {
       live.push({ ...span, end: span.end + delta });
@@ -170,7 +175,10 @@ export function mapSpans(
     } else if (start >= span.end) {
       live.push(span);
     } else if (start <= span.start && end >= span.end) {
-      if (holding) {
+      if (span === reworded) {
+        const wordsStart = start + inserted.indexOf(words);
+        live.push({ ...span, end: wordsStart + words.length, start: wordsStart });
+      } else if (holding) {
         taken.push({
           cut: before.slice(start, end),
           id: span.id,
