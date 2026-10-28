@@ -67,7 +67,7 @@ func (s *Service) SetAskBlockText(
 ) (AskBlockText, error) {
 	// The ask row is read before the live document, so its options are the ones the caller's
 	// row holds: an options edit of a two-list ask must not delete a list the row never held.
-	rowLabels, err := s.askRowLabels(ctx, artifactID, blockID)
+	rowOptions, err := s.askRowOptions(ctx, artifactID, blockID)
 	if err != nil {
 		return AskBlockText{}, err
 	}
@@ -83,7 +83,7 @@ func (s *Service) SetAskBlockText(
 		}
 		// The content rule is decided once, before the edit is built: askBlockChildren then
 		// yields the question's paragraphs and at most one list, which keeps the rule.
-		if err := refuseAskContentEdit(block, rowLabels, edit); err != nil {
+		if err := refuseAskContentEdit(block, rowOptions, edit); err != nil {
 			return err
 		}
 		want := AskBlockText{
@@ -494,9 +494,9 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 	return normalized
 }
 
-// askRowLabels is the option labels of the ask row anchored to blockID of artifactID, trimmed as
+// askRowOptions is the options of the ask row anchored to blockID of artifactID, trimmed as
 // normalizeAskOptions trims them; none when no row is anchored there.
-func (s *Service) askRowLabels(ctx context.Context, artifactID, blockID string) ([]string, error) {
+func (s *Service) askRowOptions(ctx context.Context, artifactID, blockID string) ([]model.AskOption, error) {
 	var encoded []byte
 	err := s.queryFrom(ctx).QueryRow(ctx, `
 		select a.options from asks a
@@ -512,11 +512,7 @@ func (s *Service) askRowLabels(ctx context.Context, artifactID, blockID string) 
 	if err := json.Unmarshal(encoded, &options); err != nil {
 		return nil, fmt.Errorf("decode ask row options: %w", err)
 	}
-	labels := make([]string, 0, len(options))
-	for _, option := range normalizeAskOptions(options) {
-		labels = append(labels, option.Label)
-	}
-	return labels, nil
+	return normalizeAskOptions(options), nil
 }
 
 // refuseAskContentEdit refuses edit of block, an ask block breaking its content rule
@@ -527,13 +523,17 @@ func (s *Service) askRowLabels(ctx context.Context, artifactID, blockID string) 
 //
 // An ask holding a block after its first list is refused whatever the edit sends: rebuilding the
 // body would move that block's text into the question or delete it, and the caller, reading the
-// row, cannot know it is there. A document edit moves or deletes it. An ask holding only
-// paragraphs and then two or more lists is refused unless the edit sends options, which rebuilds
-// them as one list and so repairs the ask. Settlement keeps such an ask's row (rowLabels) as it
-// was before the break, so a caller building options from the row would delete the options a
-// collaborator's list added: the edit is refused unless its options keep, by label, every option
-// the block holds and the row does not.
-func refuseAskContentEdit(block askBlock, rowLabels []string, edit AskBlockEdit) error {
+// row, cannot know it is there. A document edit moves or deletes it. So is an ask whose lists
+// hold two items with one label: its options cannot be rebuilt as one list of unique labels
+// without losing one, so a document edit renames or removes it.
+//
+// An ask holding only paragraphs and then two or more lists is refused unless the edit sends
+// options, which rebuilds them as one list and so repairs the ask. Settlement keeps such an ask's
+// row (rowOptions) as it was before the break, so a caller building options from the row would
+// delete or rewrite what a collaborator wrote in the block: the edit is refused unless its
+// options hold, exactly (label and description), every item the block holds and the row does
+// not. The refusal quotes each such item whole, so sending what it quotes loses nothing.
+func refuseAskContentEdit(block askBlock, rowOptions []model.AskOption, edit AskBlockEdit) error {
 	broken := pmdoc.AskContentError(block.node)
 	if broken == nil {
 		return nil
@@ -545,52 +545,54 @@ func refuseAskContentEdit(block askBlock, rowLabels []string, edit AskBlockEdit)
 				" into the question nor delete it: move it above the options or delete it with a document edit (dispatch doc-edit), then edit the ask",
 		}
 	}
-	protected := []string{}
-	for _, option := range normalizeAskOptions(block.options) {
-		if !slices.Contains(rowLabels, option.Label) && !slices.Contains(protected, option.Label) {
-			protected = append(protected, option.Label)
+	items := normalizeAskOptions(block.options)
+	for i, item := range items {
+		if !slices.ContainsFunc(items[i+1:], func(other model.AskOption) bool { return other.Label == item.Label }) {
+			continue
+		}
+		shared := slices.DeleteFunc(slices.Clone(items), func(other model.AskOption) bool { return other.Label != item.Label })
+		return &ErrAskBlockUnrepresentable{
+			Field: "block",
+			Reason: broken.Error() + "; the options cannot be rebuilt as one list, since " + quotedItems(shared) +
+				" share a label: rename or remove one with a document edit (dispatch doc-edit), then edit the ask",
 		}
 	}
+	protected := slices.DeleteFunc(items, func(item model.AskOption) bool { return slices.Contains(rowOptions, item) })
 	if edit.Options == nil {
 		reason := broken.Error() + "; send options to rebuild the options as one list"
 		if len(protected) > 0 {
-			reason += ", keeping " + quotedLabels(protected) + ", which the decision holds but its ask does not"
+			reason += ", keeping " + quotedItems(protected) + " exactly as quoted, which the decision holds but its ask does not"
 		}
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: reason}
 	}
-	sent := []string{}
-	for _, option := range normalizeAskOptions(*edit.Options) {
-		sent = append(sent, option.Label)
-	}
-	missing := slices.DeleteFunc(protected, func(label string) bool { return slices.Contains(sent, label) })
+	sent := normalizeAskOptions(*edit.Options)
+	missing := slices.DeleteFunc(protected, func(item model.AskOption) bool { return slices.Contains(sent, item) })
 	if len(missing) == 0 {
 		return nil
 	}
 	return &ErrAskBlockUnrepresentable{
 		Field: "block",
-		Reason: broken.Error() + "; the edit leaves out " + quotedLabels(missing) +
-			", which the decision holds but its ask does not: send them with the options to rebuild one list",
+		Reason: broken.Error() + "; the edit leaves out or changes " + quotedItems(missing) +
+			", which the decision holds but its ask does not: send each exactly as quoted with the options to rebuild one list",
 	}
+}
+
+// quotedItems quotes options whole, as `"Label: Description"`, or `"Label"` without a
+// description, so a caller can send each back exactly.
+func quotedItems(options []model.AskOption) string {
+	parts := make([]string, 0, len(options))
+	for _, option := range options {
+		text := option.Label
+		if option.Description != "" {
+			text += ": " + option.Description
+		}
+		parts = append(parts, fmt.Sprintf("%q", text))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // quotedRunes is how much of a block's text a refusal quotes before cutting it short.
 const quotedRunes = 80
-
-// quotedLabels quotes labels, cut short once together they run past quotedRunes.
-func quotedLabels(labels []string) string {
-	parts := make([]string, 0, len(labels))
-	room := quotedRunes
-	for _, label := range labels {
-		text := []rune(label)
-		if len(text) > room {
-			parts = append(parts, fmt.Sprintf("%q", strings.TrimRight(string(text[:room]), " ")+"…"))
-			break
-		}
-		room -= len(text)
-		parts = append(parts, fmt.Sprintf("%q", label))
-	}
-	return strings.Join(parts, ", ")
-}
 
 // textAfterOptions names the blocks ask holds after its first bullet list that are not lists -
 // their text quoted, cut short where it runs on - and reports whether it holds any.

@@ -720,7 +720,7 @@ func TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld(t *testing
 			var unrepresentable *ErrAskBlockUnrepresentable
 			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "block" ||
 				!strings.Contains(err.Error(), "paragraph+ bullet_list?") ||
-				!strings.Contains(err.Error(), `the edit leaves out "Defer", which the decision holds but its ask does not`) {
+				!strings.Contains(err.Error(), `the edit leaves out or changes "Defer: Wait a week", which the decision holds but its ask does not`) {
 				t.Fatalf("%s sent to a two-list ask: err = %v, want ErrAskBlockUnrepresentable quoting Defer", name, err)
 			}
 			if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
@@ -737,12 +737,21 @@ func TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld(t *testing
 		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Urgency: new("high")}, alice)
 		return err
 	})
-	if err == nil || !strings.Contains(err.Error(), "send options to rebuild the options as one list") || !strings.Contains(err.Error(), `"Defer"`) {
+	if err == nil || !strings.Contains(err.Error(), "send options to rebuild the options as one list") || !strings.Contains(err.Error(), `"Defer: Wait a week"`) {
 		t.Fatalf("urgency edit of a two-list ask: err = %v, want the refusal naming Defer", err)
 	}
 
-	// Descriptions may change: the decision is judged by label.
-	sent := []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a month"}}
+	// An option only the block holds is kept whole: sending it with a changed description is
+	// refused, quoting it in full, and sending it exactly as quoted repairs the ask.
+	changed := []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a month"}}
+	err = joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Options: &changed}, alice)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), `"Defer: Wait a week"`) {
+		t.Fatalf("edit changing Defer's description: err = %v, want the refusal quoting Defer in full", err)
+	}
+	sent := []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}}
 	err = joinedWrite(service, func(ctx context.Context) error {
 		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Options: &sent}, alice)
 		return err
@@ -752,6 +761,106 @@ func TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld(t *testing
 	}
 	if lists := countChildren(firstAsk(liveTree(t, service, artifactID)), "bullet_list"); lists != 1 {
 		t.Fatalf("repaired ask holds %d bullet lists, want 1", lists)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", sent)
+}
+
+// sendAskOptions sends options to the ask-lists block as alice.
+func sendAskOptions(service *Service, artifactID string, edit AskBlockEdit) error {
+	return joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", edit, model.Actor{Kind: "user", ID: "alice"})
+		return err
+	})
+}
+
+// assertAskEditRefusedQuoting checks err refuses the edit quoting each of quotes, and that
+// nothing was written.
+func assertAskEditRefusedQuoting(t *testing.T, service *Service, artifactID string, before *pmdoc.Node, err error, quotes ...string) {
+	t.Helper()
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) || unrepresentable.Field != "block" {
+		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the block", err)
+	}
+	for _, quote := range quotes {
+		if !strings.Contains(err.Error(), quote) {
+			t.Fatalf("err = %v, want it to quote %s", err, quote)
+		}
+	}
+	if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+		t.Fatalf("the refused edit changed the block")
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+}
+
+// An option a collaborator's list added is kept whole, description and all: an edit sending its
+// label without its description is refused quoting it in full, and sending it as quoted repairs.
+func TestSetAskBlockTextRefusesOptionsDroppingTheDescriptionOfAnOptionTheRowNeverHeld(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+
+	bare := []model.AskOption{ship, hold, {Label: "Defer"}}
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &bare})
+	assertAskEditRefusedQuoting(t, service, artifactID, before, err, `"Defer: Wait a week"`, "send each exactly as quoted")
+
+	sent := []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &sent}); err != nil {
+		t.Fatalf("edit sending Defer as quoted: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", sent)
+}
+
+// A collaborator's second list repeating a row label cannot be rebuilt as one list with unique
+// labels, so every edit is refused, quoting both items and naming the document edit that
+// renames or removes one.
+func TestSetAskBlockTextRefusesEveryEditOfAnAskRepeatingALabel(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Ship: Only on Fridays\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	fridays := model.AskOption{Label: "Ship", Description: "Only on Fridays"}
+
+	for name, edit := range map[string]AskBlockEdit{
+		"the row's options": {Options: &[]model.AskOption{ship, hold}},
+		"every item":        {Options: &[]model.AskOption{ship, hold, fridays}},
+		"urgency only":      {Urgency: new("high")},
+	} {
+		err := sendAskOptions(service, artifactID, edit)
+		t.Logf("%s: %v", name, err)
+		assertAskEditRefusedQuoting(t, service, artifactID, before, err, `"Ship: Release it"`, `"Ship: Only on Fridays"`, "dispatch doc-edit")
+	}
+}
+
+// A collaborator's new description of a row option, in the block's first list, is kept: an edit
+// putting back the row's description is refused quoting the block's, which repairs when sent.
+func TestSetAskBlockTextRefusesOptionsRevertingADescriptionTheRowNeverHeld(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		first := slices.IndexFunc(ask.Children, func(child *pmdoc.Node) bool { return child.Type == "bullet_list" })
+		ask.Children[first] = parsedBlock(t, "- Ship: Release it\n- Hold: Wait for legal review\n")
+		ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	defer_ := model.AskOption{Label: "Defer", Description: "Wait a week"}
+
+	reverted := []model.AskOption{ship, {Label: "Hold", Description: "Wait for review"}, defer_}
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &reverted})
+	assertAskEditRefusedQuoting(t, service, artifactID, before, err, `"Hold: Wait for legal review"`)
+
+	sent := []model.AskOption{ship, {Label: "Hold", Description: "Wait for legal review"}, defer_}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &sent}); err != nil {
+		t.Fatalf("edit sending the block's description: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
 	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", sent)
