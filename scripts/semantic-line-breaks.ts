@@ -1111,8 +1111,18 @@ async function readBytes(path: string): Promise<Uint8Array | undefined> {
 }
 
 /** Check mode reads invalid UTF-8 as U+FFFD; `--write` refuses it, since writing would replace it. */
-const LENIENT_UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
-const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+/**
+ * Both decoders drop a leading byte order mark, as micromark and GitHub's cmark-gfm do, so no rule
+ * reads it as part of line 1; `--write` puts it back when it writes the file.
+ */
+const LENIENT_UTF8 = new TextDecoder("utf-8");
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true });
+const BYTE_ORDER_MARK = "\uFEFF";
+
+/** Whether the bytes start with UTF-8's byte order mark (EF BB BF). */
+function hasByteOrderMark(bytes: Uint8Array): boolean {
+  return bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+}
 
 async function readText(path: string): Promise<string | undefined> {
   const bytes = await readBytes(path);
@@ -1171,7 +1181,7 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
         ? (renderDifference(parse, text, next) ?? secondRelayoutDifference(next))
         : `the re-layout would change more than whitespace (${difference})`;
     if (refusal === undefined) {
-      await writeFile(path, next);
+      await writeFile(path, hasByteOrderMark(bytes) ? BYTE_ORDER_MARK + next : next);
     } else {
       process.stderr.write(`${path}: refusing to write: ${refusal}\n`);
       status = 2;

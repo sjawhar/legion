@@ -522,3 +522,16 @@ test("--write keeps a byte order mark", async () => {
   expect(result.text).toBe("\uFEFFSome words.\nMore words.\n");
   expect(result.exitCode).toBe(0);
 });
+
+test("no rule reads a leading byte order mark as part of line 1", async () => {
+  // micromark and cmark-gfm drop the mark, so `<source` opens an HTML block that holds the list.
+  const text = "\uFEFF<source src=x> Some words.\n- one. two\n- three\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+  // Check mode reads the fence on line 1, so the sentences inside it are code.
+  const path = await markdownFile("\uFEFF```\nOne. Two.\n```\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
