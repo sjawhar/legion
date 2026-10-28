@@ -2,31 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-27T17:27:43Z",
-  "decision": "changes_requested",
-  "round": 2,
-  "reviewedCodeHead": "34719431fb67217a2543823859988fe35b868b24",
+  "completed": "2026-10-28T10:06:41Z",
+  "decision": "approved",
+  "round": 3,
+  "reviewedCodeHead": "9d82a849271f06f2d623bd6dd9102d101d413d54",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
+  "keyFindings": [],
+  "notDefects": [
     {
-      "severity": "important",
-      "file": "CI: required check `test` (run 40535572374, job 122299778736) at code head 34719431",
-      "description": "The required `test` check is red: in the step 'Test the concurrent packages under the race detector' (`go test -count=1 -race ./internal/daemon/ ...` in packages/daemon), TestOneDeployRunWithTwoApplyingJobsWakesTwoLooks failed with 'check_wake_test.go:767: timed out waiting for the look's start row resuming the implementer', and the package then hit its 10-minute test timeout. This pull request does not change packages/daemon. The same family of check_wake deploy-run tests failed on five other pull requests' runs in the same hour (40534383268, 40534377471, 40532994176, 40532235789, plus a tmux test in 40534074894). main 2df3353c's push run passed. A red required check is never approved, and the code itself has no standing finding."
+      "file": "packages/envoy/CHANGELOG.md, packages/envoy-client/CHANGELOG.md, packages/claude-envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md",
+      "description": "Main moved past the merge base (184897acc1, #2419): changelog entries are now fragment files, and the old [Unreleased] heading is now 'Before changelog fragments'. Main's own rule moves an open pull request's old-heading entries into fragments at its next merge of main. GitHub reports this pull request mergeable, so no merge is due. No behaviour and no gate change."
+    },
+    {
+      "file": "packages/envoy/internal/dispatch/api/related_terms.go:262-264",
+      "description": "The comment 'the title is a few words' is loose: an ask's or decision block's question is the title, and it can hold up to 2,000 characters. The cost is one to_tsvector per word, so this is wording only."
     }
   ],
-  "threads": {
-    "PRRT_kwDORFy7ds6wuPIJ": "accepted: fixed in fe5f66eb (budget skips with continue; two tests)",
-    "PRRT_kwDORFy7ds6wuPIP": "accepted: fixed in fe5f66eb (cancelled reason through WithTimeoutCause; verified for decision blocks and the meaning stage by overlay tests)",
-    "PRRT_kwDORFy7ds6wuPIT": "accepted: fixed in 110627e7 (coverage calls issue_embedding_spec)"
-  },
   "verified": {
-    "roundChanges": "fe5f66eb (budget continue, cancelled reason, 0135 constraint), 110627e7 (searchKeywordLegs(rank), no text rewrite or panic guard, coverage through issue_embedding_spec), merges a529e99b and 34719431 (migrations 0135/0136, README and CHANGELOG conflicts only; no stale 0130/0131 reference to this branch's migrations; main is still at the merge base 2df3353c).",
-    "sqlIdentity": "deep-review dumped searchQuery, searchQueryMeaning, relatedKeywordQuery and relatedMeaningQuery at d2fd3cd4 and 34719431: byte-identical (5,611 / 10,735 / 6,104 / 11,229 bytes).",
-    "tests": "go test ./internal/dispatch/api -run 'TestRelatedTerms|TestRelatedCheckBounds|TestDecisionBlock|TestMigration|TestSearch' ok; ./internal/dispatch/store ok; ./internal/dispatch/embedqueue ok.",
-    "ci": "Required set from the rulesets: lint, typecheck, test, pr-title; no branch protection. At code head 34719431: lint success, typecheck success, pr-title success (run 40537669934), test failure (run 40535572374). The compare from 34719431 to 19a825b2 changes only .legion/ (2 files).",
-    "thermonuclear": "deep-review: APPROVE at 19a825b2, no Medium or High finding; it ran overlay tests for allowance expiry vs cancellation (decision-block shared allowance gives timeout, a parent cancel gives cancelled, a cancel in the meaning stage gives cancelled). code-quality: last round's (a) and (b) resolved; two low items that change no behaviour, judged not defects (one helper for the two WithTimeoutCause sites; a dead timedOut argument at suggestions.go:518-519).",
-    "e2eLines": "E2E (implementer) and E2E (tester) present in the pull request body."
+    "fingerprint": "Last review commit_id 721a2c97: 620fbdda...; head 9d82a849: 5860ba95..., changed. The diff without .legion, docs/solutions and packages/claude-envoy/dist is byte-identical at both heads (3d530098...). dist differs only by bundler identifier renames from main's Bun 1.4.4. bun scripts/build.ts --check passes ('dist/ and legion/ match a fresh build'). New round; thermonuclear pair run again.",
+    "ci": "Required set from the rulesets: lint, typecheck, test, pr-title; no branch protection. At code head 9d82a849 (CI head of the newest pull_request runs): lint success, typecheck success, test success, pr-title success (run 40659364077). The compare from 9d82a849 to ebbadc97 changes only .legion/ (2 files). Not required: envoy-go success (dispatch/api package 507.6 s), envoy-go-race, claude-envoy, envoy-client, contracts, dispatch-multiprocess, dispatch-memory all success; dispatch in progress.",
+    "architectQuestion": "The term-statistics refresh runs once at server start: RunSearchTermStatsRefresh (related_terms.go:168) calls duty.Exclusive before its first time.After(interval), and main.go:416 starts it. TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses (cmd/dispatch/multiprocess_test.go:1167) holds the search-term-stats pass inside its first write lock right after start. No round opened for it.",
+    "apiTestTime": "Locally the whole dispatch/api package took 1,161 s at the head and 1,004 s at main b295a3fb (52 new tests add 69 s, existing tests add 99 s). In CI it took 507.6 s, against 410-478 s on main after 582cb2a2. This is listed as a risk on the pull request.",
+    "thermonuclear": "deep-review and code-quality at ebbadc97: APPROVE each. No semantic conflict with main 2df3353c..b295a3fb (2,000-character questions, AskGate does not gate dispatch_related, routes, leases, migrations still end at 0134 on main). The CHANGELOG resolutions lose and duplicate nothing. dist is a fresh build. Bun suites pass: contracts 294, envoy-client 1038, pi-envoy 1382, claude-envoy 216.",
+    "threads": "PRRT_kwDORFy7ds6wuPIJ, PRRT_kwDORFy7ds6wuPIP and PRRT_kwDORFy7ds6wuPIT each carry my accepting reply and are resolved. No bot threads.",
+    "e2eLines": "E2E (implementer) and E2E (tester) present in the pull request body.",
+    "contractCensus": "Not required; the merge changes no contract of this branch."
   }
 }
