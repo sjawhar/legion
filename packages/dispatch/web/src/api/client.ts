@@ -346,17 +346,15 @@ export function isRetryableQueryError(error: unknown): boolean {
   );
 }
 
-/** The codes of the `503`s Dispatch answers with a `Retry-After` it means: it is refusing excess
- *  load (`OVERLOADED`), its database is too busy to take the request now (`DATABASE_BUSY`), or the
- *  request ran past the time Dispatch gives one (`REQUEST_TIMEOUT`). Any other `503` - a
- *  gateway's, or Dispatch's own without one of these codes - names no wait the page can trust,
- *  and keeps the page's own backoff. */
-const BUSY_CODES: ReadonlySet<string> = new Set(["OVERLOADED", "DATABASE_BUSY", "REQUEST_TIMEOUT"]);
+/** The codes of the two `503`s Dispatch answers with a `Retry-After` it means: its database is
+ *  too busy to take the request now (`DATABASE_BUSY`), or the request ran past the time Dispatch
+ *  gives one (`REQUEST_TIMEOUT`). Any other `503` - a gateway's, or Dispatch's own without one of
+ *  these codes - names no wait the page can trust, and keeps the page's own backoff. */
+const BUSY_CODES: ReadonlySet<string> = new Set(["DATABASE_BUSY", "REQUEST_TIMEOUT"]);
 
 /** How long Dispatch asked to be left before this request is asked again, when it was too busy
- *  for it (`BUSY_CODES`) and said so with a `Retry-After`; `undefined` for anything else. A read's
- *  retry waits it out (`queryRetryDelay` in `api/query-client.ts`), as a write's does
- *  (`features/writes/keyed-write.ts`). */
+ *  for it (`BUSY_CODES`) and said so with a `Retry-After`; `undefined` for anything else. A
+ *  write's retry waits it out (`features/writes/keyed-write.ts`). */
 export function busyRetryAfterMs(error: unknown): number | undefined {
   if (!(error instanceof ApiError) || error.status !== 503) return undefined;
   return error.code !== undefined && BUSY_CODES.has(error.code) ? error.retryAfterMs : undefined;
