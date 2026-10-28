@@ -46,6 +46,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   spec write at its recorded time, unchecked unless a check counts for it, and `routed` needs the
   skill read before it too. A row whose two counts disagree is flagged `writes_seen=N versions=M`,
   with each unseen version and each shown write no version matches under it.
+- The skill-scenario scorer takes a `findings.json` with no row for a run that has one or more
+  spec-only checks as a rig error that asks to run `rig.sh judge` again, as it takes any other judge
+  file that does not cover its inputs. judge.ts writes no row only when a run has no check, so
+  such a file was judged before its checks were known, and it read as "no finding left".
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at

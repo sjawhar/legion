@@ -2211,7 +2211,9 @@ function covered(what: string, given: string[], named: string[], exact: boolean)
  * - proposal.json: each `ask` a row names is one given;
  * - preamble.json: each `source` is spec.md, a given document, or agent-texts.json#<given id>;
  * - faults.json: each row's count is the number of its items;
- * - findings.json: each `check` is 1 to the number of checks given. */
+ * - findings.json: at least one row when it was given a check, and each `check` is 1 to the number
+ *   of checks given. A file with no row for one or more checks is one judged before the checks were
+ *   known (judge.ts writes no row only when there is no check), so it is a rig error too. */
 export function coverage(file: string, answer: unknown, inputs: JudgeInputs): string[] {
   const asks = inputs.asks.map((ask) => ask.id);
   const texts = inputs.texts.map((text) => text.id);
@@ -2260,13 +2262,20 @@ export function coverage(file: string, answer: unknown, inputs: JudgeInputs): st
           : [`faults["${row}"] is ${faults.faults[row]}, but ${items} items name that row`];
       });
     }
-    case "findings.json":
-      return covered(
-        "check",
-        Array.from({ length: inputs.checks }, (_, index) => String(index + 1)),
-        FindingsOutput.parse(answer).rows.map((row) => String(row.check)),
-        false
-      );
+    case "findings.json": {
+      const rows = FindingsOutput.parse(answer).rows;
+      return [
+        ...(inputs.checks > 0 && rows.length === 0
+          ? [`no row for any of the ${inputs.checks} checks it was given`]
+          : []),
+        ...covered(
+          "check",
+          Array.from({ length: inputs.checks }, (_, index) => String(index + 1)),
+          rows.map((row) => String(row.check)),
+          false
+        ),
+      ];
+    }
     default:
       return [];
   }

@@ -2002,6 +2002,9 @@ specRun("spec-writing-head-52", {
 specRun("spec-writing-head-53", {
   judges: { "findings.json": { rows: [{ check: 3, finding: "No owner.", verdict: "fixed" }] } },
 });
+// findings: no row at all for the run's two checks, as a findings.json judged when the scorer saw
+// no check is: not "no finding left", but a judge that never read these checks.
+specRun("spec-writing-head-102", { judges: { "findings.json": { rows: [] } } });
 // Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
 // something else, and the run's two checked writes still stand. Each result is the one Dispatch
 // gives, so the calls that Dispatch did apply are left out for what they name, not for their result.
@@ -2725,6 +2728,11 @@ test("judged: a judge file that leaves out, repeats or invents what judge.ts gav
     'faults["A term that nobody explained"] is 1, but 0 items name that row'
   );
   uncovered("spec-writing-head-53", "findings.json", "rows for check it was not given: 3");
+  uncovered(
+    "spec-writing-head-102",
+    "findings.json",
+    "no row for any of the 2 checks it was given"
+  );
 });
 
 test("refusals: each dispatch command of a call is scored in order, with the reads between them", () => {
