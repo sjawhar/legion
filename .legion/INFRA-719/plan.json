@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-719",
+  "completed": "2026-10-28T20:23:38Z",
+  "planDocument": "dispatch://INFRA-719/artifact/plan-md",
+  "summary": "Go's indented code keeps the trailing whitespace-only lines micromark keeps (4+ columns past the code's container, shorter blank lines between, one final line ending dropped as mdast does), except code right after a list or quote the engine holds open; those held lines are not blank for list spacing. Prototype: 39,215-document differential against main a409c128 with every GATE line 0 and 11,678 fixed; pre-census of 32,002 stored versions finds 0 that change.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: pr-body.md (body, proofs, simplify pass), merge-gate.md (production check after the close), default-branch-check.md, findings.md",
+      "skill://dispatch: the census's rewrites of any latest version it counts and the production write and doc-read",
+      "skill://ce-simplify-code: the simplify pass over the reader change"
+    ],
+    "test": [
+      "skill://legion-worker: pr-body.md proof rules; re-run T1, T2 (chromium), the differential and the census at the head, and the T6 red runs in the main extract"
+    ],
+    "review": [
+      "skill://legion-worker: merge-gate.md and review-threads.md; check D2's exception against refusals.go:56-73, that held lines are only newly kept trailing lines, no source_lines.go counter still counts one, and the renderer is untouched"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/indented_code_test.go",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/indented-code-trailing-whitespace-lines.md",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/lists-spaced-by-indented-code-whitespace-lines.md",
+        "packages/envoy/internal/dispatch/pmdoc/fixtures_test.go",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json"
+      ],
+      "what": "Go tests and corpus fixtures first, red at main"
+    },
+    {
+      "id": "T2",
+      "files": [
+        "packages/dispatch/e2e/indented-code-whitespace-lines.e2e.ts"
+      ],
+      "what": "browser test first, red at main: data-spread and raw pre code textContent alike in editor, version view and comment; stored text and doc-read bytes"
+    },
+    {
+      "id": "T3",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/lines.go",
+        "packages/envoy/internal/dispatch/pmdoc/code_text.go",
+        "packages/envoy/internal/dispatch/pmdoc/source_lines.go",
+        "packages/envoy/internal/dispatch/pmdoc/list_spacing.go"
+      ],
+      "what": "codeColumns keeps the lines (D2 with its exception), codeBlockText drops one extra line ending, held set on sourceLines and the blankAfterAttr override (D3); start from main"
+    },
+    {
+      "id": "T4",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/gen/indented-code-corpus.ts"
+      ],
+      "what": "deterministic class generator (D6)"
+    },
+    {
+      "id": "T5",
+      "files": [
+        "packages/envoy/AGENTS.md",
+        "packages/envoy/.changes/unreleased/INFRA-719-indented-code-whitespace-lines.yaml"
+      ],
+      "what": "documentation and changelog fragment"
+    },
+    {
+      "id": "T6",
+      "what": "green runs, whole suites, differential with every GATE line 0, red runs in a main extract"
+    },
+    {
+      "id": "T7",
+      "what": "census at the head (filtered, D8) on the pull request; one pull request with Dispatch: INFRA-719"
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1: the shapes are corpus fixtures, passing at the head and failing at main",
+      "surface": "TestParseMatchesMilkdownForFixtures over fixtures.json and T1's direct rows",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/dispatch/pmdoc -run 'TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema' -count=1 -v",
+      "negativeControl": "the same tests in a main extract: both fixture subtests and every code-text and spread row fail"
+    },
+    {
+      "criterion": "A2: differential.sh against main, every GATE line 0",
+      "surface": "pmdoc differential over in-repo, indented-code (20,000), url, reference, delimiter and INFRA-581 corpora",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base <fork point> --corpus <dir> --out <dir>",
+      "negativeControl": "the prototype without D2's exception refused 8 shapes main reads"
+    },
+    {
+      "criterion": "A3: census of every stored version with the count; each found document rewritten",
+      "surface": "production Dispatch through the agent token",
+      "command": "infra-719-crawl.ts, infra-719-dedupe.py, infra-719-candidates.py, infra-719-census-run.sh, infra-719-census-compare.py (artifacts on INFRA-719); rewrites after the deploy",
+      "negativeControl": "the runner over the plan's 57 hand rows reports 31 changed"
+    },
+    {
+      "criterion": "A4: a document written through the API reads alike in the editor, stored markdown, doc-read and a comment",
+      "surface": "Dispatch issue page (editor, past version, Conversation) in chromium; /text; dispatch doc-read",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && DATABASE_URL=<harness db> bun run e2e -- e2e/indented-code-whitespace-lines.e2e.ts --project=chromium",
+      "negativeControl": "the same spec in a main extract fails on the editor's spread and code rows"
+    }
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Sequencing with INFRA-581 (#2403, open): its 69 documents are refused at main and it edits the same four files",
+        "answer": "D7: build on main; fixtures are the class's siblings main reads; whichever of #2403 and this pull request merges second adds the 69 to the differential and the readable ones as fixtures; the ordering is the architect's, sent with the completion"
+      },
+      {
+        "finding": "The 51 files were missing and 'siblings' undefined",
+        "answer": "The tester attached 69 documents (infra-581-indented-code-misreads.jsonl); D5 defines the sibling fixtures (two corpus documents, measured to differ at main and agree at the prototype) and D6 the generator's kinds"
+      },
+      {
+        "finding": "Lists left to goldmark's looseness (parse.go:704,726) may still read loose",
+        "answer": "D4: measured, held lines decide no list there; remaining differences are the accepted typed-block policy with no held line; generator covers the fallback kinds; a found case switches that looseness to the held-aware blankBefore"
+      },
+      {
+        "finding": "The held set changes refusal predicates beyond the issue's shapes",
+        "answer": "D3: held lines are only the newly kept trailing lines; internal code lines and fenced code keep main's treatment"
+      },
+      {
+        "finding": "refusals.go:62 would refuse documents main stores",
+        "answer": "D2's exception (code right after a list, or a quote with no blank line before it, keeps goldmark's trim); 8 probe shapes agree at main and the prototype with it"
+      },
+      {
+        "finding": "blankAfterAttr override misses quotes",
+        "answer": "D3: decided from the held set, never the line's text; '> -       x\\n>       \\n>   b\\n' measured"
+      },
+      {
+        "finding": "A3's census meaning and 'rewrite' undefined",
+        "answer": "D8: per distinct markdown, main's and the head's tree, refusals and bytes; latest versions rewritten through the API after the deploy, past versions listed; pre-census 0 changed of 32,002"
+      },
+      {
+        "finding": "A4 names no assertion per surface",
+        "answer": "D9 and T2: data-spread on ul/ol/li and raw pre code textContent via evaluateAll, stored /text bytes, doc-read bytes equal"
+      },
+      {
+        "finding": "A2 names no corpus and only three gates",
+        "answer": "T6 names the corpora and requires every GATE line 0"
+      },
+      {
+        "finding": "Workspace dirty with the prototype",
+        "answer": "Reverted before the handoff commit; T3 starts from main with no proto names"
+      },
+      {
+        "finding": "Documentation the change reaches",
+        "answer": "T5: packages/envoy/AGENTS.md list-spacing and code-after-list paragraphs, codeBlockText and codeColumns comments, changelog fragment"
+      },
+      {
+        "finding": "Readers sharing blockParsers()",
+        "answer": "Recorded: Parse, ParseRendering, ParseForWrite, ParseFragment share it; no second Go block reader"
+      },
+      {
+        "finding": "Unsupported claims",
+        "answer": "Every figure in plan.md is the planner's own run with its command; the micromark, mdast and goldmark behaviour cited from the sources read in node_modules and the module cache"
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "A1: 'The 51 shapes and their siblings are corpus fixtures, and TestParseMatchesMilkdownForFixtures passes on them at the head and fails at main.'",
+      "plan": "The fixtures are two corpus documents of the class's siblings that main reads; INFRA-581's 69 documents (39 of round 5, 30 of round 6) join the differential corpus and the fixtures only once #2403 is on main, in whichever pull request merges second.",
+      "evidence": "All 69 attached documents are refused by Parse at main a409c128 and at the prototype (footnote definitions in typed blocks, which #2403 makes readable); TestParseMatchesMilkdownForFixtures calls t.Fatal on a refusal (parse_test.go:16-19).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1: the 51 documents themselves become fixtures only after #2403 merges; until then their class's siblings are the fixtures"
+        ]
+      }
+    }
+  ]
+}
