@@ -2,45 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-576",
-  "round": 3,
-  "completed": "2026-10-28T08:45:00Z",
-  "headTested": "d71d698e1685e1aecddd97d2541a7b3fef5edc71 (code head 235e89096447, tree of the forward merge 5c0f0953)",
-  "fingerprint": "Unchanged-diff check (conflicts-and-rewrites.md) at 91ec4a799d02 -> 81a3fd2b7103..., at 235e89096447 -> 832bfb25ae15...: changed, so a full round. The PR's own diff to release.yaml, check-release-credentials.sh and release-push.test.sh is identical before and after the merge; the merge resolution changed worker-image.yaml (main's workflow-level concurrency group, the draft/closed build-job terms, main-only cache writes) and check-image-trigger-paths.sh.",
-  "ci": "Read on GitHub at code head 235e89096447: lint, typecheck, test, pr-title (the required set) and build, changes, claude-envoy, envoy-client, envoy-plugin, envoy-smoke, pi-envoy, pi-legion, pi-shared all success. The first attempt of the Tests run 40542323949 failed in TestOneDeployRunWithTwoApplyingJobsWakesTwoLooks (packages/daemon/internal/daemon/check_wake_test.go:767, a 60 s timeout); the PR changes no file under packages/daemon/internal, the same check_wake family failed on 12 other runs that day, and dispatch://INFRA-623 tracks it (P1). Its rerun of failed jobs (attempt 2) passed.",
+  "round": 4,
+  "completed": "2026-10-28T09:33:00Z",
+  "headTested": "c0e6166c150ef6c1d55de331a6d692d11303f090 (code head e1badaa641ee: the round-2 review fix 8f1d9f49 and a second forward merge of main)",
+  "fingerprint": "Unchanged-diff check at 235e89096447 -> 832bfb25ae156098..., at e1badaa641ee -> 2eb20149f80dce32...: changed, so a full round. What changed: check-image-trigger-paths.sh (8f1d9f49, the narrowed call mode); check-release-credentials.sh and its test, AGENTS.md (merge with main's changelog-fold rules, #2419); a comment in worker-image.yaml. release.yaml is byte-identical to 235e8909, and worker-image.yaml differs only in a comment, so the workflows that run are the ones round 3 dispatched (runs 40560041399, 40658214845); I did not dispatch them again.",
+  "ci": "At code head e1badaa641ee at 09:32Z, read on GitHub: lint, typecheck, test, changes and both build runs queued; pr-title queued (an earlier attempt cancelled). Not waited on: the reviewer reads the head's checks before it approves.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Proof 1 (merged release.yaml calls under main's concurrency and cache rules) driven again with a new branch dispatch at d71d698e (run 40560041399): same job pattern, --cache-from type=gha,scope=worker-image and no --cache-to off main, the attest-only call ran after the build-only call in the same worker-image-<sha> group and succeeded; the image's attestation verifies under the branch identity and is refused under main's. Proof 2 (merged checker rules) driven on a copy of the tree: the merged build-job gate passes, a call mode false while unset is refused."
+    "how": "Proof 1 (narrowed call mode) driven on a copy of the tree at e1badaa6 with the reviewer's three reproductions and a boolean input: each refused, the real files pass. Proof 3 (merge with #2419) driven: check-release-credentials.sh on the merged tree reads the four workflows, passes, and refuses a credential break in release.yaml and in changelog-fold.yaml. Proof 2 is round 3's, which I re-ran then (run 40560041399) and whose workflows are unchanged since."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Off main, the branch's release.yaml at the merged head builds the sha- image in a build-only call and attests that digest in an attest-only call, under main's workflow-level concurrency group and main-only cache writes, and the image keeps the sha- version label",
+      "criterion": "Round-2 review finding: check-image-trigger-paths.sh admits a call mode only as inputs.<name> == '' on a type: string input with no default or default \"\", so no input comparison can turn the image build off unseen",
+      "surface": "check-image-trigger-paths.sh on a copy of the tree at e1badaa641ee, with worker-image.yaml's attest_digest declaration or build-job gate edited",
+      "command": "for each edit: apply it to the copy, run .github/scripts/check-image-trigger-paths.sh",
+      "observed": "Unedited -> exit 0, 'every image trigger covers every input its build reads (5 image build(s))'. attest_digest with its default: line removed (no default) -> exit 0.",
+      "headSha": "e1badaa641ee",
+      "negativeControl": "attest_digest declared with default \"build\" and the gate == '' -> exit 1; gate inputs.attest_digest != 'sha256:x' -> exit 1; != '0' -> exit 1; inputs.skip_attest == '' (a boolean input) -> exit 1; each '::error::jobs.build builds or calls an image, and its if: is narrowed by `<term>`'."
+    },
+    {
+      "criterion": "After the merge with main's changelog fold (#2419), the release credential rules still hold over release.yaml's restructured jobs and over the new changelog-fold.yaml",
+      "surface": "check-release-credentials.sh on a copy of the merged tree",
+      "command": ".github/scripts/check-release-credentials.sh, unedited and with one break each",
+      "observed": "Unedited -> exit 0, 'check-release-credentials: 6 credentialed job(s) and 9 build job(s) across 4 release and changelog-fold workflows keep credentials out of jobs that run dependency code'. changelog-fold.yaml triggers on workflow_run of 'Release Packages', the name release.yaml still has.",
+      "headSha": "e1badaa641ee",
+      "negativeControl": "release.yaml's publish without cache-mode: none -> exit 1 ('job 'publish' holds a credential, so it must set 'cache-mode: none''); a bun step in changelog-fold.yaml's fold_publish -> exit 1 ('job 'fold_publish' holds a credential, but step 'sneak' runs 'bun'')."
+    },
+    {
+      "criterion": "Off main, release.yaml builds the sha- image in a build-only call and attests it in an attest-only call; worker-image.yaml's documented dispatch builds and attests; the removed legion_version input is refused (round 3, workflows unchanged since)",
       "surface": "GitHub Actions on sjawhar/legion and ghcr.io/sjawhar/legion-worker",
-      "command": "gh workflow run release.yaml --ref legion/INFRA-576 -R sjawhar/legion -> run 40560041399; ghcr.io manifest and config read of the pushed digest; gh attestation verify oci://ghcr.io/sjawhar/legion-worker@sha256:5c804862dfb5... --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/legion/INFRA-576 --source-ref refs/heads/legion/INFRA-576 --source-digest d71d698e1685e1aecddd97d2541a7b3fef5edc71 --deny-self-hosted-runners",
-      "observed": "success. Four builds and publish skipped; worker_image / build 20:01-20:07Z pushed sha256:5c804862dfb5... with --cache-from type=gha,scope=worker-image and no --cache-to; worker_image / attest, worker_image_attest / build and worker_image_release skipped; worker_image_attest / attest success 21:28Z. Config labels: org.opencontainers.image.version=sha-d71d698e1685, revision d71d698e1685. Verify exit 0, SAN worker-image.yaml@refs/heads/legion/INFRA-576, run 40560041399.",
+      "command": "Round 3 runs 40560041399 (release.yaml branch dispatch) and 40658214845 (gh workflow run worker-image.yaml --ref legion/INFRA-576); gh attestation verify ... --cert-identity .../worker-image.yaml@refs/heads/legion/INFRA-576 --source-digest d71d698e...",
+      "observed": "Both success; attestations verify (exit 0); image label sha-d71d698e1685; no --cache-to off main. release.yaml is byte-identical at e1badaa6 and worker-image.yaml differs only in a comment.",
       "headSha": "d71d698e1685e1aecddd97d2541a7b3fef5edc71",
-      "negativeControl": "The same verify with --cert-identity .../worker-image.yaml@refs/heads/main --source-ref refs/heads/main exits 1 ('Error: verifying with issuer \"sigstore.dev\"'); with --source-digest 235e89096447... it exits 1 ('expected SourceRepositoryDigest to be 235e8909..., got d71d698e...')."
-    },
-    {
-      "criterion": "Contract census: worker-image.yaml's workflow_dispatch, as docs/kubernetes.md documents it (gh workflow run worker-image.yaml --ref <ref>, no input), still builds and attests in one run; the removed legion_version input is refused",
-      "surface": "gh workflow run against sjawhar/legion",
-      "command": "gh workflow run worker-image.yaml --ref legion/INFRA-576 -R sjawhar/legion -> run 40658214845",
-      "observed": "success: build 08:38-08:43Z, attest 08:43Z, digest sha256:0b31028b0071...; gh attestation verify with the branch identity and --source-digest d71d698e... exits 0.",
-      "headSha": "d71d698e1685e1aecddd97d2541a7b3fef5edc71",
-      "negativeControl": "gh workflow run worker-image.yaml --ref legion/INFRA-576 -R sjawhar/legion -f legion_version=15.2.0 -> exit 1, 'HTTP 422: Unexpected inputs provided: [\"legion_version\"]'."
-    },
-    {
-      "criterion": "Round-1 finding 1 after the merge: check-image-trigger-paths.sh admits worker-image.yaml's merged build gate and refuses a call mode that is false while its input is unset",
-      "surface": "check-image-trigger-paths.sh on a copy of the tree at this head, worker-image.yaml's build job if: edited",
-      "command": "write each gate into the copy, run .github/scripts/check-image-trigger-paths.sh",
-      "observed": "As merged (inputs.attest_digest == '' && github.event.action != 'closed' && !github.event.pull_request.draft) -> exit 0, 'every image trigger covers every input its build reads (5 image build(s))'; call mode != 'sha256:x' -> exit 0; the gate without the closed term, without the draft term, or without the call mode -> exit 0 (each only widens when the build runs).",
-      "headSha": "d71d698e1685e1aecddd97d2541a7b3fef5edc71",
-      "negativeControl": "Call mode == 'sha256:x' -> exit 1 and != '' -> exit 1, each 'its if: is narrowed by `inputs.attest_digest ...`'."
+      "negativeControl": "Verify with main's identity or another --source-digest exits 1; gh workflow run worker-image.yaml -f legion_version=15.2.0 -> HTTP 422 'Unexpected inputs provided: [\"legion_version\"]'."
     }
   ],
   "notes": [
-    "The main-mapped label probes of round 2 (sjawhar/legion-smoke runs 40520715337: label 15.1.0 when legion releases; 40520719187: sha-<12> when it skips) and the round-1 graph and failure scenarios stand: release.yaml's PR diff and worker-image.yaml's Compute tags step are unchanged by the merge.",
-    "Still first executed after the merge: publish's real npm, tag and push steps in one job, worker_image_release's ghcr.io version tag, and the cache-to write on main (main's own rule). The production check reads the first main run that releases legion."
+    "Round 2's label probes and round 1's graph and failure scenarios stand: release.yaml is unchanged.",
+    "#2419's release-push.sh changes leave tag, push-main, handed and version's behaviour as the publish job uses it (tag still sets the github-actions[bot] identity, through bot_name); a fold commit landing on main between a release run's checkout and its push-main touches CHANGELOG.md and .changes/ only, so push-main's rebase of a package.json bump over it has nothing to resolve. Not exercised live.",
+    "Still first executed after the merge: publish's real npm, tag and push steps in one job, worker_image_release's ghcr.io version tag. The production check reads the first main run that releases legion."
   ]
 }
