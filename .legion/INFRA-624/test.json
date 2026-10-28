@@ -2,41 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T20:00:36Z",
-  "round": 7,
-  "headSha": "f32723d4f306f9f013eb810cdf1dd0ca05a7c7ca",
+  "completed": "2026-10-28T21:05:38Z",
+  "round": 8,
+  "headSha": "a7b325ad3fe41f853c63f5c72fb7345843211c98",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the browser specs at f32723d4: `bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone` gave 17 passed, including its undo/redo row and my execCommand rows. Reproduced undo/redo with my own probe. Drove the exact-item rule and the duplicate-label refusal through the real dispatch CLI."
+    "how": "Re-ran the browser specs at a7b325ad: `bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone` gave 17 passed. Its Go rows for the new refusals pass, but they assert only the refusal; they never follow it (see failures)."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Review round 4 item 1: the read-back filter applies an edit that deletes nothing (an insertion into an unselected option, prosemirror-history's undo and redo) and still refuses one that deletes an unselected block",
-      "surface": "Dispatch document editor in headless Chromium, real Go server and Postgres 17 in the issue pod",
-      "command": "Throwaway Playwright probes (chromium), U1 and U2 plus round 5/6's X and K probes; record https://github.com/sjawhar/legion/pull/2433#issuecomment-6479217133",
-      "observed": "U1: typed x inside the second list's option ('Optionx B'), moved the caret to the question, Ctrl+Z → 'Option B' in the DOM and in storage; Ctrl+Shift+Z → 'Optionx B'. U2: deleted the second list's option text, moved the caret to the question, Ctrl+Z → restored. K7 substring case refused, both Option A lines kept. X and K probes match rounds 5 and 6. No page error.",
-      "headSha": "f32723d4f306f9f013eb810cdf1dd0ca05a7c7ca",
-      "negativeControl": "execCommand('insertText','x') over 'one?Opt' with a first-list option equal to the second list's text is refused, and storage is unchanged"
-    },
-    {
-      "criterion": "Review round 4 item 2: an options edit of a two-list decision keeps each item its row never held whole (label and description), quotes it whole, and refuses repeated labels",
-      "surface": "Dispatch ask-edit route through the real dispatch CLI (packages/envoy-client/bin/dispatch.ts) against the harness server; decision broken by two real editors",
-      "command": "dispatch edit-ask / doc-edit sequences D1 (collaborator's 'Option B: only Fridays'), D2 (104-character label), D5 ('Option A: cheap' and 'Option A: fast'), D4 (doc-edit elsewhere)",
-      "observed": "D1: [Option A, Option B] and [Option A, 'Option B: every day'] exit 1 quoting \"Option B: only Fridays\"; the exact quote → applied, stored '- Option A\\n- Option B: only Fridays', pages unmarked. D2: the refusal quotes the whole 104-character label, and sending it back repairs. D5: edit-ask exits 1 with '… share a label: rename or remove one with a document edit'; doc-edit delete of 'Option A: fast' makes the decision valid; edit-ask [Option A: cheap, Option A2: fast] → stored '- Option A: cheap\\n- Option A2: fast', every word kept. D4: doc-edit replace and insert elsewhere apply on a document that holds a broken decision.",
-      "headSha": "f32723d4f306f9f013eb810cdf1dd0ca05a7c7ca",
-      "negativeControl": "edit-ask --option 'Option A' --option 'Option B' where the block holds 'Option B: only Fridays' → exit 1, nothing written"
+      "criterion": "An ask-edit refusal names a path an agent can follow to a valid decision with every word it did not delete (the architect's round 4 bar, and round 5 review item 1's 'name only the path that works')",
+      "evidence": "Real surface: two real editors broke the decision; bob's option was 'Option B' with a nested sub-item 'only if finance agrees'; the ask was authored by the CLI's session. `dispatch edit-ask --option 'Option A' --option 'Option B'` exits 1: '… holds \"only if finance agrees\" below its text … move it or delete it with a document edit (dispatch doc-edit), then edit the ask'. `dispatch doc-edit --ops-json '[{\"op\":\"delete\",\"find\":\"only if finance agrees\"}]'` exits 1 with only 'ask block \"a1\" … holds a second bullet list …', because doc-edit refuses an edit that changes an ask and leaves it breaking the rule (refuseChangedAsks, docs/mutation.go:367). The next edit-ask is refused the same way. Red test in commit 82346586: packages/envoy/internal/dispatch/docs/service_test.go, TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies (the implementer's nested-list and second-paragraph fixtures). Command: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies -v`. Both subtests fail at the document edit: 'apply live document operations: ask block \"ask-lists\" … holds a second bullet list …'. Record: https://github.com/sjawhar/legion/pull/2433#issuecomment-6480669360"
     }
   ],
-  "findings": [
-    {
-      "severity": "minor (wording; a working path exists)",
-      "description": "The duplicate-label refusal ('rename or remove one with a document edit (dispatch doc-edit), then edit the ask') names a rename that doc-edit refuses. doc-edit replace 'Option A: fast' → 'Option A2: fast' exits 1 with only the content-rule text, because doc-edit refuses an edit that leaves the ask breaking its rule, and a rename leaves both lists. Removing one, then edit-ask, keeps every word. Sent to the architect; not counted as a failure under the architect's round 4 bar (a failure is a refusal that leaves the agent no path)."
-    }
+  "failed": 1,
+  "passed": [
+    "Repeated-label refusal through the real CLI: edit-ask exits 1 naming 'remove one with a document edit (dispatch doc-edit), then edit the ask sending every option, the removed one renamed'. doc-edit delete 'Option A: fast' applies and the decision becomes valid. edit-ask [Option A: cheap, Option A2: fast] then stores '- Option A: cheap\\n- Option A2: fast', with every word kept.",
+    "Browser specs: 17 passed in chromium and iphone."
   ],
-  "ci": "Read on GitHub at f32723d4 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending; mergeable UNKNOWN. Not re-run.",
+  "ci": "Read on GitHub at a7b325ad during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
   "notes": [
-    "Throwaway probe specs were moved out of the workspace. The working copy holds only this handoff."
+    "The move remedy named in the same refusal also leaves both lists, so it would be refused the same way [INFERENCE: not run].",
+    "Throwaway probe specs were moved out of the workspace. The working copy holds only the red test commit and this handoff."
   ]
 }
