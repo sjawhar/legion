@@ -2,41 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-581",
-  "completed": "2026-10-28T15:19:24Z",
-  "decision": "changes_requested",
-  "round": 2,
-  "reviewedCodeHead": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
-  "scope": "Narrowed by the INFRA-138 architect to the round-1 list (review 5669899648) plus correctness defects; new non-correctness points go to Fast-follow.",
-  "roundOneFindings": {
-    "engineThrowOnFenceInListItemDirective": "fixed in 3d9fd4e9 (reproduced: no throw, mdast identical to micromark-extension-directive 4.0.0)",
-    "lazyLineAfterClosingFence": "fixed in 3d9fd4e9 (reproduced; corpus fixtures hold both shapes)",
-    "storedLeadingRuleBeforeTypedBlock": "answered by the production census: 0 of 31,160 stored versions; no backfill needed",
-    "linkReferenceReadingUndocumented": "fixed in 1642bee9",
-    "e2eWindowIncludesAppStart": "fixed in 1642bee9 (reset at the first comments GET)",
-    "copiedFactoriesInLegionFile": "fixed in 1642bee9 (directive-factories.ts transpiles identically to upstream)",
-    "fenceSizeFallback": "fixed in 1642bee9 (directiveState throws)",
-    "contractChangeCensus": "present; re-ran the writer search at head: the unlisted hits (docs/site/media scripts, docs/copied_asks.go comment, contracts example) write one `:::ask`/`:::callout` level, inside the body's 43-file depth measurement"
+  "completed": "2026-10-28T20:39:28Z",
+  "decision": "approved",
+  "round": 3,
+  "reviewedCodeHead": "fef578d632635407df87357dea13e18f99cd9264",
+  "scope": "Narrowed by the INFRA-138 architect: the paragraph-only footnote rule, the tester's red test 46396a19, and the probe and differential counts; main's indented-code whitespace shapes are out of scope (own child issue).",
+  "verified": {
+    "rule": "refusals.go:91-99 refuses a footnote definition in a typed block holding any block but paragraphs, and one with a list item around it (stricter than the rule); applies to every caller reader (TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused runs Parse, ParseForWrite, ParseFragment)",
+    "redTest": "TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused fails with c54bf052's refusals.go overlaid (3 inputs stored tight) and passes at head",
+    "roundTwoInputs": "l4/l5/l6/l7 at head: every input Go read otherwise is refused; the two still-differing accepted inputs differ only in main's whitespace-only indented code (`    :\\n     `)",
+    "ownFuzz": "3,974 callout documents with paragraph-only definitions in typed blocks accepted at head (main refused almost all): 0 differ from the engine",
+    "pairFuzz": "68,896 callout documents: 0 newly refused vs main, 0 panics; quotedDefinitionFenceBlank fired on 3,661, all refused at main"
   },
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
+  "keyFindings": [],
+  "outOfScope": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/source_lines.go:268",
-      "description": "New in c5984d7e: blankInside skips blank lines an unclosed fence takes, so holdsTypedBlockWithBlankLine no longer refuses `> - [^f]: :::callout{}\\n>       ```\\n>\\n>\\n`; main refused it. Go now accepts it with list_item spread=true while the engine reads spread=false (definitionEndSpreadsItem, list_spacing.go:320, lacks the keepsBlankLinesAfter exception). 6 variants, Go probe at head."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/refusals.go:79",
-      "description": "From ca82ad63 (missed in round 1): with the footnote-in-typed-block refusal gone, `Text[^f].\\n\\n- x\\n  :::callout{kind=\"note\" title=\"T\"}\\n  [^f]:\\n      note\\n  :::\\n` and 5 variants are accepted by Go with list_item spread=false while the engine reads spread=true; main refused them. holdsDefinitionOpeningOnALaterLine (list_spacing.go:591) reads only the item's own children."
+      "file": "packages/envoy/internal/dispatch/pmdoc (main's readings)",
+      "description": "15 documents main refused (for the footnote in a typed block) are now accepted with a reading the engine does not share; each shrinks to a misreading main already has outside any typed block: a definition paragraph followed by a table-delimiter-like line then `    ===` (`:::callout{}\\n[^g]: other\\n|-|-|\\n    ===\\n:::\\n`, Go paragraph vs engine heading; `[^g]: other\\n|-|-|\\n    ===\\n` is accepted and misread at main), and inline HTML in a quoted definition (`::::callout{}\\n>[^f]: note\\n>    <b>\\n::::\\n`; `>[^f]: note\\n>    <b>\\n` accepted and misread at main). Sent to the architect to file as main's, like the whitespace shapes. The PR body's round-6 claim of no such input is corrected in Not proven / risk."
     }
   ],
   "thermonuclear": {
-    "head": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
-    "deepReview": "CHANGES: round-1 findings fixed; 2 Medium Go-vs-engine spread defects on documents main refused and head accepts; ~174k old-vs-new fuzz with 0 throws and no round-4 regressions; Go-vs-engine 137k documents, 12 newly-accepted mismatches (these two shapes)",
-    "codeQuality": "APPROVE: round-1 findings fixed; fast-follow only"
+    "head": "fef578d632635407df87357dea13e18f99cd9264",
+    "deepReview": "CHANGES (Medium): the 15 newly accepted documents above, each a misreading main already has outside a typed block; no High; rule refuses nothing main accepted",
+    "codeQuality": "APPROVE: Minor only (refusal wording names the typed block rather than the definition; test copies refusal text; second red test passes on any ErrSchema; refusal block could be its own function)"
   },
-  "ci": "Required set lint, typecheck, test, pr-title: all completed success at CI head 799b379f; compare to e98668b7 handoffsOnly true (2 files).",
-  "threads": "7 round-1 threads answered and accepted by reply: PRRT_kwDORFy7ds6wwjjN, PRRT_kwDORFy7ds6wwjja, PRRT_kwDORFy7ds6wwjjg, PRRT_kwDORFy7ds6wwjjl, PRRT_kwDORFy7ds6wwjjs, PRRT_kwDORFy7ds6wwjjz, PRRT_kwDORFy7ds6wwjj3 (all already resolved by the implementer)"
+  "ci": "Required lint, typecheck, test, pr-title completed success at CI head fef578d6; compare to ed97d389 handoffsOnly true. Non-required Worker Image build failed in its TLS probe of external revocation test hosts (CERT_REVOKED), unrelated to this diff.",
+  "threads": "9 threads answered and accepted (7 round-1, PRRT_kwDORFy7ds6xMEjT, PRRT_kwDORFy7ds6xMEjh); all resolved by the implementer"
 }
