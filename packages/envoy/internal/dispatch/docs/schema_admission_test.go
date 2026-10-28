@@ -46,7 +46,8 @@ func useFutureBlock(t *testing.T, creatableSince int) {
 
 // fleetProcess writes the server_processes row of another server process straight into the
 // registry: one that reads schema version and creates up to creatable, whose last heartbeat is
-// age before the database's now(). A version of 0 is the row of a build before INFRA-558.
+// age before the database's now(). A version of 0 is the row of a build that predates the fleet
+// columns.
 func fleetProcess(t *testing.T, service *Service, version, creatable int, age time.Duration) {
 	t.Helper()
 	if _, err := service.store.Pool.Exec(context.Background(), `
@@ -58,7 +59,7 @@ func fleetProcess(t *testing.T, service *Service, version, creatable int, age ti
 }
 
 // page is the query a page presents on its document socket: schema_version, and schema_creatable
-// unless creatable is negative, as a page before INFRA-558 sends none.
+// unless creatable is negative, as a page that sends no schema_creatable does.
 func page(version, creatable int) url.Values {
 	query := url.Values{"schema_version": {strconv.Itoa(version)}}
 	if creatable >= 0 {
@@ -206,10 +207,10 @@ func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.
 // creates (its schema_creatable is at most each process's schema version) and the page reads what
 // every live process creates and what the document holds (its schema_version is at least each
 // process's creatable version and the highest since in the document). This process counts as one
-// of them; a process of a build before INFRA-558, which registers no schema numbers, and a process
-// whose heartbeat lapsed do not. A page that sends no schema_creatable creates what its version
-// reads. The socket's acceptance and its token's answer agree, since the provider takes the
-// second as the socket's scope.
+// of them; a process of a build that predates the fleet columns, which registers no schema
+// numbers, and a process whose heartbeat lapsed do not. A page that sends no schema_creatable
+// creates what its version reads. The socket's acceptance and its token's answer agree, since the
+// provider takes the second as the socket's scope.
 func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 	v, r := pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()
 	if v != 2 || r != 1 {
@@ -233,10 +234,10 @@ func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 		{name: "a page of this version beside the element it represents", future: true, query: page(2, 1), token: "2", writable: true},
 		{name: "a live process creating what an older page cannot represent", fleet: []process{{3, 2, 0}}, query: page(1, 1), token: "1"},
 		{name: "a live process that cannot read what a newer page creates", fleet: []process{{1, 1, 0}}, query: page(3, 2), token: "3"},
-		{name: "a process before INFRA-558 is left out", fleet: []process{{0, 0, 0}}, query: page(3, 2), token: "3", writable: true},
+		{name: "a process that predates the fleet columns is left out", fleet: []process{{0, 0, 0}}, query: page(3, 2), token: "3", writable: true},
 		{name: "a lapsed process is left out", fleet: []process{{1, 1, time.Hour}}, query: page(3, 2), token: "3", writable: true},
-		{name: "a page before INFRA-558 on this version", query: page(2, -1), token: "2", writable: true},
-		{name: "a page before INFRA-558 one version newer", query: page(3, -1), token: "3"},
+		{name: "a page that sends no schema_creatable on this version", query: page(2, -1), token: "2", writable: true},
+		{name: "a page that sends no schema_creatable one version newer", query: page(3, -1), token: "3"},
 		{name: "a page presenting no number", query: url.Values{"schema_version": {"two"}}, token: "two"},
 	} {
 		t.Run(c.name, func(t *testing.T) {

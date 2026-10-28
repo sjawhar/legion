@@ -145,7 +145,7 @@ func liveProcess(t *testing.T, database *store.Store, id string) Process {
 	return Process{}
 }
 
-// INFRA-558's four columns - the schema version and creatable version the process's documents
+// The four fleet columns - the schema version and creatable version the process's documents
 // read and write, its embedder's identity and whether it stores files in a bucket - read back as
 // the process registered them, and again after a heartbeat writes a pruned row back.
 func TestTheFleetColumnsRoundTripThroughRegisterAndLive(t *testing.T) {
@@ -173,7 +173,7 @@ func TestTheFleetColumnsRoundTripThroughRegisterAndLive(t *testing.T) {
 	want("the row written again after a prune", liveProcess(t, database, registration.ID))
 }
 
-// A row written by a build before INFRA-558 carries none of its columns, so each holds its
+// A row written by a build that predates the fleet columns carries none of them, so each holds its
 // default: it reads as a process that predates them, with no schema numbers, no embedder identity
 // and no file store.
 func TestARowAtTheDefaultsPredatesTheFleetColumns(t *testing.T) {
@@ -183,7 +183,7 @@ func TestARowAtTheDefaultsPredatesTheFleetColumns(t *testing.T) {
 		insert into server_processes (instance, commit, dashboard_build, signing_keys)
 		values (gen_random_uuid(), 'c0', 'build-c0', $1)
 		returning instance::text`, fingerprints(t, "K0")).Scan(&id); err != nil {
-		t.Fatalf("insert a row as a build before INFRA-558 writes it: %v", err)
+		t.Fatalf("insert a row as a build that predates the fleet columns writes it: %v", err)
 	}
 	got := liveProcess(t, database, id)
 	if !got.PredatesFleetColumns() || got.SchemaVersion != 0 || got.SchemaCreatable != 0 || got.EmbedderIdentity != "" || got.FileStore {

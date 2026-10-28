@@ -34,10 +34,7 @@ func validateSplice(doc *Node, r Range, with *Node) error {
 	if err := doc.Validate(); err != nil {
 		return err
 	}
-	if err := with.Validate(); err != nil {
-		return err
-	}
-	return refuseUncreatable(with.Children, func() *Node { return doc })
+	return validateTransformed(with, doc)
 }
 
 var ErrTableWidth = errors.New("table row exceeds table width")

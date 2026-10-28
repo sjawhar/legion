@@ -646,9 +646,9 @@ each surface the two builds share, this is what build N+1 may change while build
   create, in `server_processes` (migration `0138_server_processes_schema`). A page presents its own
   V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R
   is at most every live process's V, and its V is at least every live process's R and the highest
-  `since` among the elements the document holds; otherwise it is read-only. A page without
-  `schema_creatable` (a page before INFRA-558) counts its V as its R, and a process before
-  INFRA-558, whose row holds no schema numbers, is left out. Every 15 seconds (the registry's live
+  `since` among the elements the document holds; otherwise it is read-only. A page that sends no
+  `schema_creatable` counts its V as its R, and a process of a build that predates the fleet
+  columns, whose row holds no schema numbers, is left out. Every 15 seconds (the registry's live
   window) each process checks its open document sockets again and closes with `1012` each writable
   one the fleet no longer admits; the provider reconnects on that code, and the new socket is
   admitted again.

@@ -271,22 +271,25 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     attempt += 1;
   };
 
-  /** Closes the socket the page holds and reconnects as a lost socket does, with its backoff. */
-  const reconnect = () => {
-    const refused = socket;
+  /** Lets go of the socket the page holds and closes it with `code`. The socket is let go first,
+   *  so its own listeners ignore the events its close still delivers. */
+  const letGo = (code: number) => {
+    const held = socket;
     socket = null;
     isOpen = false;
-    refused?.close(REPLACED);
+    held?.close(code);
+  };
+
+  /** Closes the socket the page holds and reconnects as a lost socket does, with its backoff. */
+  const reconnect = () => {
+    letGo(REPLACED);
     lost(REPLACED);
   };
 
   const onVisibility = () => {
     if (document.visibilityState !== "visible" || socket === null) return;
     if (Date.now() - lastFrameAt <= DELIVERY_LIVE_SILENT_MS) return;
-    const silent = socket;
-    socket = null;
-    isOpen = false;
-    silent.close(REPLACED);
+    letGo(REPLACED);
     update({ since: current.since ?? Date.now(), state: "reconnecting" });
     open();
   };
@@ -295,10 +298,7 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     cancelReconnect?.();
     cancelReconnect = undefined;
     document.removeEventListener("visibilitychange", onVisibility);
-    const closing = socket;
-    socket = null;
-    isOpen = false;
-    closing?.close(1000);
+    letGo(1000);
     update({ since: null, state: "closed" });
   };
 

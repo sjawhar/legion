@@ -14,12 +14,13 @@
 // the refusing process to stop heartbeating, so a process restarted after a kill, whose dead row
 // still counts as live for up to LiveWindow, starts once that row lapses.
 //
-// Each row also records what INFRA-558's decisions over the fleet read (migration 0138): the
+// Each row also records what the decisions over the fleet read (migration 0138): the
 // document schema numbers the process reads and creates, which the document socket's admission
 // takes (docs.Service.authorize), its embedder's identity, and whether it stores files in a bucket.
 package processes
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -79,7 +80,7 @@ const pruneLease = "server-processes"
 var ErrKeySetMismatch = errors.New("this process's signing key set does not match a live server process's")
 
 // Instance is what a process registers: the build it serves, the keys it signs and verifies with,
-// and what INFRA-558's fleet decisions read (migration 0138).
+// and what the decisions over the fleet read (migration 0138).
 type Instance struct {
 	// Commit is the legion commit the binary was stamped with, "" for an unstamped build.
 	Commit string
@@ -111,8 +112,8 @@ type Process struct {
 	StartedAt   time.Time
 	HeartbeatAt time.Time
 	// SchemaVersion, SchemaCreatable, EmbedderIdentity and FileStore are as the process
-	// registered them (Instance). A process of a build before INFRA-558 writes none of them, and
-	// its row holds each column's default: 0, 0, "" and null, which reads as false
+	// registered them (Instance). A process of a build that predates these columns writes none of
+	// them, and its row holds each column's default: 0, 0, "" and null, which reads as false
 	// (PredatesFleetColumns).
 	SchemaVersion    int
 	SchemaCreatable  int
@@ -120,11 +121,14 @@ type Process struct {
 	FileStore        bool
 }
 
-// PredatesFleetColumns reports whether p is a process of a build before INFRA-558, whose row holds
-// the defaults of the columns migration 0138 added: no build that registers them reads schema
-// version 0. A decision over the fleet leaves such a process out of the numbers it takes from the
-// live rows, as it leaves out a build that does not register at all.
+// PredatesFleetColumns reports whether p is a process of a build that predates the columns migration
+// 0138 added, whose row holds their defaults: no build that registers them reads schema version 0.
+// A decision over the fleet leaves such a process out of the numbers it takes from the live rows,
+// as it leaves out a build that does not register at all.
 func (p Process) PredatesFleetColumns() bool { return p.SchemaVersion == 0 }
+
+// Build names the build p serves: "commit " and its commit, "unstamped" for an unstamped build.
+func (p Process) Build() string { return "commit " + cmp.Or(p.Commit, "unstamped") }
 
 // Querier is what Live reads through: the shared pool, or a transaction its caller already holds.
 type Querier interface {
@@ -161,6 +165,23 @@ func Live(ctx context.Context, db Querier) ([]Process, error) {
 		return nil, fmt.Errorf("read the live server processes: %w", err)
 	}
 	return live, nil
+}
+
+// Bucketless returns the live processes (Live) with no bucket: each one started without
+// DISPATCH_FILE_STORE_BUCKET, or of a build that predates the fleet columns (PredatesFleetColumns),
+// which registers no file_store and so reads as having none. The oldest comes first.
+func Bucketless(ctx context.Context, db Querier) ([]Process, error) {
+	live, err := Live(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	var bucketless []Process
+	for _, process := range live {
+		if !process.FileStore {
+			bucketless = append(bucketless, process)
+		}
+	}
+	return bucketless, nil
 }
 
 // Registration is this process's row in the registry, kept live by a heartbeat until Deregister.
@@ -338,11 +359,7 @@ func keySetsShared(peer Process, mine []string) error {
 
 // describe is how a refusal names the other process beyond its id: its build and its start.
 func describe(peer Process) string {
-	commit := peer.Commit
-	if commit == "" {
-		commit = "unstamped"
-	}
-	return fmt.Sprintf("commit %s, started %s", commit, peer.StartedAt.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("%s, started %s", peer.Build(), peer.StartedAt.UTC().Format(time.RFC3339))
 }
 
 // heartbeat stamps the row's heartbeat_at every HeartbeatInterval until ctx ends. It runs for as

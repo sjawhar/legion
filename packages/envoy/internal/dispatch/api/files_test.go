@@ -237,17 +237,17 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 }
 
 // While a live server process stores no file in a bucket - one started without
-// DISPATCH_FILE_STORE_BUCKET, or one of a build before INFRA-558, which registers no file_store -
-// an upload to a process with a bucket keeps its bytes in its row as well as in the bucket, so the
-// bucketless process serves it. A live process with a bucket, or a bucketless one whose row has
-// lapsed, leaves the bytes in the bucket alone.
+// DISPATCH_FILE_STORE_BUCKET, or one of a build that predates the fleet columns, which registers
+// no file_store - an upload to a process with a bucket keeps its bytes in its row as well as in the
+// bucket, so the bucketless process serves it. A live process with a bucket, or a bucketless one
+// whose row has lapsed, leaves the bytes in the bucket alone.
 func TestAnUploadBesideABucketlessProcessKeepsItsBytesInTheRow(t *testing.T) {
 	for _, tc := range []struct {
 		name, insert string
 		keepsBytes   bool
 	}{
 		{"bucketless process", `insert into server_processes (instance, signing_keys, schema_version, schema_creatable, file_store) values (gen_random_uuid(), '{fingerprint}', 1, 1, false)`, true},
-		{"process before INFRA-558", `insert into server_processes (instance, signing_keys) values (gen_random_uuid(), '{fingerprint}')`, true},
+		{"process that predates the fleet columns", `insert into server_processes (instance, signing_keys) values (gen_random_uuid(), '{fingerprint}')`, true},
 		{"process with a bucket", `insert into server_processes (instance, signing_keys, schema_version, schema_creatable, file_store) values (gen_random_uuid(), '{fingerprint}', 1, 1, true)`, false},
 		{"lapsed bucketless process", `insert into server_processes (instance, signing_keys, schema_version, schema_creatable, file_store, heartbeat_at) values (gen_random_uuid(), '{fingerprint}', 1, 1, false, now() - interval '1 hour')`, false},
 	} {

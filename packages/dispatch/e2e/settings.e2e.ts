@@ -389,7 +389,7 @@ test("a person sets, changes and clears a project's default assignee, and a proj
   await createProject({ key: "CORE", name: "Core" });
   // OPS is the negative control: it never gets a default. Creating it as bob also makes him a
   // person who has signed in, so he is an option in the control.
-  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "OPS", name: "Ops" }, { login: "bob" });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
@@ -459,7 +459,7 @@ test("a default assignee picked while the last pick is saving waits its turn, an
   test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
   await createProject({ key: "CORE", name: "Core" });
   // Creating OPS as bob makes him a person who has signed in, so he is an option in the control.
-  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "OPS", name: "Ops" }, { login: "bob" });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
@@ -526,8 +526,8 @@ test("default assignee picks made when Settings is left and reopened supersede t
   await createProject({ key: "CORE", name: "Core" });
   // Creating OPS as bob and QA as carol makes each a person who has signed in, so both are
   // options in the control.
-  await createProject({ key: "OPS", name: "Ops" }, "bob");
-  await createProject({ key: "QA", name: "Quality" }, "carol");
+  await createProject({ key: "OPS", name: "Ops" }, { login: "bob" });
+  await createProject({ key: "QA", name: "Quality" }, { login: "carol" });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
@@ -594,9 +594,9 @@ test("default assignee picks made while a save is out are superseded by the newe
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
   await createProject({ key: "CORE", name: "Core" });
-  await createProject({ key: "OPS", name: "Ops" }, "bob");
-  await createProject({ key: "QA", name: "Quality" }, "carol");
-  await createProject({ key: "ENG", name: "Engineering" }, "dave");
+  await createProject({ key: "OPS", name: "Ops" }, { login: "bob" });
+  await createProject({ key: "QA", name: "Quality" }, { login: "carol" });
+  await createProject({ key: "ENG", name: "Engineering" }, { login: "dave" });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
@@ -652,7 +652,7 @@ test("a default assignee save refused while Settings is left says so when Settin
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the remount");
   await createProject({ key: "CORE", name: "Core" });
-  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "OPS", name: "Ops" }, { login: "bob" });
   await putProjectDefaultAssignee("CORE", { assignee: "alice" });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();

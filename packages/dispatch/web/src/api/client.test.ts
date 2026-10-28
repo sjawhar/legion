@@ -1,12 +1,7 @@
 import { expect, test } from "bun:test";
+import { NO_ROUTE_ROLLING_RELEASE_MESSAGE } from "@legion/contracts";
 
-import {
-  ApiError,
-  createApiClient,
-  type FetchImplementation,
-  isNoRoute,
-  NO_ROUTE_ROLLING_RELEASE_MESSAGE,
-} from "./client";
+import { ApiError, createApiClient, type FetchImplementation, isNoRoute } from "./client";
 
 // While a release rolls out, an older Dispatch process answers a route only the newer build serves
 // with this 404. No handler ran, so the page sends the request again, and the next attempt may

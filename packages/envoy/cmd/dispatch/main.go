@@ -446,7 +446,7 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// INFRA-558: every live window each document socket this process serves that is writable is
+	// Every live window each document socket this process serves that is writable is
 	// checked again against the live server processes' schema numbers (registered below), and one
 	// the fleet no longer admits closes with 1012, on which the provider reconnects and is admitted
 	// again (docs.Service.authorize).
@@ -551,7 +551,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	// INFRA-558: the registry row carries the document schema numbers this build reads and creates,
+	// The registry row carries the document schema numbers this build reads and creates,
 	// which every process's document socket admission reads; the identity of its embedder, "" with
 	// none, the same string the embedding queue compares stored vectors with, from which every
 	// process's queue takes the one identity that embeds and drops (embedqueue, active.go); and

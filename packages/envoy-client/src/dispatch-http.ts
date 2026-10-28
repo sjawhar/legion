@@ -51,7 +51,15 @@ import type {
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
-import { DEFAULT_ISSUE_READ_EVENTS } from "@legion/contracts";
+import {
+  DEFAULT_ISSUE_READ_EVENTS,
+  jitteredDelay,
+  NO_ROUTE_MESSAGE_PREFIX,
+  NO_ROUTE_RETRY_DELAYS_MS,
+  NO_ROUTE_ROLLING_RELEASE_MESSAGE,
+  type Sleep,
+  sleep,
+} from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 
@@ -126,25 +134,16 @@ function isJson(response: Response): boolean {
 }
 
 /** Whether `error` is a Dispatch process's answer that it has no route for the request (`404
- *  NOT_FOUND`, "no route for …"). A `404 NOT_FOUND` for a resource the server does not know says
- *  "not found" instead. */
-function answersNoRoute(error: unknown): boolean {
+ *  NOT_FOUND`, `NO_ROUTE_MESSAGE_PREFIX`). A `404 NOT_FOUND` for a resource the server does not
+ *  know says "not found" instead. */
+function isNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
     error.code === "NOT_FOUND" &&
-    error.message.startsWith("no route for ")
+    error.message.startsWith(NO_ROUTE_MESSAGE_PREFIX)
   );
 }
-
-/** The waits before each new attempt of a request a Dispatch process answered with no route. Each
- *  wait is jittered by ±25 %, and each attempt may reach another process. */
-export const NO_ROUTE_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000];
-
-/** What a request says when every attempt met a Dispatch process with no route for it. */
-export const NO_ROUTE_ROLLING_RELEASE_MESSAGE =
-  "The Dispatch process that answered does not offer this action yet, because a new release of " +
-  "Dispatch is in progress. Try again in one minute.";
 
 /**
  * A request every attempt of which a Dispatch process answered with no route for it (`404
@@ -158,15 +157,6 @@ export class DispatchNoRouteError extends DispatchServiceError {
     super("NOT_FOUND", 404, NO_ROUTE_ROLLING_RELEASE_MESSAGE);
   }
 }
-
-/** Waits `ms` milliseconds. The client takes one so that a test does not wait. */
-export type Sleep = (ms: number) => Promise<void>;
-
-const sleep: Sleep = (ms) => {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-};
 
 export interface ListIssuesOptions {
   readonly project?: string;
@@ -1071,10 +1061,10 @@ export class DispatchClient {
       try {
         return await read(response);
       } catch (error) {
-        if (!answersNoRoute(error)) throw error;
+        if (!isNoRoute(error)) throw error;
         if (delay === undefined) break;
       }
-      await this.#sleep(delay * (0.75 + Math.random() * 0.5));
+      await this.#sleep(jitteredDelay(delay));
     }
     throw new DispatchNoRouteError();
   }

@@ -307,7 +307,7 @@ func Cover(ctx context.Context, deps Deps) error {
 			}
 		}
 	}
-	active, chosen, err := deps.embedderActive(ctx)
+	active, activeIdentity, err := deps.embedderActive(ctx)
 	if err != nil {
 		return fmt.Errorf("coverage pass: %w", err)
 	}
@@ -340,7 +340,7 @@ func Cover(ctx context.Context, deps Deps) error {
 		oldest = *report.Total.OldestLackingSeconds
 	}
 	slog.Info("dispatch embedqueue: coverage pass",
-		"identity", identity, "activeIdentity", chosen, "added", added, "repaired", repaired,
+		"identity", identity, "activeIdentity", activeIdentity, "added", added, "repaired", repaired,
 		"foreignVectorsDropped", dropped, "deadNothingToEmbedSettled", settled, "foreignDeadReadmitted", readmitted,
 		"identityStepsSkipped", skipped,
 		"items", report.Total.Items, "current", report.Total.Current, "lacking", report.Total.Lacking,

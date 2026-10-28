@@ -200,11 +200,12 @@ const documentSchemaCloseCode = contracts.DocumentSchemaCloseCode
 // documentNewerContentCloseCode closes a document websocket whose room holds an element this
 // build does not know (DOCUMENT_NEWER_CONTENT_CLOSE_CODE in packages/contracts). A newer build
 // wrote it while two builds serve one database, and a browser editor would drop it and write the
-// result back. The pinned @hocuspocus/provider 2.15 stops reconnecting only on 4401 and 1009
-// (packages/dispatch/node_modules/@hocuspocus/provider/src/HocuspocusProviderWebsocket.ts:493-529,
-// onClose), and a socket closed before any message rejects its connection attempt, which the
-// provider retries with its backoff (:265-288). So it reconnects on this code, and a later attempt
-// can reach a build that reads the document.
+// result back. In the pinned @hocuspocus/provider 2.15, onClose
+// (packages/dispatch/node_modules/@hocuspocus/provider/src/HocuspocusProviderWebsocket.ts:483-545)
+// stops reconnecting only on 4401 and 1009, which set shouldConnect to false, and on 4403, where
+// it returns before it reconnects unless the provider is quiet. A socket closed before any message
+// rejects its connection attempt, which the provider retries with its backoff (:265-288). So it
+// reconnects on this code, and a later attempt can reach a build that reads the document.
 const documentNewerContentCloseCode = contracts.DocumentNewerContentCloseCode
 
 // refuseOutsideSchema completes the upgrade only to close it with documentSchemaCloseCode before
@@ -377,11 +378,11 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 // authorizeSchemaVersion is ygo's OnTokenAuth: the answer to the Hocuspocus token a socket's
 // provider sends once it opens, which the provider takes as the socket's scope and ygo as its
 // read-only state (sjawhar/ygo provider/websocket/peer.go, handleAuth). The page's token is its
-// schema_version alone, since a server before INFRA-558 compares the whole token with its own
-// version. So the answer is the decision authorize recorded for a socket of room that presented
-// that schema_version and is still waiting for its answer, and that socket has had it. A token
-// no waiting socket presented is read-only. It never refuses: a refusal closes the socket with
-// 4401, after which the provider never reconnects.
+// schema_version alone, since a server that predates the fleet columns compares the whole token
+// with its own version. So the answer is the decision authorize recorded for a socket of room that
+// presented that schema_version and is still waiting for its answer, and that socket has had it.
+// A token no waiting socket presented is read-only. It never refuses: a refusal closes the socket
+// with 4401, after which the provider never reconnects.
 func (s *Service) authorizeSchemaVersion(room, token string) (websocket.ConnectionConfig, error) {
 	writable := s.schemaAdmissions.answer(schemaAdmissionKey{room: room, token: token})
 	return websocket.ConnectionConfig{ReadOnly: !writable}, nil
@@ -389,9 +390,9 @@ func (s *Service) authorizeSchemaVersion(room, token string) (websocket.Connecti
 
 // schemaPage is the schema a page presents on its document socket: version is C, the
 // schema_version it reads, and creatable is R, the schema_creatable it may create up to. A page
-// before INFRA-558 sends no schema_creatable and creates only what its version reads, so its R is
-// its C. A page that presents no number, or a number that does not parse, is not valid, and is
-// admitted read-only.
+// that sends no schema_creatable creates only what its version reads, so its R is its C. A page
+// that presents no number, or a number that does not parse, is not valid, and is admitted
+// read-only.
 type schemaPage struct {
 	version, creatable int
 	valid              bool
@@ -413,7 +414,7 @@ func schemaPageOf(query url.Values) schemaPage {
 
 // schemaFleet is what the server processes serving the database read and create: the lowest
 // schema version and the highest creatable version among this process and every live process
-// that registers them. A process of a build before INFRA-558 registers neither
+// that registers them. A process of a build that predates the fleet columns registers neither
 // (processes.Process.PredatesFleetColumns) and is left out, as is a build that does not register
 // at all.
 type schemaFleet struct {
@@ -592,9 +593,8 @@ func (s *Service) recheckSchemaAdmissions(ctx context.Context) error {
 }
 
 // schemaRevokedCloseCode closes a document socket whose page the fleet no longer admits writable:
-// 1012, Service Restart. The pinned @hocuspocus/provider 2.15 stops reconnecting only on 4401,
-// 4403 and 1009 (packages/dispatch/node_modules/@hocuspocus/provider/src/HocuspocusProviderWebsocket.ts:483-535,
-// onClose), so it reconnects on this code, and the reconnect is admitted again.
+// 1012, Service Restart, on which the provider reconnects (see documentNewerContentCloseCode), and
+// the reconnect is admitted again.
 const schemaRevokedCloseCode = gws.CloseServiceRestart
 
 // schemaRevokedCloseFrame is the close frame admittedConn writes, as a server writes it: final,

@@ -184,10 +184,9 @@ async function request<T>(
 
 export function createProject(
   input: CreateProjectInput,
-  login = "alice",
-  target?: DispatchProcess
+  options: ApiOptions = {}
 ): Promise<Project> {
-  return request<Project>("/api/v1/projects", "POST", input, { login, process: target });
+  return request<Project>("/api/v1/projects", "POST", input, options);
 }
 
 /** Maps `repo` (`owner/name`) to a project, as the Settings page does; `default: true` makes it the

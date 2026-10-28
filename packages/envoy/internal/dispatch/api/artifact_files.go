@@ -41,23 +41,19 @@ func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, s
 	return true
 }
 
-// fleetServesFilesFromRows reports whether any live server process (processes.Live, read in the
-// upload's transaction) has no bucket: one started without DISPATCH_FILE_STORE_BUCKET, or one of a
-// build before INFRA-558, which registers no file_store and so reads as having none. Such a
-// process serves a file only from its row, and answers 503 FILE_STORE_UNAVAILABLE for a row that
-// holds no bytes, so while one is live an upload keeps its bytes in its row as well as in the
-// bucket. backfill-files moves them out once every process has a bucket.
+// fleetServesFilesFromRows reports whether any live server process (processes.Bucketless, read in
+// the upload's transaction) has no bucket: one started without DISPATCH_FILE_STORE_BUCKET, or one
+// of a build that predates the fleet columns (PredatesFleetColumns), which registers no file_store
+// and so reads as having none. Such a process serves a file only from its row, and answers 503
+// FILE_STORE_UNAVAILABLE for a row that holds no bytes, so while one is live an upload keeps its
+// bytes in its row as well as in the bucket. backfill-files moves them out once every process has
+// a bucket.
 func fleetServesFilesFromRows(ctx context.Context, db processes.Querier) (bool, error) {
-	live, err := processes.Live(ctx, db)
+	bucketless, err := processes.Bucketless(ctx, db)
 	if err != nil {
 		return false, err
 	}
-	for _, process := range live {
-		if !process.FileStore {
-			return true, nil
-		}
-	}
-	return false, nil
+	return len(bucketless) > 0, nil
 }
 
 // serveFileVersion answers a file version's download from what its row holds: a row holding

@@ -232,6 +232,10 @@ export function ProofDocument({
   const repairError = admission?.kind === "repair" ? admission : undefined;
   const rebuildError = admission?.kind === "rebuild" ? admission : undefined;
   const newerContent = admission?.kind === "newer";
+  // An admission the page explains in place of the editor: the repair and rebuild offers, and the
+  // newer-content note.
+  const admissionHidesEditor =
+    repairError !== undefined || rebuildError !== undefined || newerContent;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
   const blockReferencesQuery = useQuery({
     enabled: version === undefined,
@@ -522,7 +526,11 @@ export function ProofDocument({
             // later read can reach a build that reads it, so the admission reads the text again
             // on the refusal schedule, and then once a minute.
             setConnection("connecting");
-            setAdmission(block);
+            // Each read makes a new block; the one before stays while it says the same, so a
+            // retry that finds the same content renders nothing again.
+            setAdmission((previous) =>
+              previous?.kind === block.kind && previous.message === block.message ? previous : block
+            );
             const delay = SCHEMA_REFUSAL_DELAYS_MS[newerReads] ?? NEWER_CONTENT_RELOAD_MS;
             newerReads += 1;
             refusalTimer = window.setTimeout(admit, delay);
@@ -774,10 +782,7 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
-      {shownLoadError === undefined ||
-      repairError !== undefined ||
-      rebuildError !== undefined ||
-      newerContent ? null : (
+      {shownLoadError === undefined || admissionHidesEditor ? null : (
         <p className={dangerText} role="alert">
           This document could not load: {shownLoadError}
         </p>
@@ -788,12 +793,7 @@ export function ProofDocument({
         aria-label="Document"
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
-        hidden={
-          version !== undefined ||
-          repairError !== undefined ||
-          rebuildError !== undefined ||
-          newerContent
-        }
+        hidden={version !== undefined || admissionHidesEditor}
         onClick={(event) => {
           // A modifier click (open in new tab/window) or a drag-selection that happens to end
           // on the link should reach the browser/editor's own handling, not steal the click.

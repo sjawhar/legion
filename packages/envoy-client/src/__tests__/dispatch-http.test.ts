@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
 import {
-  DispatchClient,
-  DispatchGatewayError,
-  DispatchNoRouteError,
+  type ArchitectureSource,
+  type IssueSummary,
   NO_ROUTE_ROLLING_RELEASE_MESSAGE,
-} from "../dispatch-http";
+} from "@legion/contracts";
+import { DispatchClient, DispatchGatewayError, DispatchNoRouteError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {

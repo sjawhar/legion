@@ -57,6 +57,7 @@ import {
   overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
+  type Sleep,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -80,7 +81,6 @@ import {
   DispatchServiceError,
   type GraphReferencesQuery,
   type IssueReadOptions,
-  type Sleep,
 } from "./dispatch-http";
 import {
   dispatchChildRef,

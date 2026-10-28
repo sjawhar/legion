@@ -98,7 +98,7 @@ for (const pageProcess of dispatchProcesses) {
   }) => {
     test.setTimeout(120_000);
     const on = { process: server };
-    await createProject({ key: "XB", name: "Cross build" }, "alice", server);
+    await createProject({ key: "XB", name: "Cross build" }, on);
     const issue = await createIssue(
       { project: "XB", spec: "# Cross build\n\nWritten before the edit.\n", title: "Two builds" },
       on
@@ -221,7 +221,7 @@ test("a document holding newer content shows that state and no replace drop zone
     binaryB !== undefined,
     "the newer-content hook is this tree's; Dispatch B runs the previous build (DISPATCH_E2E_BINARY_B)"
   );
-  await createProject({ key: "NEW", name: "Newer content" }, "alice", "a");
+  await createProject({ key: "NEW", name: "Newer content" }, { process: "a" });
   const issue = await createIssue(
     { project: "NEW", spec: "Written before the newer element.\n", title: "Newer content" },
     { process: "a" }

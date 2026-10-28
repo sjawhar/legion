@@ -59,8 +59,8 @@ export interface MarkdownEngine {
 /** The engine, built once from the manifest this page was built with (`compiledBlockSchema`). */
 let loadingEngine: Promise<MarkdownEngine> | undefined;
 /** The engine once its load resolved: what a body renders with synchronously. The engine serves
- *  every soft-break policy (the policy is a parse argument), and a parse that throws no longer
- *  evicts it - the headless editor drops only its own refused parser. */
+ *  every soft-break policy (the policy is a parse argument), and a parse that throws does not
+ *  evict it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
 /**

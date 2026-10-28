@@ -22,13 +22,8 @@ func Update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
 	if err := want.Validate(); err != nil {
 		return err
 	}
-	// want may keep an element the live document holds that this build cannot create, never add
-	// one.
 	if err := refuseUncreatable(want.Children, func() *Node {
-		held, err := readDocument(frag, yTextDeltaInTransaction, false)
-		if err != nil {
-			return nil
-		}
+		held, _ := readDocument(frag, yTextDeltaInTransaction, false)
 		return held
 	}); err != nil {
 		return err

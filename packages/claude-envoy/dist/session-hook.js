@@ -13623,6 +13623,17 @@ var DispatchServerStartedPayloadSchema = strictObject({
   started_at: exports_iso.datetime()
 });
 var DEFAULT_ISSUE_READ_EVENTS = 10;
+var NO_ROUTE_MESSAGE_PREFIX = "no route for ";
+var NO_ROUTE_RETRY_DELAYS_MS = [1000, 2000, 4000];
+var NO_ROUTE_ROLLING_RELEASE_MESSAGE = "The Dispatch process that answered does not offer this action yet, because a new release of " + "Dispatch is in progress. Try again in one minute.";
+var sleep = (ms) => {
+  const { promise, resolve } = Promise.withResolvers();
+  setTimeout(resolve, ms);
+  return promise;
+};
+function jitteredDelay(ms) {
+  return ms * (0.75 + Math.random() * 0.5);
+}
 var DispatchEventSchema = object({
   issue_key: string2().nullable(),
   artifact_id: string2().nullish(),
@@ -15316,22 +15327,15 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
-function answersNoRoute(error) {
-  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
+function isNoRoute(error) {
+  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith(NO_ROUTE_MESSAGE_PREFIX);
 }
-var NO_ROUTE_RETRY_DELAYS_MS = [1000, 2000, 4000];
-var NO_ROUTE_ROLLING_RELEASE_MESSAGE = "The Dispatch process that answered does not offer this action yet, because a new release of " + "Dispatch is in progress. Try again in one minute.";
 
 class DispatchNoRouteError extends DispatchServiceError {
   constructor() {
     super("NOT_FOUND", 404, NO_ROUTE_ROLLING_RELEASE_MESSAGE);
   }
 }
-var sleep = (ms) => {
-  const { promise, resolve } = Promise.withResolvers();
-  setTimeout(resolve, ms);
-  return promise;
-};
 var ISSUE_EVENTS_PAGE_MAX = 200;
 var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
@@ -15788,12 +15792,12 @@ class DispatchClient {
       try {
         return await read(response);
       } catch (error) {
-        if (!answersNoRoute(error))
+        if (!isNoRoute(error))
           throw error;
         if (delay === undefined)
           break;
       }
-      await this.#sleep(delay * (0.75 + Math.random() * 0.5));
+      await this.#sleep(jitteredDelay(delay));
     }
     throw new DispatchNoRouteError;
   }

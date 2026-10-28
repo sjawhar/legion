@@ -45,6 +45,7 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/reearth/ygo/encoding"
 
@@ -308,6 +309,13 @@ type servedIssue struct {
 	PrimaryArtifactID string          `json:"primary_artifact_id"`
 }
 
+// servedComment is the part of a comment of GET /api/v1/issues/{key}/comments the reply row reads
+// back.
+type servedComment struct {
+	Body    string  `json:"body"`
+	ReplyTo *string `json:"reply_to"`
+}
+
 var (
 	uuidPattern          = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	postedCommentPattern = regexp.MustCompile(`Posted comment (` + uuidPattern.String() + `)`)
@@ -393,15 +401,9 @@ func requireCLIRoundTrip(t *testing.T, cli cliBuild, server, other *dispatchProc
 	// reply
 	replyBody := "A reply " + word
 	run("comment", "--issue", issueKey, "--reply-to", commentID, "--body", replyBody)
-	var comments []struct {
-		Body    string  `json:"body"`
-		ReplyTo *string `json:"reply_to"`
-	}
+	var comments []servedComment
 	getJSON(t, other, "/api/v1/issues/"+issueKey+"/comments", &comments)
-	if !slices.ContainsFunc(comments, func(c struct {
-		Body    string  `json:"body"`
-		ReplyTo *string `json:"reply_to"`
-	}) bool {
+	if !slices.ContainsFunc(comments, func(c servedComment) bool {
 		return c.Body == replyBody && c.ReplyTo != nil && *c.ReplyTo == commentID
 	}) {
 		t.Fatalf("after dispatch comment --reply-to, the %s lists no reply %q to %s: %+v", otherName, replyBody, commentID, comments)
@@ -611,7 +613,8 @@ func (m blockManifest) page(sendsCreatable bool) pageParameters {
 }
 
 // pageSendsCreatable reports whether a built web app's scripts name schema_creatable, the
-// parameter a page sends from INFRA-558 on. A page before it sends schema_version alone.
+// parameter a page sends from the build that adds the fleet columns on. A page of a build that
+// predates them sends schema_version alone.
 func pageSendsCreatable(t *testing.T, web string) bool {
 	t.Helper()
 	scripts, err := filepath.Glob(filepath.Join(web, "assets", "*.js"))
@@ -1042,15 +1045,8 @@ func documentRefs(t *testing.T, builds *twoBuilds, artifactID string) []string {
 		t.Fatalf("read the document's refs: %v", err)
 	}
 	defer rows.Close()
-	var refs []string
-	for rows.Next() {
-		var ref string
-		if err := rows.Scan(&ref); err != nil {
-			t.Fatalf("read a refs row: %v", err)
-		}
-		refs = append(refs, ref)
-	}
-	if err := rows.Err(); err != nil {
+	refs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
 		t.Fatalf("read the document's refs: %v", err)
 	}
 	return refs
@@ -1437,7 +1433,7 @@ func TestTwoBuildsPassMessagesBothWays(t *testing.T) {
 	// build starts beside it as a standby, which is a rolling release's first moment.
 	builds.startCurrent(t, currentEnv)
 	for _, durable := range deliveryDurables {
-		waitForBound(t, builds.current(), builds.buildName(builds.current()), durable, 0, 60*time.Second)
+		waitForBound(t, builds.current(), builds.currentName(), durable, 0, 60*time.Second)
 	}
 	builds.startPrevious(t, previousEnv)
 
@@ -1473,8 +1469,8 @@ func TestTwoBuildsPassMessagesBothWays(t *testing.T) {
 	requireBusSettings(t, js, baseline, "after two settings polls with both builds running")
 
 	if boundLines(builds.previous(), bus.DispatchDeliveryDurable) != 0 {
-		t.Fatalf("the %s bound %s while the %s held it:\n%s", builds.buildName(builds.previous()), bus.DispatchDeliveryDurable,
-			builds.buildName(builds.current()), builds.previous().Output.String())
+		t.Fatalf("the %s bound %s while the %s held it:\n%s", builds.previousName(), bus.DispatchDeliveryDurable,
+			builds.currentName(), builds.previous().Output.String())
 	}
 	half := pullRequestMessages / 2
 	publishAcrossStop(t, builds, js, fake, pullRequestNumbers(1001, half), builds.current(), builds.previous())
@@ -1487,7 +1483,7 @@ func TestTwoBuildsPassMessagesBothWays(t *testing.T) {
 	time.Sleep(standbyWindow)
 	if bound, now := boundLines(builds.current(), bus.DispatchDeliveryDurable), consumerBinding(t, js, bus.DispatchDeliveryDurable); bound > 0 || now != binding {
 		t.Errorf("the restarted %s took %s from the %s, which delivers from it under no hold: the durable was %s and is %s, and the restarted build logged %d binds:\n%s",
-			builds.buildName(builds.current()), bus.DispatchDeliveryDurable, builds.buildName(builds.previous()), binding, now, bound, builds.current().Output.String())
+			builds.currentName(), bus.DispatchDeliveryDurable, builds.previousName(), binding, now, bound, builds.current().Output.String())
 	}
 	requireBusSettings(t, js, baseline, "after the current build restarted")
 
@@ -1553,16 +1549,13 @@ func publishedEventIDs(t *testing.T, builds *twoBuilds) map[string]bool {
 		t.Fatalf("read the published events: %v", err)
 	}
 	defer rows.Close()
-	ids := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			t.Fatalf("read an event id: %v", err)
-		}
-		ids[id] = true
-	}
-	if err := rows.Err(); err != nil {
+	published, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
 		t.Fatalf("read the published events: %v", err)
+	}
+	ids := make(map[string]bool, len(published))
+	for _, id := range published {
+		ids[id] = true
 	}
 	return ids
 }

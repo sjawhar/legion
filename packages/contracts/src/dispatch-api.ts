@@ -91,7 +91,7 @@ export interface BlockSchemaElement extends BlockElementVersions {
 }
 
 /** GET /api/v1/schema/blocks: the document schema manifest, `pmdoc/schema/blocks.json`. A server
- *  older than INFRA-558 names no `nodes` or `marks`. */
+ *  whose manifest predates element versions names no `nodes` or `marks`. */
 export interface BlockSchema {
   readonly version: number;
   readonly nodes?: readonly BlockSchemaElement[];
@@ -2713,6 +2713,38 @@ export interface DispatchServiceErrorShape {
   readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
   readonly current?: EditPreconditionCurrent;
   readonly mismatches?: EditPreconditionMismatch[];
+}
+
+/** How the message of a Dispatch process's `404 NOT_FOUND` starts when the process has no route for
+ *  the request ("no route for GET /api/v1/…"). While a release rolls out, two builds of Dispatch
+ *  answer, and the older one answers this way for a route only the newer one serves. No handler
+ *  ran, so a client may send the request again whatever its method. A `404 NOT_FOUND` for a
+ *  resource the server does not know says "not found" instead. */
+export const NO_ROUTE_MESSAGE_PREFIX = "no route for ";
+
+/** The waits before each new attempt of a request a Dispatch process answered with no route. Each
+ *  wait is jittered by ±25 % (`jitteredDelay`), so the attempts of many clients spread out, and
+ *  each attempt may reach another process. */
+export const NO_ROUTE_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000];
+
+/** What a client says when every attempt of a request met a Dispatch process with no route for it. */
+export const NO_ROUTE_ROLLING_RELEASE_MESSAGE =
+  "The Dispatch process that answered does not offer this action yet, because a new release of " +
+  "Dispatch is in progress. Try again in one minute.";
+
+/** Waits `ms` milliseconds. A client takes one so that a test does not wait. */
+export type Sleep = (ms: number) => Promise<void>;
+
+/** The `Sleep` a client waits with when its caller gives none: a timer. */
+export const sleep: Sleep = (ms) => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+};
+
+/** `ms` jittered by ±25 %: a wait of `NO_ROUTE_RETRY_DELAYS_MS`, as a client waits it. */
+export function jitteredDelay(ms: number): number {
+  return ms * (0.75 + Math.random() * 0.5);
 }
 
 /**

@@ -226,24 +226,18 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 	return 0
 }
 
-// bucketlessProcesses names each live server process with no bucket (processes.Live): one started
-// without DISPATCH_FILE_STORE_BUCKET, or one of a build before INFRA-558, which registers no
-// file_store. Each is named by its instance id, its build and when it started.
+// bucketlessProcesses names each live server process with no bucket (processes.Bucketless): one
+// started without DISPATCH_FILE_STORE_BUCKET, or one of a build that predates the fleet columns
+// (PredatesFleetColumns), which registers no file_store. Each is named by its instance id, its
+// build and when it started.
 func bucketlessProcesses(ctx context.Context, database *store.Store) ([]string, error) {
-	live, err := processes.Live(ctx, database.Pool)
+	bucketless, err := processes.Bucketless(ctx, database.Pool)
 	if err != nil {
 		return nil, err
 	}
 	var named []string
-	for _, process := range live {
-		if process.FileStore {
-			continue
-		}
-		commit := process.Commit
-		if commit == "" {
-			commit = "unstamped"
-		}
-		build := "commit " + commit
+	for _, process := range bucketless {
+		build := process.Build()
 		if process.PredatesFleetColumns() {
 			build += ", a build that does not register file_store"
 		}

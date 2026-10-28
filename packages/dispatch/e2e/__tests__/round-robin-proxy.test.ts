@@ -390,11 +390,12 @@ describe("DISPATCH_E2E_PROCESSES", () => {
       stderr: "pipe",
       stdout: "pipe",
     });
-    const [code, stderr] = await Promise.all([
+    const [code, stdout, stderr] = await Promise.all([
       child.exited,
+      new NativeResponse(child.stdout).text(),
       new NativeResponse(child.stderr).text(),
     ]);
-    return { code, stderr };
+    return { code, stderr, stdout };
   };
   // A process of its own per import: the refusal is the module's evaluation, which runs once.
   const importPorts = (env: Record<string, string>) =>
@@ -443,12 +444,7 @@ describe("DISPATCH_E2E_PROCESSES", () => {
         FAKE_ENVOY_PORT: "9021",
         FAKE_GITHUB_PORT: "9022",
       };
-      const ran = Bun.spawn(["bash", runServer], {
-        env: { PATH: process.env.PATH ?? "", ...environment },
-        stderr: "pipe",
-        stdout: "pipe",
-      });
-      const [code, stdout] = await Promise.all([ran.exited, new NativeResponse(ran.stdout).text()]);
+      const { code, stdout } = await run(["bash", runServer], environment);
       expect(code).toBe(0);
       expect(stdout).toBe(
         `given binary in ${envoyDirectory} with DISPATCH_TEST_HOOKS=1 DISPATCH_WEB_DIST=/given/web\n`

@@ -429,7 +429,7 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) ([
 	if err != nil {
 		return nil, err
 	}
-	deployedGeneration := streamGeneration(info.Config.Metadata)
+	deployedGeneration := MetadataGeneration(info.Config.Metadata, streamGenerationKey)
 	if deployedGeneration > streamConfigGeneration {
 		slog.Info("envoy nats stream settings belong to a newer build, so this build leaves them as they are",
 			slog.Int("deployed_generation", deployedGeneration), slog.Int("own_generation", streamConfigGeneration))
@@ -470,26 +470,34 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) ([
 	return desired.Subjects, nil
 }
 
-// streamGeneration is the generation metadata stamps on a stream: 0 when it holds none, as a stream
-// a build before generations last set does, or holds one that is not a number.
-func streamGeneration(metadata map[string]string) int {
-	generation, err := strconv.Atoi(metadata[streamGenerationKey])
+// MetadataGeneration is the generation metadata holds under key, as a stream or a durable consumer
+// carries it: 0 when it holds none, as one a build before generations last set does, or holds one
+// that is not a number.
+func MetadataGeneration(metadata map[string]string, key string) int {
+	generation, err := strconv.Atoi(metadata[key])
 	if err != nil {
 		return 0
 	}
 	return generation
 }
 
-// stampGeneration is the metadata an ensure sends: the deployed stream's own keys, then this build's
-// generation. It leaves out the keys nats-server sets itself (the `_nats.` prefix), which the server
-// sets again on every create and update.
-func stampGeneration(deployed map[string]string) map[string]string {
-	metadata := make(map[string]string, len(deployed)+2)
+// OwnMetadata is a copy of deployed without the keys nats-server sets itself (the `_nats.` prefix),
+// which the server sets again on every create and update, with room for extra more keys. The copy
+// is never nil, so a caller can add keys to it.
+func OwnMetadata(deployed map[string]string, extra int) map[string]string {
+	metadata := make(map[string]string, len(deployed)+extra)
 	for key, value := range deployed {
 		if !strings.HasPrefix(key, "_nats.") {
 			metadata[key] = value
 		}
 	}
+	return metadata
+}
+
+// stampGeneration is the metadata an ensure sends: the deployed stream's own keys (OwnMetadata),
+// then this build's generation.
+func stampGeneration(deployed map[string]string) map[string]string {
+	metadata := OwnMetadata(deployed, 2)
 	metadata[streamGenerationKey] = strconv.Itoa(streamConfigGeneration)
 	return metadata
 }

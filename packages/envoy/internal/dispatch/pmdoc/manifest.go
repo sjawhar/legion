@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // ElementVersions is from which schema version a build reads an element (Since) and from which a
@@ -64,6 +65,9 @@ type compiledManifest struct {
 	versions    map[Element]ElementVersions
 	uncreatable map[Element]bool
 	creatable   int
+	// maxSince is the highest since among the declared elements: no document's DocumentSince
+	// is higher.
+	maxSince int
 }
 
 // active is the manifest this build reads by: the embedded one, or another one a test installs
@@ -117,6 +121,7 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 			return fmt.Errorf("invalid: %w", err)
 		}
 		compiled.versions[element] = versions
+		compiled.maxSince = max(compiled.maxSince, versions.Since)
 		if versions.CreatableSince > value.Version {
 			compiled.uncreatable[element] = true
 		} else {
@@ -155,7 +160,7 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 				return compiledManifest{}, err
 			}
 			for choice := range attr.ChoiceVersions {
-				if !containsString(attr.Choices, choice) {
+				if !slices.Contains(attr.Choices, choice) {
 					return compiledManifest{}, fmt.Errorf("invalid: type %q attribute %q gives versions to %q, which is not one of its choices", typ.Name, name, choice)
 				}
 			}
@@ -234,15 +239,6 @@ func validateElementVersions(element Element, versions ElementVersions, version 
 	return nil
 }
 
-func containsString(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
-}
-
 // SchemaVersion returns V, this build's schema version: the version a client presents during
 // document admission. This build reads every element whose since is V or less, and creates every
 // element whose creatable_since is V or less.
@@ -264,7 +260,8 @@ func creatable(element Element) bool {
 
 // DocumentSince returns D, the highest since among the declared elements doc holds: a client
 // whose schema version is D or more can represent all of doc. An element this build's manifest
-// does not declare counts for nothing, and a nil doc is 0.
+// does not declare counts for nothing, and a nil doc is 0. The walk stops at the first element
+// whose since is the manifest's highest (maxSince), since no later one can raise D.
 func DocumentSince(doc *Node) int {
 	if doc == nil {
 		return 0
@@ -274,7 +271,7 @@ func DocumentSince(doc *Node) int {
 		if versions, declared := element.Versions(); declared {
 			highest = max(highest, versions.Since)
 		}
-		return true
+		return highest < active.maxSince
 	})
 	return highest
 }

@@ -64,7 +64,7 @@ type Intake struct {
 // holding its durable and taking it over under a hold and a lease it takes on leases.
 func newIntake(natsClient *bus.Client, pool *store.Pool, leases intakeLeases, github *githubapp.Client, broker *events.Broker) *Intake {
 	in := &Intake{pool: pool, github: github, events: broker}
-	in.heldDurable = newHeldDurable(natsClient, leases, deliveryConsumerConfig, func(msg *natsgo.Msg) { in.deliver(msg) })
+	in.heldDurable = newHeldDurable(natsClient, leases, deliveryConsumerConfig, in.deliver)
 	return in
 }
 
@@ -318,16 +318,6 @@ func consumerGenerationMetadata() map[string]string {
 	return map[string]string{consumerGenerationKey: strconv.Itoa(consumerConfigGeneration)}
 }
 
-// consumerGeneration reads the generation a durable's metadata carries: 0 when it carries none, as
-// a durable a build before generations created does, or holds one that is not a number.
-func consumerGeneration(metadata map[string]string) int {
-	generation, err := strconv.Atoi(metadata[consumerGenerationKey])
-	if err != nil {
-		return 0
-	}
-	return generation
-}
-
 // takeOverConfig is the config a take-over recreates the durable deployed describes with: the
 // deployed config when a newer build stamped it with a higher generation, this build's (wanted)
 // otherwise, on a fresh deliver subject, starting at the stream sequence after the durable's ack
@@ -338,16 +328,11 @@ func consumerGeneration(metadata map[string]string) int {
 // `_nats.` prefix), which the server sets again on create.
 func takeOverConfig(deployed *natsgo.ConsumerInfo, wanted natsgo.ConsumerConfig) natsgo.ConsumerConfig {
 	config := wanted
-	if consumerGeneration(deployed.Config.Metadata) > consumerConfigGeneration {
+	if bus.MetadataGeneration(deployed.Config.Metadata, consumerGenerationKey) > consumerConfigGeneration {
 		config = deployed.Config
 		config.DeliverSubject = natsgo.NewInbox()
 		config.OptStartTime = nil
-		config.Metadata = make(map[string]string, len(deployed.Config.Metadata))
-		for key, value := range deployed.Config.Metadata {
-			if !strings.HasPrefix(key, "_nats.") {
-				config.Metadata[key] = value
-			}
-		}
+		config.Metadata = bus.OwnMetadata(deployed.Config.Metadata, 0)
 	}
 	config.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
 	config.OptStartSeq = deployed.AckFloor.Stream + 1
@@ -423,23 +408,6 @@ type intakeLeases interface {
 // durable keeps a stuck change to the durable it is stuck on.
 func consumerLease(durable string) string { return "delivery-consumer-" + durable }
 
-// bindOutcome is what one take-over attempt did, which is three things rather than two: a durable
-// another process is bound to is neither a take-over nor a fault.
-type bindOutcome int
-
-const (
-	// bindFailed is an attempt that got nowhere and says nothing about who holds the durable: the
-	// lookup, the delete, the create, the subscribe or the token's record failed, and the failure
-	// is logged at ERROR. The zero value, so an outcome nothing set is never read as a bind.
-	bindFailed bindOutcome = iota
-	// bindBound is this process delivering from the durable, with its subscription live.
-	bindBound
-	// bindStandby is a durable bound to a process that holds no hold for it: a process of the
-	// build before holds. It is not this process's to take, and it is not an error: the caller
-	// polls on, and takes the durable over once that process lets go.
-	bindStandby
-)
-
 // bindThrottle is one intake's own standby-log state for its own durable: when it last said it
 // was standing by for it, and why. Per intake rather than a package-global map keyed by consumer
 // name, because an intake is exactly what the window is about -- one process's repeated polls of
@@ -503,6 +471,8 @@ type heldDurable struct {
 	throttle *bindThrottle
 	// config is the durable's config in this build; each call draws a fresh deliver subject.
 	config func() natsgo.ConsumerConfig
+	// name is the durable's name: config's Durable, which every call returns alike.
+	name string
 	// handle handles one message on the subscription's delivery goroutine and acknowledges it.
 	handle natsgo.MsgHandler
 
@@ -522,7 +492,7 @@ type heldDurable struct {
 // newHeldDurable builds the delivery from config's durable on natsClient, taking its hold and
 // consumer lease on leases and handing each message to handle.
 func newHeldDurable(natsClient *bus.Client, leases intakeLeases, config func() natsgo.ConsumerConfig, handle natsgo.MsgHandler) heldDurable {
-	return heldDurable{nats: natsClient, leases: leases, holder: uuid.New(), throttle: &bindThrottle{}, config: config, handle: handle}
+	return heldDurable{nats: natsClient, leases: leases, holder: uuid.New(), throttle: &bindThrottle{}, config: config, name: config().Durable, handle: handle}
 }
 
 // run delivers from the durable while this intake holds its hold, and stands by for it otherwise,
@@ -559,7 +529,7 @@ func (d *heldDurable) run(ctx context.Context, extra <-chan time.Time, onExtra f
 		case <-checks.C:
 			d.check(ctx)
 		case <-lost:
-			slog.Warn("dispatch delivery: the intake's hold is lost; it stops delivering", "name", d.config().Durable)
+			slog.Warn("dispatch delivery: the intake's hold is lost; it stops delivering", "name", d.name)
 			d.StopDelivering()
 			d.hold, d.subject = nil, ""
 		}
@@ -571,20 +541,25 @@ func (d *heldDurable) run(ctx context.Context, extra <-chan time.Time, onExtra f
 // bound to a subject no hold recorded is read first outside the consumer lease, so a holder that
 // waits for a process of the build before holds to let go takes no lease on every poll.
 func (d *heldDurable) attempt(ctx context.Context) {
-	name := d.config().Durable
-	if d.hold == nil && !d.takeHold(ctx, name) {
+	if d.hold == nil && !d.takeHold(ctx, d.name) {
 		return
 	}
-	lookup, cancel := context.WithTimeout(ctx, intakeHoldRenew)
-	info, err := d.nats.JS().ConsumerInfo(bus.Stream, name, natsgo.Context(lookup))
-	cancel()
+	info, err := d.lookupDurable(ctx)
 	if err == nil && d.boundElsewhere(info) {
 		return
 	}
-	duty.Exclusive(ctx, d.leases, consumerLease(name), 0, func(ctx context.Context) {
-		d.takeOver(ctx)
-	})
+	duty.Exclusive(ctx, d.leases, consumerLease(d.name), 0, d.takeOver)
 }
+
+// lookupDurable reads the durable's state from the server, bounded by intakeHoldRenew.
+func (d *heldDurable) lookupDurable(ctx context.Context) (*natsgo.ConsumerInfo, error) {
+	lookup, cancel := context.WithTimeout(ctx, intakeHoldRenew)
+	defer cancel()
+	return d.nats.JS().ConsumerInfo(bus.Stream, d.name, natsgo.Context(lookup))
+}
+
+// heldElsewhere is the standby line of an intake whose durable's hold another process holds live.
+const heldElsewhere = "dispatch delivery: NATS consumer held by another process; standing by"
 
 // takeHold takes the durable's hold when no holder holds it live, keeping the token its row
 // records, and reports whether this intake holds it now. duty.TryHold records its own token as it
@@ -601,7 +576,7 @@ func (d *heldDurable) takeHold(ctx context.Context, name string) bool {
 		}
 		return false
 	case live:
-		d.throttle.reportStandby(name, "dispatch delivery: NATS consumer held by another process; standing by")
+		d.throttle.reportStandby(name, heldElsewhere)
 		return false
 	}
 	hold, err := duty.TryHold(bounded, d.leases, holdName, d.holder, duty.HoldOptions{
@@ -614,7 +589,7 @@ func (d *heldDurable) takeHold(ctx context.Context, name string) bool {
 		return false
 	}
 	if hold == nil {
-		d.throttle.reportStandby(name, "dispatch delivery: NATS consumer held by another process; standing by")
+		d.throttle.reportStandby(name, heldElsewhere)
 		return false
 	}
 	d.hold, d.recorded = hold, token
@@ -656,7 +631,7 @@ func (d *heldDurable) holds() bool {
 // server handles one connection's protocol in order, so the subject has interest before the
 // create is even read (TestATakeOverCreatesTheDurableAlreadyBound). Then this intake records the
 // subject as the hold's token, still under the lease.
-func (d *heldDurable) takeOver(ctx context.Context) bindOutcome {
+func (d *heldDurable) takeOver(ctx context.Context) {
 	js := d.nats.JS()
 	wanted := d.config()
 	name := wanted.Durable
@@ -666,30 +641,30 @@ func (d *heldDurable) takeOver(ctx context.Context) bindOutcome {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
-		return bindFailed
+		return
 	case d.boundElsewhere(info):
-		return bindStandby
+		return
 	default:
 		create = takeOverConfig(info, wanted)
 		if !d.holds() {
-			return bindFailed
+			return
 		}
 		if err := js.DeleteConsumer(bus.Stream, name, natsgo.Context(ctx)); err != nil && !errors.Is(err, natsgo.ErrConsumerNotFound) {
 			slog.Error("dispatch delivery: delete NATS consumer to take it over", "name", name, "error", err)
-			return bindFailed
+			return
 		}
 	}
 	if !d.holds() {
-		return bindFailed
+		return
 	}
 	if _, err := d.subscribe(create.DeliverSubject); err != nil {
 		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", create.FilterSubject, "error", err)
-		return bindFailed
+		return
 	}
 	if _, err := js.AddConsumer(bus.Stream, &create, natsgo.Context(ctx)); err != nil {
 		slog.Error("dispatch delivery: create NATS consumer", "name", name, "subject", create.FilterSubject, "start_seq", create.OptStartSeq, "error", err)
 		d.StopDelivering()
-		return bindFailed
+		return
 	}
 	if err := d.hold.SetToken(ctx, create.DeliverSubject); err != nil {
 		// The durable delivers here, but the hold does not say so: the next holder would take
@@ -697,12 +672,11 @@ func (d *heldDurable) takeOver(ctx context.Context) bindOutcome {
 		// durable over again on the next attempt.
 		slog.Error("dispatch delivery: record the intake's deliver subject", "name", name, "error", err)
 		d.StopDelivering()
-		return bindFailed
+		return
 	}
 	d.recorded, d.subject = create.DeliverSubject, create.DeliverSubject
 	slog.Info("dispatch delivery: NATS consumer bound", "name", name, "subject", create.FilterSubject,
-		"start_seq", create.OptStartSeq, "generation", consumerGeneration(create.Metadata))
-	return bindBound
+		"start_seq", create.OptStartSeq, "generation", bus.MetadataGeneration(create.Metadata, consumerGenerationKey))
 }
 
 // check stops delivering when the durable no longer delivers to this intake's deliver subject:
@@ -713,10 +687,7 @@ func (d *heldDurable) check(ctx context.Context) {
 	if d.subject == "" {
 		return
 	}
-	name := d.config().Durable
-	lookup, cancel := context.WithTimeout(ctx, intakeHoldRenew)
-	info, err := d.nats.JS().ConsumerInfo(bus.Stream, name, natsgo.Context(lookup))
-	cancel()
+	info, err := d.lookupDurable(ctx)
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
 	case err != nil:
@@ -724,7 +695,7 @@ func (d *heldDurable) check(ctx context.Context) {
 	case info.Config.DeliverSubject == d.subject:
 		return
 	}
-	slog.Warn("dispatch delivery: the NATS consumer no longer delivers to this intake; it stops delivering", "name", name)
+	slog.Warn("dispatch delivery: the NATS consumer no longer delivers to this intake; it stops delivering", "name", d.name)
 	d.StopDelivering()
 	d.subject = ""
 }
@@ -739,7 +710,7 @@ func (d *heldDurable) stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), intakeHoldRenew)
 	defer cancel()
 	if err := d.hold.Release(ctx); err != nil {
-		slog.Error("dispatch delivery: release the intake's hold", "name", d.config().Durable, "error", err)
+		slog.Error("dispatch delivery: release the intake's hold", "name", d.name, "error", err)
 	}
 	d.hold, d.subject = nil, ""
 }
