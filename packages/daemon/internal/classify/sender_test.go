@@ -51,28 +51,21 @@ func TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart(t *testing.T) {
 	}
 }
 
-// A synchronize to the head the record holds, from another head and newer than the newest applied,
-// is a move (MovesBy): the branch left the head and came back, the synchronize of the move away
-// delivered late. The record holds c6, red; the implementer resets the branch to c5 and pushes c6
-// again. Its synchronize c5>c6 counts the attempt, as the move to a fresh commit c6b does - c6's
-// own red still stands for it, being the same commit; with no sender named it is no move, as the
-// release before read it.
-func TestASynchronizeBackToTheRecordedHeadIsAMove(t *testing.T) {
+// A synchronize to the head the record holds is no move, as the release before read it, whatever
+// it names: the record holds c6, red; the implementer resets the branch to c5, its synchronize late,
+// and pushes c6 again. The synchronize c5>c6 counts no attempt, as on main: the branch back at the
+// recorded head after a move whose synchronize was skipped is a loop in a skipped gap (the loop
+// floor), which the comparison with main on both oracles judges better read as no move.
+func TestASynchronizeBackToTheRecordedHeadIsNoMove(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "c6", CheckedHead: "c6", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
-	history := func(again string) []runFact {
-		return []runFact{pushed(record.ClassifiedPush{SHA: "c5", Before: "c6", Forced: true, Sender: "dev"}), pushed(record.ClassifiedPush{SHA: again, Before: "c5", Sender: "dev"}),
-			syncedAt("c5", again, "dev", 2), lateAt("c6", "c5", "dev", 1)}
+	got := delivered(t, start, pushed(record.ClassifiedPush{SHA: "c5", Before: "c6", Forced: true, Sender: "dev"}), pushed(record.ClassifiedPush{SHA: "c6", Before: "c5", Sender: "dev"}),
+		syncedAt("c5", "c6", "dev", 2), lateAt("c6", "c5", "dev", 1))
+	if got.FixAttempts != 1 || got.HeadSHA != "c6" || got.Run != nil {
+		t.Errorf("c6 pushed again: %s at %s, want fix=1 at c6 with no run open, as the release before", judged(got, "", ""), got.HeadSHA)
 	}
-	got, control := delivered(t, start, history("c6")...), delivered(t, start, history("c6b")...)
-	if got.FixAttempts != 2 || got.FixAttempts != control.FixAttempts || got.HeadCounted != "c6" || control.HeadCounted != "c6b" || got.Run != nil {
-		t.Errorf("c6 pushed again: %s, a fresh commit c6b: %s, want both counted once more at their head", judged(got, "", ""), judged(control, "", ""))
-	}
-	if MovesBy(start, Arrival{Before: "c5", At: start.HeadUpdatedAt.Add(time.Minute)}, "c6") {
-		t.Error("a synchronize to the recorded head that names no sender is a move, want none")
-	}
-	if MovesBy(start, Arrival{Before: "c5", Sender: "dev", At: start.HeadUpdatedAt}, "c6") {
-		t.Error("a synchronize to the recorded head at the newest applied clock is a move, want none: it is that synchronize delivered again")
+	if MovesBy(start, "c6") || !MovesBy(start, "c7") {
+		t.Error("MovesBy: want no move to the recorded head and a move to another")
 	}
 }
 
@@ -208,22 +201,14 @@ func TestTiedMovesInTwoOrdersLeaveThePathUnled(t *testing.T) {
 }
 
 // A second copy of the synchronize that reached the recorded head - GitHub can send two for one
-// push - is no move, whatever its clock: the record knows of no move away from the head to the head
-// the copy names. h0>h1 applied, then a copy of h0>h1 a second later, counts no fix attempt and
-// opens no head run; a return to h1 whose move away, h1..h0, was pushed is a move.
+// push - is no move, whatever its clock: h0>h1 applied, then a copy of h0>h1 a second later,
+// counts no fix attempt and opens no head run.
 func TestACopyOfTheSynchronizeThatReachedTheHeadIsNoMove(t *testing.T) {
 	code := record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: "dev"}
 	start := delivered(t, redAtH0(), pushed(code), secondAt("h0", "h1", "dev", 1, false), settles("h1", 2, "ci"))
 	copied := delivered(t, start, secondAt("h0", "h1", "dev", 2, false))
 	if copied.Run != nil || copied.FixAttempts != start.FixAttempts {
 		t.Errorf("a copy of h0>h1 a second later: run open %v, fix %d; want closed and %d", copied.Run != nil, copied.FixAttempts, start.FixAttempts)
-	}
-	if MovesBy(start, Arrival{Before: "h0", Sender: "dev", At: time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)}, "h1") {
-		t.Error("a copy of h0>h1 with no move away known is a move, want none")
-	}
-	away := delivered(t, start, pushed(record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, Sender: "dev"}))
-	if !MovesBy(away, Arrival{Before: "h0", Sender: "dev", At: time.Date(2026, 10, 1, 0, 0, 3, 0, time.UTC)}, "h1") {
-		t.Error("a return to h1 whose move away h1..h0 was pushed is no move, want one")
 	}
 }
 

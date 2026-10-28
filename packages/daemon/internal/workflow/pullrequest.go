@@ -146,7 +146,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, e.decideReplayed(ctx, tx, prior, pr)
 	}
 	arrival := classify.Arrival{Before: fact.Before, Sender: fact.Sender, At: fact.UpdatedAt}
-	moved := classify.MovesBy(*pr, arrival, fact.HeadSHA)
+	moved := classify.MovesBy(*pr, fact.HeadSHA)
 	if moved {
 		*pr = classify.AdvancePullRequestHead(*pr, arrival, fact.HeadSHA)
 		e.stampRun(pr)

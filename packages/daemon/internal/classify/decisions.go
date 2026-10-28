@@ -40,43 +40,13 @@ func AdvancePullRequestHead(pr record.PullRequest, arrival Arrival, headSHA stri
 }
 
 // MovesBy is whether a synchronize to head is a move of the head the record holds (pr.HeadSHA): a
-// head other than it, or the same head reached from another, named by its sender and newer than
-// the newest applied, when the move away to that other head is known (movedAway) - the branch left
-// the recorded head and came back, the synchronizes between skipped. Without that it is a copy of
-// the synchronize that reached the head: GitHub can send two for one push. A listener that names
-// no sender, or no before, makes a synchronize to the recorded head no move, as the release before
-// did.
-func MovesBy(pr record.PullRequest, arrival Arrival, head string) bool {
-	if head == "" {
-		return false
-	}
-	if head != pr.HeadSHA {
-		return true
-	}
-	return arrival.Sender != "" && arrival.Before != "" && arrival.Before != head && !arrival.At.IsZero() &&
-		arrival.At.After(pr.HeadUpdatedAt) && movedAway(pr, head, arrival.Before)
-}
-
-// movedAway is whether the record knows the branch moved from head to the head before: a push of
-// those two heads recorded, waiting or queued on their move, or a late synchronize that named the
-// move (record.HeadRun.Names).
-func movedAway(pr record.PullRequest, head, before string) bool {
-	for _, p := range pr.Pushes {
-		if p.Before == head && p.SHA == before {
-			return true
-		}
-	}
-	if i := moveIndex(pr.Moves, head, before); i >= 0 && len(pr.Moves[i].Repeats) > 0 {
-		return true
-	}
-	if pr.Run != nil {
-		for _, n := range pr.Run.Names {
-			if n.Before == head && n.SHA == before {
-				return true
-			}
-		}
-	}
-	return false
+// head other than it. A synchronize to the recorded head is no move, as the release before read
+// it, whatever it names: a copy of the synchronize that reached the head (GitHub can send two for
+// one push), or the branch back at the head after moves whose synchronizes were skipped - a loop in
+// a skipped gap (the loop floor, unspentPushes), which the release before reads as no move and so
+// does this one. It still names its move (NameMove).
+func MovesBy(pr record.PullRequest, head string) bool {
+	return head != "" && head != pr.HeadSHA
 }
 
 // NameMove records the move a synchronize names that moves no head - one older than the newest
@@ -394,12 +364,37 @@ func arrivalPushes(pr record.PullRequest, arrival Arrival, head string, names []
 			left = append(left, n)
 		}
 	}
-	return arrivalRead{pushes: append(gap, *own), path: true, names: left}
+	// A path that reaches a head twice made a loop in the skipped gap; the loop is erased, as the
+	// release before's shortest chain reads every move, so its pushes decide nothing (the loop
+	// floor, unspentPushes). A move back to the record's head (MovesBy) is no loop.
+	return arrivalRead{pushes: withoutLoops(pr.HeadSHA, append(gap, *own)), path: true, names: left}
 }
 
 // sameName is whether a and b name the same move by the same sender at the same clock.
 func sameName(a, b record.Named) bool {
 	return a.Before == b.Before && a.SHA == b.SHA && a.Sender == b.Sender && a.At.Equal(b.At)
+}
+
+// withoutLoops is path, the pushes of a move from from in the order the branch made them, with
+// each loop erased: a push that reaches a head the path already reached drops the pushes since
+// that head, itself with them, unless it is the path's last and reaches from - a move back to the
+// head the move left.
+func withoutLoops(from string, path []record.ClassifiedPush) []record.ClassifiedPush {
+	kept := make([]record.ClassifiedPush, 0, len(path))
+	reached := map[string]int{from: 0}
+	for i, p := range path {
+		if k, ok := reached[p.SHA]; ok && (i < len(path)-1 || p.SHA != from) {
+			for _, q := range kept[k:] {
+				delete(reached, q.SHA)
+			}
+			reached[p.SHA] = k
+			kept = kept[:k]
+			continue
+		}
+		kept = append(kept, p)
+		reached[p.SHA] = len(kept)
+	}
+	return kept
 }
 
 // arrivalRead is what an arrival is judged with (arrivalPushes): pushes, which are the move's own
@@ -790,8 +785,11 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     each by its sender. Every move is judged by the push that made it, as a move to a fresh commit
 //     is (TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain), and the two pushes of the same two
 //     heads that only their order told apart (R1, below) are told apart by their senders
-//     (TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart). A synchronize to the recorded
-//     head from another head is a move (MovesBy).
+//     (TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart). GitHub's clock is to the
+//     second, so a move in the second a window starts or ends in may be that window's or its
+//     neighbour's (gapPath). A loop on the path - a head reached twice - is erased (withoutLoops),
+//     and a synchronize to the recorded head is no move (MovesBy), each as the release before reads
+//     it.
 //   - Before alone: the oldest push of each two heads, and the oldest repeat on a chain through
 //     before (beforeChain). R1 is the floor there: two pushes of the same two heads that differ -
 //     in who pushed them - delivered in the reverse of the order they were made, which nothing but
@@ -812,14 +810,19 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     not missed by the path that leads from the record's head to before without them, so an
 //     arrival can close its head run before they arrive, and a late synchronize opens no run; which
 //     of them it saw then depends on delivery order. No rule avoids it: until a loop's facts arrive
-//     they are the facts of a branch that made no loop, where the run must close.
+//     they are the facts of a branch that made no loop, where the run must close. Inside this floor
+//     the loop is read as the release before reads it - erased, and a return to the recorded head
+//     no move - because the fresh-commit oracle judged by this rule and the same oracle judged by
+//     the release before then agree that this rule is right where the release before is wrong more
+//     often than the reverse; counting the loop's pushes, they did not agree.
 //   - A synchronize never delivered: the arrival after it waits for the move it names, judged for
 //     now by the newest push of each two heads (provisional, the release before's), until the run's
 //     bound cuts it off.
 //
-// Outside those floors the rule is never wrong where main is right in the gates' comparison (the
-// undo and any generators, random and bounded orders, seeds 11, 20261028 and 4242, 40,000 histories
-// each, synchronizes on time, late or never delivered).
+// Outside those floors the rule is never wrong where the release before is right, by the
+// fresh-commit oracle judged by this rule, in the gates' comparison (the undo and any generators,
+// the reference, random and bounded orders, seeds 11, 20261028 and 4242, 40,000 histories each,
+// synchronizes on time, late or never delivered).
 //
 // A head whose push is lost for good is judged unchained and holds its head run open, and every
 // head after it joins the run. The run drops exactly the pushes the record's own bound lets go and

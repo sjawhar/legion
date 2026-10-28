@@ -189,7 +189,7 @@ func randomHistory(rng *rand.Rand) ([]record.ClassifiedPush, []runFact) {
 // deliver applies f as the daemon does: a synchronize to the recorded head moves nothing and only
 // names its move while a head run is open (workflow's pullRequestSynchronized).
 func deliver(f runFact, pr record.PullRequest) record.PullRequest {
-	if f.head != "" && !f.late && !MovesBy(pr, Arrival{Before: f.before, Sender: f.sender, At: f.at}, f.head) {
+	if f.head != "" && !f.late && !MovesBy(pr, f.head) {
 		f.late = true
 	}
 	return f.apply(pr)
