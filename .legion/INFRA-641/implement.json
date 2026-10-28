@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-641",
+  "completed": "2026-10-28T11:32:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2455",
+  "proof": [
+    {
+      "criterion": "A1: merge rule on the replay of production's writes (every head run below every base run)",
+      "surface": "Local Dispatch server built from base b2ac1c41 and from head (runtime code of efb63bc6 = 64a0d984; head binary sha256 fdc01114...26d57 rebuilt after the simplify pass and identical) on Postgres 17.11 + pgvector 0.8.7, NATS 2.12.1 JetStream, fake Envoy listener (762 sessions), driven by the INFRA-512 architect's replay (tools/load.py from dispatch://INFRA-512/artifact/infra512-replay-tools-tgz, inputs dispatch://INFRA-512/artifact/replay-inputs-tar-gz-part00..part10, sha256 4299570e...f42949 checked), F=0.3, rho=1, window minutes 27-35, 2 SSE streams, GOMAXPROCS=2, fresh copy of the settled seed and fresh NATS store per run",
+      "command": "$TMPDIR/infra512-profile/tools/run-x2.sh <name> $TMPDIR/x2-bin/dispatch-<base|head>, six runs interleaved base-1, head-1, base-2, head-2, base-3, head-3 (tools/six.sh); results, profiles and scripts in dispatch://INFRA-641/artifact/x2-merge-rule-runs-tgz",
+      "observed": "Dispatch CPU-s over 481 s: base 386.34 / 367.63 / 363.86, head 235.92 / 229.96 / 241.38; spread 22.48; every head < every base (pass on the first test), median fall 35.8%. Committed writes equal pairwise (292/291); per committed write base 1.323/1.263/1.250 s, head 0.808/0.790/0.830 s. box_busy_before 0.37-1.33%, 0 pending actions, server alive at end in all six. Share of stacks holding pmdoc.len16|nodeSize|measure|walkedCount plus walkNode flat: base 27.40/28.55/28.66%, head 2.11/2.33/2.23%. alloc_space over each run: base 89.72/88.63/88.61 GB, head 48.47/48.46/47.55 GB (median -45.3%).",
+      "headSha": "64a0d9845186",
+      "negativeControl": "The base build is the control: same seed, inputs and harness, interleaved, 363.86-386.34 CPU-s against head 229.96-241.38. A broken size rule (measure's +2 set to 0) is refused by the equivalence tests below before any binary is built."
+    },
+    {
+      "criterion": "A2: identical sizes and positions over every node of the real specs, astral characters and empty texts included",
+      "surface": "go test over the 1,200 primary specs of the project INFRA-512 replays (fetched read-only into $TMPDIR/x2-corpus with dispatch issues --all and dispatch doc-read; not committed), each parsed and also written into a Y fragment, marked with proofComment over the middle third of every 50th text, and read back; plus the synthetic and generated trees of TestWalkVisitsEveryNodeWithTodaysRange",
+      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/x2-corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTodaysWalkOnACorpus -count=1 -v; go test ./internal/dispatch/pmdoc -run 'TestWalk|Len16' -count=1 -v",
+      "observed": "1200 files; 0 parse refusals; 0 Update/mark/Read failures; nodes 3,693,264 parsed + 3,777,882 read back; text nodes 2,383,694 + 2,468,312; 48,263 marks; max depth 12; mismatches 0 (800.7 s). The corpus has no character above U+FFFF and no empty text; those are covered by the synthetic trees (astral, invalid bytes, empty texts, mark-split texts, every leaf, texts/leaves with children, nil child, non-doc roots, MaxTreeDepth chain, 5,000 blocks) and the generated 427 KB, 14-level document, each also stopped early at 11 points: PASS.",
+      "headSha": "64a0d9845186",
+      "negativeControl": "measure's size = 2 for a non-doc node set to 0: TestWalkVisitsEveryNodeWithTodaysRange fails at 'corpus/adjacent-lists.md: visit 0: got {type doc ... end 62 ...}, want {... end 170 ...}' and the corpus test on the 40 largest specs fails on all 40 ('<spec>.md: 2 mismatches; first: walk: visit 0: got {type doc ... end 428930 ...}, want {... end 441858 ...}'); no spec text printed; restored with jj restore."
+    },
+    {
+      "criterion": "A3: len16 equal to today's for every string and allocation-free",
+      "surface": "go test (table, fuzz seeds, AllocsPerRun)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run Len16 -count=1 -v; go test ./internal/dispatch/pmdoc -run '^$' -fuzz FuzzLen16 -fuzztime 60s",
+      "observed": "TestLen16CountsTheUnitsUTF16EncodingWrites, TestLen16DoesNotAllocate (0 allocs for ASCII, multibyte and invalid-byte strings) and FuzzLen16's 22 seeds PASS. Fuzz 60 s: 745,644 execs, 30 interesting inputs, no failure (PASS).",
+      "headSha": "64a0d9845186",
+      "negativeControl": "The corpus and unit equivalence tests compare every text's len16 with the utf16.Encode reference, and the negative control above shows a size change is reported; FuzzLen16 compares against the same reference on arbitrary bytes."
+    },
+    {
+      "criterion": "A6: each walk measures each subtree once",
+      "surface": "BenchmarkPositionedWalk, base export (with this test file and a referenceLen16 shim) against head",
+      "command": "go test ./internal/dispatch/pmdoc -run '^$' -bench BenchmarkPositionedWalk -benchmem -count 8 at each; go run golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e base.txt head.txt",
+      "observed": "generated 427 KB spec 41.90 ms -> 2.69 ms (-93.6%), 14.6 MiB -> 894 KiB, 298,550 -> 17,280 allocs/op; 60,000-node docs depth=5 21.98 -> 5.04 ms, depth=20 25.91 -> 4.13 ms: base grows with depth, head does not.",
+      "headSha": "64a0d9845186",
+      "negativeControl": "The base build in the same export is the control; head ns/op at depth 20 is not above depth 5 at equal node count."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/pmdoc/position.go",
+    "packages/envoy/internal/dispatch/pmdoc/position_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/walk.go",
+    "packages/envoy/internal/dispatch/pmdoc/walk_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/splice.go",
+    "packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "measure reserves a node's pre-order slot before measuring its children and fills it after, so the sizes slice is in visit order; walkedCount follows the same descent (text, leaf and nil not descended) and sizes the slice exactly.",
+    "A nil child is visited (size 0) and then panics on node.Type in both the old and new walk; Validate refuses nil children, and the tests hold the panic to the reference's.",
+    "insertAt's early return is exact: childBoundary matches only in [start+1, end-1] for a non-doc node and [start, end] for doc, and the inline test lies inside it."
+  ],
+  "deviations": [
+    "Merge rule measured on the INFRA-512 architect's replay (tools/load.py) rather than INFRA-639's load test, as the architect directed at 2026-10-27T15:10Z; INFRA-639 had no runnable replay on its branch. Base is this branch's base b2ac1c41 (no X1).",
+    "Postgres 17.11 + pgvector 0.8.7 from .debs (the spec's and the architect's replay's setup), not the load test's pgserver 16.2; the same for both sides.",
+    "The insertAt all-positions throwaway comparison (84 testdata docs at every position; 1,168 real specs at 2,337,098 positions; 134,510 insertAt calls; 0 differences) ran on the identical splice.go change before the pod was recreated on 2026-10-28; its logs were lost with the pod. Real-spec coverage was sampled above about 4,470 positions per document (2 CPUs).",
+    "Kept walkedCount pre-sizing: it halves the bytes per walk against growing the slice (generated 1.54 MB -> 0.88 MB per walk), as the plan let the benchmark decide.",
+    "Three timing tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail in this gVisor pod at base too; skipped locally. TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a byte-order-collation database; it passes on an ICU en-US cluster."
+  ],
+  "openQuestions": []
+}
