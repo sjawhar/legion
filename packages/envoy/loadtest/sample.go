@@ -55,15 +55,22 @@ const (
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
 // Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, and NATS
 // /varz. A failed Postgres, pprof or NATS read is marked in its sample (sample.FailedReads). At each
-// sample it also checks that every stack process is alive (checkAlive).
+// sample it also checks that every stack process is alive (checkAlive). It reads stack.json again
+// at each sample, so a process stack.sh restarted is followed to its new pid, and each process's
+// CPU ticks run on across its pids (cpuStitch).
 type sampler struct {
-	pids    map[string]int // by name; "postgres" is the postmaster
-	pprof   string
-	natsMon string
-	pgURL   string
-	mu      sync.Mutex
-	samples []sample
-	exits   map[string]stackExit // by name, the stack processes found gone
+	pids      map[string]int // by name; "postgres" is the postmaster
+	stackPath string         // stack.json, read again at each sample; empty under -allow-foreign
+	pprof     string
+	natsMon   string
+	pgURL     string
+	stitch    map[string]*cpuStitch // by name
+	kick      chan struct{}         // takes a sample at once (sampleNow)
+	mu        sync.Mutex
+	samples   []sample
+	exits     map[string]stackExit // by name, the stack processes found gone
+	// restarting names the process stack.sh is restarting: its absence is not an exit.
+	restarting string
 }
 
 // stackExit is a stack process that exited during the step: the first check that found it gone.
@@ -74,7 +81,119 @@ type stackExit struct {
 }
 
 func newSampler(ep endpoints) *sampler {
-	return &sampler{pids: ep.pids, pprof: ep.pprof, natsMon: ep.natsMon, pgURL: ep.pg, exits: map[string]stackExit{}}
+	s := &sampler{pids: maps.Clone(ep.pids), pprof: ep.pprof, natsMon: ep.natsMon, pgURL: ep.pg,
+		stitch: map[string]*cpuStitch{}, kick: make(chan struct{}, 1), exits: map[string]stackExit{}}
+	if len(ep.pids) > 0 {
+		s.stackPath = ep.stack
+	}
+	return s
+}
+
+// cpuStitch is one stack process's CPU ticks across restarts: the last ticks read of each pid it
+// had before, plus the current pid's. A pid it has left is never taken up again. A pid's ticks
+// never go down: a reading below the last one keeps the last one. Postgres's reading
+// (postgresUsage) drops when backends exit, whose time leaves the live children before it shows
+// in the postmaster's reaped-child time.
+type cpuStitch struct {
+	mu      sync.Mutex
+	retired float64
+	pid     int
+	last    float64
+	left    map[int]bool
+	seen    bool
+}
+
+// observe records ticks read from pid and returns the process's ticks across every pid so far.
+func (c *cpuStitch) observe(pid int, ticks float64) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.left[pid] {
+		return c.retired + c.last
+	}
+	if c.seen && pid != c.pid {
+		if c.left == nil {
+			c.left = map[int]bool{}
+		}
+		c.left[c.pid] = true
+		c.retired += c.last
+		c.last = 0
+	}
+	c.pid, c.last, c.seen = pid, max(c.last, ticks), true
+	return c.retired + c.last
+}
+
+// total is the ticks across every pid observed so far; false before the first observation.
+func (c *cpuStitch) total() (float64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.retired + c.last, c.seen
+}
+
+func (s *sampler) stitchOf(name string) *cpuStitch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.stitch[name]
+	if c == nil {
+		c = &cpuStitch{}
+		s.stitch[name] = c
+	}
+	return c
+}
+
+// refreshPIDs takes every pid stack.json names now. A pid of 0 (stack.sh stopped the process)
+// keeps the last one, so its absence is seen as an exit.
+func (s *sampler) refreshPIDs() {
+	if s.stackPath == "" {
+		return
+	}
+	st, err := loadStack(s.stackPath)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name, pid := range st.PIDs.byName() {
+		if pid > 0 {
+			s.pids[name] = pid
+		}
+	}
+}
+
+// currentPIDs is a copy of the pids the sampler follows now.
+func (s *sampler) currentPIDs() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.pids)
+}
+
+// setRestarting names the process stack.sh is restarting, "" once it is done.
+func (s *sampler) setRestarting(name string) {
+	s.mu.Lock()
+	s.restarting = name
+	s.mu.Unlock()
+}
+
+// sampleNow makes the loop take its next sample at once, and the samples after it 5 s apart from
+// there.
+func (s *sampler) sampleNow() {
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
+}
+
+// followExit reads pid's CPU ticks every 20 ms until it has exited, so the ticks of a process that
+// stops between two samples are counted up to its end.
+func (s *sampler) followExit(name string, pid int) {
+	c := s.stitchOf(name)
+	for {
+		st, ok := readProcStat(pid)
+		if !ok || st.state == "Z" || st.state == "X" {
+			return
+		}
+		c.observe(pid, st.utime+st.stime)
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // checkAlive records each stack process that is no longer alive, with the time it was first
@@ -83,6 +202,9 @@ func (s *sampler) checkAlive(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for name, pid := range s.pids {
+		if name == s.restarting {
+			continue
+		}
 		if _, seen := s.exits[name]; !seen && !procAlive(pid) {
 			s.exits[name] = stackExit{Name: name, PID: pid, FirstSeenGone: now}
 		}
@@ -253,6 +375,7 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 	defer t.Stop()
 	self := os.Getpid()
 	for n := 0; ; n++ {
+		s.refreshPIDs()
 		sm := sample{At: time.Now(), CPUTicks: map[string]float64{}, RSSKiB: map[string]float64{}, PGConns: map[string]int{}, NATS: map[string]float64{}}
 		sm.InWindow = !sm.At.Before(winStart) && !sm.At.After(winEnd.Add(5*time.Second))
 		// failed marks and counts a failed read, unless it failed because ctx ended.
@@ -264,16 +387,19 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 			errs.add(err)
 		}
 		s.checkAlive(sm.At)
-		for name, pid := range s.pids {
+		for name, pid := range s.currentPIDs() {
+			c := s.stitchOf(name)
 			if name == "postgres" {
 				if tk, rss, ok := postgresUsage(pid); ok {
-					sm.CPUTicks[name], sm.RSSKiB[name] = tk, rss
+					c.observe(pid, tk)
+					sm.RSSKiB[name] = rss
 				}
-				continue
-			}
-			if st, ok := readProcStat(pid); ok {
-				sm.CPUTicks[name] = st.utime + st.stime
+			} else if st, ok := readProcStat(pid); ok && st.state != "Z" && st.state != "X" {
+				c.observe(pid, st.utime+st.stime)
 				sm.RSSKiB[name] = procRSS(pid)
+			}
+			if tk, ok := c.total(); ok {
+				sm.CPUTicks[name] = tk
 			}
 		}
 		if st, ok := readProcStat(self); ok {
@@ -324,6 +450,8 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-s.kick:
+			t.Reset(5 * time.Second)
 		}
 	}
 }

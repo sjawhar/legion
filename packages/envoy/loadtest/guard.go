@@ -23,8 +23,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// stackFile is $LOADTEST_ROOT/stack.json. stack.sh setup writes it; run-step.sh rewrites it once
-// it has started the step's Dispatch, so pids.dispatch is that process:
+// stackFile is $LOADTEST_ROOT/stack.json. stack.sh setup writes it; stack.sh rewrites the pids as it
+// starts and stops processes, so pids.dispatch is the running Dispatch (restart-dispatch moves it):
 //
 //	{
 //	  "name": "loadtest-<random>",   NATS server_name (nats-server -n) and the listener's machine id
@@ -32,13 +32,18 @@ import (
 //	  "dispatch_token": "<random>",  Dispatch's DISPATCH_AGENT_TOKEN
 //	  "listener_token": "<random>",  the listener's ENVOY_API_TOKEN
 //	  "ports": {"postgres": 15432, "proxy": 15433, "nats": 14222, "nats_monitor": 18222,
-//	            "listener": 19120, "dispatch": 18777, "pprof": 16061},
-//	  "pids": {"postgres": <postmaster>, "proxy": 0, "nats": 0, "listener": 0, "dispatch": 0},
-//	  "pg_direct": false             true when Dispatch reaches Postgres without the latency proxy
+//	            "listener": 19120, "dispatch": 18777, "pprof": 16061, "envoy_proxy": 19121},
+//	  "pids": {"postgres": <postmaster>, "proxy": 0, "nats": 0, "listener": 0, "envoy_proxy": 0,
+//	           "dispatch": 0},
+//	  "pg_direct": false,            true when Dispatch reaches Postgres without the latency proxy
+//	  "envoy_rtt": "",               the round trip of envoy_proxy, the proxy Dispatch's ENVOY_URL
+//	                                 names; "" when Dispatch reaches the listener directly
+//	  "dispatch_log": "<path>"       the log the running Dispatch writes
 //	}
 //
 // Every process listens on 127.0.0.1. The loadgen samplers and the lock probe always reach
-// Postgres directly (ports.postgres, database dispatch), never through the proxy.
+// Postgres directly (ports.postgres, database dispatch), never through the proxy, and loadgen
+// reaches the listener directly (ports.listener), never through envoy_proxy.
 type stackFile struct {
 	Name          string     `json:"name"`
 	Root          string     `json:"root"`
@@ -47,6 +52,7 @@ type stackFile struct {
 	Ports         stackPorts `json:"ports"`
 	PIDs          stackPIDs  `json:"pids"`
 	PGDirect      bool       `json:"pg_direct"`
+	EnvoyRTT      string     `json:"envoy_rtt"`
 }
 
 type stackPorts struct {
@@ -60,11 +66,20 @@ type stackPorts struct {
 }
 
 type stackPIDs struct {
-	Postgres int `json:"postgres"`
-	Proxy    int `json:"proxy"`
-	NATS     int `json:"nats"`
-	Listener int `json:"listener"`
-	Dispatch int `json:"dispatch"`
+	Postgres   int `json:"postgres"`
+	Proxy      int `json:"proxy"`
+	NATS       int `json:"nats"`
+	Listener   int `json:"listener"`
+	EnvoyProxy int `json:"envoy_proxy"`
+	Dispatch   int `json:"dispatch"`
+}
+
+// byName is the pids by the sampler's process names.
+func (p stackPIDs) byName() map[string]int {
+	return map[string]int{
+		"postgres": p.Postgres, "proxy": p.Proxy, "nats": p.NATS,
+		"listener": p.Listener, "envoy_proxy": p.EnvoyProxy, "dispatch": p.Dispatch,
+	}
 }
 
 func loadStack(path string) (*stackFile, error) {
@@ -107,6 +122,9 @@ type endpoints struct {
 	pids     map[string]int
 	stack    string
 	pgDirect bool
+	// envoyRTT is the round trip of the latency proxy in front of the listener that Dispatch's
+	// ENVOY_URL names (stack.json envoy_rtt); "" when Dispatch reaches the listener directly.
+	envoyRTT string
 }
 
 // endpointFlags are the endpoint flags seed and run share. Each defaults empty, so the stack's
@@ -309,6 +327,9 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	if st != nil {
 		sv = *st
 		e.pgDirect = st.PGDirect && !f.allowForeign
+		if !f.allowForeign {
+			e.envoyRTT = st.EnvoyRTT
+		}
 	}
 	local := func(scheme string, port int) string { return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port) }
 	// The endpoint and token flags, in the order the guard checks them: each one's name, the value
@@ -359,10 +380,7 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 		return e, nil
 	}
 	e.natsServerName = st.Name
-	for name, pid := range map[string]int{
-		"postgres": st.PIDs.Postgres, "proxy": st.PIDs.Proxy, "nats": st.PIDs.NATS,
-		"listener": st.PIDs.Listener, "dispatch": st.PIDs.Dispatch,
-	} {
+	for name, pid := range st.PIDs.byName() {
 		if pid > 0 {
 			e.pids[name] = pid
 		}

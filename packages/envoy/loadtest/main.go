@@ -17,7 +17,7 @@ import (
 const usage = `usage: loadgen <command> [flags]
 
 commands:
-  proxy            TCP latency proxy toward Postgres
+  proxy            TCP latency proxy (toward Postgres, or toward the listener for --envoy-rtt)
   seed             seed 4 projects, 1,000 issues and 8,000 comments through Dispatch; writes seed.json
   run              one load step against the stack in stack.json; writes summary.json and profiles
   tables           render TABLES.md and pprof tops from step directories

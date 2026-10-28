@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,9 +81,10 @@ func (ns *natsSessions) handler(agent bool, nonce int64) nats.MsgHandler {
 		if json.Unmarshal([]byte(env.Payload), &ev) != nil {
 			return
 		}
-		key := ev.Type
+		// A payload with no event type is a listener send (a mention), not a Dispatch event.
+		key := cmp.Or(ev.Type, "send")
 		if agent {
-			key = "agent." + ev.Type
+			key = "agent." + key
 		}
 		ns.envelopes.offer(key, m.Data, nonce)
 		ns.receipts.add(receipt{EventID: ev.ID, Recv: now, Agent: agent})
@@ -162,17 +164,22 @@ func (r *registrar) register(ctx context.Context, i int) error {
 	return nil
 }
 
-// registerSessions registers every session, 16 at a time.
+// registerSessions registers every session, 16 at a time. With -mention-frac, each session
+// advertises the default mention delivery, so Dispatch delivers a mention of it.
 func (st *step) registerSessions(ctx context.Context) *registrar {
 	reg := &registrar{url: st.cfg.ep.listener, token: st.cfg.ep.listenerToken, client: &http.Client{Timeout: 10 * time.Second},
 		bodies: make([][]byte, len(st.sessions))}
+	capabilities := []string{}
+	if st.cfg.mentionFrac > 0 {
+		capabilities = []string{mentionDelivery}
+	}
 	for i, s := range st.sessions {
 		topics := []string{}
 		for _, w := range s.watched {
 			topics = append(topics, st.issueTopic(w))
 		}
 		reg.bodies[i], _ = json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
-			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}})
+			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": capabilities})
 	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)

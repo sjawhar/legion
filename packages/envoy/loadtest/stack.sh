@@ -8,32 +8,43 @@
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
-#   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
+#   stack.sh seed [--force] [--min-events N]
+#                           seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
 #                           install the commit-time trigger, write seed.meta.json and keep the result as
 #                           the template database dispatch_seed. --force drops an existing seed first.
+#                           --min-events N clones comment.created events until the event log holds N
+#                           rows; on an existing seed with fewer, it extends that seed in place.
 #   stack.sh reset [LOG]    what run-step.sh does before each step: stop Dispatch and the listener,
 #                           recreate database dispatch from dispatch_seed, restart NATS on a fresh store
 #                           and the listener, start Dispatch (its log to LOG) and wait for /healthz.
-#   stack.sh stop [NAME...] stop dispatch, listener, nats, proxy and postgres (or the named ones).
+#   stack.sh restart-dispatch
+#                           stop Dispatch by its pid and start it again as the last reset or seed did
+#                           (same environment, its log appended), wait for /healthz, record the new pid.
+#   stack.sh stop [NAME...] stop dispatch, envoy_proxy, listener, nats, proxy and postgres (or the named
+#                           ones).
 #   stack.sh status         each process: pid, alive, port.
-#   stack.sh build-info     print this checkout's commit and whether its tree has uncommitted changes
-#                           ("<commit> <true|false>"; run-step.sh records them in meta.json).
+#   stack.sh build-info     print the Dispatch checkout's commit and whether its tree has uncommitted
+#                           changes ("<commit> <true|false>"; run-step.sh records them in meta.json).
 #   stack.sh loadgen ARGS   run $LOADTEST_ROOT/bin/loadgen under the stack's environment, from the
 #                           root (run-step.sh and run-series.sh call loadgen this way).
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
-# checkout holding this script); ports LOADTEST_PG_PORT (15432), LOADTEST_PROXY_PORT (15433),
+# checkout holding this script); LOADTEST_DISPATCH_SRC (default LOADTEST_SRC: the checkout
+# envoy-dispatch is built from); ports LOADTEST_PG_PORT (15432), LOADTEST_PROXY_PORT (15433),
 # LOADTEST_NATS_PORT (14222), LOADTEST_NATS_MONITOR_PORT (18222), LOADTEST_LISTENER_PORT (19120),
-# LOADTEST_DISPATCH_PORT (18777), LOADTEST_PPROF_PORT (16061), read by setup into stack.json;
-# LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy.
+# LOADTEST_DISPATCH_PORT (18777), LOADTEST_PPROF_PORT (16061), LOADTEST_ENVOY_PROXY_PORT (19121),
+# read by setup into stack.json; LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on
+# Postgres without the proxy; LOADTEST_ENVOY_RTT=<duration> starts Dispatch with ENVOY_URL through a
+# latency proxy (envoy_proxy) in front of the listener.
 #
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
 # DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_*, HOME and XDG_* never reach it, and every process is
 # stopped by the pid in its pidfile ($LOADTEST_ROOT/run/<name>.pid), never by name.
 #
-# setup, start, seed, reset and stop take the root's run lock (common.sh) for their run, and are
-# refused while another run holds it; run-step.sh's and run-series.sh's own calls pass. status,
-# build-info and loadgen take no lock.
+# setup, start, seed, reset, restart-dispatch and stop take the root's run lock (common.sh) for their
+# run, and are refused while another run holds it; run-step.sh's and run-series.sh's own calls pass,
+# and so does loadgen's restart-dispatch inside a step (loadgen inherits the run's lock descriptor and
+# gets its token). status, build-info and loadgen take no lock.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -51,19 +62,20 @@ STACK=$ROOT/stack.json
 SEED_META=$ROOT/seed.meta.json
 STACK_HOME=$ROOT/home
 PGSERVER_VERSION=0.1.4
-# Processes in stop order, and in start order (dispatch is started by seed and reset).
-PROCESSES=(dispatch listener nats proxy postgres)
-START_ORDER=(postgres proxy nats listener dispatch)
+# Processes in stop order, and in start order (envoy_proxy and dispatch are started by seed and
+# reset).
+PROCESSES=(dispatch envoy_proxy listener nats proxy postgres)
+START_ORDER=(postgres proxy nats listener envoy_proxy dispatch)
 # The stack.json port keys in their order, each one's environment variable and its default.
-PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
+PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof envoy_proxy)
 declare -A PORT_VAR=(
   [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
   [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
-  [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT
+  [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT [envoy_proxy]=LOADTEST_ENVOY_PROXY_PORT
 )
 declare -A PORT_DEFAULT=(
   [postgres]=15432 [proxy]=15433 [nats]=14222 [nats_monitor]=18222 [listener]=19120
-  [dispatch]=18777 [pprof]=16061
+  [dispatch]=18777 [pprof]=16061 [envoy_proxy]=19121
 )
 
 # base_env is every stack process's environment: a PATH and a HOME and XDG directories of the
@@ -78,14 +90,16 @@ base_env=(
   "TMPDIR=$ROOT/tmp"
 )
 
-# loadgen_env adds what loadgen needs: the root, and the go toolchain for `loadgen tables`
-# (`go tool pprof`).
+# loadgen_env adds what loadgen needs: the root, the go toolchain for `loadgen tables`
+# (`go tool pprof`), this script's path and the run's lock token, for `loadgen run -restart-at`'s
+# `stack.sh restart-dispatch`.
 loadgen_env() {
   local gobin
   gobin=$(command -v go || true)
   local path="$BIN:/usr/local/bin:/usr/bin:/bin"
   [ -n "$gobin" ] && path="$(dirname -- "$gobin"):$path"
-  printf '%s\n' "${base_env[@]:1}" "PATH=$path" "LOADTEST_ROOT=$ROOT"
+  printf '%s\n' "${base_env[@]:1}" "PATH=$path" "LOADTEST_ROOT=$ROOT" "LOADTEST_STACK_SH=$here/stack.sh"
+  [ -z "${LOADTEST_LOCK_TOKEN:-}" ] || printf '%s\n' "LOADTEST_LOCK_TOKEN=$LOADTEST_LOCK_TOKEN"
 }
 
 # loadgen runs the stack's loadgen binary under the stack's environment, from the root.
@@ -157,7 +171,7 @@ write_stack_json() {
       jq -n --arg name "loadtest-$(random_hex 4)" --arg root "$ROOT" \
         --arg dt "$(random_hex 24)" --arg lt "$(random_hex 24)" --argjson ports "$ports" \
         '{name: $name, root: $root, dispatch_token: $dt, listener_token: $lt, ports: $ports,
-          pids: {postgres: 0, proxy: 0, nats: 0, listener: 0, dispatch: 0}, pg_direct: false}' >"$STACK"
+          pids: {postgres: 0, proxy: 0, nats: 0, listener: 0, envoy_proxy: 0, dispatch: 0}, pg_direct: false}' >"$STACK"
     )
     note "wrote $STACK (stack $(stack_name))"
     return
@@ -182,7 +196,7 @@ pidfile() { printf '%s/%s.pid\n' "$RUN" "$1"; }
 binary_of() {
   case $1 in
     postgres) printf '%s\n' "$PGBIN/postgres" ;;
-    proxy) printf '%s\n' "$BIN/loadgen" ;;
+    proxy | envoy_proxy) printf '%s\n' "$BIN/loadgen" ;;
     nats) printf '%s\n' "$BIN/nats-server" ;;
     listener) printf '%s\n' "$BIN/envoy-listener" ;;
     dispatch) printf '%s\n' "$BIN/envoy-dispatch" ;;
@@ -207,9 +221,15 @@ running() { pid_of "$1" >/dev/null; }
 
 port_open() { (: <"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
-# spawn NAME LOG ENV_ARRAY CMD...: start CMD in its own session under `env -i` with the named
-# environment, its output to LOG, and record its pid in NAME's pidfile.
+# spawn [--append] NAME LOG ENV_ARRAY CMD...: start CMD in its own session under `env -i` with the
+# named environment, its output to LOG (appended with --append, else LOG is truncated), and record
+# its pid in NAME's pidfile.
 spawn() {
+  local append=false
+  if [ "$1" = --append ]; then
+    append=true
+    shift
+  fi
   local name=$1 log=$2
   local -n spawn_env=$3
   shift 3
@@ -217,11 +237,12 @@ spawn() {
   f=$(pidfile "$name")
   mkdir -p -- "$RUN" "$(dirname -- "$log")" "$ROOT/tmp"
   rm -f -- "$f"
+  $append || : >"$log"
   # The shell writes its own pid and execs CMD, so the pidfile names CMD's process. Descriptor 9,
   # the run lock (common.sh), is closed, so a stack process never holds the lock.
   # shellcheck disable=SC2016
   setsid -f env -i "${spawn_env[@]}" /bin/sh -c 'echo "$$" >"$0.tmp" && mv -f -- "$0.tmp" "$0" && exec "$@"' \
-    "$f" "$@" >"$log" 2>&1 </dev/null 9>&-
+    "$f" "$@" >>"$log" 2>&1 </dev/null 9>&-
   # Wait until the pidfile names a process running NAME's binary (the shell has exec'd).
   local i
   for ((i = 0; i < 100; i++)); do
@@ -361,20 +382,51 @@ dispatch_healthy() {
   curl -fsS --max-time 5 "http://127.0.0.1:$(port dispatch)/healthz" | jq -e '.ok and .nats'
 }
 
+# start_envoy_proxy RTT: the latency proxy in front of the listener that Dispatch's ENVOY_URL names
+# under LOADTEST_ENVOY_RTT. loadgen keeps the listener's own address.
+start_envoy_proxy() {
+  local rtt=$1
+  check_port envoy_proxy envoy_proxy
+  local log=$LOGS/envoy-proxy.out
+  spawn envoy_proxy "$log" base_env "$BIN/loadgen" proxy -listen "127.0.0.1:$(port envoy_proxy)" \
+    -target "127.0.0.1:$(port listener)" -rtt "$rtt"
+  wait_for "the listener's latency proxy" 30 envoy_proxy "$log" port_open "$(port envoy_proxy)"
+  set_pid envoy_proxy "$(pid_of envoy_proxy)"
+  note "envoy_proxy pid $(pid_of envoy_proxy) on 127.0.0.1:$(port envoy_proxy) toward the listener (rtt $rtt)"
+}
+
 # start_dispatch LOG: Dispatch on database dispatch, through the latency proxy unless
-# LOADTEST_PG_DIRECT=1; waits up to 120 s for /healthz to report ok and NATS.
+# LOADTEST_PG_DIRECT=1, and with ENVOY_URL through envoy_proxy when LOADTEST_ENVOY_RTT is set; waits
+# up to 120 s for /healthz to report ok and NATS.
 start_dispatch() {
   local log=$1
   running dispatch && die "Dispatch is already running (pid $(pid_of dispatch)); stack.sh stop dispatch first"
+  local direct=false rtt=${LOADTEST_ENVOY_RTT:-}
+  [ "${LOADTEST_PG_DIRECT:-}" = 1 ] && direct=true
+  stop_one envoy_proxy
+  [ -z "$rtt" ] || start_envoy_proxy "$rtt"
+  launch_dispatch "$log" "$direct" "$rtt"
+}
+
+# launch_dispatch LOG PG_DIRECT ENVOY_RTT [--append]: start Dispatch with the given Postgres path and
+# listener path, record them, its log and its pid in stack.json (restart-dispatch starts it again
+# from that record), and wait for /healthz.
+launch_dispatch() {
+  local log=$1 direct=$2 rtt=$3 append=()
+  [ "${4:-}" = --append ] && append=(--append)
   check_port dispatch dispatch
   check_port dispatch pprof
-  local pg_port direct=false
+  local pg_port envoy_port
   pg_port=$(port proxy)
-  if [ "${LOADTEST_PG_DIRECT:-}" = 1 ]; then
+  if [ "$direct" = true ]; then
     pg_port=$(port postgres)
-    direct=true
   else
     running proxy || die "the latency proxy is not running; stack.sh start (or LOADTEST_PG_DIRECT=1)"
+  fi
+  envoy_port=$(port listener)
+  if [ -n "$rtt" ]; then
+    running envoy_proxy || die "the listener's latency proxy (envoy_proxy) is not running"
+    envoy_port=$(port envoy_proxy)
   fi
   local webdist=$ROOT/webdist
   mkdir -p -- "$webdist" "$STACK_HOME"
@@ -393,13 +445,13 @@ start_dispatch() {
     "DISPATCH_WEB_DIST=$webdist"
     "DISPATCH_PPROF_PORT=$(port pprof)"
     "NATS_URLS=nats://127.0.0.1:$(port nats)"
-    "ENVOY_URL=http://127.0.0.1:$(port listener)"
+    "ENVOY_URL=http://127.0.0.1:$envoy_port"
     "ENVOY_TOKEN=$(jq -r .listener_token "$STACK")")
-  spawn dispatch "$log" dispatch_env "$BIN/envoy-dispatch"
+  spawn "${append[@]}" dispatch "$log" dispatch_env "$BIN/envoy-dispatch"
   set_pid dispatch "$(pid_of dispatch)"
-  stack_set '.pg_direct = $d' --argjson d "$direct"
+  stack_set '.pg_direct = $d | .envoy_rtt = $r | .dispatch_log = $l' --argjson d "$direct" --arg r "$rtt" --arg l "$log"
   wait_for "Dispatch /healthz to report ok and NATS" 120 dispatch "$log" dispatch_healthy
-  note "dispatch pid $(pid_of dispatch) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port; log $log"
+  note "dispatch pid $(pid_of dispatch) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port, listener via port $envoy_port; log $log"
 }
 
 # ---- commands ----------------------------------------------------------------------------------------
@@ -409,11 +461,12 @@ cmd_setup() {
   command -v uv >/dev/null || die "uv is required (Postgres comes from the pgserver wheel)"
   command -v jq >/dev/null || die "jq is required"
   [ -d "$ENVOY_SRC/cmd/dispatch" ] || die "LOADTEST_SRC=$SRC holds no packages/envoy/cmd/dispatch"
+  [ -d "$DISPATCH_SRC/packages/envoy/cmd/dispatch" ] || die "LOADTEST_DISPATCH_SRC=$DISPATCH_SRC holds no packages/envoy/cmd/dispatch"
   mkdir -p -- "$BIN" "$RUN" "$LOGS" "$PGDIR/log" "$STACK_HOME" "$ROOT/tmp" "$ROOT/runs"
 
-  note "building envoy-dispatch, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+  note "building envoy-dispatch from $DISPATCH_SRC/packages/envoy, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+  (cd -- "$DISPATCH_SRC/packages/envoy" && go build -o "$BIN/envoy-dispatch" ./cmd/dispatch)
   (cd -- "$ENVOY_SRC" &&
-    go build -o "$BIN/envoy-dispatch" ./cmd/dispatch &&
     go build -o "$BIN/envoy-listener" ./cmd/listener &&
     go build -o "$BIN/loadgen" ./loadtest)
 
@@ -477,12 +530,12 @@ cmd_start() {
   start_listener
 }
 
-# build_commit prints the checkout's commit and whether its tree has uncommitted changes, without
-# touching the repository (no index refresh).
-build_commit() { git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown; }
+# build_commit prints the commit of the checkout envoy-dispatch is built from, and build_dirty
+# whether its tree has uncommitted changes, without touching the repository (no index refresh).
+build_commit() { git -C "$DISPATCH_SRC" rev-parse HEAD 2>/dev/null || echo unknown; }
 build_dirty() {
   local s
-  s=$(git -C "$SRC" --no-optional-locks status --porcelain 2>/dev/null) || {
+  s=$(git -C "$DISPATCH_SRC" --no-optional-locks status --porcelain 2>/dev/null) || {
     echo false
     return
   }
@@ -493,17 +546,79 @@ cmd_build_info() { printf '%s %s\n' "$(build_commit)" "$(build_dirty)"; }
 
 db_exists() { [ "$(sql postgres "select count(*) from pg_database where datname = '$1'")" = 1 ]; }
 
+# extend_events DB N: clone the comment.created events of DB, in id order and round again when
+# needed, until its event log holds N rows. Each clone is a new row on its source's issue with that
+# issue's next sequence, published (so the outbox sends nothing), created now. It is test data: the
+# old backlog a browser tab coming back after an hour replays. Prints how many rows it added.
+extend_events() {
+  local db=$1 n=$2
+  sql "$db" "with src as (
+      select issue_key, type, actor, payload, notify, row_number() over (order by id) - 1 as k
+      from events where type = 'comment.created' and issue_key is not null
+    ), plan as (
+      select g, s.issue_key, s.type, s.actor, s.payload, s.notify
+      from generate_series(1, greatest(0, $n - (select count(*) from events))::int) g
+      join src s on s.k = (g - 1) % greatest(1, (select count(*) from src))
+    ), numbered as (
+      select p.*, i.last_seq + row_number() over (partition by p.issue_key order by p.g) as seq
+      from plan p join issues i on i.key = p.issue_key
+    ), ins as (
+      insert into events (issue_key, seq, type, actor, payload, notify, published_at)
+      select issue_key, seq, type, actor, payload, notify, now() from numbered order by g
+      returning issue_key, seq
+    ), bump as (
+      update issues i set last_seq = m.seq
+      from (select issue_key, max(seq) as seq from ins group by issue_key) m
+      where i.key = m.issue_key
+    )
+    select count(*) from ins"
+}
+
+# seed_counts DB: the seed's row counts, as seed.meta.json records them.
+seed_counts() {
+  sql "$1" "select json_build_object(
+      'projects', (select count(*) from projects),
+      'issues', (select count(*) from issues),
+      'comments', (select count(*) from comments),
+      'artifacts', (select count(*) from artifacts),
+      'artifact_versions', (select count(*) from artifact_versions),
+      'events', (select count(*) from events))"
+}
+
 cmd_seed() {
-  local force=false
-  case ${1:-} in
-    --force) force=true ;;
-    "") ;;
-    *) die "seed takes only --force, not '$1'" ;;
-  esac
+  local force=false min_events=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --force) force=true ;;
+      --min-events)
+        [[ ${2:-} =~ ^[0-9]+$ ]] || die "--min-events takes a row count, not '${2:-}'"
+        min_events=$2
+        shift
+        ;;
+      *) die "seed takes only --force and --min-events N, not '$1'" ;;
+    esac
+    shift
+  done
   need_stack
   running postgres || die "Postgres is not running; stack.sh start first"
   if db_exists dispatch_seed && [ -f "$SEED_META" ] && [ "$force" = false ]; then
-    note "already seeded: database dispatch_seed and $SEED_META exist (stack.sh seed --force reseeds)"
+    local have
+    have=$(sql dispatch_seed 'select count(*) from events')
+    if [ -z "$min_events" ] || ((have >= min_events)); then
+      note "already seeded: database dispatch_seed and $SEED_META exist, $have events (stack.sh seed --force reseeds)"
+      return 0
+    fi
+    note "extending the seed's event log from $have to $min_events rows (comment.created clones)"
+    local added
+    added=$(extend_events dispatch_seed "$min_events")
+    sql dispatch_seed 'vacuum analyze events' >/dev/null
+    local tmp
+    tmp=$(mktemp "$SEED_META.XXXXXX")
+    jq --argjson counts "$(seed_counts dispatch_seed)" --argjson min "$min_events" --argjson added "$added" \
+      '.counts = $counts | .event_extension = {min_events: $min, cloned_comment_events: ((.event_extension.cloned_comment_events // 0) + $added)}' \
+      "$SEED_META" >"$tmp"
+    mv -f -- "$tmp" "$SEED_META"
+    note "seed extended by $added events; $(jq -c . "$SEED_META")"
     return 0
   fi
   local started=$SECONDS
@@ -513,7 +628,7 @@ cmd_seed() {
   rm -f -- "$SEED_META" "$ROOT/seed.json"
   sql postgres 'create database dispatch' >/dev/null
   trap 'stop_one dispatch' EXIT
-  start_dispatch "$LOGS/dispatch-seed.log"
+  LOADTEST_ENVOY_RTT='' start_dispatch "$LOGS/dispatch-seed.log"
 
   note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
@@ -544,25 +659,24 @@ cmd_seed() {
   stop_one dispatch
   trap - EXIT
 
+  local extension=null
+  if [ -n "$min_events" ]; then
+    note "extending the event log to $min_events rows (comment.created clones)"
+    extension=$(jq -n --argjson min "$min_events" --argjson added "$(extend_events dispatch "$min_events")" \
+      '{min_events: $min, cloned_comment_events: $added}')
+  fi
   note "vacuum analyze"
   sql dispatch 'vacuum analyze' >/dev/null
   note "installing the commit-time trigger (loadtest.event_commits)"
   loadgen trigger-sql | psql_db dispatch >/dev/null
 
-  local migration counts
+  local migration
   migration=$(sql dispatch 'select max(version) from schema_migrations')
-  counts=$(sql dispatch "select json_build_object(
-      'projects', (select count(*) from projects),
-      'issues', (select count(*) from issues),
-      'comments', (select count(*) from comments),
-      'artifacts', (select count(*) from artifacts),
-      'artifact_versions', (select count(*) from artifact_versions),
-      'events', (select count(*) from events))")
   jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
-    --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
-    --argjson seconds "$((SECONDS - started))" \
+    --argjson counts "$(seed_counts dispatch)" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
+    --argjson seconds "$((SECONDS - started))" --argjson extension "$extension" \
     '{migration: $migration, build_commit: $commit, build_dirty: $dirty, created_at: $at,
-      seed_seconds: $seconds, postgres_version: $pg, counts: $counts}' >"$SEED_META"
+      seed_seconds: $seconds, postgres_version: $pg, counts: $counts, event_extension: $extension}' >"$SEED_META"
   sql postgres 'alter database dispatch rename to dispatch_seed' >/dev/null
   note "seed done in $((SECONDS - started)) s: template database dispatch_seed; $(jq -c . "$SEED_META")"
 }
@@ -580,6 +694,23 @@ cmd_reset() {
   start_nats
   start_listener
   start_dispatch "$log"
+}
+
+# cmd_restart_dispatch stops the running Dispatch by its pid and starts it again the way the last
+# reset (or seed) started it: the Postgres path, the listener path and the log that stack.json
+# recorded, the log appended. The listener's latency proxy, when there is one, keeps running.
+cmd_restart_dispatch() {
+  need_stack
+  local old log direct rtt started=$SECONDS
+  old=$(pid_of dispatch) || die "Dispatch is not running; stack.sh reset starts it"
+  log=$(jq -r '.dispatch_log // empty' "$STACK")
+  [ -n "$log" ] || die "$STACK records no dispatch_log; stack.sh reset starts Dispatch with one"
+  direct=$(jq -r '.pg_direct // false' "$STACK")
+  rtt=$(jq -r '.envoy_rtt // ""' "$STACK")
+  stop_one dispatch
+  printf '\nstack.sh: restart-dispatch: pid %s stopped at %s; starting again\n\n' "$old" "$(date -u +%FT%T.%3NZ)" >>"$log"
+  launch_dispatch "$log" "$direct" "$rtt" --append
+  note "restart-dispatch: pid $old -> $(pid_of dispatch) in $((SECONDS - started)) s"
 }
 
 cmd_stop() {
@@ -602,26 +733,27 @@ cmd_status() {
     for k in $(ports_of "$p"); do
       if port_open "$(port "$k")"; then ports+=("$k $(port "$k") open"); else ports+=("$k $(port "$k") closed"); fi
     done
-    printf '%-9s %-20s %s\n' "$p" "$state" "$(
+    printf '%-12s %-20s %s\n' "$p" "$state" "$(
       IFS=,
       echo "${ports[*]}"
     )"
   done
   if [ -f "$SEED_META" ]; then
-    printf 'seed      %s\n' "$(jq -c '{migration, build_commit, counts}' "$SEED_META")"
+    printf 'seed         %s\n' "$(jq -c '{migration, build_commit, counts, event_extension}' "$SEED_META")"
   else
-    printf 'seed      none\n'
+    printf 'seed         none\n'
   fi
 }
 
 case ${1:-} in
-  setup | start | seed | reset | stop) lock_root "$ROOT" ;;
+  setup | start | seed | reset | restart-dispatch | stop) lock_root "$ROOT" ;;
 esac
 case ${1:-} in
   setup) cmd_setup ;;
   start) cmd_start ;;
   seed) cmd_seed "${@:2}" ;;
   reset) cmd_reset "${@:2}" ;;
+  restart-dispatch) cmd_restart_dispatch ;;
   stop) cmd_stop "${@:2}" ;;
   status) cmd_status ;;
   build-info) cmd_build_info ;;

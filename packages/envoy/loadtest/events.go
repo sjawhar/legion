@@ -149,10 +149,13 @@ type eventPlan struct {
 	human   bool
 	quote   string
 	replyTo string
+	// mentions are the sessions a comment mentions (-mention-frac), by index.
+	mentions []int
 }
 
 // planEvent draws one write from the event stream: a session, one of its watched issues, a
-// person or the session as author, a kind, and the kind's quote or reply root.
+// person or the session as author, a kind, and the kind's quote or reply root. A comment's
+// mentions come from the write's own stream (planMentions), so they leave the schedule as it is.
 func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64) eventPlan {
 	sIdx := r.IntN(len(sessions))
 	s := sessions[sIdx]
@@ -170,6 +173,9 @@ func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, mar
 			roots = is.AnchoredCommentIDs
 		}
 		p.replyTo = roots[r.IntN(len(roots))]
+	}
+	if commentWrite(p.kind) {
+		p.mentions = planMentions(marker, sIdx, len(sessions), cfg.mentionFrac, cfg.mentions)
 	}
 	return p
 }
@@ -211,7 +217,7 @@ func newWriter(a *api, sf seedFile, nonce int64, lg *log.Logger) *writer {
 // do sends one write and returns its record.
 func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	is := w.sf.Issues[p.issue]
-	rec := writeRec{Marker: p.marker, Kind: p.kind, Issue: is.Key}
+	rec := writeRec{Marker: p.marker, Kind: p.kind, Issue: is.Key, Mentions: len(p.mentions)}
 	id := who{}
 	if p.human {
 		id.person = fmt.Sprintf("person-%d", p.session%7)
@@ -255,6 +261,9 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	}
 	if !p.human {
 		body["actor"] = sessionActor(sessionID(p.session))
+	}
+	if len(p.mentions) > 0 {
+		body["mentions"] = mentionTargets(p.mentions)
 	}
 	res := w.a.call(ctx, "POST", path, id, body)
 	rec.Sent, rec.Arrival, rec.Response, rec.Status, rec.ConnWait = res.start, res.arrival(), res.end, res.status, res.connWait

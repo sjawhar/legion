@@ -8,7 +8,8 @@
 #
 # resolve_paths sets SRC to LOADTEST_SRC (default: the checkout holding this file) and ROOT to
 # LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest, created), both as physical paths, and
-# exports them as LOADTEST_SRC and LOADTEST_ROOT.
+# exports them as LOADTEST_SRC and LOADTEST_ROOT. It sets DISPATCH_SRC, the checkout envoy-dispatch
+# is built from, to LOADTEST_DISPATCH_SRC (default SRC).
 #
 # lock_root ROOT: one run at a time per root (README.md, "One run at a time"). It takes an
 # exclusive, non-blocking flock on ROOT/.run.lock and keeps it on file descriptor 9. The lock lasts
@@ -33,11 +34,11 @@
 # namespace is this one. stack.sh closes descriptor 9 in every stack process that it starts, so no
 # stack process keeps the lock.
 #
-# prepare_stack runs stack.sh setup (an incremental build of SRC), start and seed, each of which
-# does nothing when its work is already done, and the migration check: a build whose highest
-# migration is older than the seed's is refused with exit 1. Then it sets BUILD to
-# `stack.sh build-info` ("<commit> <dirty>"). run-step.sh calls it before a step that is not part of
-# a series; run-series.sh calls it once, before its first step.
+# prepare_stack runs stack.sh setup (an incremental build of SRC, and of DISPATCH_SRC's
+# envoy-dispatch), start and seed, each of which does nothing when its work is already done, and the
+# migration check: a Dispatch build whose highest migration is older than the seed's is refused with
+# exit 1. Then it sets BUILD to `stack.sh build-info` ("<commit> <dirty>"). run-step.sh calls it
+# before a step that is not part of a series; run-series.sh calls it once, before its first step.
 
 die() {
   printf '%s: %s\n' "${0##*/}" "$*" >&2
@@ -57,6 +58,7 @@ resolve_paths() {
   mkdir -p -- "$ROOT"
   ROOT=$(cd -- "$ROOT" && pwd -P)
   export LOADTEST_SRC=$SRC LOADTEST_ROOT=$ROOT
+  DISPATCH_SRC=${LOADTEST_DISPATCH_SRC:-$SRC}
 }
 
 # lock_field NAME RECORD: the value of NAME= in a lock record.
@@ -209,8 +211,8 @@ prepare_stack() {
   "$stack" start
   "$stack" seed
   # A build cannot start on a seed that a newer build migrated: compare the highest migration file
-  # of this checkout with the seed's level.
-  local migrations=$SRC/packages/envoy/internal/dispatch/store/migrations build_file build_level seed_level
+  # of the Dispatch checkout with the seed's level.
+  local migrations=$DISPATCH_SRC/packages/envoy/internal/dispatch/store/migrations build_file build_level seed_level
   build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
   build_level=$((10#${build_file%%_*}))
   seed_level=$(jq -er .migration "$ROOT/seed.meta.json")
