@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -561,5 +562,86 @@ func TestAStoppedIntakeStaysStoppedAcrossAReconnectAndSubscribesAgain(t *testing
 	settings, err := GetSettings(ctx, pool)
 	if err != nil || settings.LastEventAt == nil {
 		t.Fatalf("settings after the message handled by the second subscription = %+v, %v: want last_event_at recorded", settings, err)
+	}
+}
+
+// A stop after the client replaced its connection drains the subscription the client bound again
+// on the new connection, which is the one delivering, rather than the handle subscribe returned,
+// which the closed connection took with it. The durable loses its subscriber as the stop begins, so
+// a message published while a handler still runs is not handed to the stopping process, which would
+// hand it back and be handed it again; the stop logs no failed drain, and the next process to bind
+// the durable handles the message.
+func TestAStopAfterTheConnectionWasReplacedDrainsTheRestoredSubscription(t *testing.T) {
+	logs := captureLogs(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	fake := newFakeGitHub(t)
+	held := holdPullRequestOne(fake)
+	github := fake.newTestClient()
+	t.Cleanup(held.release)
+	natsClient := intakeTestClient(t)
+	hooked := make(chan struct{}, 8)
+	natsClient.AddReconnectHook(func(*natsgo.Conn) error {
+		hooked <- struct{}{}
+		return nil
+	})
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	stop := runIntake(t, intake)
+	awaitBoundDurable(t, natsClient)
+
+	// The client dials a connection to replace the closed one and binds its registration there: a
+	// handle of its own, not the one subscribe returned.
+	natsClient.Conn.Close()
+	select {
+	case <-hooked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the client's reconnect hooks never ran")
+	}
+	waitFor(t, 20*time.Second, func() bool { return natsClient.SubOK() && deliveryConsumerInfo(t, natsClient).PushBound }, func() string {
+		return "the client never bound the intake's subscription again on its new connection"
+	})
+	intake.mu.Lock()
+	delivery := intake.delivering
+	intake.mu.Unlock()
+	if delivery.sub.IsValid() {
+		t.Fatal("the handle subscribe returned is still valid on the replaced connection; the test proves nothing")
+	}
+
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 1, mergedPullRequest(1))
+	held.awaitEntered(t)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	waitFor(t, 20*time.Second, delivery.stopping.Load, func() string { return "the intake never began stopping" })
+	waitFor(t, 5*time.Second, func() bool { return !deliveryConsumerInfo(t, natsClient).PushBound }, func() string {
+		return "the stopping intake's subscription stayed bound to the durable while its handler ran: the stop did not drain " +
+			"the subscription the client restored on its new connection"
+	})
+	before := deliveryConsumerInfo(t, natsClient).Delivered.Consumer
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 2, mergedPullRequest(2))
+	// nats-server hands a bound consumer's subscriber a new message within moments.
+	time.Sleep(time.Second)
+
+	held.release()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the stopping intake did not return once its handler ended")
+	}
+	if delivered := deliveryConsumerInfo(t, natsClient).Delivered.Consumer; delivered != before {
+		t.Fatalf("the durable delivered %d message(s) to the stopping intake after its stop began, want none", delivered-before)
+	}
+	for _, record := range logs() {
+		if message, _ := record["msg"].(string); strings.Contains(message, "drain") {
+			t.Errorf("the stop logged %q (%v)", message, record["error"])
+		}
+	}
+
+	runIntake(t, newIntake(intakeTestClient(t), pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	awaitAcknowledged(t, natsClient)
+	if events, want := held.of("2"), []string{"start 2", "end 2"}; !slices.Equal(events, want) {
+		t.Fatalf("pull request 2's events = %q, want %q: the next process handles the message published during the stop", events, want)
 	}
 }

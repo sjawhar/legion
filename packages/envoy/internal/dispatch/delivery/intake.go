@@ -125,19 +125,22 @@ func (in *Intake) Run(ctx context.Context) {
 }
 
 // intakeStopBudget is how long Run's stop waits, from the moment its ctx ends, for the messages in
-// their handlers to finish and be acknowledged before it gives them up (StopDelivering). In
-// cmd/dispatch that ctx is the signal context, so the stop begins at SIGTERM and runs beside the
-// HTTP drain and the document shutdown, which take up to stopGrace (30 s) less a 5 s reserve:
-// httpDrainBeforeDocuments then documentShutdownTimeout (cmd/dispatch/shutdown.go). main's own
-// stop of the intakes gives their handlers up at intakeStopDeadline (stopGrace less the same
-// reserve, 25 s) after the signal at the latest. 15 s leaves 10 s before that for what follows the
-// wait -- the handlers given up returning, which they do as soon as their context is cancelled,
-// the negative acknowledgements and the drain's end -- and 15 s before the kubelet's kill. It is
-// also well past what a handler GitHub answers needs, a pull request and its commit pages with a
-// page GitHub answered 502 asked again (after 1 s, then 2 s: githubPageRetryWait), so an ordinary
-// handler finishes and is acknowledged rather than redone. A call GitHub does not answer holds one
-// attempt for up to githubapp.RequestTimeout (20 s), and is then asked again, which no budget
-// inside stopGrace could wait out.
+// their handlers to finish and be acknowledged before it gives them up (StopDelivering), and the
+// one deadline of the intakes' stop in cmd/dispatch, whose call of StartIntakes' stop adds none.
+// There that ctx is the signal context, so the stop begins at SIGTERM and runs beside the HTTP
+// drain and the document shutdown, which take up to stopGrace (30 s) less a 5 s reserve:
+// httpDrainBeforeDocuments then documentShutdownTimeout (cmd/dispatch/shutdown.go). The shutdown
+// waits for the intakes after the document service and before it closes the database pool, so
+// that a handler's writes never meet a closed pool. 15 s leaves 10 s before the document budget's
+// latest end for what follows the wait -- the handlers given up returning, which they do as soon
+// as their context is cancelled, the negative acknowledgements, the drain's end, which the given-up
+// handlers' cancelled context cuts short, and the clients closing -- so the intakes never hold the
+// shutdown past what that budget already can, and 15 s before the kubelet's kill. It is also well
+// past what a handler GitHub answers needs, a pull request and its commit pages with a page GitHub
+// answered 502 asked again (after 1 s, then 2 s: githubPageRetryWait), so an ordinary handler
+// finishes and is acknowledged rather than redone. A call GitHub does not answer holds one attempt
+// for up to githubapp.RequestTimeout (20 s), and is then asked again, which no budget inside
+// stopGrace could wait out.
 const intakeStopBudget = 15 * time.Second
 
 // route dispatches one envelope payload by its kind field: a pull request to
@@ -728,16 +731,18 @@ func (in *Intake) StopDelivering(ctx context.Context) {
 
 // stop is StopDelivering for this subscription. The drain goes first, so the server has the
 // subscription's interest gone before any negative acknowledgement reaches it, and redelivers
-// what this one gives back to the next subscriber rather than straight back here.
+// what this one gives back to the next subscriber rather than straight back here. It drains the
+// subscription the client holds for this one's registration (bus.Client.DrainSubscription): a
+// handle of the client's own once it has replaced its connection, not sub, which went with the
+// replaced connection while the client's handle went on delivering here.
 func (d *intakeDelivery) stop(ctx context.Context) {
 	giveUp := context.AfterFunc(ctx, d.abandon)
 	defer giveUp()
 	d.stopped.Do(func() {
 		d.stopping.Store(true)
-		drained := true
-		if err := d.sub.Drain(); err != nil {
+		draining, err := d.nats.DrainSubscription(d.sub)
+		if err != nil {
 			slog.Error("dispatch delivery: drain the intake's subscription", "error", err)
-			drained = false
 		}
 		for _, waiting := range d.keys.stop() {
 			d.giveBack(waiting.msg)
@@ -756,19 +761,19 @@ func (d *intakeDelivery) stop(ctx context.Context) {
 		// nats.go ends a drain on a goroutine of its own, once the callback has run every message
 		// the client had buffered, and reports it only by the subscription turning invalid.
 		waitedFrom := time.Now()
-		for drained && d.sub.IsValid() {
+		for draining != nil && draining.IsValid() {
 			if d.handling.Err() != nil || time.Since(waitedFrom) >= intakeDrainWait {
 				slog.Error("dispatch delivery: the intake's subscription did not finish draining; unsubscribing it", "waited", time.Since(waitedFrom))
-				if err := d.sub.Unsubscribe(); err != nil {
+				if err := draining.Unsubscribe(); err != nil {
 					slog.Error("dispatch delivery: unsubscribe the intake's subscription", "error", err)
 				}
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		// The client binds again a registration whose subscription is no longer valid, a drained
-		// one included, so without this the next reconnect would bind this stopped callback, which
-		// negatively acknowledges every message it is handed, straight back to the durable.
+		// The drain has kept every reconnect since from binding the registration again; giving it
+		// up leaves the client holding nothing of this stopped callback's, so a later subscribe on
+		// the same client starts afresh.
 		d.nats.Release(d.sub)
 		d.abandon()
 	})

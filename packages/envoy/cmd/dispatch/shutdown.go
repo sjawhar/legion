@@ -39,15 +39,6 @@ const documentShutdownTimeout = docs.ShutdownDrainBudget + 5*time.Second
 // process context (api.Deps.Lifetime), which is cancelled before shutdown starts.
 const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTimeout
 
-// intakeStopDeadline is how long after the signal main's stop of the intakes (delivery.StartIntakes)
-// lets their handlers run before giving them up: stopGrace less the 5 s reserve the document budget
-// ends inside too, which the given-up handlers' prompt return, their messages being handed back to
-// NATS and the clients closing fit in. The intakes begin stopping at the signal, beside the HTTP
-// drain and the document shutdown, under their own budget (delivery's intakeStopBudget, 15 s), so
-// they have normally returned before main reaches their stop; this deadline bounds the case they
-// have not.
-const intakeStopDeadline = stopGrace - 5*time.Second
-
 // silentProbes is how many health probes (store.Pool.Healthy, two seconds each) in a row must fail,
 // with no connection of the shared or document-rooms pool taken back meanwhile, before Dispatch
 // counts the database as having stopped answering. A probe that answers, or a connection taken
@@ -67,10 +58,10 @@ const drainPollInterval = 250 * time.Millisecond
 // exits 1 and a supervisor never reads either as a clean stop: serving failed, or the registry
 // refused to count this process as live again beside a live process whose signing keys it does not
 // share (lost, processes.Registration.Lost). Either cancels ctx, so the stop is the one a signal
-// makes: the listener closes at once, the requests in flight are answered, and the registry's row
-// is deleted.
+// makes: the listener closes at once, the requests in flight are answered, the intakes stop, and
+// the registry's row is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
+	documentService *docs.Service, pool *store.Pool, waitDelivery, waitIntakes, deregister func(), lost <-chan error) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", listener.Addr().String())
@@ -88,7 +79,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 		cancel()
 	}
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitDelivery, deregister)
+	shutdown(server, documentService, pool, waitDelivery, waitIntakes, deregister)
 	select {
 	case err := <-serveErr:
 		return err
@@ -101,16 +92,26 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // first, with no deadline of its own. The document service settles the documents owed within
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
 // signal with some still running. Hijacked delivery sockets and the delivery hub then finish their
-// Lifetime-driven shutdown. The database pool closes once every request has answered and no
-// connection of the shared or document-rooms pool is in use. While the database answers, nothing
-// but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
-// finishes before the kill. Then deregister takes this process out of the registry of live server
-// processes: it runs only once HTTP has drained, so a draining process counts as live until its
-// last request is answered, and before the pool closes. A database that has stopped answering
-// (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
-// rolls back whatever they held open; it deregisters nothing then, since the delete would wait on
-// that database too, and its row's heartbeat stops with the process instead.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func()) {
+// Lifetime-driven shutdown, and the GitHub intakes finish their stop (waitIntakes,
+// delivery.StartIntakes' stop), which began at the signal, beside the HTTP drain and the document
+// shutdown: a message in its handler finishes and is acknowledged, or is given up and handed back
+// to NATS, delivery's intakeStopBudget (15 s) after the signal at the latest, the one deadline of
+// that stop. That wait ends 10 s inside the latest the document service's budget ends (stopGrace
+// less its 5 s reserve, 25 s after the signal), which leaves the given-up handlers' prompt return,
+// their negative acknowledgements and the intakes' clients closing room inside it, so it never
+// makes the shutdown longer than the document budget already can. It comes before the pool closes
+// because nothing else keeps the pool open for a handler: one waiting on GitHub holds no
+// connection, so waitUntilIdle finds the pool idle, and its writes would fail on the closed pool once
+// GitHub answered, with its message acknowledged all the same. The database pool closes once every
+// request has answered and no connection of the shared or document-rooms pool is in use. While the
+// database answers, nothing but the runtime's kill bounds that wait, so a write in flight commits
+// and is answered if it finishes before the kill. Then deregister takes this process out of the
+// registry of live server processes: it runs only once HTTP has drained, so a draining process
+// counts as live until its last request is answered, and before the pool closes. A database that
+// has stopped answering (silentProbes) holds its connections forever, so Dispatch exits without
+// them, and the database rolls back whatever they held open; it deregisters nothing then, since the
+// delete would wait on that database too, and its row's heartbeat stops with the process instead.
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery, waitIntakes, deregister func()) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -129,6 +130,7 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
 	waitDelivery()
+	waitIntakes()
 	if waitUntilIdle(drained, pool) {
 		deregister()
 		pool.Close()

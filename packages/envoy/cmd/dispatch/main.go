@@ -528,14 +528,16 @@ func main() {
 	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
+	// waitIntakes waits for the intakes' stop, which shutdown runs before it closes the database
+	// pool; with no NATS client there is nothing to wait for.
+	waitIntakes := func() {}
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their Runs return once ctx is cancelled; the intake's
 		// begins stopping then, at the signal, beside the HTTP drain and the document shutdown, and
-		// returns once a message still in its handler has been acknowledged, or given up and handed
-		// back, so the clients close after it. stopIntakes has the handlers still running given up
-		// no later than intakeStopDeadline after the signal, which signalled records. Each connects
-		// in the background as the publisher does, and its bind poll binds the durable once it has.
+		// returns once a message still in its handler has been acknowledged, or given up at its own
+		// stop budget and handed back, so the clients close after it. Each connects in the
+		// background as the publisher does, and its bind poll binds the durable once it has.
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
@@ -544,14 +546,11 @@ func main() {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
 		}
-		signalled := make(chan time.Time, 1)
-		context.AfterFunc(ctx, func() { signalled <- time.Now() })
-		defer func() {
-			cancel()
-			stopCtx, cancelStop := context.WithDeadline(context.Background(), (<-signalled).Add(intakeStopDeadline))
-			defer cancelStop()
-			stopIntakes(stopCtx)
-		}()
+		// The intakes' own stop budget is the one deadline: their stop's ctx adds none.
+		waitIntakes = func() { stopIntakes(context.Background()) }
+		// A stop before serving (the admission wait, below) returns without shutdown, so the
+		// intakes are waited for here too; after shutdown has waited for them, this returns at once.
+		defer waitIntakes()
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
@@ -599,7 +598,7 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery,
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery, waitIntakes,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)

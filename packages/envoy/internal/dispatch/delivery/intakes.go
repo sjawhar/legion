@@ -35,8 +35,10 @@ const (
 // is acknowledged before stop closes the client, and the messages behind it are handed back to
 // NATS for the next process. That handler wait ends at intakeStopBudget after ctx, or as stop's own
 // ctx ends if that is sooner -- the handlers still running are then given up and their messages
-// handed back too -- and the Runs return promptly after it, so stop's ctx bounds how long a
-// shutdown spends on the intakes: give it a deadline a little inside the process's own.
+// handed back too -- and the Runs return promptly after it, so intakeStopBudget bounds how long a
+// shutdown spends on the intakes, and a caller with no nearer deadline passes a ctx with none.
+// Every handler of Intake's has returned by the time stop does, so a caller that closes the pool
+// after stop returns, as cmd/dispatch's shutdown does, never closes it under one's writes.
 //
 // The intakes cannot share a client: a bus.Client holds one JetStream subscription, and refuses the
 // second intake's bind with bus.ErrSubscriptionHeld.

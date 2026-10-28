@@ -323,7 +323,7 @@ func (c *Client) subscriptionsHealthy() bool {
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
 	for _, subscription := range c.subscriptions {
-		if subscription.handler != nil && (subscription.active == nil || !subscription.active.IsValid()) {
+		if subscription.handler != nil && !subscription.draining && (subscription.active == nil || !subscription.active.IsValid()) {
 			return false
 		}
 	}
@@ -356,8 +356,9 @@ func (c *Client) restoreSubscriptions() (pending bool, err error) {
 		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
 		// it delivers as it did. Unsubscribing it to bind again would race the server's release of
 		// the consumer's push binding, which refuses the new bind while it still sees the old one.
-		// One on a replaced connection is invalid and is bound again.
-		if subscription.handler == nil || subscription.active.IsValid() {
+		// One on a replaced connection is invalid and is bound again, unless its caller is ending
+		// it (DrainSubscription).
+		if subscription.handler == nil || subscription.draining || subscription.active.IsValid() {
 			continue
 		}
 		// A registration whose bind is in flight (the listener's bind attempt, whose lookup a
