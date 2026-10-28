@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-647",
+  "completed": "2026-10-28T09:40:48Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The implementer's replay inputs and throwaway harness were not on this pod's scratch any more (/legion/scratch/tmp/infra647 absent), so the same surface was driven independently: base 9652564f and head 5d2d9883 cmd/dispatch built from git archive, on fresh Postgres 17.11 + pgvector. Render once: CPU profiles of 40 plain edits on a 125 KB spec, 3 alternating runs each side, show the version render at base (service.go:1594) and none at head, as the implementer's replay profiles say. Equivalence: a 16-step settlement scenario dumps byte-identically base vs head. Regression tests: both pass -count=3 at head; under the ranking's `len(slots) > 0` both fail, under `versioned != read` alone the repair test fails, under `changedTree()` alone the stamp test fails, and the old nil selection fails the repair test with selected=\"null\", matching the implementer's negative control. The merge-rule ruling cited (dispatch://INFRA-647/comment/59513078-df49-4e40-a407-ef2815117ace) exists and says what the PR says."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Settled versions identical to today's; what people and agents see is unchanged",
+      "surface": "A local Dispatch server (cmd/dispatch, GOWORK=off builds of git archive 9652564f = base and 5d2d9883 = head) on Postgres 17.11 + pgvector 0.8.7, driven through the dispatch CLI (doc-edit, issue, doc-read) and the human answer/resolve routes after dev sign-in",
+      "command": "$TMPDIR/t647/runside.sh <side> <db> <port> <side>.dump (reset db, start server with DISPATCH_TEST_SETTLE_DELAY=300ms, run scenario.py: create, mention target, 3 plain edits, answer ask-ship [Yes], answer ask-free with an empty selection and text, plain edit, delete answered ask-free, re-insert it, plain edit, insert ask-new, retract it, reword decided ask-ship, insert a mention, table edit; then dump.py); diff base.dump head.dump",
+      "observed": "diff empty: both dumps 556 lines, sha256 d18622bb3a06c3df372538b42fdaa1dfc8f2605f440b7c9c8490659d441b1731 (17 versions' normalized markdown, document_blocks rows, document_block_texts per version, block_refs, refs excerpts, asks, event types). On each side every step's latest version equals the live doc-read (16 of 16), every indexed text_sha256 equals sha256 of its stored text at changed_version, the index is at version 17, no server ERROR line. A head run of 3 rounds of 30 concurrent doc-edits plus an answer, an ask delete and a re-insert (stress.py) settles each round to a latest version equal to the live document, indexed at it, 0 sha mismatches, 0 ERROR lines.",
+      "headSha": "5d2d9883e15b6d8c8710ec9ef3e20133ce786b00",
+      "negativeControl": "The head build with the reuse made unconditional (`if false && (versioned != read || reconciliation.changedTree())`) writes 15 versions where base and head write 17: the settlement's restore of the re-inserted answered block and its restore of the decided wording are never versioned (135 diff lines against base.dump)."
+    },
+    {
+      "criterion": "Render once",
+      "surface": "CPU profiles (/debug/pprof/profile, DISPATCH_PPROF_PORT) of the same local base and head servers",
+      "command": "$TMPDIR/t647/perfside.sh <side> <db> 18677 40 <n> for base-1, head-1, base-2, head-2, base-3, head-3 (perf.py: seed a 125,098-byte spec, 40 plain replace edits, each waited to its version, under one CPU profile; server CPU-s from /proc/<pid>/stat over the loop); go tool pprof -lines -peek 'docs\\.renderTree' and -top -cum -nodecount=1000000",
+      "observed": "Base renders in settleRoomWithin at service.go:1428 (0.13 / 0.17 / 0.15 s) and at the version render service.go:1594 (0.12 / 0.13 / 0.20 s); head only at service.go:1429 (0.17 / 0.15 / 0.11 s), no samples at the version render. settleRoomWithin cumulative share base 7.99 / 9.76 / 10.32 %, head 8.26 / 7.18 / 6.38 % (median 9.76 -> 7.18). Server CPU-s over the loop base 6.61 / 6.33 / 6.16, head 6.18 / 6.16 / 6.07: lower at the head, nothing contradicting the function share.",
+      "headSha": "5d2d9883e15b6d8c8710ec9ef3e20133ce786b00",
+      "negativeControl": "The base profiles of the same workload keep both renders (1428 and 1594), so the split tells the builds apart."
+    },
+    {
+      "criterion": "Merge rule of the shared context (verified against the implementer's replay proof)",
+      "surface": "The PR body's implementer proof and the INFRA-512 architect's ruling on Dispatch",
+      "command": "dispatch read --ref dispatch://INFRA-647/comment/59513078-df49-4e40-a407-ef2815117ace; the local profile runs above",
+      "observed": "The ruling exists: a fix merges when the changed function's share falls by at least half the expected gain or the whole-server CPU falls, either enough when the other does not contradict it, with equivalence tests on real-size documents. The independent runs agree in direction with the implementer's replay: function share median down 2.58 points; whole-server CPU mean 6.37 s base vs 6.14 s head, the runs overlapping only at the edge (max head 6.18 vs min base 6.16). The replay itself was not re-run: its inputs are not on this pod's scratch any more.",
+      "headSha": "5d2d9883e15b6d8c8710ec9ef3e20133ce786b00",
+      "negativeControl": "Each half of the reuse condition, and the ranking's len(slots) > 0, removed in turn: one of the two regression tests fails each time (repair test under `versioned != read` alone and under len(slots) > 0; stamp test under `changedTree()` alone and under len(slots) > 0)."
+    },
+    {
+      "criterion": "Error paths unchanged; no resident memory",
+      "surface": "Code reading of packages/envoy/internal/dispatch/docs at 5d2d9883",
+      "command": "read service.go:1411-1610, ask_blocks.go:85-121, 237-420, 795-832, ask_answers.go:64-156, ask_block_text.go:322-347, tree.go:221-238, 479-486, pmdoc/render.go:892-955, pmdoc/block_ids.go:93-109",
+      "observed": "read is a fresh deep copy (liveTree -> treeOf); between the first render and the version only reconcileAskBlocks mutates it: repair, repairAsk, the decided-wording write (recorded in repairs; no mutation on error) and withholdAnswers (runs only with rewrites, which never shrink). BlockIDRepairCount and the renderer do not mutate the tree (asWritten renders a copy). versioned == read implies len(slots) == 0, so a reused beforeRenderErr reaches the same `len(slots) == 0 && ErrDocSchema` branch as before. beforeOffsets is a local of one settlement.",
+      "headSha": "5d2d9883e15b6d8c8710ec9ef3e20133ce786b00",
+      "negativeControl": "None reachable on the surface: no tree was found that the reader accepts and the renderer refuses without a stamp (the implementer reports the same); the error value is the same function's on the same tree."
+    }
+  ],
+  "ci": "Read on GitHub at 5d2d9883 (the code head; 20c417f8 is handoff-only and carries skip-checks) at 09:39Z: build and changes success; test in progress; lint, typecheck, envoy-go, envoy-go-race, dispatch and the other envoy lanes queued. Not waited for."
+}
