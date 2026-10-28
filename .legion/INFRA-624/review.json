@@ -2,45 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T21:59:52Z",
-  "round": 6,
-  "reviewedHead": "22b46b022121ba0a404d2a1f59d654c32890541f",
-  "codeHead": "57f8b42132c6",
+  "completed": "2026-10-28T23:54:19Z",
+  "round": 7,
+  "reviewedHead": "11e3ba574263c2e70c7fe09c0e147fbf4d02b2af",
+  "codeHead": "39014e297cb7",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 2,
-  "scope": "Round 5's list (review 5689129907), as the INFRA-138 architect has narrowed each round since the cap; correctness defects anywhere still fixed here; other points on Fast-follow.",
-  "ci": "CI head 5e1477d1 (newest pull_request run; compare to 22b46b02 handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 21:59Z. GitHub reports MERGEABLE.",
-  "roundFiveItems": "Divider in the read-back filter (d47ad385): fixed, PRRT_kwDORFy7ds6xTgj3 accepted. Repeated-label path (0862174a): the wording now names only removal, but removal is refused when the duplicate's list holds another option; PRRT_kwDORFy7ds6xTgja unresolved. Protected item with more than its text (0862174a, 2b79f496, 57f8b421): refused and its lists quoted by id with ops, but a protected option in the kept list is never shown and the printed ops do not escape a quote in a document-sourced block id; PRRT_kwDORFy7ds6xTgjr unresolved.",
+  "important": 1,
+  "minor": 3,
+  "scope": "The architect's design change (recorded on INFRA-624): the ask-edit route refuses every edit of a broken decision, quotes every block with ids as data and no shell text, and names doc-edit delete of whole blocks then edit-ask. Judged: the new refusal, no shell text, the end-to-end Go test, no regression; plus the architect's request on the one-document-edit wording.",
+  "ci": "CI head 73d363c5 (newest pull_request run; compare to 11e3ba57 handoffsOnly true, 1 file): required lint, typecheck, pr-title success; test in_progress at 23:54Z. GitHub reports MERGEABLE.",
+  "roundSixItems": "Items 1-3 (repeated-label path, kept-list option, shell-quoted ops) and 4-5 (stale comment, steps test) are gone with the rebuild code by the design change (ddf1bc5b); the implementer resolved those threads with that reason, which holds: no removed name is referenced, and the new end-to-end test reads ids from the refusal.",
+  "verified": "Both reviewers: every block quoted in full (nested lists, bold, links), ids Go-quoted only, no ops or command text; following the refusal through ApplyOps (one call) then SetAskBlockText reaches a valid decision with 0 words lost on two lists, three lists, a paragraph after the list, a list before the question, a repeated label, an extra option in the first list, and an id holding ' \" \\ newline $( ) and a backtick. The four new tests fail against 57f8b421. The merge 635805f8 keeps both parents and fixes main's pmdoc import (crafted.NestedValue); go vet and go build pass.",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The repeated-label refusal (:565) says to remove one item with doc-edit, but doc-edit refuses any edit that leaves the decision broken; when the duplicate's list also holds another option, removing the item still leaves two lists. Reviewer's re-run of the deep-review probe against Postgres: ask '- Ship: Release it / - Hold' + '* Ship: Only on Fridays / * Defer: Wait a week'; doc-edit delete of either Ship -> 'apply live document operations: … holds a second bullet list'; block unchanged. The working path, deleting a whole list by id, is not named, and Defer is never quoted."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "When listsToDelete fires (:569-579), only the lists to delete are quoted; a protected option in the list that stays is never shown, and once the doc-edit leaves the decision valid no guard applies while the row is still the pre-break one. Deep-review probe P1 (re-read by the reviewer): a collaborator's '- Ext: added after the break' in the first list; following the refusal (doc-edit, then edit-ask with row + quote) stores a block with no Ext."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "Security[untrusted-input]: quotedLists (:660-668) prints doc-edit ops inside shell single quotes, '[…]', with the document-sourced block id JSON-encoded; json.Marshal does not escape a single quote. Reviewer's re-run: a list id \"x'; touch …/PWNED; echo '\" survives settlement and the refusal prints it inside the quoted ops, so an agent that pastes the ops runs the payload (deep review: pasted into bash it created the file). Escape ' (\\u0027) or print no ready ops for an id outside a safe set."
+      "description": "The reason (:514-516) says to delete 'the block or blocks to drop … until it holds its question and at most one list', which lets an agent delete one list per doc-edit; with three lists the first delete is refused because it leaves the decision broken, while both extra lists in one doc-edit apply (tester, https://github.com/sjawhar/legion/pull/2433#issuecomment-6483048479). Say to delete the blocks in one document edit and list every delete it needs. Requested by the architect."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The comment at :543 still says sending what the refusal quotes loses nothing, which round 5 asked to narrow (a link target is dropped: code-quality probe TestZZProbeLinkInProtectedItem)."
+      "description": "Before settlement the refusal can name 'a block with no id' (:506), which doc-edit cannot delete, or an id another block earlier in the document also holds, so the delete removes that earlier block (deep-review probes TestProbeR7NoID, TestProbeR7DuplicateID: 'Unrelated words outside the decision.' deleted, ask still broken). Say to retry once the document settles instead of naming such an id."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_blocks.go",
+      "description": "The comment at :256-257 still says the collector reads a broken ask leniently so the ask-edit route can rebuild its options as one list; the rebuild is gone."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/service_test.go",
-      "description": "TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply (:875) builds its own delete instead of reading the ops from the refusal, so a wrong block id in quotedLists passes every test (code-quality probe)."
+      "description": "The comment at :755-757 says a caller pasting from the refusal runs nothing; %q leaves $, backtick and ' as they are, so a pasted id can run in a shell. Correct the comment (the design prints no command, so this is wording). Also packages/proof-editor/AGENTS.md:35 says Fourteen legion-owned files where the table lists fifteen after the merge."
     }
   ],
-  "fastFollow": "listsToDelete indexes items by position and relies on parseAskBlock making one option per item: say so in the doc comment or pair items with their nodes",
-  "thermonuclear": "Both run at 22b46b02 (code 57f8b421): deep review CHANGES (items 1-3), code quality CHANGES (items 4-5).",
-  "security": "untrusted-input: the new refusal prints document-sourced block ids inside shell-quoted doc-edit ops (ask_block_text.go:660-668) without escaping a single quote: finding 3 (ASVS v5.0.0 1.2.5). authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler (api/asks.go:393-413)."
+  "fastFollow": "none",
+  "thermonuclear": "Both run at 11e3ba57 (code 39014e29): deep review APPROVE with minors (items 2 and 4), code quality CHANGES (item 3); item 1 is the architect's request from the tester's record.",
+  "security": "untrusted-input: the refusal gives block ids only as Go-quoted data and prints no command (ask_block_text.go:495-519); %q escapes quotes, backslash and newline but not $, backtick or ', so a caller that pastes an id into a shell command line can still run it: no server-side hole, item 4 corrects the test's claim. authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler (api/asks.go:393-413)."
 }
