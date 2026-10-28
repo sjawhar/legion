@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T13:31:59Z",
+  "completed": "2026-10-28T14:59:53Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -148,6 +148,14 @@
       "observed": "1,047 pass; ask items and the decision line print `Answered by alice at … · options chosen: Exponential` / `Answer text: …`, `Closed with no answer: retracted by … at …: …`, `Open: no answer yet.`, or `Answer state not reported by this Dispatch; …`; the dist holds one renderer (askStateLines2 count 0) and matches a fresh build",
       "headSha": "da35e4009a807e90f8fe3dc497b82b46176e3a16",
       "negativeControl": "a malformed ask state prints `This client could not show where the ask stands: …` under its item instead of throwing"
+    },
+    {
+      "criterion": "Review round 6: dispatchConnectionsPerPod equals store.ConnectionsPerProcess after this pull request's added lease",
+      "surface": "envoy-infra's Go tests (the gcp:Dispatch component's sizing)",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers -count=1 (and ./gcp/ -skip DataDisk)",
+      "observed": "ok: 87 = 64 shared + 4 rooms + 1 health + 13 lease + 1 outbox + 1 registry + 3 listeners after the merge with #2390; the default tier's 500 max_connections less 3 holds 5 app pods",
+      "headSha": "25c14fd63081a250025ce39b21cf3a4a21a14c70",
+      "negativeControl": "main's own value (86) or this branch's before the merge (85) makes the test fail with expected 87"
     }
   ],
   "filesChanged": [
@@ -187,7 +195,8 @@
     "Acceptance round (62c33b14): adopted main's SearchAsk/attachAskStates from #2363 (this branch's copies dropped; the check calls the helper once per check). Main's helper leaves a nil Answer.Selected as null; the client already reads a missing selected as no option chosen. A merge commit pushed earlier (f9688cd2) names the branch legion/INFRA-568 in its subject; pushed commits are not rewritten.",
     "Review round 4 (da35e400): docs/ask_row.go restored to main's file (its diff against main is empty); an ask item with no state now prints main's 'Answer state not reported by this Dispatch' line where the branch printed nothing.",
     "Merge of main 0a921021 (4b1f15ff): routes_table.go conflicted with #2225 (both route descriptions kept); fingerprint aed6caca… unchanged; migrations stay 0135/0136.",
-    "Merge of main 5fbd8391 (6f585d36): main's issue-ask repair lease plus this pull request's search-term-stats make the lease pool 12 and the maintenance loops ten; fingerprint aed6caca… -> 429ff707… changed by those counts only; migrations stay 0135/0136."
+    "Merge of main 5fbd8391 (6f585d36): main's issue-ask repair lease plus this pull request's search-term-stats make the lease pool 12 and the maintenance loops ten; fingerprint aed6caca… -> 429ff707… changed by those counts only; migrations stay 0135/0136.",
+    "Round 6 (a7d9ad82, 25c14fd6): main's #2390 arrived mid-round with a registry prune lease and migration 0135, so leasePoolSize 13, ConnectionsPerProcess 87, eleven maintenance loops, migrations 0136/0137; envoy-infra's DataDisk tests need mkfs.ext4 and were not run in this pod."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
