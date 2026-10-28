@@ -2,30 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-528",
-  "completed": "2026-10-28T10:37:00Z",
-  "testedHead": "9558d7b3bc3ac89ed4cd79bf29b38f047379be9b (code head 1add418c85d9b3a3b1fd614c6849ff288e243430, merge 81b5d79e of main 460facf5)",
-  "workspace": "The issue volume was recreated before this round. I re-read implement.json and review.json from the pushed branch and re-ran /legion/harness/setup.sh (tester lane, db dispatch_tester_e2e).",
-  "rebaseCheck": "Fingerprint from my last verified head ec8f0722 (b41f344d…) to 9558d7b3 (d739c1f666b8367f2c6f84886a20f9895f86a2139a6ca2427bedb618698ff11c): changed only by the changelog entry moving from packages/envoy/CHANGELOG.md into packages/envoy/.changes/unreleased/pr2311-Fixed-20261028-100919.yaml (kind Fixed, custom Issue: pr2311, no Dispatch key in its text). No code line differs. Main's #2313 changed the browser suite itself: the iphone project now runs only tests tagged @phone.",
+  "completed": "2026-10-28T10:51:00Z",
+  "testedHead": "6d458c25b9a1d6e3b1da1fc4667e345f37258e93 (code head 622614ce7f69c37ae7c0be61cec6ec2e48ff7f65)",
+  "change": "Since my round-11 head a7b02fe4, the only code change is 622614ce: packages/dispatch/e2e/mermaid.e2e.ts gets ' @phone' at the end of all eight test titles (8 insertions, 8 deletions, nothing else).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands through `bun e2e/run.ts` after `bun run build:web` at 9558d7b3: e2e/mermaid.e2e.ts across chromium, iphone, webkit and firefox -> 24 passed (1.7m), 8 rows in each of chromium, webkit and firefox and none on iphone; text-typed-blocks, unknown-directive, task-items and typed-block-content-rule across the four projects -> 23 passed (1.3m). Both match its counts."
+    "how": "Re-ran its command after `bun run build:web` at 6d458c25: `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (2.2m), matching its 32."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Plan's proof table, A1 and the spec Summary rows: proven in 'Desktop Chrome, the iPhone 13 viewport, Desktop Safari (WebKit) and Desktop Firefox'. The plan says the spec 'runs in the chromium and iphone projects' and that 'on a phone a row reaches the Conversation as issue.e2e.ts does'.",
-      "evidence": "No mermaid row runs on a phone any more. Main's #2313 makes the iphone project run only tests whose title carries @phone (e2e/playwright.config.ts:113-115, `grep: phoneTagged`), and no test in e2e/mermaid.e2e.ts carries the tag. `source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project iphone` -> `Error: No tests found.`, exit 1. The phone surface the plan names (the narrow Conversation thread dialog, the Inbox card, the diagram capped at the body's width with sideways scroll) is no longer proven and has no regression lock. Under the architect's rule (envoy edba2297, 10:29Z) a missing tag on rows the plan names on a phone fails this round. The fix is to add ` @phone` to the titles of the rows the plan proves on the iPhone viewport: A1's comment row and the ask, message and reply rows. Before the merge all 8 rows ran on iphone, the refusal, too-large, markup-label and other-language rows included. The rows pass on a phone once tagged: a throwaway copy of e2e/mermaid.e2e.ts with ' @phone' appended to all 8 titles, run with `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/zz-mermaid-phone.e2e.ts --project iphone`, gave 8 passed (32.7s): comment, Inbox ask, message, reply, refusal, too-large (8.1s), markup label and other-language guard. The copy was deleted after the run. So the tag is the whole fix, and no code change is needed."
-    }
-  ],
+  "roundElevenFailure": "Fixed: the iphone project runs every mermaid row again.",
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "A1, the spec Summary rows and the time limit on the desktop engines at the merged head",
-      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, WebKit, Firefox",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
-      "observed": "24 passed (1.7m): 8 rows each in chromium, webkit and firefox; 0 on iphone.",
-      "headSha": "9558d7b3bc3ac89ed4cd79bf29b38f047379be9b",
-      "negativeControl": "Round 1: the same suite at the red commit ecc18ff3 -> 24 failed, 4 passed (9.1m)."
+      "criterion": "A1, the spec Summary rows and the time limit on all four projects the plan names, the iPhone 13 viewport included",
+      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13 (Chromium), WebKit, Firefox",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox; then the same with --project iphone alone",
+      "observed": "32 passed (2.2m). With --project iphone alone: 8 passed (28.1s): comment, Inbox ask, message, reply, refusal, too-large (8.2s), markup label, other-language guard.",
+      "headSha": "6d458c25b9a1d6e3b1da1fc4667e345f37258e93",
+      "negativeControl": "At 9558d7b3 (no tags) the same `--project iphone` run gave `Error: No tests found.`, exit 1 (round 11); round 1's red commit ecc18ff3 failed every drawing row (24 failed, 4 passed)."
     }
   ],
-  "ci": "At 9558d7b3 on GitHub when read (10:34Z): build x2, changes, lint, pr-title, test, typecheck queued (one earlier pr-title cancelled); no lane concluded. 1add418c has no runs. The implementer's re-run of Tests run 40538589181 at ec8f0722 went green on attempt 3; attempt 2 failed only on TestAnIssueDeployedEventWakesTheCheck (packages/daemon, not touched by this pull request)."
+  "ci": "At 6d458c25 on GitHub when read (10:49Z): build x2, changes, lint, pr-title, test, typecheck queued (one earlier pr-title cancelled); no lane concluded. 622614ce has no runs (pushed with the handoff)."
 }
