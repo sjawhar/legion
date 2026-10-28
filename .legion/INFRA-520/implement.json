@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T13:58:39Z",
+  "completed": "2026-10-28T15:32:53Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Filter drift (round 8, the tester's dc1e05b6): a go line the check reduces runs in its Run's directory, and no step of its job changes the environment unseen",
+      "surface": "check-ci-filters.sh on the merged tree (main 690c0136) and its test suite",
+      "command": "PATH=$TMPDIR/pyenv/bin:$PATH bash .github/scripts/check-ci-filters.test.sh; .github/scripts/check-ci-filters.sh",
+      "observed": "Tests 78 passed, 0 failed, the tester's three cases (working-directory alt, GITHUB_ENV write, go env -w) unchanged and passing; check exit 0, 24 gates 0 uncovered. ci.yaml's two $GITHUB_ENV writes now pass a step env and a step output, and go_notices matches every daemon .go file, since its subshells cd out of the root step directory.",
+      "headSha": "f343a775a6ab45ef7086fb7bd266305497ab9c5a",
+      "negativeControl": "On the real tree, 'Test the Go daemon' moved to working-directory packages/envoy fails naming the command ('its step runs in packages/envoy, the Run in packages/daemon') and 151 more files the test filter misses; an added `echo $RUNNER_TEMP >> $GITHUB_PATH` in envoy-smoke's plugin step fails envoy-smoke naming the step. Both reverted."
+    },
+    {
+      "criterion": "The pull request can be merged at its head with main's changes to the deleted workflows carried into ci.yaml",
+      "surface": "GitHub mergeability and check-ci-filters.sh after three forward merges (main 1072ddf9, 25ef8cd2, 690c0136)",
+      "command": "gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus; check-ci-filters.sh; actionlint ci.yaml",
+      "observed": "MERGEABLE/BLOCKED at f343a775. #2364: pgvector-on-18 in every existing job, three Postgres 16 jobs with filters, gates and ci-ok places (daemon 2985, dispatch 1840, broker 286 files, 0 uncovered). #2390: check-ci-filters.sh named internal/dispatch/processes missing from test, daemon-go-postgres-16, docs, dispatch and envoy-infra-go and testnats from dispatch-memory, and docs-pages.yaml's paths; all added. #2423: verify-build in claude-envoy and test. actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0; ci-ok 42/0, image-trigger tests 991/0. Fingerprint comment 6473250199.",
+      "headSha": "f343a775a6ab45ef7086fb7bd266305497ab9c5a",
+      "negativeControl": "Before adding processes/*, check-ci-filters.sh exited 1 with 16 problems naming packages/envoy/internal/dispatch/processes/processes.go per job, and then 1 naming docs-pages.yaml's missing path."
+    },
     {
       "criterion": "Filter drift: the check reduces only simple go commands; anything else counts as reading every Go file of its module (tester round 6, GOFLAGS)",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the check ci.yaml's ci-filters job runs",
@@ -326,7 +342,8 @@
     "Scratch pull requests must be stacked on legion/INFRA-520: a scratch against main would carry ci.yaml in its diff and select every job.",
     "worker_image's exclusions need the step's predicate-quantifier some-with-excludes: under some a `!` pattern matches every file outside it; no other filter may carry a `!`.",
     "Running go list inside packages/envoy/infra rewrites packages/envoy/infra/go.work.sum; restore it after the coverage script.",
-    "GitHub's queue was 160-210 runs deep on 2026-10-27; scratch runs waited up to three hours for a runner."
+    "GitHub's queue was 160-210 runs deep on 2026-10-27; scratch runs waited up to three hours for a runner.",
+    "A line whose step directory differs from its Run's falls to the modules of both, since a cd in the script may move it to either; above every module (the repository root) that is each module of the go.work there."
   ],
   "deviations": [
     "#2244 (worker image cancel) was not merged, so it is folded in; its owner was asked through the INFRA-490 architect to close it.",
@@ -345,7 +362,8 @@
     "Round 4 (architect's narrowing at the round cap): only the tester's finding is fixed; a claimed go line's relative package arguments must equal its Run's packages.",
     "Round 5: continuations joined before a go line is read, and every positional argument of a claimed go command must be one of the Run's packages (fail closed), per the architect's 'fix the class'.",
     "Review round 1: docs-deploy is gated on the docs job's newest output; check-ci-filters.sh holds -tags and mode; the router guide's cache recipe matches ci.yaml; main merged with #2358 and the three check-image-trigger-paths.sh tidy-ups carried. Known, pre-existing: the image reverse check does not model a widening || term in an image-only gate's filters clause (no workflow has one).",
-    "Round 7: docs-deploy replaced by the push-only docs-pages.yaml (architect comment 6c83c); the drift check made conservative (architect, at the INFRA controller's direction): simple commands reduced, everything else counts as the whole module; go_notices and envoy_smoke widened. Script runs are held exact (the script line must equal the pinned text) rather than parsed. Main's two reds from #2233 are not fixed here (architect)."
+    "Round 7: docs-deploy replaced by the push-only docs-pages.yaml (architect comment 6c83c); the drift check made conservative (architect, at the INFRA controller's direction): simple commands reduced, everything else counts as the whole module; go_notices and envoy_smoke widened. Script runs are held exact (the script line must equal the pinned text) rather than parsed. Main's two reds from #2233 are not fixed here (architect).",
+    "Round 8: the three Postgres 16 jobs main added as non-required are in ci-ok's needs, as every router job is, so after the flip a selected one that fails fails ci-ok."
   ],
   "openQuestions": [],
   "productionCheck": [
