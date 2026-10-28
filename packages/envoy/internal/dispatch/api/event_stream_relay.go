@@ -251,23 +251,88 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 	}
 }
 
-// firstRelayCursor is the relay's first cursor: the last event at or below the horizon already
-// proven when the relay starts (Horizon.Proven), every event at or below which was final before
-// the first connection's request, so an event that commits while the start runs stands above the
-// cursor and is published to that connection. The connection may be sent a few events that
-// committed just before its request, the ones above the last proof, which a cold client's own
-// reads may already show. The delivery hub proves a horizon at boot, and every reader of the log
-// proves more, so one is proven by the time a page connects. When none is yet, or a Reset has
-// just forgotten it, the cursor is the last event at or below the first horizon proven after the
-// call (awaitEventCursor): that is at or above everything committed before the request, but an
-// event that commits while that proof is awaited, as long as any transaction open on the instance
-// holds it back, can fall at or below it and reach no connection the start served.
+// firstRelayCursor is the relay's first cursor, which is the first connection's start point, so
+// no event that commits after that connection's request may stand at or below it. It reads the
+// log as it stands at the start, in one statement: its newest id and every gap among its ids above
+// the horizon already proven (Horizon.Proven, 0 on a process where no reader has proven one, which
+// is every process at boot, since the delivery hub runs nothing before its first subscriber). An
+// event that commits after that read stands above the newest id, or in one of those gaps: an id it
+// drew before the read, while its transaction was still open. A gap can also be an id whose
+// transaction rolled back. Below the proven horizon every id was final before the read, so no gap
+// there can fill.
+//
+// It then waits for a horizon proven after the read (Horizon.Await), past which every id at or
+// below that newest one is final, and reads which of the gaps have filled since: those are events
+// that committed after the start began. The cursor is the last event below the lowest of them, or
+// at the newest id when none filled, so the first connection is sent every event that committed
+// after the read and none committed before it, but those between the lowest late one and the
+// newest id. A gap still empty then is a rollback, and moves the cursor nowhere.
+//
+// The wait is the start's, as before: as long as any transaction open on the instance holds the
+// horizon back, with the connection not yet open (streamEvents). The gap read covers the ids above
+// the proven horizon, so on a process where none is proven it reads every id of the log, once, at
+// the relay's first start. An event that commits between the first connection's request and this
+// read, a round trip apart, counts as committed before it.
 func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error) {
-	if proven := s.horizon().Proven(); proven > 0 {
-		return lastEventThrough(ctx, s.deps.Store.Pool, proven)
+	pool := s.deps.Store.Pool
+	newest, gaps, err := eventLogGapsAbove(ctx, pool, s.horizon().Proven())
+	if err != nil {
+		return 0, time.Time{}, err
 	}
-	_, id, at, err := s.awaitEventCursor(ctx)
-	return id, at, err
+	if _, err := s.horizon().Await(ctx); err != nil {
+		return 0, time.Time{}, err
+	}
+	through := newest
+	if len(gaps.from) > 0 {
+		late, err := firstEventInGaps(ctx, pool, gaps)
+		if err != nil {
+			return 0, time.Time{}, err
+		}
+		if late > 0 {
+			through = late - 1
+		}
+	}
+	return lastEventThrough(ctx, pool, through)
+}
+
+// eventLogGaps are runs of ids missing from the event log, from[i] through to[i].
+type eventLogGaps struct {
+	from, to []int64
+}
+
+// eventLogGapsAbove reads, in one statement and so one snapshot, the event log's newest id and
+// every run of ids missing from it above floor and below that newest id. It reads every id above
+// floor, in id order, through the primary key. A floor above the newest id is a horizon of a log
+// that was reset since it was proven, which says nothing of the new one, so the read starts at 0.
+func eventLogGapsAbove(ctx context.Context, q queryer, floor int64) (int64, eventLogGaps, error) {
+	var newest int64
+	var gaps eventLogGaps
+	err := q.QueryRow(ctx, `
+		with head as (
+			select coalesce(max(id), 0) as newest from events
+		), bound as (
+			select newest, case when $1 > newest then 0 else $1 end as floor from head
+		), ids as (
+			select e.id, coalesce(lag(e.id) over (order by e.id), bound.floor) as prev
+			from events e, bound where e.id > bound.floor
+		)
+		select (select newest from bound),
+			coalesce(array_agg(prev + 1 order by id) filter (where id > prev + 1), '{}'),
+			coalesce(array_agg(id - 1 order by id) filter (where id > prev + 1), '{}')
+		from ids
+	`, floor).Scan(&newest, &gaps.from, &gaps.to)
+	return newest, gaps, err
+}
+
+// firstEventInGaps is the lowest id of an event that now stands in one of gaps, 0 when none does.
+func firstEventInGaps(ctx context.Context, q queryer, gaps eventLogGaps) (int64, error) {
+	var id int64
+	err := q.QueryRow(ctx, `
+		select coalesce(min(e.id), 0)
+		from unnest($1::bigint[], $2::bigint[]) as gap(first, last)
+		join events e on e.id between gap.first and gap.last
+	`, gaps.from, gaps.to).Scan(&id)
+	return id, err
 }
 
 // awaitEventCursor waits for a horizon proven safe by an observation taken during the call

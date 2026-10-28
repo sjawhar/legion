@@ -2540,12 +2540,11 @@ func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
 
 // TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit: a cold connection (no since= and no
 // Last-Event-ID) starts at the relay's published cursor, which it reads with its subscription
-// inside this one handler. A relay this connection starts in a process where no horizon is proven
-// yet takes its first cursor under one proven after the call, at or above everything committed
-// before it, so the connection is sent nothing already committed, which is the backlog it asked
-// not to get, and everything committing after it, which the relay publishes into its
-// subscription. (With a horizon already proven, the relay starts on it, and the connection may be
-// sent the few events above it that committed just before the request: firstRelayCursor.) A client that read its head through a
+// inside this one handler. A relay this connection starts takes its first cursor at the log's
+// newest id as the start read it, or below the lowest gap that filled while the start waited for
+// every id to be final (firstRelayCursor), so the connection is sent nothing already committed,
+// which is the backlog it asked not to get, and everything committing after it, which the relay
+// publishes into its subscription. A client that read its head through a
 // separate request first would lose an event committing between that request and this one:
 // invisible to the catch-up (id <= since) and dropped by the live loop.
 func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
@@ -2962,11 +2961,11 @@ func replacedLogConnection(t *testing.T, query string) {
 
 // TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts: the first
 // connection of a process starts the relay, whose first cursor is that connection's start point.
-// With a horizon already proven (here by a since read of the references graph, in production by
-// the delivery hub at boot) the relay starts on it at once, below every event that commits after
-// the request. A first cursor taken under a horizon proven after the request instead waits, while
-// an event above the proven horizon is unproven, for every transaction open on the instance, and
-// an event that commits during that wait falls at or below it and never reaches the connection.
+// Here a horizon is already proven (by a since read of the references graph), so the start reads
+// the log's gaps only above it, and an event committed before the request but not yet proven makes
+// the start wait for every transaction open on the instance. The first cursor is the log's newest
+// id as the start read it, so an event that commits during that wait stands above it and reaches
+// the connection; a cursor taken under the horizon proven after the wait would cover it instead.
 func TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(t *testing.T) {
 	const hold = 2 * time.Second
 	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
@@ -3072,6 +3071,95 @@ func TestSSEFirstColdConnectionOfAFreshProcessIsSentAnEventCommittedWhileTheRela
 		t.Fatalf("SSE status = %d, want 200", opened.response.StatusCode)
 	}
 	awaitSSELine(t, sseLines(t, opened.response.Body), committed, hold+sseFrameWait, "event committed while the relay started, with no horizon proven before the request")
+}
+
+// TestSSEFirstColdConnectionIsSentAnEventThatDrewItsIdBeforeTheRequest: an event can draw its id
+// before the first connection's request and commit after it, below an id that had already
+// committed. The relay's first start must not start above it: it reads the log's gaps when it
+// starts, and once every id is final starts below the lowest one that has filled, so that event
+// reaches the connection, first.
+func TestSSEFirstColdConnectionIsSentAnEventThatDrewItsIdBeforeTheRequest(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, handler, "OTHER", "Other issue", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	low, _, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	type answer struct {
+		response *http.Response
+		err      error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}))
+		answered <- answer{response, err}
+	}()
+	// Time for the request to reach its handler and start the relay, which then waits on low.
+	time.Sleep(300 * time.Millisecond)
+	commitLow()
+
+	var opened answer
+	select {
+	case opened = <-answered:
+	case <-time.After(sseFrameWait):
+		t.Fatalf("the stream did not open within %s", sseFrameWait)
+	}
+	if opened.err != nil {
+		t.Fatalf("open SSE stream: %v", opened.err)
+	}
+	t.Cleanup(func() { opened.response.Body.Close() })
+	if opened.response.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", opened.response.StatusCode)
+	}
+	select {
+	case frame, more := <-sseFrames(t, bufio.NewScanner(opened.response.Body)):
+		if !more {
+			t.Fatalf("the stream ended before it was sent event %d", low)
+		}
+		if id := sseFrameID(t, frame); id != low {
+			t.Fatalf("the first connection was sent event %d first, want %d, which committed after its request", id, low)
+		}
+	case <-time.After(sseFrameWait):
+		t.Fatalf("the first connection was not sent event %d, which committed after its request", low)
+	}
+}
+
+// TestSSEFirstColdConnectionSkipsAnIdThatRolledBack: the relay's first start reads the gaps among
+// the log's ids, since an event that commits after the first connection's request can stand in
+// one, and starts below the lowest gap that has filled once every id is final. An id whose
+// transaction rolled back leaves a gap that never fills, and must move the cursor nowhere: taken
+// for a late event, it would send the connection every event above it, the backlog a cold
+// connection asked not to get.
+func TestSSEFirstColdConnectionSkipsAnIdThatRolledBack(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	rename := func(title string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+			"title": title,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+	}
+	// An id drawn and never written, as a rolled-back write leaves one, then an event above it.
+	if _, err := database.Pool.Exec(t.Context(), `select nextval('events_id_seq')`); err != nil {
+		t.Fatalf("draw an event id: %v", err)
+	}
+	rename("Renamed above the gap")
+	backlog := eventHead(t, database)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events")
+
+	rename("Renamed after the connection opened")
+	live := eventHead(t, database)
+	for id := int64(0); id != live; {
+		id = sseFrameID(t, readSSEFrame(t, scanner))
+		if id <= backlog {
+			t.Fatalf("cold connection was sent event %d, backlog at or below the head %d it opened on, above an id that rolled back", id, backlog)
+		}
+	}
 }
 
 // TestShutdownEndsAStreamWaitingOnTheHorizon: http.Server.Shutdown waits for every handler, and an
