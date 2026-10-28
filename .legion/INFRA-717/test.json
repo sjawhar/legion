@@ -2,39 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T22:25:00Z",
-  "round": 4,
-  "testedHead": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
+  "completed": "2026-10-28T22:35:00Z",
+  "round": 5,
+  "testedHead": "59377f8f148db07a88d650683a44aba9b2429762",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at 75e39fdb: the README block extracted with the implementer's awk and sourced in bash. I repeated its case A, SIGINT with its default action restored, sent to the run's process group 0.3 s after data.new appeared. Run 1 exit 1, with initdb 'caught signal' and 'removing data directory \"data.new\"', leaving server/ and no data. Rerun exit 0, printing the socket path. psql: 180006|'add':1. The workflows are unchanged since 839a67cb: jj diff --stat 839a67cb..75e39fdb lists only scripts/dispatch/README.md and .legion/. Round 1 verified actionlint and the job graph for them."
+    "how": "Drove the same sibling surface independently at 59377f8f. The README block was extracted with awk. Role A ran it twice: both exit 0, and the second printed only the socket path. Then a sibling ran it under unshare --user --map-current-user --pid --ipc --fork --mount-proc: it printed only the socket path, sibling-exit=0. There was one postmaster afterwards. pg_postmaster_start_time was 2026-10-28 22:27:50.728533+00 before and after the sibling's run, and psql gave 180006|'add':1."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "scripts/dispatch/README.md's Lexeme database block, which says it 'prints the socket path and starts nothing when a server answers on the socket': on a machine without pg_isready it must not report a running server as dead or give advice that starts a second server.",
+      "evidence": "The block now decides liveness with `pg_isready -q -h \"$pg\" -U postgres`. Nothing in the README names pg_isready, and the block used no PostgreSQL client before this round (curl, python3 and flock are its other tools). pg_isready comes from postgresql-client. Here it is /usr/bin/pg_isready from postgresql-client-common, but the lexeme check itself (bun) needs no PostgreSQL client. I ran the block with PATH holding bash, curl, python3, flock, mkdir, rm, mv, echo, cat, env and sh, and no pg_isready. Run 1: exit 0, 'server started', and psql reached it (180006). Run 2, with that server up: 'line 5: pg_isready: command not found', then 'no server answers on .../t717n/pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove .../t717n/pg', exit 1. A missing command takes the same branch as a dead server. Following the advice (rm -rf $TMPDIR/pg, run again): exit 0, 'server started', and ps listed two postmasters from that directory (PIDs 16608 and 16652). The first was still running with its data directory deleted. A fix that adds no dependency: test the socket with python3, which the block already requires, for example `python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' \"$pg/.s.PGSQL.5432\" 2>/dev/null`. Or refuse up front when `command -v pg_isready` fails. No red test: the defect is in README prose, and a source-text test is forbidden here. The steps above reproduce it."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "The README's lexeme-database block, which says it is safe to run again, recovers from every interrupted or crashed state, and the lexeme check reads the PostgreSQL 18.6 server it starts.",
-      "surface": "The README's bash block at the code head, run as written in this pod, then bun scripts/dispatch/meaning-search-check.ts against the Dispatch this pod is configured for (read-only GETs).",
-      "command": "awk '/^### Lexeme database/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' scripts/dispatch/README.md > <block>; each case in a fresh TMPDIR: (1) SIGKILL to run 1's process group as soon as pg.jar appeared, then rerun; (2) SIGKILL to the running postmaster (a stale postmaster.pid stays), then rerun; (3) run 1 SIGKILLed inside initdb while a second run waited on the lock; (4) SIGINT inside initdb, then rerun; then bun scripts/dispatch/meaning-search-check.ts --pair '<key>=adding production jobs' --lexeme-database <dir>/pg/.s.PGSQL.5432",
-      "observed": "(1) Run 1 left a 61,440-byte pg.jar and no server/; the rerun downloaded again, exit 0, 180006|'add':1. (2) postmaster.pid left behind, 0 postmasters; rerun: 'pg_ctl: another server might be running; trying to start server anyway', 'server started', exit 0, 180006, 1 postmaster. (3) A exit 137; B took the lock, ran initdb on a fresh data.new, 'server started', exit 0, 180006|'add':1,2 'set':3, 1 postmaster. (4) As in implementerProof: run 1 exit 1, rerun exit 0, 180006|'add':1. The check printed 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true' and 'A2 <key> shared=2 position=none fail': the lexer read the server. The query repeats two title words, so a fail is expected. No postmaster from these directories was left running afterwards.",
-      "headSha": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
-      "negativeControl": "The same check after pg_ctl -D data stop on that server: 'A2 <key> shared=unchecked position=none unavailable: lexeme-database', 'result unavailable exit=2'. The round-3 block at da02c91, SIGINT inside initdb then a rerun: 'Bus error' in the python3 extraction, then 'liblzma.so.5: file too short' on every run (round 3)."
+      "criterion": "A sibling role's run of the README block (own PID and IPC namespace, shared $TMPDIR) leaves role A's server as the one server, still answering.",
+      "surface": "The README's bash block at the code head, run by role A in this pod and by a sibling under unshare --user --map-current-user --pid --ipc --fork --mount-proc.",
+      "command": "TMPDIR=<dir> bash -c 'source <block>' (twice); TMPDIR=<dir> unshare --user --map-current-user --pid --ipc --fork --mount-proc bash -c 'source <block>'; psql -h <dir>/pg -U postgres -Atc \"select current_setting('server_version_num'), to_tsvector('english','added'), pg_postmaster_start_time()\" before and after the sibling's run",
+      "observed": "Role A: exit 0 twice. Sibling: printed only the socket path, exit 0. One postmaster. The same start time before and after: 180006|'add':1|2026-10-28 22:27:50.728533+00.",
+      "headSha": "59377f8f148db07a88d650683a44aba9b2429762",
+      "negativeControl": "The implementer's round-4 control: the same sibling run against the 75e39fdb block printed 'another server might be running; trying to start server anyway' and broke role A's server."
     },
     {
-      "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job.",
-      "surface": "The job graph GitHub Actions builds at the round-4 code head.",
-      "command": "gh run view 40755477001 -R sjawhar/legion --json jobs; gh run view 40755477007 -R sjawhar/legion --json jobs",
-      "observed": "Tests 40755477001 at 75e39fdb (queued, jobs created): lint, typecheck, test only. Legion Envoy and Contracts 40755477007 lists only 'changes' (queued): its job list and envoy-go's 180006|0.8.7 line are not read. The plan's reviewer rule stands: no approval until envoy-go at the code head finished success with that line. The required checks lint, typecheck, test and pr-title are queued or pending, not yet read.",
-      "headSha": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
-      "negativeControl": "Main's Tests run 40741954129 at a409c128 lists 'Daemon Go suite on production's Postgres 16 (until production runs Postgres 18)' (round 1)."
-    },
-    {
-      "criterion": "No added line or path names the deployment's Dispatch keys or dispatch:// links; no fragment; new commit subjects carry no key.",
-      "surface": "The PR's diff, files and commits on GitHub (PR #2476).",
-      "command": "Re-run: jj diff --git from main a409c128 over .github .dispatch scripts, grep for [A-Z][A-Z0-9]+-[0-9]+|dispatch:// on added lines; gh pr view 2476 --json title,commits,files.",
-      "observed": "Re-run at 75e39fdb from main a409c128: one match on added lines, 'SQL-18' inside 'PostgreSQL-18', which is on main already. Title and every commit subject: no key. Files: the only paths carrying a key are .legion/INFRA-717/*, the transient handoffs that retro removes (the plan's recorded assumption). No /.changes/ path.",
-      "headSha": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
-      "negativeControl": "printf '+# see dispatch://X-1\\n' | grep -nE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://' printed the line (round 1)."
+      "criterion": "No workflow names the Postgres 16 jobs (workflows unchanged since 839a67cb).",
+      "surface": "The job graph at the round-5 code head.",
+      "command": "gh run view 40779548448 -R sjawhar/legion --json jobs",
+      "observed": "Tests 40779548448 (queued, jobs created): typecheck, lint, test. Legion Envoy and Contracts 40779548483 lists only 'changes' (queued). The required checks at this head are not read yet. The reviewer's handoff records envoy-go at 75e39fdb printing 180006|0.8.7.",
+      "headSha": "59377f8f148db07a88d650683a44aba9b2429762",
+      "negativeControl": "Main's Tests run 40741954129 at a409c128 lists the Postgres 16 job (round 1)."
     }
   ]
 }
