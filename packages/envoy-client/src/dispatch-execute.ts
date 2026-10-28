@@ -2121,21 +2121,21 @@ function nodeLine(node: GraphNode): string[] {
 
 /**
  * A block read's head, from the node its reference names. A document's block: the block, the
- * document it is in (`holder` is the reference before the `#b-`), the version its text last
+ * document it is in (`ref.document`, the reference before the `#b-`), the version its text last
  * changed in and that text. A comment's or message's block: one line naming the block, its item
  * and the comment revision its text last changed in (`Block b2 of comment <id> (changed in
  * revision 1):`), then its text. A block no current version or revision holds has neither a
  * changed version nor text. Then for a pinned ref how the block stands against the version or
  * revision it pins and its text there.
  */
-function blockLines(node: GraphNode, ref: ParsedDispatchRef, holder: string): string[] {
+function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head =
     ref.item === undefined
       ? [
           `Block: ${blockID}`,
-          `Document: ${node.document ?? holder}`,
+          `Document: ${node.document ?? ref.document}`,
           ...(node.changed_version === undefined
             ? []
             : [`Changed in version: ${node.changed_version}`]),
@@ -4297,10 +4297,9 @@ export async function executeDispatchTool(
           graphReferences(client, { from: blockRef }),
         ]);
         return {
-          text: [
-            ...blockLines(incoming.node, ref, holder),
-            ...graphSectionLines(incoming, outgoing),
-          ].join("\n"),
+          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(
+            "\n"
+          ),
           details: {
             ...(ref.owner.kind === "project"
               ? { project: ref.owner.project }

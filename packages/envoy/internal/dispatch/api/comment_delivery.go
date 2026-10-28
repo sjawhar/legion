@@ -803,13 +803,12 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
+		r.Context(), tx, &reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	reply.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(reply.IssueKey, reply.ArtifactID).event(
 		"comment.answered", actor, payload,
 	))

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -20,14 +21,9 @@ import (
 // message writes no mention. A reply that names a block of the item calls it first, so the block
 // it names is one of the item's current body; the block-index reconciliation drains owed items
 // through it (IndexOwedItemBlocks). The caller holds the item's owner row (the reconciliation
-// holds none) and the item row; IndexItem takes the state row after them.
-func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) error {
-	_, err := indexItemIfOwed(ctx, tx, kind, itemID, serverURL)
-	return err
-}
-
-// indexItemIfOwed is IndexItemIfOwed, reporting whether the item was owed and so indexed.
-func indexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
+// holds none) and the item row; IndexItem takes the state row after them. It reports whether the
+// item was owed and so indexed.
+func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
 	var query string
 	switch kind {
 	case ItemComment:
@@ -52,7 +48,7 @@ func indexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 	if err := tx.QueryRow(ctx, query, itemID).Scan(&body, &writtenAt, &mentions, &stated, &owed, &sum); err != nil {
 		return false, fmt.Errorf("read the block state of %s %s: %w", kind, itemID, err)
 	}
-	if stated && !owed && sum != nil && *sum == BodySHA256(body) {
+	if stated && !owed && sum != nil && *sum == itemblocks.BodySHA256(body) {
 		return false, nil
 	}
 	var located []text.Located
@@ -65,7 +61,7 @@ func indexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 	if !mentions {
 		return true, nil
 	}
-	if _, err := replaceRefs(ctx, tx, string(kind), itemID, locatedRefs(located), &writtenAt); err != nil {
+	if _, err := replaceRefs(ctx, tx, string(kind), itemID, text.Refs(located), &writtenAt); err != nil {
 		return false, fmt.Errorf("index %s %s: %w", kind, itemID, err)
 	}
 	return true, nil

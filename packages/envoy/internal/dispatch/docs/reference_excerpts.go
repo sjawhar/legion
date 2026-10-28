@@ -98,11 +98,7 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 // replaceVersionRefs reconciles the document's references, dated versionAt, to the mentions
 // located in its version, counting the targets moved, which its blocks' mentions moved, as well.
 func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, versionAt time.Time, located []text.Located, moved []refs.Target) (model.ReferenceChanges, error) {
-	found := make([]text.Ref, len(located))
-	for i, mention := range located {
-		found[i] = mention.Ref
-	}
-	return refs.ReplaceCountedRefs(ctx, tx, "artifact", artifactID, found, &versionAt, moved)
+	return refs.ReplaceCountedRefs(ctx, tx, "artifact", artifactID, text.Refs(located), &versionAt, moved)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep

@@ -11,12 +11,13 @@ import (
 )
 
 // Block is one top-level block of an item's body: its Proof type and its text, the slice of the
-// body as its author wrote it, body[From:To] in bytes. The stored text, the excerpt and the
-// identity hash all read this slice, never the canonical rendering, which can differ from what was
-// written.
+// body as its author wrote it, body[From:To] in bytes, and Hash(Text), its identity hash. The
+// stored text, the excerpt and the identity hash all read this slice, never the canonical
+// rendering, which can differ from what was written.
 type Block struct {
 	Type     string
 	Text     string
+	Hash     string
 	From, To int
 }
 
@@ -31,12 +32,18 @@ func Split(body string) []Block {
 	if strings.TrimSpace(body) == "" {
 		return nil
 	}
+	var blocks []Block
+	ok := false
 	if doc, starts, err := pmdoc.ParseWithSourceStarts(body); err == nil {
-		if blocks, ok := bySourceStarts(body, doc, starts); ok {
-			return blocks
-		}
+		blocks, ok = bySourceStarts(body, doc, starts)
 	}
-	return byBlankLines(body)
+	if !ok {
+		blocks = byBlankLines(body)
+	}
+	for index := range blocks {
+		blocks[index].Hash = Hash(blocks[index].Text)
+	}
+	return blocks
 }
 
 // bySourceStarts cuts body at the parser's block starts. Each start is taken back to the start of
@@ -118,9 +125,15 @@ func appendText(blocks []Block, body string, from, to int) []Block {
 	return append(blocks, Block{Type: "text", Text: body[from:to], From: from, To: to})
 }
 
-// Hash is a block's identity: the SHA-256, in hex, of text with each CR LF read as LF, so a block
-// that only changed its line endings (a textarea writes LF where the body had CR LF) keeps it.
+// Hash is a block's identity: BodySHA256 of text with each CR LF read as LF, so a block that only
+// changed its line endings (a textarea writes LF where the body had CR LF) keeps it.
 func Hash(text string) string {
-	sum := sha256.Sum256([]byte(strings.ReplaceAll(text, "\r\n", "\n")))
+	return BodySHA256(strings.ReplaceAll(text, "\r\n", "\n"))
+}
+
+// BodySHA256 is the hex SHA-256 of an item's body as stored, byte for byte: the state row's
+// body_sha256, which says which body the item's blocks were last indexed from.
+func BodySHA256(body string) string {
+	sum := sha256.Sum256([]byte(body))
 	return hex.EncodeToString(sum[:])
 }

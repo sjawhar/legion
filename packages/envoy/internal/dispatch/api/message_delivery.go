@@ -900,13 +900,7 @@ func (s *server) insertSessionReply(
 		}
 		replyParent.ReplyBody = messageReplyPreview(block.excerpt)
 	}
-	// A direct message writes no mention, so its blocks hold none either.
-	var referenceChanges model.ReferenceChanges
-	if reply.IssueKey != nil {
-		referenceChanges, err = refs.ReplaceCountedItem(ctx, tx, refs.ItemMessage, reply.ID, reply.Body, s.deps.ServerURL, reply.CreatedAt, nil)
-	} else {
-		_, _, err = refs.IndexItem(ctx, tx, refs.ItemMessage, reply.ID, reply.Body, reply.CreatedAt, nil, nil)
-	}
+	referenceChanges, err := s.indexMessage(ctx, tx, reply)
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}

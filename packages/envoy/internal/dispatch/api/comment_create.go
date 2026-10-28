@@ -541,6 +541,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Suggestion = suggestion
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
+	comment.RepliesToBlock = threadTarget.ReplyBlock.nodeID()
 	if comment.Anchor != nil {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
@@ -633,7 +634,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
-		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
+		payload, err := s.commentEventPayload(r.Context(), tx, reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -650,13 +651,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, event)
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
+		r.Context(), tx, &comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	comment.ReplyBlock = payload.ReplyBlock
 	payload.SuppressRoute = suppressRoute
 	payload.SuppressedAuthors = suppressedAuthors
 	payload.SuppressedRoute = suppressedRoute

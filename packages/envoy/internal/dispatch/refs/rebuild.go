@@ -247,7 +247,7 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
 			}
 		}
-		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, locatedRefs(located), &writtenAt); err != nil {
+		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, text.Refs(located), &writtenAt); err != nil {
 			return fmt.Errorf("index %s %s: %w", item.Kind, item.ID, err)
 		}
 	} else if _, err := tx.Exec(ctx, `delete from refs where from_kind = $1 and from_id = $2`, item.Kind, item.ID); err != nil {

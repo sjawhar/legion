@@ -20,7 +20,7 @@ func removed(id, text string) Stored {
 func paragraphs(texts ...string) []Block {
 	blocks := make([]Block, len(texts))
 	for index, text := range texts {
-		blocks[index] = Block{Type: "paragraph", Text: text}
+		blocks[index] = Block{Type: "paragraph", Text: text, Hash: Hash(text)}
 	}
 	return blocks
 }

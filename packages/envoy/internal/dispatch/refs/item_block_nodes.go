@@ -10,17 +10,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// itemOfBlockKind is the item kind whose blocks are stored under kind, comment_block or
-// message_block (ItemKind.BlockKind).
-func itemOfBlockKind(kind string) (ItemKind, bool) {
-	for _, item := range []ItemKind{ItemComment, ItemMessage} {
-		if kind == item.BlockKind() {
-			return item, true
-		}
-	}
-	return "", false
-}
-
 // itemBlocksKnown reports whether this build reads the blocks of items of kind: nodeLoaders has
 // their storage kind. Every read that lists or counts a block's edge in place of its item's
 // (heldByABlock, an item's own reads in readEdgeRows) asks it, so a build that cannot address an
@@ -30,19 +19,12 @@ func itemBlocksKnown(kind ItemKind) bool {
 	return known
 }
 
-// loadItemBlockNodes resolves the block nodes of comments and messages, stored under kind
-// comment_block or message_block and addressed '<item kind>/<item uuid>#<block id>', from the
-// current blocks of their items. A block no current revision holds resolves to nothing, so every
-// edge at it is omitted until a revision holds its id again. The node's kind is block, as a
-// document block's is; its parent is its item, and its Text the block's whole text.
-func loadItemBlockNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
-	item, ok := itemOfBlockKind(kind)
-	if !ok {
-		return fmt.Errorf("load %s nodes: not an item block kind", kind)
-	}
-	if item == ItemMessage {
-		return loadMessageBlockNodes(ctx, q, kind, ids, nodes)
-	}
+// loadCommentBlockNodes resolves the block nodes of comments, stored under kind comment_block and
+// addressed 'comment/<comment uuid>#<block id>', from the current blocks of their comments. A
+// block no current revision holds resolves to nothing, so every edge at it is omitted until a
+// revision holds its id again. The node's kind is block, as a document block's is; its parent is
+// its comment, and its Text the block's whole text.
+func loadCommentBlockNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	blocks, err := commentBlockNodes(ctx, q, ids, false)
 	if err != nil {
 		return err
@@ -120,13 +102,15 @@ func commentBlockNodes(ctx context.Context, q Queryer, ids []string, includeRemo
 	return blocks, rows.Err()
 }
 
-// loadMessageBlockNodes resolves message block nodes. A message is never edited, so a block is
-// made by the message's author at its created_at and has no other change (as loadMessageNodes);
-// it belongs to its message, which has no versions. Its Text is re-read from the message body:
-// a message never changes, so the body split as the index split it (itemblocks.Split) holds the
-// block at its position, which its identity hash confirms; were the parser to read the body
-// otherwise since, the block is the first of equal hash, else its stored excerpt stands in.
-func loadMessageBlockNodes(ctx context.Context, q Queryer, kind string, ids []string, nodes map[[2]string]resolvedNode) error {
+// loadMessageBlockNodes resolves the block nodes of messages, stored under kind message_block and
+// addressed 'message/<message uuid>#<block id>', from the current blocks of their messages, as
+// loadCommentBlockNodes resolves a comment's. A message is never edited, so a block is made by the
+// message's author at its created_at and has no other change (as loadMessageNodes); it belongs to
+// its message, which has no versions. Its Text is re-read from the message body: a message never
+// changes, so the body split as the index split it (itemblocks.Split) holds the block at its
+// position, which its identity hash confirms; were the parser to read the body otherwise since,
+// the block is the first of equal hash, else its stored excerpt stands in.
+func loadMessageBlockNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
 		select b.node_id, b.block_id, b.excerpt, b.position, b.text_sha256,
 		       m.id::text, m.issue_key, coalesce(i.project_key, ''), m.body, m.author, m.created_at
@@ -175,11 +159,11 @@ func loadMessageBlockNodes(ctx context.Context, q Queryer, kind string, ids []st
 // from blocks, the message body's split: the block at position when its hash is sum, else the
 // first block whose hash is, else excerpt.
 func messageBlockText(blocks []itemblocks.Block, position int, sum, excerpt string) string {
-	if position >= 0 && position < len(blocks) && itemblocks.Hash(blocks[position].Text) == sum {
+	if position >= 0 && position < len(blocks) && blocks[position].Hash == sum {
 		return blocks[position].Text
 	}
 	for _, block := range blocks {
-		if itemblocks.Hash(block.Text) == sum {
+		if block.Hash == sum {
 			return block.Text
 		}
 	}

@@ -162,12 +162,9 @@ func itemBlockIDs(kind ItemKind, param string) string {
 // naming a current block of the item of kind whose uuid is the numbered parameter param: the
 // reply is listed under that block, by its replies_to edge to it.
 func repliesToABlockOf(kind ItemKind, alias, param string) string {
-	table := "comments"
-	if kind == ItemMessage {
-		table = "messages"
-	}
+	tables, _ := kind.tables()
 	return `(` + alias + `.kind = 'replies_to' and ` + alias + `.from_kind = '` + string(kind) + `' and ` + alias + `.from_id in (
-		select r.id::text from ` + table + ` r where r.replies_to_block in ` + itemBlockIDs(kind, param) + `))`
+		select r.id::text from ` + tables.items + ` r where r.replies_to_block in ` + itemBlockIDs(kind, param) + `))`
 }
 
 // itemRead is the item whose blocks' edges a query's read lists with its own: a comment or a
@@ -396,8 +393,8 @@ var nodeLoaders = map[string]nodeLoader{
 	"component":     loadComponentNodes,
 	"session":       loadSessionNodes,
 	"block":         loadBlockNodes,
-	"comment_block": loadItemBlockNodes,
-	"message_block": loadItemBlockNodes,
+	"comment_block": loadCommentBlockNodes,
+	"message_block": loadMessageBlockNodes,
 }
 
 // nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter

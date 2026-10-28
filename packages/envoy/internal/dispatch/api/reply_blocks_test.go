@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -400,7 +401,7 @@ func TestAMessageReplyNamesTheBlockItAnswers(t *testing.T) {
 	var settled bool
 	if err := database.Pool.QueryRow(context.Background(), `
 		select body_sha256, owed_at is null from message_block_state where message_id = $1
-	`, owed.ID).Scan(&sum, &settled); err != nil || sum != refs.BodySHA256(rewritten) || !settled {
+	`, owed.ID).Scan(&sum, &settled); err != nil || sum != itemblocks.BodySHA256(rewritten) || !settled {
 		t.Fatalf("the owed message's state = %q settled %v (%v), want the rewritten body indexed", sum, settled, err)
 	}
 }

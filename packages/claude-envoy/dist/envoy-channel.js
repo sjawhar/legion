@@ -41538,12 +41538,12 @@ function nodeLine(node) {
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
-function blockLines(node, ref, holder) {
+function blockLines(node, ref) {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head = ref.item === undefined ? [
     `Block: ${blockID}`,
-    `Document: ${node.document ?? holder}`,
+    `Document: ${node.document ?? ref.document}`,
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
   ] : [
@@ -42961,10 +42961,7 @@ ${trailer.join(`
           graphReferences(client, { from: blockRef })
         ]);
         return {
-          text: [
-            ...blockLines(incoming.node, ref, holder),
-            ...graphSectionLines(incoming, outgoing)
-          ].join(`
+          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(`
 `),
           details: {
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },

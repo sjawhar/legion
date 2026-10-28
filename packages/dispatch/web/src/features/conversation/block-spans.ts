@@ -10,7 +10,8 @@ import type { ItemBlock } from "../../api/types";
  */
 
 /** The part of the textarea's value one edit replaced, as offsets into the value before it
- *  (`onBeforeBodyInput` records it from the selection). */
+ *  (the body field's `beforeinput` listener, `bodyFieldRef` in `MentionComposer`, records it from
+ *  the selection). */
 export interface TextEditRange {
   readonly end: number;
   readonly start: number;
@@ -73,8 +74,20 @@ export function spansFromBlocks(
   blocks: readonly Pick<ItemBlock, "from" | "id" | "text" | "to">[]
 ): BlockSpans | undefined {
   if (textareaValue(storedBody) !== value) return undefined;
-  const valueOffset = (offset: number) =>
-    offset - (storedBody.slice(0, offset).match(/\r\n/g)?.length ?? 0);
+  // CR LF pairs counted with one cursor over the offsets, which rise from block to block: `pairs`
+  // is how many pairs start before `at`. An offset before the last one counts again from 0.
+  let at = 0;
+  let pairs = 0;
+  const valueOffset = (offset: number) => {
+    if (offset - 1 < at) {
+      at = 0;
+      pairs = 0;
+    }
+    for (; at < offset - 1; at += 1) {
+      if (storedBody.charCodeAt(at) === 13 && storedBody.charCodeAt(at + 1) === 10) pairs += 1;
+    }
+    return offset - pairs;
+  };
   const live: BlockSpan[] = [];
   for (const block of blocks) {
     if (

@@ -2,6 +2,7 @@ package itemblocks
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 )
 
@@ -23,31 +24,32 @@ type Stored struct {
 //
 // Rules 1 and 2 match by Hash and take the first untaken match in stored's order. For rule 3, a
 // block's bounds are the stored positions of the nearest earlier and later blocks that kept their
-// ids by rule 1, or the start and the end without one. counter is the next number to mint, above
-// every number stored holds. It returns the ids in next's order and the counter after the last id
-// minted.
+// ids by rule 1, or the start and the end without one. next is as Split returns it, each block's
+// Hash set. counter is the next number to mint, above every number stored holds. It returns the
+// ids in next's order and the counter after the last id minted.
 func Align(stored []Stored, next []Block, counter int) ([]string, int) {
 	ids := make([]string, len(next))
 	taken := make([]bool, len(stored))
-	hashes := make([]string, len(next))
+	untaken := indexUntaken(stored, taken)
 	kept := make([]int, len(next)) // the stored position of a block that kept its id by rule 1, else -1
 	for index, block := range next {
-		hashes[index] = Hash(block.Text)
 		kept[index] = -1
-		if match := firstUntaken(stored, taken, hashes[index], true); match >= 0 {
+		if match := untaken.take(true, block.Hash); match >= 0 {
 			taken[match] = true
 			ids[index] = stored[match].ID
 			kept[index] = stored[match].Position
 		}
 	}
+	// Rule 3 takes live blocks without untaken.take, which is safe: no live block is matched by
+	// hash after rule 1.
+	lower, upper := keptBounds(kept)
 	for index, block := range next {
 		if ids[index] != "" {
 			continue
 		}
-		match := firstUntaken(stored, taken, hashes[index], false)
+		match := untaken.take(false, block.Hash)
 		if match < 0 {
-			lower, upper := keptBounds(kept, index)
-			match = reworded(stored, taken, block.Type, lower, upper)
+			match = reworded(stored, taken, block.Type, lower[index], upper[index])
 		}
 		if match >= 0 {
 			taken[match] = true
@@ -59,20 +61,22 @@ func Align(stored []Stored, next []Block, counter int) ([]string, int) {
 	return ids, counter
 }
 
-// keptBounds is the stored positions of the nearest blocks before and after next[index] that kept
-// their ids by rule 1: -1 for the start, and the largest int for the end.
-func keptBounds(kept []int, index int) (lower, upper int) {
-	lower, upper = -1, int(^uint(0)>>1)
-	for before := index - 1; before >= 0; before-- {
-		if kept[before] >= 0 {
-			lower = kept[before]
-			break
+// keptBounds is, for each block of next, the stored positions of the nearest blocks before and
+// after it that kept their ids by rule 1: -1 for the start, and the largest int for the end.
+func keptBounds(kept []int) (lower, upper []int) {
+	lower, upper = make([]int, len(kept)), make([]int, len(kept))
+	bound := -1
+	for index, position := range kept {
+		lower[index] = bound
+		if position >= 0 {
+			bound = position
 		}
 	}
-	for after := index + 1; after < len(kept); after++ {
-		if kept[after] >= 0 {
-			upper = kept[after]
-			break
+	bound = math.MaxInt
+	for index := len(kept) - 1; index >= 0; index-- {
+		upper[index] = bound
+		if kept[index] >= 0 {
+			bound = kept[index]
 		}
 	}
 	return lower, upper
@@ -93,15 +97,38 @@ func reworded(stored []Stored, taken []bool, nodeType string, lower, upper int) 
 	return match
 }
 
-// firstUntaken is the first untaken stored block, live or removed as live says, whose hash is hash,
-// or -1.
-func firstUntaken(stored []Stored, taken []bool, hash string, live bool) int {
+// matchKey is what rules 1 and 2 match a stored block by: whether it is live, and its hash.
+type matchKey struct {
+	live bool
+	hash string
+}
+
+// untakenMatches lists the indexes of the untaken stored blocks under their matchKey, each list in
+// stored's order, so the front of a list is the first untaken match.
+type untakenMatches map[matchKey][]int
+
+// indexUntaken lists the stored blocks taken does not mark.
+func indexUntaken(stored []Stored, taken []bool) untakenMatches {
+	matches := make(untakenMatches, len(stored))
 	for index, block := range stored {
-		if !taken[index] && (block.Position >= 0) == live && block.Hash == hash {
-			return index
+		if !taken[index] {
+			key := matchKey{live: block.Position >= 0, hash: block.Hash}
+			matches[key] = append(matches[key], index)
 		}
 	}
-	return -1
+	return matches
+}
+
+// take removes and returns the first untaken stored block, live or removed as live says, whose
+// hash is hash, or -1. The caller marks it taken.
+func (matches untakenMatches) take(live bool, hash string) int {
+	key := matchKey{live: live, hash: hash}
+	list := matches[key]
+	if len(list) == 0 {
+		return -1
+	}
+	matches[key] = list[1:]
+	return list[0]
 }
 
 // mint is the id b<counter> and the counter after it.
@@ -109,11 +136,12 @@ func mint(counter int) (string, int) {
 	return "b" + strconv.Itoa(counter), counter + 1
 }
 
-// Carried is a block id the dashboard editor carried through an edit, and From, the byte offset in
-// the edited body where the id's span starts.
+// Carried is a block id the dashboard editor carried through an edit, and From, where the id's
+// span starts in the edited body: in UTF-16 code units in what ReadCarried reads (the request's
+// `blocks`), and the byte offset in what ReadCarried returns and Carry reads.
 type Carried struct {
-	ID   string
-	From int
+	ID   string `json:"id"`
+	From int    `json:"from"`
 }
 
 // Carry gives each block of next an id for an edit that carries ids (ReadCarried checks them):
@@ -126,8 +154,8 @@ type Carried struct {
 // with no carried id takes Align's rule 1 (an untaken live stored block of equal text, a move) or
 // rule 2 (a removed block of equal last text, a restore), else b<counter>; rule 3 does not apply,
 // since a reworded block carries its id. A carried id is never taken by rules 1 and 2, even one a
-// join removed. carried is in body order. It returns the ids in next's order and the counter after
-// the last id minted.
+// join removed. carried is in body order, and next is as Split returns it, each block's Hash set.
+// It returns the ids in next's order and the counter after the last id minted.
 func Carry(stored []Stored, next []Block, carried []Carried, counter int) ([]string, int) {
 	ids := make([]string, len(next))
 	taken := make([]bool, len(stored))
@@ -145,14 +173,14 @@ func Carry(stored []Stored, next []Block, carried []Carried, counter int) ([]str
 	for index, block := range stored {
 		taken[index] = named[block.ID]
 	}
+	untaken := indexUntaken(stored, taken)
 	for index, block := range next {
 		if ids[index] != "" {
 			continue
 		}
-		hash := Hash(block.Text)
-		match := firstUntaken(stored, taken, hash, true)
+		match := untaken.take(true, block.Hash)
 		if match < 0 {
-			match = firstUntaken(stored, taken, hash, false)
+			match = untaken.take(false, block.Hash)
 		}
 		if match >= 0 {
 			taken[match] = true

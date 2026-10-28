@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -70,7 +71,7 @@ func (s *server) itemBlocks(ctx context.Context, kind refs.ItemKind, id string) 
 		}
 		answer.Revision = &revision
 	}
-	if stored.owed || stored.bodySHA256 == nil || *stored.bodySHA256 != refs.BodySHA256(stored.body) {
+	if stored.owed || stored.bodySHA256 == nil || *stored.bodySHA256 != itemblocks.BodySHA256(stored.body) {
 		return answer, nil
 	}
 	split := itemblocks.Split(stored.body)
@@ -90,7 +91,7 @@ func (s *server) itemBlocks(ctx context.Context, kind refs.ItemKind, id string) 
 	}
 	for index, block := range split {
 		row := stored.rows[index]
-		if row.position != index || row.textSHA256 != itemblocks.Hash(block.Text) {
+		if row.position != index || row.textSHA256 != block.Hash {
 			return answer, nil
 		}
 		from, err := units(block.From)
@@ -136,57 +137,57 @@ type itemBlockRow struct {
 }
 
 // itemBlockRowsQueries reads an item, its state and its current blocks in one statement, so one
-// snapshot holds the body, the hash it was indexed from and the rows that index wrote.
+// snapshot holds the body, the hash it was indexed from and the rows that index wrote. It answers
+// one row: the blocks' columns are arrays in body order, null when the item holds no current
+// block.
 var itemBlockRowsQueries = map[refs.ItemKind]string{
 	refs.ItemComment: `
 		select c.body, st.revision, st.owed_at is not null, st.body_sha256,
-		       b.block_id, b.type, b.text_sha256, b.position, b.changed_revision, b.changed_at
+		       b.ids, b.types, b.sums, b.positions, b.revisions, b.ats
 		from comments c
 		left join comment_block_state st on st.comment_id = c.id
-		left join comment_blocks b on b.comment_id = c.id and b.position is not null
-		where c.id = $1
-		order by b.position`,
+		cross join lateral (
+			select array_agg(block_id order by position) as ids, array_agg(type order by position) as types,
+			       array_agg(text_sha256 order by position) as sums, array_agg(position order by position) as positions,
+			       array_agg(changed_revision order by position) as revisions, array_agg(changed_at order by position) as ats
+			from comment_blocks where comment_id = c.id and position is not null
+		) b
+		where c.id = $1`,
 	refs.ItemMessage: `
 		select m.body, null::integer, st.owed_at is not null, st.body_sha256,
-		       b.block_id, b.type, b.text_sha256, b.position, null::integer, null::timestamptz
+		       b.ids, b.types, b.sums, b.positions, null::integer[], null::timestamptz[]
 		from messages m
 		left join message_block_state st on st.message_id = m.id
-		left join message_blocks b on b.message_id = m.id and b.position is not null
-		where m.id = $1
-		order by b.position`,
+		cross join lateral (
+			select array_agg(block_id order by position) as ids, array_agg(type order by position) as types,
+			       array_agg(text_sha256 order by position) as sums, array_agg(position order by position) as positions
+			from message_blocks where message_id = m.id and position is not null
+		) b
+		where m.id = $1`,
 }
 
 // readItemBlockRows reads comment or message id's body, block state and current block rows;
 // pgx.ErrNoRows when there is no such item.
 func readItemBlockRows(ctx context.Context, q queryer, kind refs.ItemKind, id string) (storedItemBlocks, error) {
-	rows, err := q.Query(ctx, itemBlockRowsQueries[kind], id)
+	var stored storedItemBlocks
+	var ids, types, sums []string
+	var positions []int
+	var revisions []*int
+	var ats []*time.Time
+	err := q.QueryRow(ctx, itemBlockRowsQueries[kind], id).Scan(&stored.body, &stored.revision, &stored.owed, &stored.bodySHA256,
+		&ids, &types, &sums, &positions, &revisions, &ats)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storedItemBlocks{}, err
+	}
 	if err != nil {
 		return storedItemBlocks{}, fmt.Errorf("read the blocks of %s %s: %w", kind, id, err)
 	}
-	defer rows.Close()
-	var stored storedItemBlocks
-	found := false
-	for rows.Next() {
-		var blockID, nodeType, textSHA256 *string
-		var position *int
-		var row itemBlockRow
-		if err := rows.Scan(&stored.body, &stored.revision, &stored.owed, &stored.bodySHA256,
-			&blockID, &nodeType, &textSHA256, &position, &row.changedRevision, &row.changedAt); err != nil {
-			return storedItemBlocks{}, fmt.Errorf("scan a block of %s %s: %w", kind, id, err)
+	for index := range ids {
+		row := itemBlockRow{blockID: ids[index], nodeType: types[index], textSHA256: sums[index], position: positions[index]}
+		if revisions != nil {
+			row.changedRevision, row.changedAt = revisions[index], ats[index]
 		}
-		found = true
-		if blockID == nil {
-			// The item holds no current block: the one row the left join answers.
-			continue
-		}
-		row.blockID, row.nodeType, row.textSHA256, row.position = *blockID, *nodeType, *textSHA256, *position
 		stored.rows = append(stored.rows, row)
-	}
-	if err := rows.Err(); err != nil {
-		return storedItemBlocks{}, fmt.Errorf("read the blocks of %s %s: %w", kind, id, err)
-	}
-	if !found {
-		return storedItemBlocks{}, pgx.ErrNoRows
 	}
 	return stored, nil
 }

@@ -1135,6 +1135,9 @@ type Comment struct {
 	// ReplyBlock is the block of the comment this reply answers, when it names one
 	// (reply_to_block); null on every other comment.
 	ReplyBlock *ReplyBlock `json:"reply_block"`
+	// RepliesToBlock is the node id comments.replies_to_block stores, null for a comment that
+	// names no block; ReplyBlock is read from it, and only for a comment that names one.
+	RepliesToBlock *string `json:"-"`
 }
 
 // ReplyBlock is the block a reply answers: its node id ('<item kind>/<item id>#<block id>') and
@@ -1294,6 +1297,9 @@ type Message struct {
 	// ReplyBlock is the block of the message this reply answers, when it names one
 	// (in_reply_to_block); null on every other message.
 	ReplyBlock *ReplyBlock `json:"reply_block"`
+	// RepliesToBlock is the node id messages.replies_to_block stores, null for a message that
+	// names no block; ReplyBlock is read from it, and only for a message that names one.
+	RepliesToBlock *string `json:"-"`
 }
 
 // MessageDelivery records one attempt to reach a live agent with a targeted message.

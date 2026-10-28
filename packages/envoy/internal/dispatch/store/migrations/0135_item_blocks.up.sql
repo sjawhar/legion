@@ -91,6 +91,8 @@ create table message_block_state (
 create index message_block_state_owed on message_block_state (owed_at) where owed_at is not null;
 
 -- One row per link a block of a comment or message holds, as 0121's block_refs for a document's.
+-- The _to index ends in the item's id as text, so the graph's probe of whether a block of the
+-- citing item holds a link (refs.heldByABlock, which matches graph_edges.from_id) is one lookup.
 create table comment_block_refs (
   comment_id uuid not null references comments (id) on delete cascade,
   block_id text not null,
@@ -102,7 +104,7 @@ create table comment_block_refs (
   source_seq bigint,
   primary key (comment_id, block_id, to_kind, to_id, kind)
 );
-create index comment_block_refs_to on comment_block_refs (to_kind, to_id);
+create index comment_block_refs_to on comment_block_refs (to_kind, to_id, (comment_id::text));
 create index comment_block_refs_from_node on comment_block_refs using hash (from_node);
 
 create table message_block_refs (
@@ -116,7 +118,7 @@ create table message_block_refs (
   source_seq bigint,
   primary key (message_id, block_id, to_kind, to_id, kind)
 );
-create index message_block_refs_to on message_block_refs (to_kind, to_id);
+create index message_block_refs_to on message_block_refs (to_kind, to_id, (message_id::text));
 create index message_block_refs_from_node on message_block_refs using hash (from_node);
 
 -- The block node id a reply answers, null for a reply to the whole item. A catalog change that

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -855,7 +856,7 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 	requireRead("an owed comment", owed, "comment", comment.ID, new(2), false, "")
 	stillOwed("an owed comment", "comment_block_state", "comment_id", comment.ID)
 	if _, err := database.Pool.Exec(context.Background(),
-		`update comment_block_state set owed_at = null, body_sha256 = $2 where comment_id = $1`, comment.ID, refs.BodySHA256("another body")); err != nil {
+		`update comment_block_state set owed_at = null, body_sha256 = $2 where comment_id = $1`, comment.ID, itemblocks.BodySHA256("another body")); err != nil {
 		t.Fatalf("index the comment from another body: %v", err)
 	}
 	stale, _ := read("a comment indexed from another body", "/api/v1/comments/"+comment.ID+"/blocks", true)

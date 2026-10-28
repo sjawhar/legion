@@ -29,7 +29,7 @@ type namedBlock struct {
 func (s *server) replyBlockOf(
 	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
 ) (*namedBlock, error) {
-	if err := refs.IndexItemIfOwed(ctx, tx, kind, itemID, s.deps.ServerURL); err != nil {
+	if _, err := refs.IndexItemIfOwed(ctx, tx, kind, itemID, s.deps.ServerURL); err != nil {
 		return nil, err
 	}
 	node, excerpt, found, err := refs.CurrentItemBlock(ctx, tx, kind, itemID, blockID)
@@ -60,12 +60,12 @@ func lockReplyParentMessage(ctx context.Context, tx pgx.Tx, id string) error {
 }
 
 // hydrateCommentReplyBlocks sets each comment's ReplyBlock, the block of its parent it answers
-// (null when it names none), in one query over every comment however many there are. A comment
-// with no id (one a test builds) names none.
+// (null when it names none), in one query over every comment that names one (RepliesToBlock),
+// however many there are, and none when no comment does.
 func hydrateCommentReplyBlocks(ctx context.Context, q queryer, comments ...*model.Comment) error {
 	ids := make([]string, 0, len(comments))
 	for _, comment := range comments {
-		if comment.ID != "" {
+		if comment.RepliesToBlock != nil {
 			ids = append(ids, comment.ID)
 		}
 	}
@@ -80,11 +80,12 @@ func hydrateCommentReplyBlocks(ctx context.Context, q queryer, comments ...*mode
 }
 
 // hydrateMessageReplyBlocks sets each message's ReplyBlock, the block of the message it answers
-// (null when it names none), in one query over every message however many there are.
+// (null when it names none), in one query over every message that names one (RepliesToBlock),
+// however many there are, and none when no message does.
 func hydrateMessageReplyBlocks(ctx context.Context, q queryer, messages ...*model.Message) error {
 	ids := make([]string, 0, len(messages))
 	for _, message := range messages {
-		if message.ID != "" {
+		if message.RepliesToBlock != nil {
 			ids = append(ids, message.ID)
 		}
 	}

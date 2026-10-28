@@ -93,7 +93,11 @@ type Located struct {
 // (pageInBound), and one whose document or item is past them is the URL it is, as one that names
 // no page is.
 func Extract(body, serverURL string) []Ref {
-	located := ExtractAt(body, serverURL)
+	return Refs(ExtractAt(body, serverURL))
+}
+
+// Refs is the references of located, without their offsets.
+func Refs(located []Located) []Ref {
 	refs := make([]Ref, len(located))
 	for index, item := range located {
 		refs[index] = item.Ref
@@ -544,15 +548,13 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 // comment, a document or item past them nothing.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
-	switch {
-	case !ok:
+	if !ok {
 		return ref, false
-	case ref.Kind == "comment":
-		return pageBlock(ref, page), true
-	case ref.Kind != "artifact" || query.Get(versionParam) != "":
-		return ref, true
 	}
-	return pageBlock(ref, page), true
+	if ref.Kind == "comment" || ref.Kind == "artifact" && query.Get(versionParam) == "" {
+		return pageBlock(ref, page), true
+	}
+	return ref, true
 }
 
 // pageBlock is what a dashboard page showing ref - a document, or a comment or a message - names:

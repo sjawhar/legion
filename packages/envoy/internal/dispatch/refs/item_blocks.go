@@ -2,8 +2,6 @@ package refs
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -26,18 +24,18 @@ const (
 	ItemMessage ItemKind = "message"
 )
 
-// itemTables is the storage of one item kind's blocks: the blocks table, the column naming the
-// item in every table, the state table and the block mentions table.
+// itemTables is the storage of one item kind and its blocks: the items table, the blocks table,
+// the column naming the item in every block table, the state table and the block mentions table.
 type itemTables struct {
-	blocks, item, state, refs string
+	items, blocks, item, state, refs string
 }
 
 func (kind ItemKind) tables() (itemTables, error) {
 	switch kind {
 	case ItemComment:
-		return itemTables{blocks: "comment_blocks", item: "comment_id", state: "comment_block_state", refs: "comment_block_refs"}, nil
+		return itemTables{items: "comments", blocks: "comment_blocks", item: "comment_id", state: "comment_block_state", refs: "comment_block_refs"}, nil
 	case ItemMessage:
-		return itemTables{blocks: "message_blocks", item: "message_id", state: "message_block_state", refs: "message_block_refs"}, nil
+		return itemTables{items: "messages", blocks: "message_blocks", item: "message_id", state: "message_block_state", refs: "message_block_refs"}, nil
 	}
 	return itemTables{}, fmt.Errorf("index the blocks of a %q: not an item kind", string(kind))
 }
@@ -67,13 +65,6 @@ type IndexedBlock struct {
 	Changed        bool
 }
 
-// BodySHA256 is the hex SHA-256 of an item's body as stored, byte for byte: the state row's
-// body_sha256, which says which body the item's blocks were last indexed from.
-func BodySHA256(body string) string {
-	sum := sha256.Sum256([]byte(body))
-	return hex.EncodeToString(sum[:])
-}
-
 // ReplaceCountedItem indexes a comment's or an issue message's body, which the calling
 // transaction has just written: its blocks and the mentions each holds (IndexItem), then the
 // item's own references (ReplaceCountedRefs), from one extraction of body. The counted targets it
@@ -93,16 +84,7 @@ func ReplaceCountedItem(
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return ReplaceCountedRefs(ctx, tx, string(kind), itemID, locatedRefs(located), nil, moved)
-}
-
-// locatedRefs is the references of located, without their offsets.
-func locatedRefs(located []text.Located) []text.Ref {
-	found := make([]text.Ref, len(located))
-	for i, mention := range located {
-		found[i] = mention.Ref
-	}
-	return found
+	return ReplaceCountedRefs(ctx, tx, string(kind), itemID, text.Refs(located), nil, moved)
 }
 
 // IndexItem records body, written at `at` (the created_at of an insert, the edited_at of an
@@ -137,7 +119,8 @@ func locatedRefs(located []text.Located) []text.Ref {
 // reindex with a new grammar re-reads them even when the body is unchanged. A new row takes `at`,
 // or at the item's first indexing its own refs row's created_at and source_seq for that target;
 // Stamp gives the others their event. A direct message passes no located mentions and holds none.
-// It stores the revision, the next block number and BodySHA256(body) and clears owed_at.
+// It stores the revision, the next block number and itemblocks.BodySHA256(body) and clears
+// owed_at.
 //
 // It returns the item's current blocks and the targets of the block mentions it inserted or
 // deleted, which the caller's event counts (ReplaceCountedRefs' moved).
@@ -158,9 +141,14 @@ func IndexItem(
 	if err != nil {
 		return nil, nil, err
 	}
-	stored, err := storedItemBlocks(ctx, tx, kind, tables, itemID)
-	if err != nil {
-		return nil, nil, err
+	// An item no block-aware build indexed holds no block and no block mention: IndexItem writes
+	// them in the transaction that marks the state indexed, and a state row goes only with its
+	// item.
+	stored := []itemblocks.Stored{}
+	if state.indexed {
+		if stored, err = storedItemBlocks(ctx, tx, kind, tables, itemID); err != nil {
+			return nil, nil, err
+		}
 	}
 	counter := state.nextBlock
 	for _, block := range stored {
@@ -185,13 +173,13 @@ func IndexItem(
 	for _, block := range stored {
 		byID[block.ID] = block
 	}
-	bodySum := BodySHA256(body)
+	bodySum := itemblocks.BodySHA256(body)
 	changed := !state.indexed || state.bodySHA256 != bodySum
 	blocks := make([]IndexedBlock, len(next))
 	var written, kept []itemBlockRow
 	for index, block := range next {
 		row := itemBlockRow{
-			id: ids[index], position: index, nodeType: block.Type, sum: itemblocks.Hash(block.Text),
+			id: ids[index], position: index, nodeType: block.Type, sum: block.Hash,
 			excerpt: text.HeadRunes(block.Text, BlockExcerptRunes), text: block.Text,
 		}
 		previous, held := byID[row.id]
@@ -436,39 +424,21 @@ func itemBlockColumns(rows []itemBlockRow) (ids []string, positions []int32, typ
 
 // itemBlockPairs is each distinct link the mentions in located write from the block of next
 // (whose ids are ids) whose [From, To) holds the mention's start. A mention no block holds, and
-// an external URL, write none.
+// an external URL, write none. next's blocks are top-level, apart and in body order, and located
+// is in offset order, so blockPairs' innermost holder is the one block holding each start.
 func itemBlockPairs(next []itemblocks.Block, ids []string, located []text.Located) []blockPair {
-	pairs := make([]blockPair, 0, len(located))
-	seen := make(map[blockPair]struct{}, len(located))
-	for _, mention := range located {
-		holder := -1
-		for index, block := range next {
-			if block.From <= mention.Offset && mention.Offset < block.To {
-				holder = index
-				break
-			}
-		}
-		if holder < 0 {
-			continue
-		}
-		target, ok := TargetOf(mention.Ref)
-		if !ok {
-			continue
-		}
-		pair := blockPair{blockID: ids[holder], kind: "mentions", target: target}
-		if _, dup := seen[pair]; dup {
-			continue
-		}
-		seen[pair] = struct{}{}
-		pairs = append(pairs, pair)
+	nodes := make([]model.ArtifactBlock, len(next))
+	for index, block := range next {
+		nodes[index] = model.ArtifactBlock{ID: ids[index], From: block.From, To: block.To}
 	}
-	return pairs
+	return blockPairs(nodes, located)
 }
 
 // replaceItemBlockRefs reconciles the item's block mentions with pairs, matching on the columns
 // of their key, and returns the targets of the pairs it deleted and inserted. A pair that survives
 // keeps its created_at and source_seq; a new one takes `at`, or at the item's first indexing the
-// item's own refs row for that target's created_at and source_seq, when one exists.
+// item's own refs row for that target's created_at and source_seq, when one exists. At the first
+// indexing the item holds no block mention, so nothing is deleted.
 func replaceItemBlockRefs(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -486,15 +456,19 @@ func replaceItemBlockRefs(
 	for i, pair := range pairs {
 		blockIDs[i], kinds[i], toKinds[i], toIDs[i] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
 	}
-	moved, err := scanTargets(tx.Query(ctx, `
-		delete from `+tables.refs+` r
-		where r.`+tables.item+` = $1::uuid and not exists (
-			select 1 from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
-			where p.block_id = r.block_id and p.kind = r.kind and p.to_kind = r.to_kind and p.to_id = r.to_id)
-		returning r.to_kind, r.to_id
-	`, itemID, blockIDs, kinds, toKinds, toIDs))
-	if err != nil {
-		return nil, fmt.Errorf("delete the block mentions %s %s dropped: %w", kind, itemID, err)
+	var moved []Target
+	if !firstIndexing {
+		var err error
+		moved, err = scanTargets(tx.Query(ctx, `
+			delete from `+tables.refs+` r
+			where r.`+tables.item+` = $1::uuid and not exists (
+				select 1 from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
+				where p.block_id = r.block_id and p.kind = r.kind and p.to_kind = r.to_kind and p.to_id = r.to_id)
+			returning r.to_kind, r.to_id
+		`, itemID, blockIDs, kinds, toKinds, toIDs))
+		if err != nil {
+			return nil, fmt.Errorf("delete the block mentions %s %s dropped: %w", kind, itemID, err)
+		}
 	}
 	if len(pairs) == 0 {
 		return moved, nil
@@ -515,8 +489,8 @@ func replaceItemBlockRefs(
 	return append(moved, added...), nil
 }
 
-// storeItemState records the item indexed from the body whose BodySHA256 is bodySum, at revision
-// with next as the next block number for a comment, and settles its owed_at.
+// storeItemState records the item indexed from the body whose itemblocks.BodySHA256 is bodySum, at
+// revision with next as the next block number for a comment, and settles its owed_at.
 func storeItemState(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string, revision, next int, bodySum string) error {
 	var err error
 	if kind == ItemComment {
@@ -572,20 +546,15 @@ func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock,
 
 // IndexOwedItemBlocks indexes one owed comment or message in a transaction of its own and reports
 // whether it indexed it. It takes the item row `for no key update`, the lock an edit of the
-// comment takes, then indexes it as a reply naming one of its blocks does (indexItemIfOwed), which
+// comment takes, then indexes it as a reply naming one of its blocks does (IndexItemIfOwed), which
 // takes the state row after it; it never takes an owner row. A new block and a new mention take
 // the time the item's body was written: a comment's coalesce(edited_at, created_at), a message's
 // created_at. An item a write site indexed since it was listed is no longer owed and is left
 // alone; one deleted since took its state row with it (on delete cascade), so nothing is owed.
 func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string) (bool, error) {
-	var lock string
-	switch item.Kind {
-	case ItemComment:
-		lock = `select true from comments where id = $1::uuid for no key update`
-	case ItemMessage:
-		lock = `select true from messages where id = $1::uuid for no key update`
-	default:
-		return false, fmt.Errorf("index the blocks of %s %s: not an item kind", item.Kind, item.ID)
+	tables, err := item.Kind.tables()
+	if err != nil {
+		return false, err
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -593,13 +562,13 @@ func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, ser
 	}
 	defer tx.Rollback(ctx)
 	var found bool
-	switch err := tx.QueryRow(ctx, lock, item.ID).Scan(&found); {
+	switch err := tx.QueryRow(ctx, `select true from `+tables.items+` where id = $1::uuid for no key update`, item.ID).Scan(&found); {
 	case errors.Is(err, pgx.ErrNoRows):
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("lock %s %s: %w", item.Kind, item.ID, err)
 	}
-	indexed, err := indexItemIfOwed(ctx, tx, item.Kind, item.ID, serverURL)
+	indexed, err := IndexItemIfOwed(ctx, tx, item.Kind, item.ID, serverURL)
 	if err != nil {
 		return false, err
 	}

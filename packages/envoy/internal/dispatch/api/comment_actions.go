@@ -102,12 +102,11 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
+	payload, err := s.commentEventPayload(r.Context(), tx, &comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	comment.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.reopened",
 		actor,
@@ -134,12 +133,9 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	// block's id and where its span starts in body, in UTF-16 code units, against the comment's
 	// revision the editor read them at (refs.IndexItem). Without them the ids follow the text.
 	var input struct {
-		Body         string `json:"body"`
-		BaseRevision *int   `json:"base_revision"`
-		Blocks       []struct {
-			ID   string `json:"id"`
-			From int    `json:"from"`
-		} `json:"blocks"`
+		Body         string               `json:"body"`
+		BaseRevision *int                 `json:"base_revision"`
+		Blocks       []itemblocks.Carried `json:"blocks"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -159,10 +155,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "blocks: requires base_revision, the comment's revision the blocks were read at")
 			return
 		}
-		carried = &refs.CarriedEdit{BaseRevision: *input.BaseRevision, Blocks: make([]itemblocks.Carried, len(input.Blocks))}
-		for index, block := range input.Blocks {
-			carried.Blocks[index] = itemblocks.Carried{ID: block.ID, From: block.From}
-		}
+		carried = &refs.CarriedEdit{BaseRevision: *input.BaseRevision, Blocks: input.Blocks}
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -223,12 +216,11 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, referenceChanges)
+	payload, err := s.commentEventPayload(r.Context(), tx, &comment, artifactName, commentEventThread{}, referenceChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	comment.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.edited",
 		actor,
@@ -435,12 +427,11 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		events = append(events, versionEvent)
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
+	payload, err := s.commentEventPayload(r.Context(), tx, &comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	comment.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		eventType,
 		actor,

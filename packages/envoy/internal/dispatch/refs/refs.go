@@ -172,10 +172,8 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 		if uuid.Validate(fromID) != nil {
 			return nil
 		}
-		blockRefs = `update comment_block_refs set source_seq = $2 where comment_id = $1::uuid and source_seq is null`
-		if fromKind == string(ItemMessage) {
-			blockRefs = `update message_block_refs set source_seq = $2 where message_id = $1::uuid and source_seq is null`
-		}
+		tables, _ := ItemKind(fromKind).tables()
+		blockRefs = `update ` + tables.refs + ` set source_seq = $2 where ` + tables.item + ` = $1::uuid and source_seq is null`
 	default:
 		return nil
 	}
