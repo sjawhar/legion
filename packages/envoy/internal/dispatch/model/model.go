@@ -299,6 +299,18 @@ type SearchIssue struct {
 	Status string `json:"status"`
 }
 
+// SearchAsk is where an ask hit stands, read when the search ran, so a reader of the hit knows
+// whether the question still waits on a human and, once it does not, how it was settled.
+// Answer is the ask's current answer when it is answered; on a resolved ask it is the last
+// answer its ask.answered events recorded, the only place the answer survives on a row that
+// document settlement retracted while it was answered, and nil when nobody answered.
+// Answer.Selected is an empty list, never null, when the answer chose no option.
+type SearchAsk struct {
+	State      string         `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *AskAnswer     `json:"answer,omitempty"`
+	Resolution *AskResolution `json:"resolution,omitempty"`
+}
+
 // SearchResult is one ranked Dispatch search hit.
 type SearchResult struct {
 	Kind  string      `json:"kind"`
@@ -312,6 +324,9 @@ type SearchResult struct {
 	Snippet  string          `json:"snippet"`
 	Rank     float64         `json:"rank"`
 	Href     string          `json:"href"`
+	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
+	// the read of its state keeps it nil too.
+	Ask *SearchAsk `json:"ask,omitempty"`
 }
 
 // SearchResponse is one page of the fused search result list.
@@ -968,6 +983,25 @@ type AskAnswer struct {
 	At       time.Time `json:"at"`
 }
 
+// UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
+// that chose no option sends `"selected":[]`, never null, though rows and ask.answered events
+// written before answers stored an empty list hold null there.
+func (a *AskAnswer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain AskAnswer
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Selected == nil {
+		value.Selected = []string{}
+	}
+	*a = AskAnswer(value)
+	return nil
+}
+
 // OpenAskOwner identifies the issue or standalone project document holding an ask.
 type OpenAskOwner struct {
 	Issue    *OpenAskIssue    `json:"issue,omitempty"`
@@ -1068,6 +1102,21 @@ type Mention struct {
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
 }
+
+// DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
+// message_deliveries row): a sender's claim older than this was left by a sender that never came
+// back. Two readers depend on the one window and must agree. The API's claimLapsed
+// (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
+// and the outbox's mentionDeliveryQuery (internal/dispatch/outbox) stops holding a mentioned
+// session's own-topic copy back for a pending mention attempt whose claim - or creation, when no
+// sender claimed it - is older, so the outbox never waits on an attempt a sender may no longer
+// finish. Both judge it in Postgres against Postgres's own timestamps, through
+// DeliveryClaimLapseInterval.
+const DeliveryClaimLapse = time.Minute
+
+// DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
+// seconds, for SQL that compares a delivery's claimed_at or created_at against now().
+var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
 
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
@@ -1220,11 +1269,16 @@ type CommentEventPayload struct {
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
-	// so the outbox can deduplicate without consulting the live session registry.
-	// SuppressedAuthors names the sessions the claimant route and the author routes skip because a
-	// mention delivers the comment to them: every session a mention resolved to, on a new comment,
-	// a reply and a comment in an ask's thread alike, since the outbox reads the claimant, the
-	// thread's sessions and the document's authors only when it publishes.
+	// so the outbox can deduplicate without consulting the live session registry. They name
+	// candidates only: the sessions the comment's mentions resolved to when it was written. The
+	// mention's send runs after the commit and can fail, so the outbox skips a candidate's copy only
+	// once comment_deliveries shows its mention was sent to it, holds the copy back while that send
+	// is still pending, and publishes it when the send failed or was abandoned.
+	// SuppressedRoute is the route that resolved to SuppressedRouteSessionID, the candidate whose
+	// mention suppresses the route. SuppressedAuthors names the candidates the author routes and
+	// the primary document's sessions skip: every session a mention resolved to, on a new comment,
+	// a reply and a comment in an ask's thread alike, since the outbox reads the thread's sessions
+	// and the documents' authors only when it publishes.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

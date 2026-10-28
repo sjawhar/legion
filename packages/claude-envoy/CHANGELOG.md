@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -65,14 +65,15 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
 
-- The `dispatch` command (`dist/dispatch.js`) prints every open thread anchored on a document
-  `dispatch doc-read` reads in full: an open ask with its question and every reply under it, and
-  a comment thread with its root and every reply's author, time and text, in place of the one line
-  of ask and comment ids that never showed a reply. The bundled `dispatch_doc_read` description
-  says so, since `dist/` was regenerated (#2366).
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:

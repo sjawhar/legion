@@ -575,10 +575,10 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		r.expectAddressedAsRecorded(t, stay)
 	})
 
-	t.Run("a routed issue's comment is owed to the route and not the claimant", func(t *testing.T) {
+	t.Run("a routed issue's comment is owed to the route, and its claimant is addressed without being owed", func(t *testing.T) {
 		got := rowsFor(rows, routed)
-		if len(got) != 1 {
-			t.Fatalf("rows of the routed comment = %v, want one: the route", got)
+		if len(got) != 2 {
+			t.Fatalf("rows of the routed comment = %v, want two: the route, and the claimant #2225's claimant route reaches", got)
 		}
 		row := targetRow(t, rows, routed, "role:reviewer")
 		expect(t, row, map[string]string{
@@ -587,6 +587,9 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 			"route_source": fmt.Sprint(r.eventSeq(t, routedIssue, "issue.updated")),
 		})
 		r.expectAddressedAsRecorded(t, row)
+		claimant := targetRow(t, rows, routed, agent("s-worker"))
+		expect(t, claimant, map[string]string{"owed_reasons": "addressed-only", "addressed": "true"})
+		r.expectAddressedAsRecorded(t, claimant)
 	})
 
 	t.Run("a comment on an unrouted issue with its claim released has one row and no target", func(t *testing.T) {

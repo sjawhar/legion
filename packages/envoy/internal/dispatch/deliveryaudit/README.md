@@ -42,7 +42,8 @@ are the union of two sets:
   - The issue's route, when the issue has one at the time (`role:<token>` or `session:<id>`, as
     Dispatch stores it). A comment on an issue's document counts the document's issue.
   - Otherwise, the issue's claimant, when the claim belongs to a session. A person's claim, or no
-    claim, adds nothing.
+    claim, adds nothing. Since #2225 the outbox also sends a person's comment on a routed issue to
+    its session claimant; the audit lists that claimant as `addressed-only`.
   - For a reply on an ask's thread: the ask's asker, and every session that followed the ask at
     the time. Followers are rebuilt from the records that change them, because `ask_followers`
     holds only the list as it is now. The asker follows from the ask's creation. A session

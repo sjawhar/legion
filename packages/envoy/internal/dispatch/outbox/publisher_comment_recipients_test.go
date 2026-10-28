@@ -41,34 +41,23 @@ func seedThreadComment(t *testing.T, database *store.Store, issueKey, anchoredOn
 	return id
 }
 
-// claimIssue records claimant's claim on the issue key names.
-func claimIssue(t *testing.T, database *store.Store, key string, claimant model.Actor) {
-	t.Helper()
-	claimJSON, err := json.Marshal(claimant)
-	if err != nil {
-		t.Fatalf("encode claimant: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `
-		update issues set claimed_by = $2, claimed_at = now() where key = $1
-	`, key, claimJSON); err != nil {
-		t.Fatalf("claim issue %s: %v", key, err)
-	}
-}
-
 // appendCommentEvent appends a comment event on T-1 with the payload the API writes for it.
-func appendCommentEvent(t *testing.T, database *store.Store, broker *events.Broker, eventType string, actor model.Actor, comment model.Comment, suppressedAuthors ...string) model.Event {
+func appendCommentEvent(t *testing.T, database *store.Store, broker *events.Broker, eventType string, actor model.Actor, comment model.Comment, mentioned ...string) model.Event {
 	t.Helper()
-	return appendIssueCommentEvent(t, database, broker, "T-1", eventType, actor, comment, suppressedAuthors...)
+	return appendIssueCommentEvent(t, database, broker, "T-1", eventType, actor, comment, mentioned...)
 }
 
 // appendIssueCommentEvent appends a comment event on issueKey's issue with the payload the API
-// writes for it.
-func appendIssueCommentEvent(t *testing.T, database *store.Store, broker *events.Broker, issueKey, eventType string, actor model.Actor, comment model.Comment, suppressedAuthors ...string) model.Event {
+// writes for it: the comment's mentions resolved to each session of mentioned, which
+// suppressed_authors lists, as the API lists every mentioned session.
+func appendIssueCommentEvent(t *testing.T, database *store.Store, broker *events.Broker, issueKey, eventType string, actor model.Actor, comment model.Comment, mentioned ...string) model.Event {
 	t.Helper()
 	comment.IssueKey = new(issueKey)
 	comment.Author = actor
-	if suppressedAuthors == nil {
-		suppressedAuthors = []string{}
+	suppressedAuthors := []string{}
+	for _, sessionID := range mentioned {
+		comment.Mentions = append(comment.Mentions, mentionOf(sessionID)...)
+		suppressedAuthors = append(suppressedAuthors, sessionID)
 	}
 	return appendEvent(t, database, broker, model.Event{
 		IssueKey: new(issueKey),
@@ -105,7 +94,8 @@ type recipientCheck struct {
 
 // TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions appends comment events as the API
 // writes them, runs one batch of the outbox over them, and reads which sessions' own topics each
-// event reached. The claim and the route come from the issue's row, as the outbox reads them.
+// event reached. The claim and the route come from the issue's row, as the outbox reads them. The
+// claimant's copy is #2225's (publishClaimantRoute); the thread's sessions are #2366's.
 func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -131,9 +121,21 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 				reopened := appendCommentEvent(t, database, broker, "comment.reopened", sami, model.Comment{ID: root, Anchor: &model.Anchor{ArtifactID: spec}})
 				created := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: reply, ReplyTo: &root})
 				return []recipientCheck{
-					{event: reopened, want: []string{}},
+					{event: reopened, want: []string{claimant.ID}},
 					{event: created, want: []string{claimant.ID, writer.ID}},
 				}
+			},
+		},
+		{
+			name: "a claimant who also wrote in the thread gets one copy of a person's reply",
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
+				claimIssue(t, database, "T-1", claimant)
+				root := seedThreadComment(t, database, "T-1", "", claimant, nil)
+				seedThreadComment(t, database, "T-1", "", replier, &root)
+				seedThreadComment(t, database, "T-1", "", claimant, &root)
+				reply := seedThreadComment(t, database, "T-1", "", sami, &root)
+				created := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: reply, ReplyTo: &root})
+				return []recipientCheck{{event: created, want: []string{claimant.ID, replier.ID}}}
 			},
 		},
 		{
@@ -148,7 +150,7 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 			},
 		},
 		{
-			name:  "a routed issue reaches the route's holder and the thread's sessions, not the claimant",
+			name:  "a reply on a routed claimed issue reaches the route's holder, the claimant and the thread's sessions",
 			route: new("session:session-holder"),
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
 				claimIssue(t, database, "T-1", claimant)
@@ -156,19 +158,24 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 				seedThreadComment(t, database, "T-1", "", replier, &root)
 				reply := seedThreadComment(t, database, "T-1", "", alice, &root)
 				created := appendCommentEvent(t, database, broker, "comment.created", alice, model.Comment{ID: reply, ReplyTo: &root})
-				return []recipientCheck{{event: created, want: []string{"session-holder", replier.ID}}}
+				return []recipientCheck{{event: created, want: []string{"session-holder", claimant.ID, replier.ID}}}
 			},
 		},
 		{
-			name: "a claimant the reply mentions is left to the mention",
+			name: "a thread session the reply mentions is left to the mention once it delivered, and published to when it failed",
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
 				claimIssue(t, database, "T-1", claimant)
 				root := seedThreadComment(t, database, "T-1", "", alice, nil)
 				seedThreadComment(t, database, "T-1", "", claimant, &root)
 				seedThreadComment(t, database, "T-1", "", replier, &root)
+				seedThreadComment(t, database, "T-1", "", rooter, &root)
 				reply := seedThreadComment(t, database, "T-1", "", alice, &root)
-				created := appendCommentEvent(t, database, broker, "comment.created", alice, model.Comment{ID: reply, ReplyTo: &root}, claimant.ID)
-				return []recipientCheck{{event: created, want: []string{replier.ID}}}
+				seedMentionDelivery(t, database, reply, claimant.ID, "sent")
+				seedMentionDelivery(t, database, reply, replier.ID, "sent")
+				seedMentionDelivery(t, database, reply, rooter.ID, "failed")
+				created := appendCommentEvent(t, database, broker, "comment.created", alice, model.Comment{ID: reply, ReplyTo: &root},
+					claimant.ID, replier.ID, rooter.ID)
+				return []recipientCheck{{event: created, want: []string{rooter.ID}}}
 			},
 		},
 		{
@@ -183,7 +190,7 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 			},
 		},
 		{
-			name: "the reopening a reply makes reaches the thread's root author only, and the reply reaches everyone",
+			name: "the reopening a reply makes reaches the claimant and the thread's root author, and the reply reaches everyone",
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
 				claimIssue(t, database, "T-1", claimant)
 				spec := seedDocument(t, database, new("T-1"), "spec", writer, []model.Actor{writer})
@@ -193,7 +200,7 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 				reopened := appendCommentEvent(t, database, broker, "comment.reopened", alice, model.Comment{ID: root, Anchor: &model.Anchor{ArtifactID: spec}})
 				created := appendCommentEvent(t, database, broker, "comment.created", alice, model.Comment{ID: reply, ReplyTo: &root})
 				return []recipientCheck{
-					{event: reopened, want: []string{rooter.ID}},
+					{event: reopened, want: []string{claimant.ID, rooter.ID}},
 					{event: created, want: []string{claimant.ID, rooter.ID, replier.ID, writer.ID}},
 				}
 			},
@@ -274,9 +281,9 @@ func seedSpec(t *testing.T, database *store.Store, issueKey string, creator mode
 
 // TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions covers #2366: a
 // person's comment on an issue with no route and no session claim reaches the sessions the issue's
-// primary document credits, in the claimant's place. The spec of each case credits session-spec
-// (its creator) and session-editor, and also a person and a session credit with no id, which have
-// no topic.
+// primary document credits, where a session claimant would get #2225's copy. The spec of each case
+// credits session-spec (its creator) and session-editor, and also a person and a session credit
+// with no id, which have no topic.
 func TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions(t *testing.T) {
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -370,11 +377,18 @@ func TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions(t *
 			},
 		},
 		{
-			name: "a spec session the comment mentions is left to the mention",
+			name: "a spec session the comment mentions is left to the mention once it delivered, and published to when it failed",
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker, spec string) []recipientCheck {
-				mentioning := seedThreadComment(t, database, "T-1", "", sami, nil)
-				mentioned := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: mentioning}, editor.ID)
-				return []recipientCheck{{event: mentioned, want: []string{specWriter.ID}}}
+				delivered := seedThreadComment(t, database, "T-1", "", sami, nil)
+				seedMentionDelivery(t, database, delivered, editor.ID, "sent")
+				failed := seedThreadComment(t, database, "T-1", "", sami, nil)
+				seedMentionDelivery(t, database, failed, editor.ID, "failed")
+				onDelivered := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: delivered}, editor.ID)
+				onFailed := appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: failed}, editor.ID)
+				return []recipientCheck{
+					{event: onDelivered, want: []string{specWriter.ID}},
+					{event: onFailed, want: specSessions},
+				}
 			},
 		},
 		{
@@ -520,9 +534,9 @@ func appendIssueMessage(t *testing.T, database *store.Store, broker *events.Brok
 }
 
 // A recipient query that fails fails the comment event that needed it at the step that needed it,
-// as the lookup did when it ran per event: the event's owner topic and its route are published and
-// recorded first, so the issue's subject still gets the event in id order and the retry sends only
-// the rest. The batch's other events publish as they would have.
+// as the lookup did when it ran per event: the event's owner topic, its route and its claimant are
+// published and recorded first, so the issue's subject still gets the event in id order and the
+// retry sends only the rest. The batch's other events publish as they would have.
 func TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTopic(t *testing.T) {
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -548,17 +562,18 @@ func TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTo
 			wantMessages: []string{messageTopic},
 		},
 		{
-			name:  "a reply's thread sessions, on a routed issue",
+			name:  "a reply's thread sessions, on a routed claimed issue",
 			route: new("role:reviewer"),
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) model.Event {
+				claimIssue(t, database, "T-1", model.Actor{Kind: "session", ID: "session-claimant"})
 				spec := seedDocument(t, database, new("T-1"), "spec", writer, []model.Actor{writer})
 				breakDocumentCredits(t, database, spec)
 				root := seedThreadComment(t, database, "T-1", spec, alice, nil)
 				reply := seedThreadComment(t, database, "T-1", "", sami, &root)
 				return appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: reply, ReplyTo: &root})
 			},
-			wantComment:  []string{commentTopic, roleTopic},
-			wantMessages: []string{messageTopic, roleTopic},
+			wantComment:  []string{commentTopic, roleTopic, contracts.AgentSubject("session-claimant")},
+			wantMessages: []string{messageTopic, roleTopic, contracts.AgentSubject("session-claimant")},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

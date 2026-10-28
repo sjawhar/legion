@@ -425,11 +425,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			suppressedRouteSessionID = route.sessionID
 		}
 	}
-	// A session a mention delivers this comment to hears it from the mention alone: the claimant
-	// route and the author routes skip it (suppressed_authors). The outbox reads the claimant, the
-	// thread's sessions and the document's authors only when it publishes, so every session a
-	// mention resolved to is named, on a new comment, a reply and an ask's thread alike. The ask's
-	// follower routes do not read the list.
+	// A session a mention delivers this comment to hears it from the mention alone: the
+	// primary-document and author routes skip it once its mention is sent (suppressed_authors).
+	// The outbox reads the thread's sessions and the documents' authors only when it publishes, so
+	// every session a mention resolved to is named, on a new comment, a reply and an ask's thread
+	// alike. The claimant and follower routes read the comment's mentions instead.
 	// Never nil: an empty list encodes as [].
 	suppressedAuthors := slices.Sorted(maps.Keys(mentionedSessions))
 	if suppressedAuthors == nil {

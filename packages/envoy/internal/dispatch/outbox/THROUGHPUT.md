@@ -31,12 +31,17 @@ The test requires 25 ev/s. The old design fails it in every case.
 
 ## Comment replies to the claimant and the thread (2026-10-27, sjawhar/legion#2366)
 
-This change sends a person's comment on an issue with no route to the session that claimed the
-issue. When no session claimed the issue, it sends the comment to every session that wrote the
-issue's primary document. It also sends a reply to every session in its thread and to every
-session that wrote the thread's document. The outbox reads the claimant in its scan. For the
-whole batch, it reads the threads' sessions in one query (`loadCommentRecipients`) and the
-primary documents' sessions in one query (`loadPrimaryDocumentAuthors`).
+This change, as measured, sent a person's comment on an issue with no route to the session that
+claimed the issue. When no session claimed the issue, it sends the comment to every session that
+wrote the issue's primary document. It also sends a reply to every session in its thread and to
+every session that wrote the thread's document. For the whole batch, it reads the threads'
+sessions in one query (`loadCommentRecipients`) and the primary documents' sessions in one query
+(`loadPrimaryDocumentAuthors`).
+
+Since the merge with #2225, the claimant's copy comes from main's claimant route
+(`publishClaimantRoute`, the claim read in the scan), on a routed issue too; no load here has a
+claimed routed issue, so each load's stream count is unchanged and the runs below were not
+repeated.
 
 Method: the test has three loads. Each has 200 events across 20 issues, so each batch of 100 has
 every kind of event in its load.

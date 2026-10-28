@@ -1,22 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Changed
 
-- `dispatch doc-read` prints every open thread anchored on the document in full, after the
-  document token and approval lines, under `Open anchored threads:`: an open ask as
-  `ask <id> · <author> · <time>`, its quote and `Question: <question>`; a comment thread as
-  `comment <id> · <author> · <time>`, its quote and `Body: <text>`. Under either, each reply
-  follows as `reply <id> · <author> · <time>` and `Body: <text>`, oldest first, none cut: an ask's
-  replies are the comments whose `ask_id` names it. It replaces the
-  `Open anchored asks/comments: ask <id>, comment <id>` line, which named a thread a person had
-  reopened by replying by its root's id alone and never showed the reply. A resolved thread, and
-  an ask that is answered or resolved, is not printed, nor are its replies. The threads come from
-  one read of the issue's comments without the `artifact` filter (a reply carries no anchor, so
-  the filter dropped every reply), or of a project document's own
-  `GET /api/v1/artifacts/{id}/comments`, grouped by ask or root; `DispatchClient.getComments`
-  loses its `artifact` argument (#2366).
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
 - `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
@@ -197,6 +184,15 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
 
 - `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
   envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse

@@ -107,11 +107,27 @@ All of them are kept in the stream. Some are also delivered straight to an agent
 - A person's reply to a comment reaches every session that wrote a comment in its thread, and
   every session that wrote the document the thread is on. A person's new comment on a document
   reaches every session that wrote the document. Each arrives on the session's own inbox topic.
-- On an issue with no route, a person's comment, and its edit, reach the session that claimed the
-  issue, on its own inbox topic. When no session holds the claim, they reach every session that
-  wrote the issue's spec (its primary document) instead.
+- The session holding an issue's claim gets, on its own inbox topic, a person's answers,
+  hand-backs and resolutions of asks, comments (new, edited, resolved or reopened) and messages on
+  that issue. A message a person sends to one session reaches only that session. Dispatch reads
+  the claim when it publishes the event, so a retry after the claim changed hands reaches the new
+  holder.
+- On an issue with no route and no session holding its claim, a person's comment, and its edit,
+  reach every session that wrote the issue's spec (its primary document), on its own inbox topic.
 
-Anything else on an issue reaches an agent only if the agent subscribes to it.
+A session reached more than one of these ways gets one copy. A new comment that mentions a session
+arrives there once, as the mention, when the mention reached it; when the mention's send fails,
+the session still gets the comment on its own inbox topic, as the route, a follower, an author or
+the claimant. While the mention is still being sent, for up to a minute, Dispatch holds that copy
+back and checks again a few seconds later. One copy is not guaranteed: when the mention's receipt
+times out, or its send is stranded for over a minute, Dispatch records it as failed though it may
+have landed, so the session can get the comment twice, once as the mention and once on its inbox
+topic. A session treats the second copy as the same comment. A comment's edit, resolution or
+reopening reaches every one of these sessions, mentioned or not, and is not held back with the new
+comment: while the new comment waits on its mention, an edit to it can arrive first. A session that
+gets an edit, resolution or reopening of a comment it has not seen yet should expect the comment
+to follow. Anything else on an issue, including every event an agent makes outside an ask the
+session follows, reaches an agent only if the agent subscribes to it.
 [Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this from the agent's
 side. Because the stream keeps them, an agent whose connection was down when one of these was
 published still gets it when it reconnects
@@ -121,7 +137,7 @@ published still gets it when it reconnects
 
 | Topic | What it is |
 | --- | --- |
-| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, comments on an unrouted issue it claimed or, with no session claim, whose spec it wrote, and claim changes arrive here. |
+| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, comments on an issue with no route and no session claim whose spec it wrote, and claim changes arrive here. |
 | `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |

@@ -34,10 +34,9 @@ func answered(err error) <-chan error {
 
 // publish runs one attempt of event to its end, as scanBatch does for each event of a batch, with
 // the comment recipients read as scanBatch reads a batch's (resolveCommentRecipients), and returns
-// why it failed. The claimant is not read: a test of it goes through scanBatch, which reads it from
-// the issue's row.
-func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
-	pending := []pendingEvent{{event: event, slug: slug, route: route}}
+// why it did not finish: errMentionPending when it held a mentioned session's copy back.
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, routing routing, delivered map[string]struct{}) error {
+	pending := []pendingEvent{{event: event, slug: slug, routing: routing}}
 	resolveCommentRecipients(ctx, deps, pending)
 	a := send(ctx, deps, deps.Publisher.Window(), pending[0], delivered)
 	a.wait(ctx)
