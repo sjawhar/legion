@@ -244,23 +244,22 @@ func (f *fakeLease) exclusive(ctx context.Context, _ Leases, name string, period
 	return true
 }
 
-// A pass refused its lease is retried every HeldRetry, plus up to a tenth again, until a pass of
+// A pass refused its lease is retried every MinGap, plus up to a tenth again, until a pass of
 // its own runs, with no wake: the process holding the lease may have read before the change that
 // woke this loop. Once it has run, the loop is idle again. Every attempt goes through the lease
 // named for the loop, with no period.
 func TestARefusedLeaseIsRetriedUntilAPassOfItsOwnRuns(t *testing.T) {
-	const heldRetry = 2 * time.Second
+	const minGap = 2 * time.Second
 	fixJitter(t, func(n time.Duration) time.Duration { return n - 1 })
 	synctest.Test(t, func(t *testing.T) {
 		var passes passClock
 		lease := &fakeLease{refusals: 3}
 		booted := time.Now()
 		cancel, done := runLoop(WokenLoop{
-			Lease:     "suggestion-outcomes",
-			Wake:      make(chan struct{}, 1),
-			MinGap:    time.Second,
-			HeldRetry: heldRetry,
-			Pass:      func(context.Context) time.Time { passes.record(); return time.Time{} },
+			Lease:  "suggestion-outcomes",
+			Wake:   make(chan struct{}, 1),
+			MinGap: minGap,
+			Pass:   func(context.Context) time.Time { passes.record(); return time.Time{} },
 		}, lease.exclusive)
 		time.Sleep(time.Hour)
 		stop(cancel, done)
@@ -271,8 +270,8 @@ func TestARefusedLeaseIsRetriedUntilAPassOfItsOwnRuns(t *testing.T) {
 			t.Fatalf("attempts = %d, want 3 refused and the one that ran", len(lease.attempts))
 		}
 		for i := 1; i < len(lease.attempts); i++ {
-			if gap := lease.attempts[i].Sub(lease.attempts[i-1]); gap < heldRetry || gap >= heldRetry+heldRetry/10 {
-				t.Errorf("retry %d came %v after the refusal, want within [%v, %v)", i, gap, heldRetry, heldRetry+heldRetry/10)
+			if gap := lease.attempts[i].Sub(lease.attempts[i-1]); gap < minGap || gap >= minGap+minGap/10 {
+				t.Errorf("retry %d came %v after the refusal, want within [%v, %v)", i, gap, minGap, minGap+minGap/10)
 			}
 		}
 		for i := range lease.attempts {
@@ -310,7 +309,7 @@ func TestAWokenLoopReturnsAtOnceWhenItsContextEnds(t *testing.T) {
 	t.Run("waiting to retry a refused lease", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			lease := &fakeLease{refusals: 1 << 30}
-			cancel, done := runLoop(WokenLoop{Lease: "l", HeldRetry: time.Hour, Pass: idlePass}, lease.exclusive)
+			cancel, done := runLoop(WokenLoop{Lease: "l", MinGap: time.Hour, Pass: idlePass}, lease.exclusive)
 			returnsAtOnce(t, cancel, done)
 		})
 	})
@@ -332,7 +331,7 @@ func TestAWokenLoopReturnsAtOnceWhenItsContextEnds(t *testing.T) {
 				cancel()
 				return false
 			}
-			loop := WokenLoop{Lease: "l", HeldRetry: time.Second, Pass: idlePass}
+			loop := WokenLoop{Lease: "l", MinGap: time.Second, Pass: idlePass}
 			loop.run(ctx, cutShort)
 			if attempts != 1 {
 				t.Errorf("attempts = %d, want the one shutdown cut short", attempts)
@@ -365,11 +364,11 @@ func TestRunWokenRetriesALeaseHeldElsewhereUntilThePassRuns(t *testing.T) {
 	go func() {
 		defer close(done)
 		RunWoken(loopCtx, WokenLoop{
-			Lease:     name,
-			Leases:    leases,
-			Wake:      make(chan struct{}, 1),
-			HeldRetry: 50 * time.Millisecond,
-			Pass:      func(context.Context) time.Time { ran <- struct{}{}; return time.Time{} },
+			Lease:  name,
+			Leases: leases,
+			Wake:   make(chan struct{}, 1),
+			MinGap: 50 * time.Millisecond,
+			Pass:   func(context.Context) time.Time { ran <- struct{}{}; return time.Time{} },
 		})
 	}()
 	defer func() {

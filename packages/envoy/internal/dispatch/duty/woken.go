@@ -24,14 +24,13 @@ type WokenLoop struct {
 	// MinGap is the least time from the start of one pass to the start of the next, whatever
 	// woke it: wakes that arrive sooner collapse into the one pass at the end of the gap, so a
 	// loop under load runs no more often than once per MinGap - the period of the timer it
-	// replaces - and an idle one not at all.
+	// replaces - and an idle one not at all. It is also how long a leased loop waits, plus up to
+	// a tenth again, before trying once more after an attempt whose pass did not run: the lease
+	// was held by another process, or could not be taken. It must be positive when Lease is
+	// set. The retry is what keeps a wake from being lost to the other process's pass, which may
+	// have read before the change that woke this one; the loop keeps trying until a pass of its
+	// own runs.
 	MinGap time.Duration
-	// HeldRetry is how long a leased loop waits, plus up to a tenth again, before trying once
-	// more after an attempt whose pass did not run: the lease was held by another process, or
-	// could not be taken. It must be positive when Lease is set. The retry is what keeps a wake
-	// from being lost to the other process's pass, which may have read before the change that
-	// woke this one; the loop keeps trying until a pass of its own runs.
-	HeldRetry time.Duration
 	// Pass does the work, on the loop's goroutine, and returns when the loop next needs to run
 	// with no wake - an attempt's retry time, a claim's expiry - or the zero time for never.
 	// Each pass's answer replaces the last one's, and a due time is held to MinGap like a wake.
@@ -50,7 +49,7 @@ type exclusiveFunc func(ctx context.Context, leases Leases, name string, period 
 // A leased loop runs each pass under Exclusive with no period, which is mutual exclusion and
 // nothing else, and the lease name passes through Exclusive like every other loop's. An attempt
 // Exclusive reports did not run - the lease held elsewhere, or a failure to take it - is retried
-// every loop.HeldRetry until one runs: the other process's pass may have read before the change,
+// every loop.MinGap until one runs: the other process's pass may have read before the change,
 // and a failure must neither spin nor drop the wake. A pass shutdown cut short also reports it
 // did not run, and the loop returns then rather than retrying.
 func RunWoken(ctx context.Context, loop WokenLoop) {
@@ -58,8 +57,8 @@ func RunWoken(ctx context.Context, loop WokenLoop) {
 }
 
 func (l WokenLoop) run(ctx context.Context, exclusive exclusiveFunc) {
-	if l.Lease != "" && l.HeldRetry <= 0 {
-		panic("duty: a leased WokenLoop needs a positive HeldRetry")
+	if l.Lease != "" && l.MinGap <= 0 {
+		panic("duty: a leased WokenLoop needs a positive MinGap")
 	}
 	var (
 		// owed is whether a pass is owed regardless of any due time: the boot pass, a wake, or an
@@ -116,7 +115,7 @@ func (l WokenLoop) run(ctx context.Context, exclusive exclusiveFunc) {
 			return
 		}
 		owed = true
-		notBefore = later(notBefore, time.Now().Add(Jittered(l.HeldRetry)))
+		notBefore = later(notBefore, time.Now().Add(Jittered(l.MinGap)))
 	}
 }
 

@@ -1,4 +1,4 @@
--- 0139_write_suggestions_swept.up.sql
+-- 0140_write_suggestions_swept.up.sql
 -- Which suggestions the outcome sweep (api.RunSuggestionOutcomeSweep) has yet to judge against
 -- every event of theirs. A pass reads the event log after its cursor (suggestion_outcome_cursor,
 -- migration 0139), but a suggestion is recorded after its write commits, outside the events'

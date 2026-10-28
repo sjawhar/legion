@@ -21,9 +21,9 @@ import (
 // on the hub - a loop runs its boot pass whether or not the listener has connected yet, and the
 // signal after the first LISTEN costs it one more pass at most.
 //
-// Everything is registered before Run: Handle, Wake, OnConnected and OnDisconnected panic once Run
-// has started, because the listener's LISTEN statement and callbacks are fixed when it starts and
-// a channel registered later would never be heard.
+// Everything is registered before Run: Wake and OnConnected panic once Run has started, because
+// the listener's LISTEN statement and callbacks are fixed when it starts and a channel registered
+// later would never be heard.
 type Hub struct {
 	// Owner names the subsystem in the listener's log line (Listener.Owner).
 	Owner string
@@ -35,32 +35,18 @@ type Hub struct {
 	PingTimeout time.Duration
 	Backoff     func(attempt int) time.Duration
 
-	mu           sync.Mutex
-	started      bool
-	channels     []string
-	handlers     map[string][]func(Notification)
-	wakes        map[string][]chan struct{}
-	connected    []func()
-	disconnected []func()
-}
-
-// Handle calls fn with each notification on channel, on the listener's goroutine, so slow work in
-// fn delays every channel's notifications behind it. channel is spliced into the LISTEN statement
-// as written (Listener.Channels): a package constant, never a value read from a request.
-func (h *Hub) Handle(channel string, fn func(Notification)) {
-	h.register(func() {
-		h.listenOn(channel)
-		if h.handlers == nil {
-			h.handlers = make(map[string][]func(Notification))
-		}
-		h.handlers[channel] = append(h.handlers[channel], fn)
-	})
+	mu        sync.Mutex
+	started   bool
+	channels  []string
+	wakes     map[string][]chan struct{}
+	connected []func()
 }
 
 // Wake returns a channel of its own, with a buffer of one, that is signalled on each notification
 // on channel and after every successful LISTEN. The send never blocks, so any number of signals
 // before the subscriber reads collapse into one, and a signal that arrives while the subscriber is
-// busy waits in the buffer. Each call is a separate subscriber.
+// busy waits in the buffer. Each call is a separate subscriber. channel is spliced into the LISTEN
+// statement as written (Listener.Channels): a package constant, never a value read from a request.
 func (h *Hub) Wake(channel string) <-chan struct{} {
 	wake := make(chan struct{}, 1)
 	h.register(func() {
@@ -79,13 +65,6 @@ func (h *Hub) OnConnected(fn func()) {
 	h.register(func() { h.connected = append(h.connected, fn) })
 }
 
-// OnDisconnected adds fn to what runs when a connection that had listened is lost, on the
-// listener's goroutine (Listener.OnDisconnected): from then until the next OnConnected,
-// notifications are missed.
-func (h *Hub) OnDisconnected(fn func()) {
-	h.register(func() { h.disconnected = append(h.disconnected, fn) })
-}
-
 // Run runs one Listener on every registered channel until ctx ends. A hub with no channel
 // registered opens no connection, and Run only waits for ctx.
 func (h *Hub) Run(ctx context.Context) {
@@ -101,15 +80,14 @@ func (h *Hub) Run(ctx context.Context) {
 		return
 	}
 	listener := &Listener{
-		Owner:          h.Owner,
-		Dial:           h.Dial,
-		Channels:       h.channels,
-		ListenIdle:     h.ListenIdle,
-		PingTimeout:    h.PingTimeout,
-		Backoff:        h.Backoff,
-		OnConnected:    h.onConnected,
-		OnDisconnected: h.onDisconnected,
-		OnNotification: h.onNotification,
+		Owner:       h.Owner,
+		Dial:        h.Dial,
+		Channels:    h.channels,
+		ListenIdle:  h.ListenIdle,
+		PingTimeout: h.PingTimeout,
+		Backoff:     h.Backoff,
+		OnConnected: h.onConnected,
+		OnNotify:    h.onNotify,
 	}
 	listener.Run(ctx)
 }
@@ -143,20 +121,10 @@ func (h *Hub) onConnected() {
 	}
 }
 
-func (h *Hub) onDisconnected() {
-	for _, fn := range h.disconnected {
-		fn()
-	}
-}
-
-// onNotification signals the channel's wakes before calling its handlers, so a slow handler does
-// not hold back a loop waiting on the same change.
-func (h *Hub) onNotification(n Notification) {
-	for _, wake := range h.wakes[n.Channel] {
+// onNotify signals the channel's wakes.
+func (h *Hub) onNotify(channel, _ string) {
+	for _, wake := range h.wakes[channel] {
 		signalWake(wake)
-	}
-	for _, fn := range h.handlers[n.Channel] {
-		fn(n)
 	}
 }
 

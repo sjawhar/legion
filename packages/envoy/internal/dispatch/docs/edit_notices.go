@@ -185,12 +185,11 @@ func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases, wake <
 func (s *Service) runEditNotices(ctx context.Context, leases duty.Leases, wake <-chan struct{}, schedule editNoticeSchedule) {
 	ctx = store.WithTransactionTracking(ctx)
 	duty.RunWoken(ctx, duty.WokenLoop{
-		Lease:     editNoticeLease,
-		Leases:    leases,
-		Wake:      wake,
-		MinGap:    schedule.minGap,
-		HeldRetry: schedule.minGap,
-		Pass:      s.editNoticePass,
+		Lease:  editNoticeLease,
+		Leases: leases,
+		Wake:   wake,
+		MinGap: schedule.minGap,
+		Pass:   s.editNoticePass,
 	})
 }
 

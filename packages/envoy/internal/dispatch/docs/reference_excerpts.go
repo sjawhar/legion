@@ -161,11 +161,10 @@ func (s *Service) runReferenceExcerptReconciliation(ctx context.Context, leases 
 	// failed is tried again by the next pass that runs.
 	marked := false
 	duty.RunWoken(ctx, duty.WokenLoop{
-		Lease:     referenceExcerptLease,
-		Leases:    leases,
-		Wake:      wake,
-		MinGap:    schedule.minGap,
-		HeldRetry: schedule.minGap,
+		Lease:  referenceExcerptLease,
+		Leases: leases,
+		Wake:   wake,
+		MinGap: schedule.minGap,
 		Pass: func(ctx context.Context) time.Time {
 			if !marked {
 				marked = s.markStaleExcerpts(ctx)

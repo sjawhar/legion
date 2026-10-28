@@ -1201,7 +1201,7 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // whichever took the lease. reference-excerpts is a woken loop
 // (docs.RunReferenceExcerptReconciliation) that runs a pass at start and again on the
 // pglisten.Hub wake after its first LISTEN: the process that found the lease held retries (every
-// two seconds, its HeldRetry) until it runs a pass of its own, because the other's pass may have
+// two seconds, its MinGap) until it runs a pass of its own, because the other's pass may have
 // read before whatever woke it, so after the release each process runs at least one pass and no
 // count is held to one. suggestion-outcomes, a woken loop too, has a row of its own below. The
 // other five are not observable, and this row says so rather than pretending:
@@ -1285,7 +1285,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 // passes meet. The one holding the lease waits inside its first statement - the read of the cursor
 // row it holds for update, behind a lock this test takes - and the other finds the lease held and
 // runs nothing beside it. Once the lock lets go, the other keeps retrying (every minute, its
-// HeldRetry) until it runs a pass of its own: the first process's pass may have read before
+// MinGap) until it runs a pass of its own: the first process's pass may have read before
 // whatever woke the second, so a woken loop never gives its pass up to another process's.
 func TestTheSuggestionOutcomeSweepNeverPassesAtOnceAcrossBothProcessesAndBothPass(t *testing.T) {
 	pair := newPair(t)

@@ -416,11 +416,10 @@ func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, leases dut
 func runSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, leases duty.Leases, wake <-chan struct{}, schedule suggestionSchedule) {
 	ctx = store.WithTransactionTracking(ctx)
 	duty.RunWoken(ctx, duty.WokenLoop{
-		Lease:     suggestionOutcomeLease,
-		Leases:    leases,
-		Wake:      wake,
-		MinGap:    schedule.minGap,
-		HeldRetry: schedule.minGap,
+		Lease:  suggestionOutcomeLease,
+		Leases: leases,
+		Wake:   wake,
+		MinGap: schedule.minGap,
 		Pass: func(ctx context.Context) time.Time {
 			next, err := sweepSuggestionOutcomePages(ctx, pool, schedule.page, schedule.settle)
 			switch {

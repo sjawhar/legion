@@ -1,4 +1,4 @@
--- 0138_suggestion_outcome_cursor.up.sql
+-- 0139_suggestion_outcome_cursor.up.sql
 -- How far the suggestion outcome sweep (api.RunSuggestionOutcomeSweep) has read the event log: one
 -- row, whose event_id is the highest events.id a pass has judged the pending write_suggestions
 -- against. A pass reads only the events after it, and judges only the pending suggestions those
