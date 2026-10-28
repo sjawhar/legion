@@ -1,5 +1,7 @@
 kind: Changed
 body: |-
   Dispatch's document settlement lists a document's comment and ask marks without computing the
-  position of every node, which took a quarter to two thirds of a render on a large spec; the
-  marks it lists, the versions it writes and every API response are unchanged.
+  position of every node, which took a quarter to two thirds of a render on a large spec, and reads
+  the marks its comments and asks record through the `comments_anchor_artifact` and
+  `asks_anchor_artifact` indexes instead of scanning both tables; the marks it lists, the versions
+  it writes and every API response are unchanged.
