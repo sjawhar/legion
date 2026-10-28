@@ -126,6 +126,38 @@ test("an ordered marker whose number is not 1 does not interrupt a paragraph, so
   expect(stdout).not.toContain("R2");
 });
 
+/** `count` lines, each one sentence, indented by `indent`. */
+function sentenceLines(count: number, indent: string, word: string) {
+  return Array.from({ length: count }, (_, n) => `${indent}${word} ${n + 1}.\n`).join("");
+}
+
+test("R3 does not count a nested list toward its parent: a short parent passes", async () => {
+  // The 30 nested items and the blank lines between them run 60 screen rows.
+  const nested = Array.from({ length: 30 }, (_, n) => `  - Nested item ${n + 1}.\n`).join("\n");
+  const path = await markdownFile(`- Parent item.\n\n${nested}`);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("R3 reports a nested item longer than one screen at the nested item, not its parent", async () => {
+  const path = await markdownFile(
+    `- Parent item.\n\n  - Nested item.\n${sentenceLines(55, "    ", "Line")}`
+  );
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe(`${path}:3: R3: 56 screen rows: - Nested item.\n`);
+  expect(exitCode).toBe(1);
+});
+
+test("R3 counts a parent's paragraph after its nested list toward the parent", async () => {
+  const path = await markdownFile(
+    `- Parent item.\n\n  - Nested item.\n\n${sentenceLines(50, "  ", "Continuation")}`
+  );
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe(`${path}:1: R3: 52 screen rows: - Parent item.\n`);
+  expect(exitCode).toBe(1);
+});
+
 test("--write does not join a 01. item into the paragraph above it: 01. starts at 1, so it interrupts", async () => {
   const result = await written("A paragraph line\n01. An item.\n");
   expect(result.text.split("\n")).toContain("01. An item.");

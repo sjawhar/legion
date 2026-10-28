@@ -1,6 +1,7 @@
 // Checks and re-lays out the semantic line breaks of a markdown file, so concurrent edits to it
 // touch different lines: one sentence per line (R1), a blank line before each list item (R2), and
-// no list item or table row longer than one screen (R3). It is not a CI gate:
+// no list item or table row longer than one screen (R3, which counts a nested item's lines toward
+// that item, not toward its parent). It is not a CI gate:
 // packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
 // `--write` fixes it by changing only whitespace.
 //
@@ -40,7 +41,7 @@ const PARSER_MISSING =
 
 const USAGE = "usage: bun scripts/semantic-line-breaks.ts [--write] <file.md>...\n";
 
-/** A list item or table row longer than this many screen rows fails R3. */
+/** A list item's own lines, or a table row, longer than this many screen rows fails R3. */
 const MAX_SCREEN_ROWS = 50;
 const SCREEN_WIDTH = 100;
 /** `--write` breaks a line longer than this after `; ` or `: `, or before ` —`. */
@@ -208,6 +209,11 @@ interface VerbatimFrom {
 interface Blocks {
   lines: LineInfo[];
   items: ListItem[];
+  /**
+   * The innermost list item open at each line, if any. A blank line is still inside the item
+   * above it: only a later non-blank line can close an item.
+   */
+  owners: (ListItem | undefined)[];
   /** Where markVerbatim found the first verbatim open, if anywhere. */
   verbatimFrom?: VerbatimFrom;
 }
@@ -389,6 +395,7 @@ function scanBlocks(source: readonly string[]): Blocks {
   const lines: LineInfo[] = [];
   const items: ListItem[] = [];
   const open: ListItem[] = [];
+  const owners: (ListItem | undefined)[] = [];
   let paragraph: Paragraph | undefined;
   let fence: Fence | undefined;
   /** What ends the open HTML block; for BLANK (kinds 6 and 7) the blank line is outside it. */
@@ -515,6 +522,7 @@ function scanBlocks(source: readonly string[]): Blocks {
   for (const [index, line] of source.entries()) {
     if (index <= frontMatter) {
       lines.push(info("other"));
+      owners.push(undefined);
       continue;
     }
     // A fence or HTML block inside a list item ends with the item.
@@ -551,9 +559,11 @@ function scanBlocks(source: readonly string[]): Blocks {
       lines.push(blockLine(index, line, source[index + 1]));
     }
     if (!isBlank(line)) for (const item of open) item.last = index;
+    owners.push(open.at(-1));
   }
   const verbatimFrom = markVerbatim(source, lines, frontMatter + 1);
-  return verbatimFrom === undefined ? { lines, items } : { lines, items, verbatimFrom };
+  const blocks = { lines, items, owners };
+  return verbatimFrom === undefined ? blocks : { ...blocks, verbatimFrom };
 }
 
 /**
@@ -1118,8 +1128,17 @@ function check(text: string): Finding[] {
       }
     }
   }
-  for (const item of blocks.items) {
-    const rows = screenRows(lines.slice(item.first, item.last + 1));
+  // R3 counts an item's own lines. Each line inside a list item (from its first line to its last
+  // non-blank one), blank lines included, counts toward the innermost item open at that line. So a
+  // nested item is checked on its own, and text after a nested list counts toward its parent.
+  const inside = new Array<boolean>(lines.length).fill(false);
+  for (const item of blocks.items) inside.fill(true, item.first, item.last + 1);
+  const own = new Map<ListItem, number>();
+  for (const [index, line] of lines.entries()) {
+    const owner = blocks.owners[index];
+    if (inside[index] && owner) own.set(owner, (own.get(owner) ?? 0) + screenRows([line]));
+  }
+  for (const [item, rows] of own) {
     if (rows > MAX_SCREEN_ROWS) {
       const message = `${rows} screen rows: ${excerpt(lines[item.first] ?? "", 0)}`;
       findings.push({ line: item.first, rule: 3, message });
