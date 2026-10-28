@@ -2,45 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T15:45:00Z",
-  "round": 10,
-  "headTested": "3d988c68588d82d4c99dc30736b048ec87b8d177 (code head 2e8dde76; meta.json build_commit 3d988c68, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120), reseeded with the merged build on PostgreSQL 16.2 (migration 135, 1,078 s). The stack is stopped; the seed is kept.",
-  "rebaseRecheck": "rebase re-check f93dbc53 -> 823c1906: fingerprint 214869c92046854284ccd8ae5e01b84b59e27f8587d832fb575b866e2875f684 at both, unchanged, so bare gates only. 2e8dde76 then adds four README lines, the 'Postgres 16, not 18' difference from production, which is the architect's condition for this round.",
+  "completed": "2026-10-28T16:40:00Z",
+  "round": 11,
+  "headTested": "ccc9decae1919006a0b93867e80e39919bf85278 (code head 6eeea895; meta.json build_commit ccc9deca, build_dirty false)",
+  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120), seed at migration 135 on PostgreSQL 16.2 (this build's level). box_busy_before 1.0%. The stack is stopped.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Recomputed the fingerprint at f93dbc53 and 823c1906 (equal) and confirmed MERGEABLE. Reseeded with the merged build on Postgres 16.2 and ran a smoke step, which reproduces the implementer's seed and smoke. Read the README addition."
+    "how": "Re-ran the implementer's three comma-in-password -pg forms, with harder inputs beside them, as foreign runs on my stack. Then I scanned every step file, stdout, stderr and the tables output for both password halves and both stack tokens. To catch a regression of rounds 7-9, I re-ran a two-host -pg with a password, a -nats list with a token user and a user:password, an unescaped comma in a -nats password and a keyword/value -pg. Then a smoke step."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Tester round-9 failure: the head merges with main, and the merge leaves the branch's own diff unchanged",
-      "surface": "GitHub pull request #2369; the jj fingerprint (skill legion-worker/references/conflicts-and-rewrites.md)",
-      "command": "gh pr view 2369 -R sjawhar/legion --json mergeable; the unchanged-diff fingerprint at f93dbc53 and 823c1906",
-      "observed": "MERGEABLE; fingerprint 214869c9... at both. CI at code head 2e8dde76 when read: changes, lint, typecheck success; test in progress; pr-title queued; envoy-go, envoy-e2e-local, envoy-smoke queued",
-      "headSha": "3d988c68588d82d4c99dc30736b048ec87b8d177",
-      "negativeControl": "at the previous head 17cff7ca GitHub reported CONFLICTING DIRTY"
+      "criterion": "Review round 5: a comma in a -pg password leaks no fragment into any step file or output; only -nats is split at commas, and the URL check follows the same rule",
+      "surface": "stack.sh loadgen run -allow-foreign and loadgen tables on the real stack",
+      "command": "foreign runs with every endpoint flag for the local stack and, in turn: -pg 'postgres://postgres:<A>,<B>@127.0.0.1:25432/dispatch?sslmode=disable'; -pg 'postgres://postgres:<A>:1,<B>@...'; -pg 'postgres://127.0.0.1:25432/dispatch?sslmode=disable&user=postgres&password=<A>,<B>'; -pg 'postgres://postgres:<A>@127.0.0.1:25432,127.0.0.1:25432/dispatch?sslmode=disable'; -nats 'nats://<NT>@127.0.0.1:24222,nats://loadgen:<B>@127.0.0.1:24222'; -nats 'nats://u:<A>,<B>@127.0.0.1:24222'; -pg 'host=127.0.0.1 ... password=<A> ...'. Each: -events 1 -sessions 10 -requests 2 -duration 20s, then loadgen tables and grep -caF <A>, <B>, <NT> and both stack tokens over every step file, stdout, stderr and the tables output",
+      "observed": "pw-comma, pw-colon-comma, param-comma, pg-twohost, nats-list: each rc 0 with lock and Postgres read errors 0 (pgx read each -pg whole) and commits_error null; 0 of 19 files hold any secret. meta.json recorded '-pg=postgres://127.0.0.1:25432/dispatch?sslmode=disable' ('...&user=postgres' for the parameter form, '...25432,127.0.0.1:25432/...' for two hosts) and '-nats=nats://127.0.0.1:24222,nats://127.0.0.1:24222'. pw-comma committed 26/26; the later runs 22/26, with 4 non-2xx edits each, because foreign runs with no reset between them reuse moved revision tokens. nats-comma and pg-kv: rc 1, '-nats is not a URL with a scheme and a host (for -nats, a comma-separated list of servers)' and the same for -pg, before any connection, 0 of 2 files hold a secret",
+      "headSha": "ccc9decae1919006a0b93867e80e39919bf85278",
+      "negativeControl": "the two refused values (an unescaped comma inside a -nats password, a keyword/value -pg) never connect, and their refusals name only the flag"
     },
     {
-      "criterion": "Architect's condition 1 (Envoy, 14:48Z): the merged build, with main's Postgres-18 Dispatch and migration 0135, seeds and runs on the harness's PostgreSQL 16.2",
+      "criterion": "A1/A3 still hold after the guard change",
       "surface": "packages/envoy/loadtest CLI",
-      "command": "stack.sh setup && stack.sh start && stack.sh seed --force; run-step.sh smoke-r10 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20",
-      "observed": "seed exit 0 in 1,078 s, migration 135, postgres 16.2, 4 projects / 1,000 issues / 8,000 comments, build 3d988c68 build_dirty false; smoke-r10 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, clock_anomalies 0, commits_error null, every read-error count 0, no mark in TABLES.md; meta.json postgres_version 'PostgreSQL 16.2'",
-      "headSha": "3d988c68588d82d4c99dc30736b048ec87b8d177",
-      "negativeControl": "Dispatch SIGKILLed 30 s into killed-r10: EXIT=1 'dispatch (pid 27849) exited during the step ...'. The next step, after-kill-r10, started Dispatch and ran exit 0, and its dispatch.log has no refusal from 0135's live-process registry (the reset restores the database from the seed)"
-    },
-    {
-      "criterion": "Architect's condition 2: the README's 'Differences from production' names the Postgres major of the harness and of production, and where absolute numbers on 18 come from",
-      "surface": "packages/envoy/loadtest/README.md",
-      "command": "jj diff -r 2e8dde76",
-      "observed": "added under 'Differences from production': '**Postgres 16, not 18.** The harness runs PostgreSQL 16.2 (the `pgserver` wheel), while production Dispatch runs PostgreSQL 18 since 2026-10-28 (`gcp:Dispatch`'s default database version is `POSTGRES_18`). So the harness compares a fix's before and after on one version, and absolute numbers on 18 come from the cluster load test.'",
-      "headSha": "3d988c68588d82d4c99dc30736b048ec87b8d177",
-      "negativeControl": "the README at round 9's head 17cff7ca named no Postgres version among its differences from production"
+      "command": "run-step.sh smoke-r11 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20",
+      "observed": "exit 0; 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, clock_anomalies 0, every read-error count 0, no mark in TABLES.md; build ccc9deca, build_dirty false",
+      "headSha": "ccc9decae1919006a0b93867e80e39919bf85278",
+      "negativeControl": "a local step passes no endpoint flag, so meta.json args hold nothing to redact (0 '<redacted>' entries); the foreign runs above are the refused and redacted cases"
     }
   ],
   "observations": [
-    "The README names production's major (18), not the minor (18.6) that the architect quoted; the condition was the major.",
-    "Round 9's live proof of the round-4 review fixes and of A1-A6 stands: the merge left the branch's diff unchanged."
+    "GitHub reports MERGEABLE at ccc9deca. CI at code head 6eeea895 when read: changes, lint, typecheck, test and pr-title queued.",
+    "Main's three reds that the INFRA controller named are main's, not this PR's: recipients-claim route-close (fixed by #2324), TestDispatchConnectionsPerPodIsTheServers (fixed by #2464) and mermaid.e2e.ts:194, which INFRA-138's tree is fixing. None has run at this head yet.",
+    "Round 9's live proof of A1-A6 and of the round-4 fixes stands for the code 6eeea895 does not touch. Its code changes are guard.go's endpoint parsing, and run.go's recordedArgs now calling redactEndpoint(name, value) in place of redactURL(value), plus their tests."
   ]
 }
