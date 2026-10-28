@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -76,6 +77,18 @@ func recoverMutation(room string, err *error) {
 // the tree it writes (LEGION-504). current is applyLive's to compare with what the write leaves, so
 // a mutate never changes it: every pmdoc edit returns a copy. It is nil when the fork's tree is
 // outside the schema, where startTree reads the fork again for the refusal.
+//
+// The rendering of the fork before the operation, which only a write that changed the fork, or a
+// failure to classify, needs, is often known without rendering the fork again, and is then taken
+// as it is: forkLive's (liveWrite.forkMarkdown), the room replica's rendering of the very state
+// the fork was read from (warmFork says why that is exact), or else the transaction's previous
+// operation's (liveWrite.markdown), which is the fork's as it stands for as long as the write
+// keeps its tree. A fork moves only through forkLive, which drops that rendering whenever it does
+// (buildFork, releaseFork), and through an operation's mutate, after which that operation records
+// the rendering of what it left or abandons the fork with its rendering (releaseFork). Rendering
+// is deterministic over one state - pmdoc.Read and ReadForRendering differ only in copying
+// attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
+// string the render would make. A fork no rendering is known for is rendered here.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
@@ -93,6 +106,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return err
 	}
+	// The replica's counters this operation's own fork read found, copied now: a later fork read
+	// in the same operation (a joined read's) must not pair this operation's rendering with
+	// another read's counters (publishedRendering).
+	read := write.forkRead
 	// An operation that changed the fork but does not reach the end below leaves it holding
 	// changes its transaction never recorded; the next operation rebuilds it. One that changed
 	// nothing leaves the fork as it was, so the next operation keeps it.
@@ -114,16 +131,34 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// only the renderer does - is the document's own refusal (OutsideSchemaError), which every
 	// schema refusal this operation meets is then answered with, unless the operation repairs it.
 	// Its rendering is taken only when something needs it: a failure to classify, or the content
-	// comparison of a write that changed the fork.
+	// comparison of a write that changed the fork. It may be known without rendering the fork
+	// (above), and is then picked up here, before mutate moves the fork it describes; only beside
+	// a readable tree, since one the reader refuses is the refusal, whatever else is known. The
+	// path it took is counted once, when it is first needed (renderPathCounts).
 	before, startErr := treeOf(fork)
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
 	var beforeMarkdown string
+	var known *atomic.Uint64
+	if startErr == nil {
+		switch {
+		case write.forkMarkdown != nil:
+			beforeMarkdown, known = *write.forkMarkdown, &s.renderPaths.beforeFromReplica
+		case write.tree != nil:
+			beforeMarkdown, known = write.markdown, &s.renderPaths.beforeFromWrite
+		}
+	}
+	write.forkMarkdown = nil
 	rendered := startErr != nil
 	start := func() error {
 		if !rendered {
-			beforeMarkdown, startErr = documentMarkdown(before)
+			if known != nil {
+				known.Add(1)
+			} else {
+				beforeMarkdown, startErr = documentMarkdown(before)
+				s.renderPaths.beforeRendered.Add(1)
+			}
 			rendered = true
 		}
 		return startErr
@@ -177,6 +212,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	unchanged := beforeMarkdown == markdown
+	if unchanged {
+		// One string retained, not two equal ones: the write's rendering and the one it was
+		// compared with.
+		markdown = beforeMarkdown
+	}
 	if err == nil {
 		contentChanged, weighedFrom = !unchanged, before
 	}
@@ -234,6 +274,16 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	write.anchorsTree = tree
 	write.updates = append(write.updates, update)
 	write.versions = append(write.versions, version)
+	// What the room's update observer can take in place of rendering the room after this update
+	// (publishedRendering): this operation's rendering, when its fork was read warm.
+	var rendering publishedRendering
+	if read.warm {
+		rendering = publishedRendering{forkReadMark: read, markdown: markdown}
+		if contentChanged {
+			rendering.askBlocks = askBlockIDs(tree)
+		}
+	}
+	write.renderings = append(write.renderings, rendering)
 	recorded = true
 	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
 	// pending author and leaves the document's latest edit source as it was.

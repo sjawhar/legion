@@ -14696,7 +14696,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -16000,8 +16000,8 @@ class DispatchClient {
   async resolveComment(id, actor) {
     return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
   }
-  async getComments(issue, artifact) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], undefined, artifact ? { artifact } : undefined);
+  async getComments(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
   async getIssueReferences(issue) {
     return this.#json("GET", [
@@ -18167,22 +18167,64 @@ function messageSummary({ message, replies }, graph) {
   ].join(`
 `);
 }
-async function openArtifactMarks(client, resolved) {
+async function openAnchoredThreads(client, resolved) {
   const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
-  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "");
   const commentsResultPromise = commentsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
-  const asks = await asksPromise;
-  const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
+  const asks = (await asksPromise).filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id);
   const commentsResult = await commentsResultPromise;
-  if (commentsResult.status === "rejected") {
-    if (dispatchAnswered(commentsResult.reason, 404))
-      return marks;
+  if (commentsResult.status === "rejected" && !dispatchAnswered(commentsResult.reason, 404)) {
     throw commentsResult.reason;
   }
-  return [
-    ...marks,
-    ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
-  ];
+  const comments = commentsResult.status === "fulfilled" ? commentsResult.value : [];
+  const askReplies = new Map(asks.map((ask) => [ask.id, []]));
+  for (const comment of comments) {
+    if (comment.ask_id)
+      askReplies.get(comment.ask_id)?.push(comment);
+  }
+  const askThreads = asks.map((ask) => [
+    `ask ${ask.id} \xB7 ${actorText(ask.author)} \xB7 ${ask.created_at}`,
+    ...anchorLines(ask),
+    `Question: ${ask.question}`,
+    ...threadReplyLines(askReplies.get(ask.id) ?? [])
+  ].join(`
+`));
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const roots = comments.filter((comment) => comment.reply_to === null && !comment.ask_id && !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id);
+  const replies = new Map(roots.map((root) => [root.id, []]));
+  for (const comment of comments) {
+    const root = comment.reply_to === null ? undefined : threadRootId(comment, byId);
+    if (root !== undefined)
+      replies.get(root)?.push(comment);
+  }
+  const commentThreads = roots.map((root) => [
+    `comment ${root.id} \xB7 ${actorText(root.author)} \xB7 ${root.created_at}`,
+    ...anchorLines(root),
+    `Body: ${root.body}`,
+    ...threadReplyLines(replies.get(root.id) ?? [])
+  ].join(`
+`));
+  return [...askThreads, ...commentThreads];
+}
+function threadReplyLines(replies) {
+  return replies.flatMap((reply) => [
+    `reply ${reply.id} \xB7 ${actorText(reply.author)} \xB7 ${reply.created_at}`,
+    `Body: ${reply.body}`
+  ]);
+}
+function threadRootId(comment, byId) {
+  const seen = new Set;
+  let current = comment;
+  while (current.reply_to !== null) {
+    if (seen.has(current.id))
+      return;
+    seen.add(current.id);
+    const parent = byId.get(current.reply_to);
+    if (parent === undefined)
+      return;
+    current = parent;
+  }
+  return current.id;
 }
 async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
@@ -19147,24 +19189,27 @@ Document token: ${listed.token}`,
         } : { issue: resolved.issue?.key }, version, resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue, shown);
       }
       const documentPromise = client.docRead(resolved.artifact.id, version);
-      const marksPromise = openArtifactMarks(client, resolved);
-      const marksResultPromise = marksPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
+      const threadsPromise = openAnchoredThreads(client, resolved);
+      const threadsResultPromise = threadsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
       const document = await documentPromise;
-      const marksResult = await marksResultPromise;
-      if (marksResult.status === "rejected")
-        throw marksResult.reason;
-      const marks = marksResult.value;
+      const threadsResult = await threadsResultPromise;
+      if (threadsResult.status === "rejected")
+        throw threadsResult.reason;
+      const threads = threadsResult.value;
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
-        ...marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`],
         ...approval === undefined ? [] : [approval]
       ];
       return {
-        text: trailer.length === 0 ? document.markdown : `${document.markdown}
+        text: [
+          document.markdown,
+          ...trailer.length === 0 ? [] : [trailer.join(`
+`)],
+          ...threads.length === 0 ? [] : ["Open anchored threads:", ...threads]
+        ].join(`
 
-${trailer.join(`
-`)}`,
+`),
         details: resolved.owner.kind === "project" ? {
           project: resolved.artifact.project,
           document: `${resolved.artifact.project}/${resolved.artifact.slug}`

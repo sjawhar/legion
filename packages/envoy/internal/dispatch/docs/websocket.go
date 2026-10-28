@@ -692,15 +692,15 @@ type roomObservation struct {
 // records only later.
 func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *renderedReplica, own []byte) roomObservation {
 	var observed roomObservation
-	replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
+	replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
 		if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 			// Its own observer records its class (onLoadDocument). The replica takes it all the
 			// same, so the update after it is measured against the room the repair left.
 			return
 		}
 		var attributed map[string]model.Actor
-		if tree != nil {
-			attributed = s.observeAskBlocksForUpdate(room, tree, logged.Origin)
+		if asks != nil {
+			attributed = s.observeAskBlocksForUpdate(room, asks.askBlocks(), logged.Origin)
 		}
 		// The cursor is this instance's, taken here rather than looked up when the update
 		// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -788,20 +788,20 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 	return sole, ambiguous
 }
 
-// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
-// attributes each one not already recorded (observeAskBlocks), in the same critical section the
-// update observer renders tree in (renderedReplica.observe): the observer renders each update in
-// the order the replica took them, so the room's record of its ask blocks moves forward only. The
-// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
-// observe already showed a real change, so the no-op path, the common one, pays for neither. It
-// returns the authors it named for blocks no write registered, which the update's append records.
+// observeAskBlocksForUpdate records askBlocks, the ask blocks an update left in room's document,
+// and attributes each one not already recorded (observeAskBlocks), in the same critical section
+// the update observer classifies the update in (renderedReplica.observe): the observer classifies
+// each update in the order the replica took them, so the room's record of its ask blocks moves
+// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
+// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
+// the common one, pays for neither. It returns the authors it named for blocks no write
+// registered, which the update's append records.
 //
 // An update another process stored, which a catch-up applied (origin is a remoteUpdateOrigin),
 // introduced its blocks on that process: none of this room's connected peers wrote them, so the
 // blocks are recorded with no author here, as the blocks a room loads with are, and a settlement
 // finds the author that process recorded (askBlockSources.author).
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node, origin any) map[string]model.Actor {
-	askBlocks := askBlockIDs(tree)
+func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}, origin any) map[string]model.Actor {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor

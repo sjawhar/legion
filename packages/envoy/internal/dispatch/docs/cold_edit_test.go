@@ -63,8 +63,8 @@ func TestAColdWriteLoadsNoRoom(t *testing.T) {
 			if err != nil {
 				t.Fatalf("apply the edit: %v", err)
 			}
-			if write.fork != nil || write.tree != nil || write.updates != nil {
-				t.Error("the committed write kept its fork, its rendering or its updates")
+			if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.forkMarkdown != nil {
+				t.Error("the committed write kept its fork, its rendering, its updates or the renderings beside them")
 			}
 			if service.roomHeld(artifactID) {
 				t.Fatal("the published write loaded a room of the document")
