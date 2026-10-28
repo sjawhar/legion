@@ -1105,7 +1105,6 @@ while both run — its own pages are served from its own image, as before — an
 back past `0136` is an image rollback alone, with no schema to restore: the tables are left for
 the next release that carries them, whose boot prunes what no build still needs.
 
-+++++++ uxwtkurr 8e58845b "retro: remove the issue's handoff directory under .legion/ before READY"
 Migration `0137_related_checks` adds three tables for the related-item check, which this release makes
 search by meaning first and by the project's rarest words. `related_checks` holds one row per
 check of an issue, an ask or a decision block a document edit adds, written by the check itself
