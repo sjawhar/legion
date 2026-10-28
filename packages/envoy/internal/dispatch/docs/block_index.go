@@ -59,10 +59,11 @@ type BlockIndexTick struct {
 // than the block grammar indexes without. One tick per lease, at start, then every blockIndexStep
 // while a batch is full and every BlockIndexReconcileInterval once none is, until ctx ends.
 //
-// The ticks are duty.RunLeased's, and so is the period each runs under: the wait the tick before
-// it asked for, as in RunReferenceExcerptReconciliation, so a tick inside it is one some process
-// already made. A tick whose lease another process holds, or whose period that process has
-// already served, waits the full interval: that process is doing this work.
+// The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
+// that pass returned, and so is the period each runs under: that wait, as in
+// RunReferenceExcerptReconciliation, so a tick inside it is one some process already made. A tick
+// whose lease another process holds, or whose period that process has already served, waits the
+// full interval: that process is doing this work.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	var cursor string
@@ -70,7 +71,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	duty.RunLeased(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, duty.TickAtStart, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
 		var wait time.Duration
 		wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
 		return wait

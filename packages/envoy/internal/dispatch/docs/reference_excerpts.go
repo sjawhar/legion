@@ -133,18 +133,19 @@ const referenceExcerptLease = "reference-excerpts"
 // GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
 // the document's name until this stores one.
 //
-// The ticks are duty.RunLeased's, and so is the period each runs under: the wait the tick before
-// it asked for, referenceExcerptStep while drift remains and the full interval once none does. A
-// tick inside it is a tick some process has already made, so it is skipped; passing the full
-// interval instead would make the converging 2 s steps - this loop's whole point when a rebuild
-// leaves thousands of mentions owed an excerpt - one batch per five minutes. A tick whose lease
-// another process holds, or whose period that process has already served, waits the full
-// interval: that process is doing this work, and the drift it leaves is what the next tick to
-// take the lease finds. leases is required, as it is of every leased loop.
+// The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
+// that pass returned, and so is the period each runs under: that wait, referenceExcerptStep while
+// drift remains and the full interval once none does. A tick inside it is a tick some process has
+// already made, so it is skipped; passing the full interval instead would make the converging 2 s
+// steps - this loop's whole point when a rebuild leaves thousands of mentions owed an excerpt - one
+// batch per five minutes. A tick whose lease another process holds, or whose period that process
+// has already served, waits the full interval: that process is doing this work, and the drift it
+// leaves is what the next tick to take the lease finds. leases is required, as it is of every
+// leased loop.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	started := time.Now()
-	duty.RunLeased(ctx, leases, referenceExcerptLease, ReferenceExcerptReconcileInterval, duty.TickAtStart, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, referenceExcerptLease, ReferenceExcerptReconcileInterval, func(ctx context.Context) time.Duration {
 		return s.reconcileExcerptTick(ctx, started)
 	})
 }

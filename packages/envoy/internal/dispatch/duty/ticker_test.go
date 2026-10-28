@@ -19,7 +19,7 @@ const runLeasedDeadline = 30 * time.Second
 // interval's period, would serve the step's ticks five minutes apart: one batch per interval while
 // thousands of mentions wait for an excerpt. And no tick may come sooner than its wait after the
 // pass before it ended, which is what keeps two of a lone loop's ticks out of one period.
-func TestRunLeasedTicksAtStartAndThenAtTheWaitEachPassAsksFor(t *testing.T) {
+func TestRunLeasedAfterEachPassTicksAtStartAndThenAtTheWaitEachPassAsksFor(t *testing.T) {
 	leases := leasesOf(t, storetest.Open(t))
 	const interval, step = time.Hour, 100 * time.Millisecond
 	const passes = 4
@@ -31,7 +31,7 @@ func TestRunLeasedTicksAtStartAndThenAtTheWaitEachPassAsksFor(t *testing.T) {
 	started := time.Now()
 	go func() {
 		defer close(done)
-		RunLeased(ctx, leases, "reference-excerpts", interval, TickAtStart, func(ctx context.Context) time.Duration {
+		RunLeasedAfterEachPass(ctx, leases, "reference-excerpts", interval, func(ctx context.Context) time.Duration {
 			began := time.Now()
 			// A pass's own time, so a loop that ticks on a fixed cadence instead of after the
 			// pass shows here as a gap shorter than the step.
@@ -95,5 +95,32 @@ func TestRunLeasedWaitsAnIntervalBeforeTheFirstTickWhenAsked(t *testing.T) {
 		}
 	case <-time.After(runLeasedDeadline):
 		t.Fatalf("no pass in %v with an interval of %v", runLeasedDeadline, interval)
+	}
+}
+
+// A pass of a fixed-cadence loop that overruns its wait - a compaction slowed by a large database,
+// a redelivery sweep paging a slow GitHub - must be followed at once by the tick a ticker would
+// deliver: due at the latest scheduled moment not after now, the moments it overran dropped. A
+// loop that kept due plus one wait would run each overrun moment late, one after another, each due
+// long before it runs; one that took now as the due time, or waited for the scheduled moment after
+// now, would put its due times off the whole waits apart that keep a lone loop's ticks in
+// consecutive periods, and the lag would build up.
+func TestRunLeasedTicksAtOnceAtTheLatestMomentDueWhenAPassOverruns(t *testing.T) {
+	due := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	const wait = time.Second
+	for _, c := range []struct {
+		name      string
+		now, want time.Duration
+	}{
+		{"a pass shorter than its wait", 400 * time.Millisecond, wait},
+		{"a pass that ends at the next moment", wait, wait},
+		{"a pass that overruns into the next wait", 1500 * time.Millisecond, wait},
+		{"a pass that overruns several waits", 3500 * time.Millisecond, 3 * wait},
+		{"a pass that ends at a later moment", 3 * wait, 3 * wait},
+	} {
+		if next := nextDue(due, wait, due.Add(c.now)); next.Sub(due) != c.want {
+			t.Errorf("%s: a tick due at %s whose wait is %v, at %v in, was followed by one due %v in; want %v",
+				c.name, due.Format("15:04:05.000"), wait, c.now, next.Sub(due), c.want)
+		}
 	}
 }

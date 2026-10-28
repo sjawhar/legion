@@ -427,10 +427,12 @@ func (r *Registration) Deregister(ctx context.Context) error {
 	return nil
 }
 
-// RunPrune deletes, PruneInterval after each pass until ctx ends, the rows whose heartbeat is
-// older than PruneAge by the database's clock: what processes that died without deregistering
-// left behind. Each pass runs under pruneLease (duty.RunLeased), so one process prunes per period
-// however many serve the database.
+// RunPrune deletes, every PruneInterval until ctx ends, the rows whose heartbeat is older than
+// PruneAge by the database's clock: what processes that died without deregistering left behind.
+// Each pass runs under pruneLease, so one process prunes per period however many serve the
+// database. The ticks are duty.RunLeased's, on a fixed schedule: the first one interval after the
+// call, then each one interval after the moment the tick before it was due, however long its pass
+// took.
 func RunPrune(ctx context.Context, pool *store.Pool, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) time.Duration {
 		pruned, err := prune(ctx, pool)

@@ -143,12 +143,12 @@ const dueEditNotice = `
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
 // route (outbox.publishAuthorRoutes). It sweeps at start and then editNoticeInterval after each
-// sweep returns (duty.RunLeased) until ctx ends, under the edit-notices lease, so one process
-// sweeps a period however many serve the database. The window is a row, not a timer, so a notice
-// still pending when a process stops is sent by the next sweep of any process.
+// sweep returns (duty.RunLeasedAfterEachPass) until ctx ends, under the edit-notices lease, so one
+// process sweeps a period however many serve the database. The window is a row, not a timer, so a
+// notice still pending when a process stops is sent by the next sweep of any process.
 func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeased(ctx, leases, editNoticeLease, editNoticeInterval, duty.TickAtStart, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, editNoticeLease, editNoticeInterval, func(ctx context.Context) time.Duration {
 		sent, err := s.sendDueEditNotices(ctx)
 		if err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: send edit notices", "error", err)
