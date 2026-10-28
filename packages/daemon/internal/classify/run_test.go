@@ -306,6 +306,63 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 	}
 }
 
+// A head run that one lost push opened closes at its bound, however many heads follow, each pushed
+// before it arrives: h1 arrives with no push of its move - lost for good, or the push of a move made
+// again never delivered - and n1, n2, ... follow, each push on its way before its head. h1 waits
+// for good, so the run holds it and every head after it until the step past maxRunSteps, which cuts
+// h1 off; every head after it was judged with its chain, so the run closes there, and stays closed.
+// The run keeps the pushes of its heads past the waiting-push bound (maxWaitingPushes), which
+// counts from no head of the run but the anchor otherwise, and would let n1..n16 go and leave
+// those heads judged unchained, the run open for good at its bound.
+func TestARunOneLostPushOpenedClosesAtItsBound(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
+	for _, tc := range []struct {
+		name  string
+		facts []runFact
+	}{
+		{"h1's push lost", []runFact{arrives("h1")}},
+		{"the push of h1 made again lost", []runFact{pushed(first), arrives("h1"), pushed(back), arrives("h0"), arrives("h1")}},
+	} {
+		pr := red
+		for _, f := range tc.facts {
+			pr = stored(t, deliver(f, pr))
+		}
+		if pr.Run == nil {
+			t.Fatalf("%s: no head run waits for h1", tc.name)
+		}
+		// h1 is the run's first step and n_i its step i+1, so n(maxRunSteps) is the step past the
+		// bound: the run is open through n(maxRunSteps-1) and closed from n(maxRunSteps) on.
+		prev, closedAt, reopened := "h1", 0, 0
+		for i := 1; i <= 2*maxRunSteps; i++ {
+			head := fmt.Sprintf("n%d", i)
+			pr = stored(t, deliver(pushed(record.ClassifiedPush{SHA: head, Before: prev}), pr))
+			pr = stored(t, deliver(arrives(head), pr))
+			prev = head
+			switch {
+			case pr.Run == nil && closedAt == 0:
+				closedAt = i
+			case pr.Run != nil && closedAt != 0 && reopened == 0:
+				reopened = i
+			}
+		}
+		if closedAt != maxRunSteps || reopened != 0 {
+			got := fmt.Sprintf("never closed in %d heads", 2*maxRunSteps)
+			if closedAt != 0 {
+				got = fmt.Sprintf("closed after n%d", closedAt)
+			}
+			if reopened != 0 {
+				got += fmt.Sprintf(", opened again after n%d", reopened)
+			}
+			if pr.Run != nil {
+				got += fmt.Sprintf(", %d steps open at the end", len(pr.Run.Steps))
+			}
+			t.Errorf("%s: the run %s, want it closed after n%d and never again", tc.name, got, maxRunSteps)
+		}
+	}
+}
+
 // One head records one move, its push delivered before the head or after it, and the move records
 // its push as spent either way.
 func TestOneHeadRecordsItsMoveOnce(t *testing.T) {

@@ -3,11 +3,13 @@ package classify
 import "github.com/sjawhar/legion/daemon/internal/record"
 
 // maxRunSteps bounds a head run: a run longer than this is cut to its newest maxRunSteps steps,
-// its anchor moving to the judgement before them. A run stays open only while a head in it waits
-// for a push of its move, and GitHub sends every push, so a run reaches the bound only when a push
-// webhook is lost for good, or each of more than this many facts arrives before the push it waits
-// for; the heads cut from it keep the judgement the last replay gave them, and no later push
-// replays them.
+// its anchor moving to the judgement before the first head among them still waiting, and the run
+// closing when none of them waits. A run stays open only while a head in it waits for a push of
+// its move, and GitHub sends every push, so a run reaches the bound only when a push webhook is
+// lost for good, or each of more than this many facts arrives before the push it waits for; the
+// heads cut from it keep the judgement the last replay gave them, and no later push replays them.
+// The run keeps every push on the path forward from a head it holds (runHeads), so a head whose
+// push arrived first is never cut loose from it, however many heads follow one lost push.
 const maxRunSteps = 32
 
 // A head run (record.PullRequest.Run) makes the fix-attempt count, its mark, the planned mark and
@@ -70,16 +72,22 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 		pushes    []record.ClassifiedPush
 	}
 	before := make([]state, len(run.Steps))
-	waiting := len(run.Steps)
+	var unchained []int
 	for i, step := range run.Steps {
 		before[i] = state{judgementOf(at), withoutApprovalCarriers(at.Pushes)}
 		var chained bool
 		at, chained = applyStep(at, step)
-		if step.Head != "" && !chained && waiting == len(run.Steps) {
-			waiting = i
+		if step.Head != "" && !chained {
+			unchained = append(unchained, i)
 		}
 	}
-	waiting = max(waiting, len(run.Steps)-maxRunSteps)
+	waiting := len(run.Steps)
+	for _, i := range unchained {
+		if i >= len(run.Steps)-maxRunSteps {
+			waiting = i
+			break
+		}
+	}
 	if waiting < len(run.Steps) {
 		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Steps: clone(run.Steps[waiting:]), Decided: run.Decided}
 	}
@@ -88,6 +96,19 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 		at.BlockedAttempts = 0
 	}
 	return at
+}
+
+// runHeads is the heads run holds: its anchor's head and each head step's. A push on the path
+// forward from any of them is one the replay can chain a head of the run with, so the run's bound
+// on waiting pushes (boundedPushes) never counts it, whichever head's push was lost.
+func runHeads(run record.HeadRun) []string {
+	heads := []string{run.Anchor.HeadSHA}
+	for _, step := range run.Steps {
+		if step.Head != "" {
+			heads = append(heads, step.Head)
+		}
+	}
+	return heads
 }
 
 // withoutApprovalCarriers is pushes without those that carry an approval across.

@@ -294,6 +294,12 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // pushes delivered after the head. The repeat chains that arrival, so no head run opens, and the
 // other path's pushes, arriving later, replay nothing: the judgement stays the repeat's. With those
 // pushes delivered before the head, they are its chain and decide it.
+//
+// A head whose push is lost for good - a move made again whose second push never arrives among
+// them - is judged unchained and holds its head run open, and every head after it joins the run.
+// The run keeps every push on the path forward from a head it holds (runHeads), so each later head
+// whose push arrives is judged with its chain, and the run closes at the step past its bound
+// (maxRunSteps), which cuts the waiting head off (TestARunOneLostPushOpenedClosesAtItsBound).
 func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival bool) []record.ClassifiedPush {
 	made := map[[2]string]bool{}
 	for _, m := range moves {
@@ -391,7 +397,7 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 	}
 	run := *pr.Run
 	if !carriesApproval(push) {
-		run.Pushes = boundedPushes(withPush(run.Pushes, push), run.Anchor.HeadSHA)
+		run.Pushes = boundedPushes(withPush(run.Pushes, push), runHeads(run)...)
 	}
 	pr.Run = &run
 	return replayRun(pr)
@@ -409,15 +415,17 @@ func withPush(pushes []record.ClassifiedPush, push record.ClassifiedPush) []reco
 }
 
 // maxWaitingPushes bounds the pushes a pull request keeps that wait for a link: a push that
-// neither carries an approval across nor lies on the path forward from the head, and whose own
-// move the record has not made (unspentPushes) - one of a line of commits the branch never takes,
-// or one behind a webhook that never arrives. Past the bound the oldest such push goes, and a move
-// it would have linked into is judged without it.
+// neither carries an approval across nor lies on the path forward from the head - for a head
+// run's pushes, from any head the run holds (runHeads) - and whose own move the record has not
+// made (unspentPushes): one of a line of commits the branch never takes, or one behind a webhook
+// that never arrives. Past the bound the oldest such push goes, and a move it would have linked
+// into is judged without it.
 const maxWaitingPushes = 16
 
-// boundedPushes is pushes with at most maxWaitingPushes waiting pushes, the oldest dropped first.
-func boundedPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
-	onPath := onPathFrom(pushes, head)
+// boundedPushes is pushes with at most maxWaitingPushes waiting pushes, the oldest dropped first: a
+// push on the path forward from any of heads (pathFrom) is not waiting.
+func boundedPushes(pushes []record.ClassifiedPush, heads ...string) []record.ClassifiedPush {
+	onPath := onPathFrom(pushes, heads...)
 	waiting := 0
 	for _, p := range pushes {
 		if !carriesApproval(p) && !onPath[pushKey(p)] {
@@ -503,13 +511,16 @@ func LatestClock(applied, observed time.Time) time.Time {
 	return applied
 }
 
-// pathFrom is the pushes that lie on the path forward from head: each that replaced head or the
-// head a push already on the path left - also one that returns the branch to a head the path
+// pathFrom is the pushes that lie on the path forward from heads: each that replaced one of heads
+// or the head a push already on the path left - also one that returns the branch to a head the path
 // already passed, a push of its own whatever the head it leaves. With unplaced, a push that did
 // not say which head it replaced is on the path too, the reading that never lets it pass unseen.
-func pathFrom(pushes []record.ClassifiedPush, head string, unplaced bool) []record.ClassifiedPush {
+func pathFrom(pushes []record.ClassifiedPush, unplaced bool, heads ...string) []record.ClassifiedPush {
 	var path []record.ClassifiedPush
-	reached, included := map[string]bool{head: true}, make([]bool, len(pushes))
+	reached, included := make(map[string]bool, len(heads)), make([]bool, len(pushes))
+	for _, head := range heads {
+		reached[head] = true
+	}
 	for grew := true; grew; {
 		grew = false
 		for i, p := range pushes {
@@ -528,10 +539,10 @@ func pushKey(p record.ClassifiedPush) [2]string {
 	return [2]string{p.Before, p.SHA}
 }
 
-// onPathFrom is the identities of the pushes on the path forward from head (pathFrom).
-func onPathFrom(pushes []record.ClassifiedPush, head string) map[[2]string]bool {
+// onPathFrom is the identities of the pushes on the path forward from heads (pathFrom).
+func onPathFrom(pushes []record.ClassifiedPush, heads ...string) map[[2]string]bool {
 	onPath := map[[2]string]bool{}
-	for _, p := range pathFrom(pushes, head, false) {
+	for _, p := range pathFrom(pushes, false, heads...) {
 		onPath[pushKey(p)] = true
 	}
 	return onPath
@@ -556,7 +567,7 @@ func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 // their synchronize moves the head, and no merge lands them meanwhile, since a READY merge names
 // the approved head as GitHub's expected head (ghautomerge.Submit).
 func CodeOnItsWay(pr record.PullRequest) bool {
-	for _, p := range pathFrom(pr.Pushes, pr.HeadSHA, true) {
+	for _, p := range pathFrom(pr.Pushes, true, pr.HeadSHA) {
 		if p.MayChangeCode() {
 			return true
 		}
