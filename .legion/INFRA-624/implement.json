@@ -2,47 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T17:30:00Z",
+  "completed": "2026-10-28T20:15:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 4 items 1 and 3: the read-back filter refuses only deletions of an unselected block's content (text or any inline leaf), never a pure insertion, and Ctrl+Z / redo with the caret in another block of a broken decision work",
+      "surface": "Dispatch document editor in headless Chromium against the real Go server and Postgres (new undo/redo row in ask-concurrent-edit.e2e.ts), plus happy-dom rows in packages/proof-editor/tests/ask-concurrent-edit.test.ts",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test",
+      "observed": "177 passed (12.0m), 0 failed; the 14 ask-concurrent-edit rows pass, including the new one: type x inside the second list's option, caret to the question, ControlOrMeta+Z removes it, ControlOrMeta+Shift+Z re-inserts it with the caret still in the question, every other word kept, no page error; the substring row and the tester's execCommand rows still refuse. proof-editor 185 pass (insertion into an unselected option applies; an image-only paragraph's deletion is refused; undo/redo apply). The reviewer's probes re-run: every collaborator-word loss refused, every ordinary edit applied.",
+      "headSha": "4deb955e216ad9e9c0da077aa650e1e6f1e76c18",
+      "negativeControl": "Against a66296db's filter: the Chromium row fails (Expected 'Option A', Received 'Option xA': the undo refused); happy-dom: insertion refused (Received 'Option B'), image-only paragraph deletion applied, undo refused (Received 'Option xB')."
+    },
+    {
+      "criterion": "Review round 4 item 2: an options edit of a two-list decision keeps each item the ask row never held whole (label and description) and refuses repeated labels, so following a refusal loses nothing a collaborator wrote",
+      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ ./internal/dispatch/api/ -count=1 -run 'AskBlock|SetAsk|EditAsk|AskEdit|Invalid|Settlement|Idempot' -timeout 40m",
+      "observed": "ok (docs 148s, api 73s). New tests: a dropped description ([Ship, Hold, {Label: Defer}]) is refused quoting \"Defer: Wait a week\", and the exact item repairs; a repeated label (* Ship: Only on Fridays) refuses every edit quoting both Ship items and naming dispatch doc-edit; a reverted description refuses quoting \"Hold: Wait for legal review\", and sending it repairs. The reviewer's Go probes (D4, Q4) are each refused or repair without loss; long labels are quoted in full.",
+      "headSha": "4deb955e216ad9e9c0da077aa650e1e6f1e76c18",
+      "negativeControl": "Before the change all three new tests failed with err = <nil> (Wait a week lost; Ship: Only on Fridays deleted; Wait for legal review reverted)."
+    },
     {
       "criterion": "Review round 3 item 1: the DOM read-back filter keeps an unselected option list even when its text appears elsewhere in the decision",
       "surface": "Dispatch document editor in headless Chromium against the real Go server and Postgres (new row in ask-concurrent-edit.e2e.ts), plus a happy-dom row in packages/proof-editor/tests/ask-concurrent-edit.test.ts",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test",
-      "observed": "176 passed (11.6m), 0 failed; the 13 ask-concurrent-edit rows pass, including the new one: first list [first, '<second> later'], second list [<second>], execCommand('insertText') over the question-into-first-list selection; both pages keep the second list as its own one-item list, the stored markdown keeps '* <second>', the decision stays malformed, no page error. The tester's two execCommand rows pass unchanged. proof-editor 182 pass.",
-      "headSha": "a66296db17b810c3edb605d541969efe438547d5",
+      "observed": "176 passed (11.6m), 0 failed; the 13 ask-concurrent-edit rows pass, including the new one: first list [first, '<second> later'], second list [<second>], execCommand('insertText') over the question-into-first-list selection; both pages keep the second list as its own one-item list, the stored markdown keeps '* <second>', the decision stays malformed, no page error. The tester's two execCommand rows pass unchanged. proof-editor 182 pass. Re-run at 4deb955e: passes (177 passed; proof-editor 185 pass).",
+      "headSha": "4deb955e216ad9e9c0da077aa650e1e6f1e76c18",
       "negativeControl": "Against the previous text check (before 0d52a02a): the Chromium row fails, `locator(':scope > ul').nth(1).getByRole('listitem')` Expected 1, Received 0 (the list dropped); the happy-dom row fails `expect(view.state.doc).toBe(before.doc)`."
-    },
-    {
-      "criterion": "Review round 3 item 2: an options edit of a two-list decision never deletes an option its ask row never held unless the edit sends it",
-      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ ./internal/dispatch/api/ -count=1 -run 'AskBlock|SetAsk|EditAsk|AskEdit|Invalid|Settlement|Idempot' -timeout 40m",
-      "observed": "ok (docs 140s, api 65s); TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld: options [Ship, Hold], [Ship, Hold, Later], [] and [Later] are refused quoting \"Defer\" with live tree and row unchanged; an urgency-only edit's reason names \"Defer\"; [Ship, Hold, Defer] repairs one list and settlement clears invalid. The tester's and the existing refusal test pass unmodified.",
-      "headSha": "a66296db17b810c3edb605d541969efe438547d5",
-      "negativeControl": "Before the change all four refusal subtests failed: err = <nil> (the edit deleted Defer, or both lists for [])."
     },
     {
       "criterion": "Tester failure (round 4): document.execCommand('insertText'|'delete') over a selection from the question into the first list of a decision two editors broke keeps the unselected second list (an edit ProseMirror reads back from the DOM never drops an unselected block of a broken decision)",
       "surface": "Dispatch document editor in headless Chromium against the real Go server and Postgres (the tester's red rows in ask-concurrent-edit.e2e.ts, unchanged), plus happy-dom rows in packages/proof-editor/tests/ask-concurrent-edit.test.ts",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "175 passed (10.8m), 0 failed: both execCommand rows pass (every unselected word in both pages and the stored markdown, the ask open, no page error), and the 10 other ask-concurrent-edit rows (input guards included) pass; ask-concurrent-edit alone 24/24 with --repeat-each 2; proof-editor 181 pass. The refused read-back writes no Yjs update (0 update events in the happy-dom row) and ProseMirror's DOM-observer flush redraws the dirty nodes from the kept state. Re-run at a66296db: passes (176 passed; proof-editor 182 pass).",
-      "headSha": "a66296db17b810c3edb605d541969efe438547d5",
+      "observed": "175 passed (10.8m), 0 failed: both execCommand rows pass (every unselected word in both pages and the stored markdown, the ask open, no page error), and the 10 other ask-concurrent-edit rows (input guards included) pass; ask-concurrent-edit alone 24/24 with --repeat-each 2; proof-editor 181 pass. The refused read-back writes no Yjs update (0 update events in the happy-dom row) and ProseMirror's DOM-observer flush redraws the dirty nodes from the kept state. Re-run at 4deb955e: passes (177 passed; proof-editor 185 pass).",
+      "headSha": "4deb955e216ad9e9c0da077aa650e1e6f1e76c18",
       "negativeControl": "As committed by the tester (a26d87b0, before the fix) and again with `.use(keepUnselectedAskBlocks)` removed from lib.ts: both execCommand rows fail, received 'Which xion BOption C…' (insertText) and 'Which ion AOption C…' (delete); the happy-dom refusal row fails (17 pass 1 fail)."
     },
     {
       "criterion": "Review round 2 item 1: typing over a selection from the question into a list, Ctrl+X, input with no keypress, an input method composition and a drag inside a decision two editors broke neither throw nor lose an unselected word",
       "surface": "Dispatch document editor in headless Chromium against the real Go server and Postgres (five rows in ask-concurrent-edit.e2e.ts), plus happy-dom rows in packages/proof-editor/tests/ask-concurrent-edit.test.ts",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test",
-      "observed": "173 passed (11.2m), 0 failed; the 10 ask-concurrent-edit rows pass, including the five new ones (every unselected word in both pages and the stored markdown, the ask still open, no page error); ask-concurrent-edit alone passed 20/20 with --repeat-each 2; proof-editor 179 pass, 0 fail. Re-run at 2796bcaf: passes (175 passed). Re-run at a66296db: passes (176 passed; proof-editor 182 pass).",
-      "headSha": "a66296db17b810c3edb605d541969efe438547d5",
+      "observed": "173 passed (11.2m), 0 failed; the 10 ask-concurrent-edit rows pass, including the five new ones (every unselected word in both pages and the stored markdown, the ask still open, no page error); ask-concurrent-edit alone passed 20/20 with --repeat-each 2; proof-editor 179 pass, 0 fail. Re-run at 4deb955e: passes (177 passed; proof-editor 185 pass).",
+      "headSha": "4deb955e216ad9e9c0da077aa650e1e6f1e76c18",
       "negativeControl": "With lib.ts installing only the old keydown guard: typing over -> page error 'Content does not fit in gap'; Ctrl+X -> 'Content does not fit in gap'; input with no keypress -> Option A lost (received 'Which xion BOption C…'); composition -> 'Content does not fit in gap' twice; drag -> 'Called contentMatchAt on a node with invalid content' (5 failed); happy-dom rows 3 fail."
     },
     {
       "criterion": "A1. Two editors whose crossed edits leave an ask holding two lists keep the question and both options in both editors and the stored document; the ask stays open, is marked malformed, and joining the lists clears that",
       "surface": "Dispatch document editor in headless Chromium against the real Go Dispatch server and Postgres 17 in the issue pod",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "168 passed (9.5m), 0 failed (main's #2313 makes the iphone project run only @phone rows). The ask-concurrent-edit rows pass: words kept in both pages and the stored markdown, data-dispatch-ask-malformed=true, open_asks holds a1, Backspace at the start of the second list clears the mark and the ask takes both options; Enter in the question (caret now placed in the question paragraph of the content hole, not the banner) keeps every word and More lands in the question paragraph. (code unchanged since b1f6d7bb except ask_block_text.go's repair fix) Re-run at af271aab: passes. Re-run at 2796bcaf: passes (175 passed). Re-run at a66296db: passes (176 passed; proof-editor 182 pass).",
-      "headSha": "a66296db17b810c3edb605d541969efe438547d5",
+      "observed": "168 passed (9.5m), 0 failed (main's #2313 makes the iphone project run only @phone rows). The ask-concurrent-edit rows pass: words kept in both pages and the stored markdown, data-dispatch-ask-malformed=true, open_asks holds a1, Backspace at the start of the second list clears the mark and the ask takes both options; Enter in the question (caret now placed in the question paragraph of the content hole, not the banner) keeps every word and More lands in the question paragraph. (code unchanged since b1f6d7bb except ask_block_text.go's repair fix) Re-run at 4deb955e: passes (177 passed; proof-editor 185 pass).",
+      "headSha": "4deb955e216ad9e9c0da077aa650e1e6f1e76c18",
       "negativeControl": "At the base 2df3353c the same spec file fails every row at toHaveAttribute data-dispatch-ask-malformed \"true\" -> element(s) not found (the ask and its words deleted)."
     }
   ],
@@ -65,7 +73,8 @@
     "round 3: packages/envoy/internal/dispatch/docs/ask_block_text.go (options sent to a block off its content rule always rebuild one list)",
     "round 4: proof-editor src/ask-content.ts (brokenAskInputGuards), src/lib.ts; docs/ask_block_text.go (refuseAskContentEdit, withoutUnchanged); e2e editor.ts (every range search editable-only); pmdoc node_test.go (test removed); two docs/solutions notes; AGENTS.md files; pr2433 fragment bodies",
     "round 5: packages/proof-editor/src/ask-content.ts (keepUnselectedAskBlocks filterTransaction), src/lib.ts (.use(keepUnselectedAskBlocks)), tests/ask-concurrent-edit.test.ts",
-    "round 6: merge of main (a7b7fe96); proof-editor src/ask-content.ts (dropsUnselectedAskBlock by deleted characters), tests; docs/ask_block_text.go (askRowLabels, protected labels in refuseAskContentEdit), service_test.go; AGENTS.md files; pr2433 fragments"
+    "round 6: merge of main (a7b7fe96); proof-editor src/ask-content.ts (dropsUnselectedAskBlock by deleted characters), tests; docs/ask_block_text.go (askRowLabels, protected labels in refuseAskContentEdit), service_test.go; AGENTS.md files; pr2433 fragments",
+    "round 7: proof-editor src/ask-content.ts (deletedBefore over leaf units, history transactions pass), tests; docs/ask_block_text.go (askRowOptions, items compared whole, repeated-label refusal, quotedItems), service_test.go; AGENTS.md files; Changed fragment"
   ],
   "trickyParts": [
     "Which of the two crossed option lists comes first is decided by the two editors' Yjs client ids, so the browser test reads the second list from the page before Backspace; Backspace at the start of the first list lifts its item into the question (a valid ask with one option), which made the first version of the test flaky (2 of 3 runs).",
@@ -81,5 +90,5 @@
     "Round 4: the reviewer's fast-follow (test setup duplication) is not done in this round, as the architect narrowed the round to the review's must-change list."
   ],
   "openQuestions": [],
-  "round": 6
+  "round": 7
 }
