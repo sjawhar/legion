@@ -1998,7 +1998,12 @@ node type weighs:
 
 ```sh
 cd packages/envoy
-env DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
-  go test ./internal/dispatch/... ./cmd/dispatch/...
+export DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable'
+go test -timeout 20m ./internal/dispatch/api
+go test -timeout 20m $(go list ./internal/dispatch/... ./cmd/dispatch/... | grep -v '/internal/dispatch/api$')
 go vet ./...
 ```
+
+`internal/dispatch/api` alone takes close to `go test`'s default ten-minute package deadline (about
+600 s), so it runs first and on its own, with 20 minutes, as CI's `envoy-go` and
+`dispatch-go-postgres-16` jobs run it (`docs/testing.md`, "Go's package deadline").

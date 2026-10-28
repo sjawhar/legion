@@ -25,6 +25,26 @@ the limit, as on a dev box whose `TMPDIR` is on a data disk.
   TMPDIR="$L" GOTMPDIR="$L" go test ./<package>/... -count=1
   ```
 
+## Go's package deadline
+
+`go test` panics a package that runs longer than ten minutes (`panic: test timed out after 10m0s`),
+which reads as a failure of the change under test. `packages/envoy/internal/dispatch/api` alone
+takes close to that, about 600 s on a workstation, so every command that runs that package, on its
+own or in a pattern that includes it (`./...`, `./internal/dispatch/...`), passes `-timeout 20m`:
+
+```sh
+cd packages/envoy
+go test -timeout 20m ./internal/dispatch/api
+```
+
+CI's `envoy-go` and `dispatch-go-postgres-16` jobs run it that way, alone and before the module's
+other packages (`.github/workflows/envoy-and-contracts.yaml`), and `envoy-go-race` gives it 30
+minutes. A
+command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
+rather than beside the module's other Postgres-backed packages: together they share one database
+service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
+(`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
+
 ## Containers a test starts
 
 Every container a test or a proof script starts carries a CPU limit and a memory limit sized to its
