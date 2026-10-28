@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { askgateState, sweepStores } from "./askgate-marker";
 import { adviceMemory } from "./dispatch-execute";
 import { shownPictures } from "./dispatch-picture-tools";
 import type { PictureType, ToolImage } from "./dispatch-pictures";
@@ -37,6 +38,14 @@ export interface ResultEntry {
   readonly tool: string;
   readonly details?: unknown;
   readonly error?: string;
+  /**
+   * A gated write AskGate's record required a marker for, and which carried none or one whose
+   * file or arguments differ: refused in `block` mode (`error` holds the refusal); in `warn` mode a
+   * line of its own, with neither `details` nor `error`, written before the write is sent, and the
+   * result's own line after it. pi-envoy turns each into an `advisor-gate` entry, so the report
+   * counts it.
+   */
+  readonly askgate?: { readonly mode: "warn" | "block"; readonly why: string };
 }
 
 interface SessionMemory {
@@ -279,7 +288,10 @@ export function readSessionTitle(dir: string): string | undefined {
 
 /**
  * Removes the session directories nobody touched for 14 days, at most once a day: the root's
- * `.pruned` stamp records the last pass.
+ * `.pruned` stamp records the last pass. A directory whose AskGate record a live process keeps
+ * (`askgateState`), or whose record cannot be read, stays: removing it would let that session's
+ * writes post with no marker. The same pass removes the AskGate marker stores of processes that
+ * are gone (`sweepStores`).
  */
 export function pruneSessions(root: string, now: number): void {
   const stamp = join(root, PRUNED_STAMP);
@@ -299,7 +311,7 @@ export function pruneSessions(root: string, now: number): void {
     if (!entry.isDirectory()) continue;
     const dir = join(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
+      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
         rmSync(dir, { recursive: true, force: true });
       }
     } catch (error) {
@@ -307,6 +319,7 @@ export function pruneSessions(root: string, now: number): void {
       if (!hasErrnoCode(error, "ENOENT")) throw error;
     }
   }
+  sweepStores(root, now);
   ensureDirectory(root);
   writeFileSync(stamp, "", { mode: PRIVATE_FILE });
 }

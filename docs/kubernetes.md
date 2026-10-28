@@ -5428,6 +5428,49 @@ issue's pod (every role of it alike) and the image probe's.
   turns it off or the probe could not read it — a report, not a refusal; a
   `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to
   keep it off ([The deployment's capability report](#the-deployments-capability-report)).
+- **AskGate's time limit** is the operator's too. Every pod loads pi-envoy, whose AskGate reviews
+  each Dispatch write of a role's main agent before it posts. Its review must finish inside Oh My
+  Pi's limit for one `tool_call` handler, `extensionHandlers.toolCallTimeoutMs`, and the gate holds
+  its deadline 5 s under that limit. The limit is 30 s by default, so the deadline is then 25 s. A
+  review of a long session often takes longer, a review that times out lets the write post
+  unreviewed, and three timeouts in a row stop the gate for the rest of that session. Set
+  `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
+  overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
+  it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
+  through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
+  gets no gate. The pod's `dispatch` command enforces the review: while the gate is bound, a
+  gated write that is not one literal `dispatch` call the gate reviewed (a pipe other than one
+  trailing `head` or `tail`, a script, `python3 -c`, an eval cell's process) is refused by the
+  CLI, in block mode, for want of the single-use marker the gate mints. It reviews the writes of
+  a cooperating agent and is no
+  sandbox: it does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a
+  process of the pod's own user that removes the CLI's AskGate record or a marker, acts as another
+  session id or state directory, or otherwise goes around the CLI (pi-envoy's README, "What
+  AskGate is not").
+
+  **Turning AskGate off in a pod:** put `{"askgate":{"enabled":false}}` in the `envoy.json` that the
+  pod's pi-envoy reads. The image sets `OMP_PROFILE=legion`, so Oh My Pi sets
+  `PI_CODING_AGENT_DIR` to the profile's agent directory in its own process, and pi-envoy reads
+  `/home/legion/.omp/profiles/legion/agent/envoy.json`. It reads that path before the file
+  `ENVOY_CONFIG_FILE` names, so that variable does not move it. The image writes no file there, and
+  the pod gets Dispatch from the `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` that the runtime sets. A
+  file that holds only the `askgate` section has no `dispatch` section, so Dispatch stays on from
+  those variables. Mount the file at that path as the operator's `models.yml` is mounted, from a
+  ConfigMap of its own:
+
+  ```yaml
+  # askgate.json: kubectl -n legion create configmap legion-askgate --from-file=envoy.json=askgate.json
+  runtime:
+    kubernetes:
+      pod:
+        volumes:
+          - {name: askgate, config_map: {name: legion-askgate}}
+        volume_mounts:
+          - {volume: askgate, mount_path: /home/legion/.omp/profiles/legion/agent/envoy.json, sub_path: envoy.json}
+  ```
+
+  (beside the block's other volumes and mounts). pi-envoy reads the switch when it loads, so the
+  change reaches the pods created after it, and a pod that already runs keeps its gate.
 - **`role_config_files`** gives one role Oh My Pi overlays no other role gets: a top-level
   `legion.yaml` key mapping a role (an issue role, or `controller` under `controller: daemon`) to
   absolute paths of overlays in the operator's mounts. A deployment that wants a model fallback
