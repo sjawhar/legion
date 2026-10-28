@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -50,12 +48,8 @@ func verifyBundle(dir string) (bundleVerification, error) {
 	if err != nil {
 		return bundleVerification{}, fmt.Errorf("bundle %s: %w", dir, err)
 	}
-	meta, err := os.ReadFile(filepath.Join(dir, bundleMetaFile))
-	if err != nil {
-		return bundleVerification{}, err
-	}
 	return bundleVerification{
-		Project: b.Meta.Project, At: b.Meta.At, Until: b.Meta.Until, MetaSHA256: sha256Hex(meta),
+		Project: b.Meta.Project, At: b.Meta.At, Until: b.Meta.Until, MetaSHA256: b.MetaSHA256,
 		Files: len(b.Meta.Files), Issues: countExisting(b.State.Issues), WindowEvents: len(b.Window),
 		Roster: len(b.Roster),
 	}, nil

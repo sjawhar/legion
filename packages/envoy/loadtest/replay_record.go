@@ -380,8 +380,7 @@ func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]repl
 			}
 			var quote, block string
 			if _, err := pgx.ForEachRow(rows, []any{&quote, &block}, func() error {
-				sum := sha256.Sum256([]byte(quote))
-				d.Anchors = append(d.Anchors, replayEndAnchor{QuoteSHA256: hex.EncodeToString(sum[:]), BlockID: block})
+				d.Anchors = append(d.Anchors, replayEndAnchor{QuoteSHA256: sha256Hex([]byte(quote)), BlockID: block})
 				return nil
 			}); err != nil {
 				return nil, fmt.Errorf("comments: %w", err)

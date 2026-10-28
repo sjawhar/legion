@@ -46,12 +46,6 @@ stack=$here/stack.sh
 source "$here/common.sh"
 resolve_paths
 
-# abs_file FLAG FILE: FILE's absolute path, refused when it is not a file.
-abs_file() {
-  [ -f "$2" ] || die "$1 names $2, which is not a file"
-  printf '%s/%s\n' "$(cd -- "$(dirname -- "$2")" && pwd -P)" "$(basename -- "$2")"
-}
-
 [ $# -ge 1 ] || usage
 name=$1
 shift
@@ -79,6 +73,10 @@ while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || die "$flag needs a value"
   value=$2
   shift 2
+  if [ "$flag" = --out ]; then
+    out=$value
+    continue
+  fi
   if $replay; then
     case $flag in
       --events | --sessions | --requests | --duration | --grace | --event-mix | --route-mix | --human | --sse)
@@ -103,10 +101,6 @@ while [ $# -gt 0 ]; do
         manifest=$(abs_file --manifest "$value")
         continue
         ;;
-      --out)
-        out=$value
-        continue
-        ;;
       *) die "unknown flag '$flag'" ;;
     esac
   else
@@ -116,10 +110,6 @@ while [ $# -gt 0 ]; do
       --requests) have_requests=true ;;
       --duration | --warmup | --grace | --event-mix | --human | --sse | --rng-seed) ;;
       --route-mix) value=$(abs_file --route-mix "$value") ;;
-      --out)
-        out=$value
-        continue
-        ;;
       *) die "unknown flag '$flag'" ;;
     esac
   fi

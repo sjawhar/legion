@@ -9,10 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -315,7 +316,8 @@ type replayCounts struct {
 	BlockMapsUnavailable int `json:"block_maps_unavailable"`
 	// AnchorRules counts the state's and the window's anchors by the chooseAnchor branch each
 	// takes on the text at At (logged_quote, in_logged_block, nearest_surviving_block,
-	// unanchorable); window anchors on documents not in the state are not counted.
+	// no_block_map, unanchorable); an anchor on a document with no text at At (one not in the
+	// state, say) counts as no_text.
 	AnchorRules map[string]int `json:"anchor_rules"`
 }
 
@@ -355,7 +357,9 @@ type replayBundle struct {
 	State  replayState
 	Roster []replayRosterEntry
 	Meta   replayMeta
-	Window []replayEvent
+	// MetaSHA256 is bundle.meta.json's sha256, as readBundle read it.
+	MetaSHA256 string
+	Window     []replayEvent
 }
 
 // readFile reads a bundle file by its slash path (a replayArtifact.TextPath, say).
@@ -371,6 +375,7 @@ func readBundle(dir string) (*replayBundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	b.MetaSHA256 = sha256Hex(metaBytes)
 	if err := json.Unmarshal(metaBytes, &b.Meta); err != nil {
 		return nil, fmt.Errorf("%s: %w", bundleMetaFile, err)
 	}
@@ -379,11 +384,7 @@ func readBundle(dir string) (*replayBundle, error) {
 			return nil, fmt.Errorf("%s does not list %s", bundleMetaFile, need)
 		}
 	}
-	paths := make([]string, 0, len(b.Meta.Files))
-	for p := range b.Meta.Files {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(b.Meta.Files))
 	for _, p := range paths {
 		data, err := b.readFile(p)
 		if err != nil {
@@ -446,11 +447,6 @@ func keepIssue(rngSeed uint64, issueKey string, f float64) bool {
 	binary.LittleEndian.PutUint64(seed[:], rngSeed)
 	_, _ = h.Write(seed[:])
 	_, _ = h.Write([]byte(issueKey))
-	x := h.Sum64()
-	x ^= x >> 30
-	x *= 0xbf58476d1ce4e5b9
-	x ^= x >> 27
-	x *= 0x94d049bb133111eb
-	x ^= x >> 31
+	x := splitmix64(h.Sum64())
 	return float64(x>>11)/float64(1<<53) < f
 }

@@ -99,11 +99,13 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	pick := func(branch, id string, start, end int, cands []string) anchorChoice {
 		return anchorChoice{Branch: branch, BlockID: id, Start: start, End: end, Candidates: fallbackOrder(rngSeed, docID, itemID, cands)}
 	}
+	useLogged := !skipLogged && !orphaned && quote != ""
 	if bm == nil || len(bm.Blocks) == 0 {
-		if !skipLogged && !orphaned && quote != "" && strings.Count(text, quote) == 1 {
+		if useLogged && strings.Count(text, quote) == 1 {
 			return anchorChoice{Branch: ruleNoBlockMap, Start: 0, End: len(text), Candidates: []string{quote}}
 		}
-		if c := spanCandidates(text, 0, len(text)); len(c) > 0 {
+		// fallbackCandidates already keeps only sentences unique in the whole text.
+		if c := fallbackCandidates(text); len(c) > 0 {
 			return pick(ruleNoBlockMap, "", 0, len(text), c)
 		}
 		return anchorChoice{Branch: ruleUnanchorable}
@@ -116,7 +118,7 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	// Rule 1: a logged quote that is not orphaned and occurs once in the text is no substitute, so
 	// it is used whether or not its logged block survives. Its span is its block's when the quote
 	// lies inside it, else the quote itself.
-	if !skipLogged && !orphaned && quote != "" && strings.Count(text, quote) == 1 {
+	if useLogged && strings.Count(text, quote) == 1 {
 		q := strings.Index(text, quote)
 		if located && q >= start && q+len(quote) <= end {
 			return anchorChoice{Branch: ruleLoggedQuote, BlockID: blockID, Start: start, End: end, Candidates: []string{quote}}
@@ -125,7 +127,7 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	}
 	// A logged quote repeated in the text but once inside its located block: that occurrence,
 	// counted under in_logged_block.
-	if located && !skipLogged && !orphaned && quote != "" {
+	if located && useLogged {
 		k, at, inside := 0, -1, 0
 		for i, off := 0, 0; ; i++ {
 			j := strings.Index(text[off:], quote)
@@ -149,26 +151,11 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 	}
 	ref := top
 	if !found {
-		ref = -1
-		if quote != "" {
-			for i, b := range bm.Blocks {
-				if strings.Contains(b.Text, quote) {
-					ref = i
-					break
-				}
-			}
-		}
-		if ref < 0 {
-			rel := 0.5
-			if i := strings.Index(text, quote); quote != "" && i >= 0 && len(text) > 0 {
-				rel = float64(i) / float64(len(text))
-			}
-			ref = min(len(bm.Blocks)-1, int(rel*float64(len(bm.Blocks))))
-		}
+		ref = refByQuote(text, bm, quote)
 	}
 	for d := 0; d < len(bm.Blocks); d++ {
 		for _, i := range []int{ref - d, ref + d} {
-			if i < 0 || i >= len(bm.Blocks) || (d == 0 && i != ref) || (found && i == top && located) {
+			if i < 0 || i >= len(bm.Blocks) || (found && i == top && located) {
 				continue
 			}
 			if s, e, ok := locate(text, bm.Blocks[i].Text); ok {
@@ -182,6 +169,24 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 		}
 	}
 	return anchorChoice{Branch: ruleUnanchorable}
+}
+
+// refByQuote is where the search for the nearest surviving block starts when the logged block id
+// is not among the current blocks: the first block whose text holds the logged quote, else the
+// block at the quote's relative position in text (the middle when the quote is not in text).
+func refByQuote(text string, bm *replayBlockMap, quote string) int {
+	if quote != "" {
+		for i, b := range bm.Blocks {
+			if strings.Contains(b.Text, quote) {
+				return i
+			}
+		}
+	}
+	rel := 0.5
+	if i := strings.Index(text, quote); quote != "" && i >= 0 {
+		rel = float64(i) / float64(len(text))
+	}
+	return min(len(bm.Blocks)-1, int(rel*float64(len(bm.Blocks))))
 }
 
 // substituteAnchor is chooseAnchor for the replay source's window anchors: given a document's
@@ -332,7 +337,7 @@ func planHistory(text string, sizes []int, final int, steps []askStep, versions 
 			real[n] = sizes[n]
 		case n > 0:
 			real[n] = real[n-1]
-			p.Missing++
+			fallthrough
 		default:
 			p.Missing++
 		}

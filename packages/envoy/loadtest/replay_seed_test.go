@@ -10,10 +10,10 @@ import (
 func TestResumeSkipsMappedIDs(t *testing.T) {
 	// A seeder with no API client and no database: any step that sent a request or ran a query
 	// would panic, so each step below passing proves that a logged id replay_ids holds is skipped.
-	ids := &idStore{m: map[[2]string]string{
+	ids := newIDStore(nil, map[[2]string]string{
 		{idIssue, "PRJ-1"}: "PRJ-1", {idArtifact, "d1"}: "local-d1", {idArtifact, "f1"}: "local-f1",
 		{idComment, "c1"}: "local-c1", {idResolve, "c1"}: "local-c1", {idAsk, "a1"}: "local-a1", {idAnswer, "a1"}: "local-a1",
-	}}
+	})
 	s := &replaySeeder{ids: ids}
 	ctx := context.Background()
 	is := &replayIssue{Key: "PRJ-1", Number: 1, Exists: true}
@@ -43,8 +43,8 @@ func TestResumeSkipsMappedIDs(t *testing.T) {
 	if err := s.answer(ctx, "PRJ-1", docs, a, "local-a1"); err != nil {
 		t.Fatal(err)
 	}
-	if !ids.locals(idArtifact)["local-f1"] || ids.count(idArtifact) != 2 || ids.len() != 7 {
-		t.Fatal("locals or counts wrong")
+	if !ids.mapped(idArtifact, "local-f1") || ids.count(idArtifact) != 2 || ids.len() != 7 {
+		t.Fatal("mapped or counts wrong")
 	}
 }
 

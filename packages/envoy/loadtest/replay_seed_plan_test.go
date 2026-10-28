@@ -30,10 +30,7 @@ func TestPlanIssuesPlaceholders(t *testing.T) {
 	}
 	var placeholders []string
 	for _, p := range plans {
-		if p.Placeholder != (p.Issue == nil) {
-			t.Fatalf("%s: Placeholder %v with issue %v", p.Key, p.Placeholder, p.Issue != nil)
-		}
-		if p.Placeholder {
+		if p.placeholder() {
 			placeholders = append(placeholders, p.Key)
 		}
 	}
@@ -50,7 +47,7 @@ func TestPlanIssuesPlaceholders(t *testing.T) {
 		if p.Number != i+1 {
 			t.Fatalf("plan %d has number %d: numbering must hold", i, p.Number)
 		}
-		if !p.Placeholder {
+		if !p.placeholder() {
 			seeded = append(seeded, p.Key)
 		}
 	}

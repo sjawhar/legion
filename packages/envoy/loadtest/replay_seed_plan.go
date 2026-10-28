@@ -34,12 +34,13 @@ const padToken = "zqpad"
 
 // seedIssuePlan is one issue number of the project: seeded from the bundle, or a placeholder.
 type seedIssuePlan struct {
-	Key         string
-	Number      int
-	Placeholder bool
+	Key    string
+	Number int
 	// Issue is the bundle's issue; nil for a placeholder.
 	Issue *replayIssue
 }
+
+func (p seedIssuePlan) placeholder() bool { return p.Issue == nil }
 
 // readKeysFile reads a keys file: issue keys separated by newlines, commas or blanks; # starts a
 // comment that runs to the line's end.
@@ -81,8 +82,6 @@ func planIssues(st replayState, keys map[string]bool) ([]seedIssuePlan, error) {
 		if is.Exists && (keys == nil || keys[is.Key]) {
 			p.Issue = is
 			seen[is.Key] = true
-		} else {
-			p.Placeholder = true
 		}
 		plans = append(plans, p)
 	}
@@ -220,6 +219,9 @@ func loggedQuote(text string, a *replayAnchor) (string, bool) {
 // escapes, so the sentence reads the same in the markdown and in the document's text.
 const fallbackSyntax = "`*_~[](){}<>#|\\!:=&\"$^@"
 
+// blockMarker is a list item's or a block quote's marker at a line's start.
+var blockMarker = regexp.MustCompile(`^(?:[-*+]|\d+[.)]|>)\s+`)
+
 // fallbackCandidates are the sentences of text an anchor can fall back to, in text order: plain
 // text of 20 to 200 bytes outside code fences, front matter and directive blocks, starting with a
 // letter, holding no markdown syntax character, tab or double blank, and occurring exactly once in
@@ -259,8 +261,8 @@ func fallbackCandidates(text string) []string {
 		if directive > 0 || strings.HasPrefix(line, "    ") {
 			continue
 		}
-		for blockMarker.MatchString(trimmed) {
-			trimmed = blockMarker.ReplaceAllString(trimmed, "")
+		for loc := blockMarker.FindStringIndex(trimmed); loc != nil; loc = blockMarker.FindStringIndex(trimmed) {
+			trimmed = trimmed[loc[1]:]
 		}
 		// A table row's cells are each a segment of their own.
 		segments := []string{trimmed}
@@ -337,9 +339,6 @@ func fallbackOrder(rngSeed uint64, docID, itemID string, candidates []string) []
 }
 
 // --- asks ----------------------------------------------------------------------------------------
-
-// blockMarker is a list item's or a block quote's marker at a line's start.
-var blockMarker = regexp.MustCompile(`^(?:[-*+]|\d+[.)]|>)\s+`)
 
 var approvalPrefix = regexp.MustCompile(`^Approve .* \(version \d+\)\?( |$)`)
 
@@ -499,7 +498,7 @@ func expectedOpenAnchored(is *replayIssue) map[string]int {
 	return out
 }
 
-// windowWrite is one window write production counts toward a document's load: an
+// windowWrites are the window writes production counts toward a document's load: each
 // artifact.version, or a comment.created with an anchor or a reply_to.
 type windowWrites struct {
 	// Writes counts those events per issue key; AnchoredRoots counts the anchored roots

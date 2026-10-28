@@ -355,7 +355,6 @@ func (a *replayAction) refs() []replayRef {
 // replayPlan is the replay's actions in send order, with what planning counted.
 type replayPlan struct {
 	Project string
-	At      time.Time
 	Actions []*replayAction
 	Counts  replayPlanCounts
 	// IssueKeys are the kept issues that existed at the bundle's instant, in key order.
@@ -417,8 +416,7 @@ type replayPlanner struct {
 	snap          map[string]map[string]json.RawMessage
 	stateIssue    map[string]*replayIssue
 	claim         map[string]*replayActor
-	created       map[string]bool // issue keys a kept issue.created makes
-	firstSize     map[string]int  // the first logged version size of each artifact in the window
+	firstSize     map[string]int // the first logged version size of each artifact in the window
 	// bornAt is the offset of the write that creates each comment and document the window creates:
 	// a read sent before it never names the object.
 	bornAt      map[string]time.Duration
@@ -433,13 +431,13 @@ type replayPlanner struct {
 func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 	pl := &replayPlanner{
 		b: b, o: o, at: b.State.At,
-		p: &replayPlan{Project: b.State.Project, At: b.State.At, Counts: replayPlanCounts{
+		p: &replayPlan{Project: b.State.Project, Counts: replayPlanCounts{
 			WritesByKind: map[string]int{}, ReadsByKind: map[string]int{}, RequestsByRoute: map[string]int{},
 			NotSent: map[string]int{}, SpecSizes: map[string]int{},
 		}},
 		artifacts: map[string]*replayArtifact{}, docs: map[string]*rpDoc{}, issueDocs: map[string][]string{},
 		issueComments: map[string][]string{}, snap: map[string]map[string]json.RawMessage{}, stateIssue: map[string]*replayIssue{},
-		claim: map[string]*replayActor{}, created: map[string]bool{}, firstSize: map[string]int{}, bornAt: map[string]time.Duration{},
+		claim: map[string]*replayActor{}, firstSize: map[string]int{}, bornAt: map[string]time.Duration{},
 		threadDoc: map[string]string{}, askDoc: map[string]string{},
 	}
 	pl.key = func(k string) bool { return keepIssue(o.rngSeed, k, o.rate) && (o.keys == nil || o.keys[k]) }
@@ -638,17 +636,22 @@ func (pl *replayPlanner) add(a *replayAction) {
 		c.ReadActions++
 		c.ReadsByKind[a.Kind]++
 	}
+	a.tally(&c.Substitutes, &c.Edits)
+}
+
+// tally counts the action's substitutes and edit kinds into s and e.
+func (a *replayAction) tally(s *replaySubstitutes, e *replayEdits) {
 	if a.QuoteSub {
-		c.Substitutes.Quote++
+		s.Quote++
 	}
 	if a.ContentSub {
-		c.Substitutes.Edit++
+		s.Edit++
 	}
 	if a.EditDiff {
-		c.Edits.Diff++
+		e.Diff++
 	}
 	if a.EditSub {
-		c.Edits.Substitute++
+		e.Substitute++
 	}
 }
 
@@ -667,7 +670,11 @@ func replayHash(rngSeed uint64, parts ...string) uint64 {
 		_, _ = h.Write([]byte(p))
 		_, _ = h.Write([]byte{0})
 	}
-	x := h.Sum64()
+	return splitmix64(h.Sum64())
+}
+
+// splitmix64 is the splitmix64 finalizer.
+func splitmix64(x uint64) uint64 {
 	x ^= x >> 30
 	x *= 0xbf58476d1ce4e5b9
 	x ^= x >> 27
@@ -731,7 +738,6 @@ type rpVersion struct {
 	Name       string  `json:"name"`
 	Diff       *string `json:"diff"`
 	Version    struct {
-		Number  int     `json:"number"`
 		Named   bool    `json:"named"`
 		Size    *int    `json:"size"`
 		MIME    *string `json:"mime"`
@@ -753,7 +759,6 @@ type rpArtifactCreated struct {
 }
 
 type rpIssueCreated struct {
-	Key               string       `json:"key"`
 	Title             string       `json:"title"`
 	Parent            *string      `json:"parent"`
 	PrimaryArtifactID string       `json:"primary_artifact_id"`
@@ -802,13 +807,6 @@ func actorFor(a replayActor) (person string, actor map[string]any) {
 	return "", actor
 }
 
-func withActorBody(body map[string]any, actor map[string]any) map[string]any {
-	if actor != nil {
-		body["actor"] = actor
-	}
-	return body
-}
-
 func issueRef(key string) replayRef { return replayRef{Kind: idIssue, Logged: key} }
 
 func refArg(r replayRef) replayArg { return replayArg{Ref: &r} }
@@ -833,7 +831,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		if err := json.Unmarshal(ev.Payload, &c); err != nil {
 			return nil, "", fmt.Errorf("event %d: %w", ev.ID, err)
 		}
-		body := withActorBody(map[string]any{"body": c.Body}, actor)
+		body := withActor(map[string]any{"body": c.Body}, actor)
 		post := &replayReq{Method: "POST", Path: "/api/v1/issues/{key}/comments", Params: keyParams(key), Body: body, Person: person,
 			Produces: []replayProduce{{Ref: replayRef{idComment, c.ID}, Field: "id"}}}
 		switch {
@@ -894,7 +892,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		}
 		if (d != nil && d.file) || v.Version.MIME != nil {
 			act.Kind = rkFileVersion
-			act.Stages = [][]*replayReq{{pl.fileUpload(key, v.Name, v.Version.MIME, eid, size, actor, person, nil)}}
+			act.Stages = [][]*replayReq{{fileUpload(key, v.Name, v.Version.MIME, eid, size, actor, person, nil)}}
 			if d != nil {
 				d.size = size
 			}
@@ -925,10 +923,10 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		case upload:
 			act.Kind = rkUpload
 			act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/issues/{key}/artifacts", Params: keyParams(key), Person: person,
-				Body: withActorBody(map[string]any{"name": v.Name, "content": next, "summary": summary}, actor)}}}
+				Body: withActor(map[string]any{"name": v.Name, "content": next, "summary": summary}, actor)}}}
 		default:
 			act.Kind = rkEdit
-			body := withActorBody(map[string]any{"ops": ops}, actor)
+			body := withActor(map[string]any{"ops": ops}, actor)
 			if v.Version.Named {
 				body["summary"] = summary
 			} else {
@@ -955,24 +953,26 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			if !known {
 				continue
 			}
-			if now := cur[f]; !sameJSON(was, now) {
-				if f == "parent" {
-					var p *string
-					_ = json.Unmarshal(now, &p)
-					if p != nil {
-						body[f] = replayRef{idIssue, *p}
-						continue
-					}
-				}
-				body[f] = nullIfEmpty(now)
-				statusChanged = statusChanged || f == "status"
+			now := cur[f]
+			if sameJSON(was, now) {
+				continue
 			}
+			if f == "parent" {
+				var p *string
+				_ = json.Unmarshal(now, &p)
+				if p != nil {
+					body[f] = issueRef(*p)
+					continue
+				}
+			}
+			body[f] = nullIfEmpty(now)
+			statusChanged = statusChanged || f == "status"
 		}
 		if len(body) == 0 {
 			pl.p.Counts.PatchUnchanged++
 			body["status"] = nullIfEmpty(cur["status"])
 		}
-		withActorBody(body, actor)
+		withActor(body, actor)
 		switch {
 		case strings.HasPrefix(ev.Actor.ID, replayDaemonPrefix):
 			act.Kind = rkDaemon
@@ -1021,9 +1021,9 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			}
 			spec = replaySynthDoc(size, replayHash(pl.o.rngSeed, "spec", docID))
 		}
-		body := withActorBody(map[string]any{"project": pl.p.Project, "title": is.Title, "spec": spec, "force": true}, actor)
+		body := withActor(map[string]any{"project": pl.p.Project, "title": is.Title, "spec": spec, "force": true}, actor)
 		if is.Parent != nil {
-			body["parent"] = replayRef{idIssue, *is.Parent}
+			body["parent"] = issueRef(*is.Parent)
 		}
 		project := map[string]replayArg{"project": {Lit: url.PathEscape(pl.p.Project)}}
 		act.Stages = [][]*replayReq{
@@ -1032,7 +1032,6 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			{{Method: "GET", Path: "/api/v1/projects/{project}/architecture-sources", Params: project, Tolerate: http.StatusNotFound}},
 			{{Method: "GET", Path: "/api/v1/projects/{project}/architecture-source", Params: project}},
 		}
-		pl.created[key] = true
 		act.Doc = docID
 		pl.docs[docID] = &rpDoc{text: spec, size: size}
 		pl.issueDocs[key] = append(pl.issueDocs[key], docID)
@@ -1064,7 +1063,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		act.Doc = a.ID
 		if a.Kind != "doc" {
 			act.Kind = rkFileCreate
-			act.Stages = [][]*replayReq{{pl.fileUpload(key, a.Name, mime, a.ID, size, actor, person, produce)}}
+			act.Stages = [][]*replayReq{{fileUpload(key, a.Name, mime, a.ID, size, actor, person, produce)}}
 			pl.docs[a.ID] = &rpDoc{file: true, size: size}
 			break
 		}
@@ -1078,7 +1077,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		} else {
 			return nil, "", fmt.Errorf("bundle created document %s: %w", a.ID, err)
 		}
-		body := withActorBody(map[string]any{"name": a.Name, "content": text}, actor)
+		body := withActor(map[string]any{"name": a.Name, "content": text}, actor)
 		if summary != "" {
 			body["summary"] = summary
 		}
@@ -1104,7 +1103,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			return nil, "", fmt.Errorf("event %d: %w", ev.ID, err)
 		}
 		post := &replayReq{Method: "POST", Path: "/api/v1/issues/{key}/messages", Params: keyParams(key), Person: person,
-			Body: withActorBody(map[string]any{"body": m.Body}, actor)}
+			Body: withActor(map[string]any{"body": m.Body}, actor)}
 		if strings.HasPrefix(ev.Actor.ID, replayDaemonPrefix) {
 			act.Kind = rkDaemonMessage
 			act.Stages = [][]*replayReq{{{Method: "GET", Path: "/api/v1/issues/{key}/events?order=desc&limit=200", Params: keyParams(key)}}, {post}}
@@ -1128,7 +1127,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			for _, o := range a.Options {
 				options = append(options, map[string]any{"label": o.Label, "description": o.Description})
 			}
-			body := withActorBody(map[string]any{"question": a.Question, "kind": a.Kind, "options": options, "multiple": a.Multiple, "urgency": a.Urgency}, actor)
+			body := withActor(map[string]any{"question": a.Question, "kind": a.Kind, "options": options, "multiple": a.Multiple, "urgency": a.Urgency}, actor)
 			if a.Anchor != nil {
 				body["anchor"] = map[string]any{"artifact": replayRef{idArtifact, a.Anchor.ArtifactID}, "quote": a.Anchor.Quote}
 				act.Doc = a.Anchor.ArtifactID
@@ -1159,7 +1158,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			if a.Resolution != nil {
 				body["kind"], body["reason"] = a.Resolution.Kind, a.Resolution.Reason
 			}
-			act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/asks/{id}/resolve", Params: askParams, Person: person, Body: withActorBody(body, actor)}}}
+			act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/asks/{id}/resolve", Params: askParams, Person: person, Body: withActor(body, actor)}}}
 			act.Doc = pl.askDoc[a.ID]
 		}
 	case "issue.claimed":
@@ -1176,7 +1175,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			pl.claim[key] = &c.Claim.Actor
 		}
 		cp, ca := actorFor(claimer)
-		act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/issues/{key}/claim", Params: keyParams(key), Person: cp, Body: withActorBody(map[string]any{}, ca)}}}
+		act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/issues/{key}/claim", Params: keyParams(key), Person: cp, Body: withActor(map[string]any{}, ca)}}}
 	default:
 		return nil, "unhandled:" + ev.Type, nil
 	}
@@ -1184,7 +1183,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 }
 
 // fileUpload is a multipart upload of deterministic bytes of the logged size.
-func (pl *replayPlanner) fileUpload(key, name string, mime *string, seed string, size int, actor map[string]any, person string, produce []replayProduce) *replayReq {
+func fileUpload(key, name string, mime *string, seed string, size int, actor map[string]any, person string, produce []replayProduce) *replayReq {
 	m := "application/octet-stream"
 	if mime != nil && *mime != "" {
 		m = *mime
@@ -1207,17 +1206,10 @@ func stateSnapshot(is *replayIssue) map[string]json.RawMessage {
 	put("status", is.Status)
 	put("parent", is.Parent)
 	put("priority", is.Priority)
-	put("labels", nonNilStrings(is.Labels))
+	put("labels", nonNil(is.Labels))
 	put("route", is.Route)
-	put("blocked_by", nonNilStrings(is.BlockedBy))
+	put("blocked_by", nonNil(is.BlockedBy))
 	return out
-}
-
-func nonNilStrings(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }
 
 // sameJSON compares two JSON values by their compact bytes; absent is null.
@@ -1475,7 +1467,7 @@ func (pl *replayPlanner) readAction(key, kind, eid string, j int, at time.Durati
 		return ids[int(replayHash(pl.o.rngSeed, what, eid, strconv.Itoa(j))%uint64(n))]
 	}
 	params := keyParams(key)
-	issueURI := map[string]replayArg{"key_ref": {Ref: &replayRef{idIssue, key}, URI: true}}
+	issueURI := map[string]replayArg{"key_ref": {Ref: new(issueRef(key)), URI: true}}
 	switch kind {
 	case rkDocRead:
 		if doc := pick(pl.issueDocs[key], "docread"); doc != "" {
@@ -1489,7 +1481,7 @@ func (pl *replayPlanner) readAction(key, kind, eid string, j int, at time.Durati
 	case rkCommentRef:
 		if c := pick(pl.issueComments[key], "commentref"); c != "" {
 			cref := replayRef{idComment, c}
-			uri := map[string]replayArg{"comment_ref": {Ref: &replayRef{idIssue, key}, Sub: &cref, URI: true}}
+			uri := map[string]replayArg{"comment_ref": {Ref: new(issueRef(key)), Sub: &cref, URI: true}}
 			act.Stages = [][]*replayReq{
 				{{Method: "GET", Path: "/api/v1/comments/{id}", Params: map[string]replayArg{"id": refArg(cref)}}},
 				{{Method: "GET", Path: "/api/v1/references?to={comment_ref}", Params: uri}, {Method: "GET", Path: "/api/v1/references?from={comment_ref}", Params: uri}},
@@ -1551,12 +1543,8 @@ func runReplayPlan(args []string) error {
 
 // inputsRecord is the inputs as summary.json records them; the stack's fields stay empty.
 func (o replayOptions) inputsRecord(b *replayBundle) replayInputs {
-	in := replayInputs{RateFactor: o.rate, ReadsPerWrite: o.reads, ReadMix: o.mix.asMap(), UploadShare: o.uploads, RNGSeed: o.rngSeed,
-		FromS: o.from.Seconds(), ToS: o.to.Seconds()}
-	if raw, err := b.readFile(bundleMetaFile); err == nil {
-		in.BundleSHA256 = sha256Hex(raw)
-	}
-	return in
+	return replayInputs{RateFactor: o.rate, ReadsPerWrite: o.reads, ReadMix: o.mix.asMap(), UploadShare: o.uploads, RNGSeed: o.rngSeed,
+		FromS: o.from.Seconds(), ToS: o.to.Seconds(), BundleSHA256: b.MetaSHA256}
 }
 
 // --- sending ---------------------------------------------------------------------------------------
@@ -1634,16 +1622,18 @@ func newReplayStep(cfg runConfig, lg *log.Logger, nonce int64) *step {
 			home = index[k]
 		}
 		s := session{id: id, home: home, watched: []int{home}}
-		for k := 1; k < n && len(st.registrationBody(s)) < replayRosterEntryBytes; k++ {
+		size := len(st.registrationBody(s))
+		for k := 1; k < n && size < replayRosterEntryBytes; k++ {
 			w := (home + k*37) % n
 			if slices.Contains(s.watched, w) {
 				continue
 			}
 			next := append(slices.Clone(s.watched), w)
-			if len(st.registrationBody(session{id: id, watched: next})) > replayRosterEntryBytes+20 {
+			nb := len(st.registrationBody(session{id: id, watched: next}))
+			if nb > replayRosterEntryBytes+20 {
 				break
 			}
-			s.watched = next
+			s.watched, size = next, nb
 		}
 		for _, w := range s.watched {
 			st.watchers[w] = append(st.watchers[w], i)
@@ -1675,10 +1665,7 @@ func replayTurns(actions []*replayAction) map[*replayAction]*replayTurn {
 		if !a.Write || a.Doc == "" {
 			continue
 		}
-		t := &replayTurn{done: make(chan struct{})}
-		if prev, ok := last[a.Doc]; ok {
-			t.prev = prev
-		}
+		t := &replayTurn{done: make(chan struct{}), prev: last[a.Doc]}
 		last[a.Doc] = t.done
 		turns[a] = t
 	}
@@ -1903,18 +1890,7 @@ func (rr *replayRun) do(ctx context.Context, base, token string, act *replayActi
 	if act.Write {
 		rr.mu.Lock()
 		rr.writes[act.Kind].Sent++
-		if act.QuoteSub {
-			rr.subs.Quote++
-		}
-		if act.ContentSub {
-			rr.subs.Edit++
-		}
-		if act.EditDiff {
-			rr.edits.Diff++
-		}
-		if act.EditSub {
-			rr.edits.Substitute++
-		}
+		act.tally(&rr.subs, &rr.edits)
 		rr.mu.Unlock()
 	}
 	tr := &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, MaxIdleConnsPerHost: 4, IdleConnTimeout: replayActionDeadline}

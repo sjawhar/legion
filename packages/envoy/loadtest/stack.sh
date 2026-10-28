@@ -163,21 +163,11 @@ loadgen() {
   (cd -- "$ROOT" && env -i "${envs[@]}" "$BIN/loadgen" "$@")
 }
 
-psql_bin() {
-  if [ -x "$PGBIN/psql" ]; then
-    printf '%s\n' "$PGBIN/psql"
-  elif [ -x /usr/bin/psql ]; then
-    printf '%s\n' /usr/bin/psql
-  else
-    die "no psql: neither $PGBIN/psql nor /usr/bin/psql exists"
-  fi
-}
-
 # psql_db DB ARGS...: a psql client on the stack's Postgres, no ~/.psqlrc, no PG* from this shell.
 psql_db() {
   local db=$1
   shift
-  env -i "${base_env[@]}" PGOPTIONS=--client-min-messages=warning "$(psql_bin)" -X -q -v ON_ERROR_STOP=1 \
+  env -i "${base_env[@]}" PGOPTIONS=--client-min-messages=warning "$(pg_tool psql)" -X -q -v ON_ERROR_STOP=1 \
     -h 127.0.0.1 -p "$(port postgres)" -U postgres -d "$db" "$@"
 }
 
@@ -195,15 +185,10 @@ port() {
 
 stack_name() { jq -er .name "$STACK"; }
 
-# stack_set JQ_FILTER [jq args...]: rewrite stack.json through a filter.
+# stack_set JQ_FILTER [jq args...]: rewrite stack.json through a filter, owner-only.
 stack_set() {
-  local filter=$1
-  shift
-  local tmp
-  tmp=$(mktemp "$STACK.XXXXXX")
-  jq "$@" "$filter" "$STACK" >"$tmp"
-  chmod 600 "$tmp"
-  mv -f -- "$tmp" "$STACK"
+  json_set "$STACK" "$@"
+  chmod 600 "$STACK"
 }
 
 set_pid() { stack_set '.pids[$n] = $p' --arg n "$1" --argjson p "$2"; }
@@ -576,16 +561,15 @@ cmd_setup() {
 
   if [ -n "$commit" ]; then
     build_dispatch_at "$commit" "$BIN/envoy-dispatch"
-    note "building envoy-listener and loadgen from $ENVOY_SRC into $BIN"
-    (cd -- "$ENVOY_SRC" &&
-      go build -o "$BIN/envoy-listener" ./cmd/listener &&
-      go build -o "$BIN/loadgen" ./loadtest)
   else
-    note "building envoy-dispatch, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
-    (cd -- "$ENVOY_SRC" &&
-      go build -o "$BIN/envoy-dispatch" ./cmd/dispatch &&
-      go build -o "$BIN/envoy-listener" ./cmd/listener &&
-      go build -o "$BIN/loadgen" ./loadtest)
+    note "building envoy-dispatch from $ENVOY_SRC into $BIN"
+    (cd -- "$ENVOY_SRC" && go build -o "$BIN/envoy-dispatch" ./cmd/dispatch)
+  fi
+  note "building envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+  (cd -- "$ENVOY_SRC" &&
+    go build -o "$BIN/envoy-listener" ./cmd/listener &&
+    go build -o "$BIN/loadgen" ./loadtest)
+  if [ -z "$commit" ]; then
     local dirty tree=""
     dirty=$(build_dirty)
     [ "$dirty" = true ] || tree=$(git -C "$SRC" rev-parse HEAD:packages/envoy 2>/dev/null || true)
@@ -901,7 +885,7 @@ cmd_replay_seed() {
   bundle=$(cd -- "$bundle" && pwd -P)
   if [ -n "$keys" ]; then
     [ -f "$keys" ] || die "no keys file at $keys"
-    keys=$(cd -- "$(dirname -- "$keys")" && pwd -P)/$(basename -- "$keys")
+    keys=$(abs_file --keys-file "$keys")
   fi
   mkdir -p -- "$out"
   out=$(cd -- "$out" && pwd -P)
@@ -1420,10 +1404,10 @@ cmd_reset_replay() {
   migration=$(sql dispatch 'select max(version) from schema_migrations')
   touch_prepared "$rec"
   jq -n --arg template "$db" --arg key "$BUILD_KEY" --arg seed "$seed_sha" --argjson checksum "$checksum" \
-    --argjson migration "$migration" --slurpfile prepared "$rec" --argjson empty "$([ "$owed" = 0 ] && echo true || echo false)" \
+    --argjson migration "$migration" --slurpfile prepared "$rec" --argjson owed "$owed" \
     --arg at "$(date -u +%FT%TZ)" \
     '{template: $template, key: $key, seed_dump_sha256: $seed, checksum: $checksum, migration: $migration,
-      prepared: $prepared[0], backfill_empty: $empty, reset_at: $at}' >"$last"
+      prepared: $prepared[0], backfill_empty: ($owed == 0), reset_at: $at}' >"$last"
   note "database dispatch from $db: checksum $(jq -c .checksum "$last"), block index owes $owed"
   stop_one nats
   start_nats

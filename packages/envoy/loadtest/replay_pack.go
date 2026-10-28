@@ -24,8 +24,6 @@ import (
 // replay-unpack reassembles them. Packing is deterministic: sorted paths, mtime 0, mode 0644,
 // uid/gid 0 and a single-threaded encoder, so identical bundles pack to identical bytes.
 
-const defaultPartSize = 24 << 20
-
 // packResult is what replay-pack prints.
 type packResult struct {
 	TarZstSHA256 string     `json:"tar_zst_sha256"`
@@ -115,7 +113,7 @@ func packBundle(dir, prefix string, partSize int64) (*packResult, error) {
 		err = enc.Close()
 	}
 	if err == nil {
-		err = sp.finish()
+		err = sp.closePart()
 	}
 	if err != nil {
 		sp.abort()
@@ -177,8 +175,6 @@ func (s *splitWriter) closePart() error {
 	s.cur = nil
 	return err
 }
-
-func (s *splitWriter) finish() error { return s.closePart() }
 
 // abort removes the parts written so far.
 func (s *splitWriter) abort() {

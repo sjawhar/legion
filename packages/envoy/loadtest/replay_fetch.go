@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -124,8 +125,7 @@ func (f *replayFetcher) get(ctx context.Context, route, path string, attempts in
 		if res.ok() {
 			return res.body, nil
 		}
-		transient := res.err != nil || res.status == http.StatusTooManyRequests || res.status >= 500
-		if !transient || attempt >= attempts || ctx.Err() != nil {
+		if !res.transient() || attempt >= attempts || ctx.Err() != nil {
 			if res.err != nil {
 				inner := res.err
 				var ue *url.Error
@@ -136,10 +136,7 @@ func (f *replayFetcher) get(ctx context.Context, route, path string, attempts in
 			}
 			return nil, &httpStatusError{route: route, status: res.status}
 		}
-		backoff := time.Second << (attempt - 1)
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
-		}
+		backoff := min(time.Second<<(attempt-1), 30*time.Second)
 		if !sleepUntil(ctx, time.Now().Add(backoff)) {
 			return nil, ctx.Err()
 		}
@@ -215,7 +212,6 @@ type listedArtifact struct {
 
 type listedVersion struct {
 	Number    int       `json:"number"`
-	Named     bool      `json:"named"`
 	Size      *int      `json:"size"`
 	MIME      *string   `json:"mime"`
 	CreatedAt time.Time `json:"created_at"`
@@ -383,6 +379,7 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 		}
 	}
 	docBytes := make([]int, len(docs))
+	texts := make([]string, len(docs))
 	g, gctx = errgroup.WithContext(ctx)
 	g.SetLimit(f.conc)
 	for i, a := range docs {
@@ -399,7 +396,7 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 				if err := os.WriteFile(filepath.Join(out, filepath.FromSlash(rel)), text, 0o644); err != nil {
 					return err
 				}
-				a.TextPath, a.TextVersion, docBytes[i] = rel, n, len(text)
+				a.TextPath, a.TextVersion, docBytes[i], texts[i] = rel, n, len(text), string(text)
 				return nil
 			}
 			return nil
@@ -454,12 +451,14 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 	}
 	f.lg.Printf("created: %d documents, %d specs", len(created), len(specs))
 
-	docTexts, err := readDocTexts(out, docs)
-	if err != nil {
-		return counts, err
+	docTexts := map[string]string{}
+	for i, a := range docs {
+		if a.TextPath != "" {
+			docTexts[a.ID] = texts[i]
+		}
 	}
 	dropResolvedOutsideText(&rec.State, docTexts)
-	mapsUnavailable, err := f.fetchBlockMaps(ctx, &rec.State, rec.Window, byID, out)
+	mapsUnavailable, err := f.fetchBlockMaps(ctx, &rec.State, rec.Window, byID, docTexts)
 	if err != nil {
 		return counts, err
 	}
@@ -759,7 +758,7 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 		where := func(err error) error {
 			return fmt.Errorf("%s event %d (%s): %w", lg.Key, ev.ID, ev.Type, err)
 		}
-		if strings.HasPrefix(ev.Type, "comment.") && commentStates[ev.Type] && ev.CreatedAt.Before(until) {
+		if commentStates[ev.Type] && ev.CreatedAt.Before(until) {
 			var c wireComment
 			if err := json.Unmarshal(ev.Payload, &c); err != nil {
 				return is, nil, where(err)
@@ -1238,22 +1237,6 @@ func askBlockIDs(markdown string) []string {
 	return ids
 }
 
-// readDocTexts reads the bundle's texts at At by document id.
-func readDocTexts(out string, docs []*replayArtifact) (map[string]string, error) {
-	texts := map[string]string{}
-	for _, a := range docs {
-		if a.TextPath == "" {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(a.TextPath)))
-		if err != nil {
-			return nil, err
-		}
-		texts[a.ID] = string(b)
-	}
-	return texts, nil
-}
-
 // windowAnchor is the anchor a window comment.created or ask.opened payload carries.
 type windowAnchor struct {
 	ID     string        `json:"id"`
@@ -1300,15 +1283,11 @@ func anchoredDocs(st *replayState, window []replayEvent) []string {
 			}
 		}
 	}
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+	return slices.Sorted(maps.Keys(set))
 }
 
-// servedBlocks is GET /api/v1/artifacts/{id}/blocks: byte ranges into the current markdown.
+// servedBlock is one block of GET /api/v1/artifacts/{id}/blocks: a byte range into the current
+// markdown.
 type servedBlock struct {
 	ID    string `json:"id"`
 	Type  string `json:"type"`
@@ -1365,8 +1344,9 @@ func (f *replayFetcher) cachedOrUnavailable(ctx context.Context, rel, route, pat
 }
 
 // fetchBlockMaps reads the current blocks and markdown of every anchored document into
-// st.BlockMaps, returning how many production would not serve.
-func (f *replayFetcher) fetchBlockMaps(ctx context.Context, st *replayState, window []replayEvent, byID map[string]listedArtifact, out string) (int, error) {
+// st.BlockMaps, returning how many production would not serve; texts are the bundle's texts at At
+// by document id.
+func (f *replayFetcher) fetchBlockMaps(ctx context.Context, st *replayState, window []replayEvent, byID map[string]listedArtifact, texts map[string]string) (int, error) {
 	stateDocs := map[string]*replayArtifact{}
 	for i := range st.Issues {
 		for j := range st.Issues[i].Artifacts {
@@ -1378,6 +1358,13 @@ func (f *replayFetcher) fetchBlockMaps(ctx context.Context, st *replayState, win
 	st.BlockMaps = map[string]*replayBlockMap{}
 	var mu sync.Mutex
 	var unavailable, outOfRange atomic.Int64
+	// refused counts a refusal (a nil err) as unavailable and returns err.
+	refused := func(err error) error {
+		if err == nil {
+			unavailable.Add(1)
+		}
+		return err
+	}
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(f.conc)
 	for _, id := range ids {
@@ -1385,20 +1372,14 @@ func (f *replayFetcher) fetchBlockMaps(ctx context.Context, st *replayState, win
 			body, ok, err := f.cachedOrUnavailable(gctx, filepath.Join("blocks", id+".json"), "/api/v1/artifacts/{id}/blocks",
 				"/api/v1/artifacts/"+url.PathEscape(id)+"/blocks")
 			if err != nil || !ok {
-				if err == nil {
-					unavailable.Add(1)
-				}
-				return err
+				return refused(err)
 			}
 			la, listed := byID[id]
 			if !listed {
 				meta, ok, err := f.cachedOrUnavailable(gctx, filepath.Join("artifact", id+".json"), "/api/v1/artifacts/{id}",
 					"/api/v1/artifacts/"+url.PathEscape(id))
 				if err != nil || !ok {
-					if err == nil {
-						unavailable.Add(1)
-					}
-					return err
+					return refused(err)
 				}
 				if err := json.Unmarshal(meta, &la); err != nil {
 					return fmt.Errorf("artifact %s: %w", id, err)
@@ -1410,18 +1391,11 @@ func (f *replayFetcher) fetchBlockMaps(ctx context.Context, st *replayState, win
 			}
 			var markdown string
 			if a := stateDocs[id]; a != nil && a.TextPath != "" && cur == a.Version && a.TextVersion == a.Version {
-				b, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(a.TextPath)))
-				if err != nil {
-					return err
-				}
-				markdown = string(b)
+				markdown = texts[id]
 			} else {
 				b, ok, err := f.docText(gctx, id, cur)
 				if err != nil || !ok {
-					if err == nil {
-						unavailable.Add(1)
-					}
-					return err
+					return refused(err)
 				}
 				markdown = string(b)
 			}

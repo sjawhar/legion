@@ -9,12 +9,12 @@ import (
 	"bufio"
 	"context"
 	"crypto/md5"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -34,15 +34,21 @@ func (f *dbFlags) register(fs *flag.FlagSet) {
 	f.db = fs.String("db", "", "database name, overriding the Postgres URL's")
 }
 
-func (f *dbFlags) connect(ctx context.Context) (*pgx.Conn, error) {
+// url is the stack's endpoints and its Postgres URL with the database replaced.
+func (f *dbFlags) url() (endpoints, string, error) {
 	if *f.db == "" {
-		return nil, fmt.Errorf("-db is required")
+		return endpoints{}, "", fmt.Errorf("-db is required")
 	}
 	ep, err := f.ef.resolve()
 	if err != nil {
-		return nil, err
+		return endpoints{}, "", err
 	}
 	u, err := withDatabase(ep.pg, *f.db)
+	return ep, u, err
+}
+
+func (f *dbFlags) connect(ctx context.Context) (*pgx.Conn, error) {
+	_, u, err := f.url()
 	if err != nil {
 		return nil, err
 	}
@@ -118,17 +124,17 @@ func runReplayCheckSeed(args []string) error {
 	res := checkResult{
 		Documents: r.Documents, Differences: len(r.Differences), VersionSizeMismatches: len(sa.SizeMismatches),
 		AnchorsOutsideLoggedBlock: len(sa.Outside), SignFlipped: sa.SignFlipped,
-		AnchorRules:      checkAnchorRules{sa.Rules[ruleLoggedQuote], sa.Rules[ruleInBlock], sa.Rules[ruleNearest]},
-		OtherAnchorRules: sa.Rules, DifferenceList: r.Differences, SizeMismatchList: sa.SizeMismatches, OutsideList: sa.Outside,
+		AnchorRules:    checkAnchorRules{sa.Rules[ruleLoggedQuote], sa.Rules[ruleInBlock], sa.Rules[ruleNearest]},
+		AllAnchorRules: sa.Rules, DifferenceList: r.Differences, SizeMismatchList: sa.SizeMismatches, OutsideList: sa.Outside,
 	}
 	res.Passed = res.Differences == 0 && res.VersionSizeMismatches == 0 && res.AnchorsOutsideLoggedBlock == 0
 	fmt.Printf("passed %v\n", res.Passed)
 	if *out != "" {
-		b, err := json.MarshalIndent(res, "", "  ")
+		data, err := json.MarshalIndent(res, "", "  ")
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
+		if err := os.WriteFile(*out, append(data, '\n'), 0o644); err != nil {
 			return err
 		}
 	}
@@ -149,7 +155,7 @@ type checkResult struct {
 	Passed                    bool             `json:"passed"`
 	// Detail: every branch's count (no_block_map, unanchorable included) and the lists, ids and
 	// numbers only.
-	OtherAnchorRules map[string]int   `json:"anchor_rules_all"`
+	AllAnchorRules   map[string]int   `json:"anchor_rules_all"`
 	DifferenceList   []seedDifference `json:"difference_list"`
 	SizeMismatchList []sizeMismatch   `json:"version_size_mismatch_list"`
 	OutsideList      []anchorOutside  `json:"anchors_outside_list"`
@@ -213,11 +219,11 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 		return r, err
 	}
 	for _, p := range plans {
-		if p.Placeholder {
+		if p.placeholder() {
 			continue
 		}
 		is := p.Issue
-		texts := map[string]string{}
+		textByLocal := map[string]string{} // a document's text by its local id ("" for an unmapped one)
 		for i := range is.Artifacts {
 			a := &is.Artifacts[i]
 			if a.Kind != "doc" {
@@ -227,8 +233,9 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			if err != nil {
 				return r, err
 			}
-			texts[a.ID] = string(raw)
+			text := string(raw)
 			local, ok := ids[[2]string{idArtifact, a.ID}]
+			textByLocal[local] = text
 			if !ok {
 				continue
 			}
@@ -240,7 +247,7 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			if err != nil {
 				return r, err
 			}
-			plan, err := docPlan(is, a, texts[a.ID])
+			plan, err := docPlan(is, a, text)
 			if err != nil {
 				return r, err
 			}
@@ -277,11 +284,11 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 				}
 			}
 		}
-		check := func(kind, logged string) error {
+		check := func(kind, logged string) {
 			row, ok := recorded[[2]string{kind, logged}]
 			if !ok {
 				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, "no recorded branch"})
-				return nil
+				return
 			}
 			r.Anchors++
 			r.Rules[row.branch]++
@@ -293,14 +300,9 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			var quote, doc string
 			if err := conn.QueryRow(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'artifact_id', '') from `+table+` where id::text = $1`, local).Scan(&quote, &doc); err != nil {
 				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, "seeded item not found"})
-				return nil
+				return
 			}
-			var text string
-			for id, t := range texts {
-				if ids[[2]string{idArtifact, id}] == doc {
-					text = t
-				}
-			}
+			text := textByLocal[doc]
 			i := strings.Index(text, quote)
 			switch {
 			case quote == "" || text == "":
@@ -311,7 +313,6 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			case strings.Count(text, quote) != 1 || i < row.start || i+len(quote) > row.end || row.end > len(text):
 				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, fmt.Sprintf("stored quote at byte %d, chosen span [%d, %d)", i, row.start, row.end)})
 			}
-			return nil
 		}
 		plan := planComments(is)
 		steps := append([]commentStep{}, plan.Main...)
@@ -320,16 +321,12 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 		}
 		for _, s := range steps {
 			if s.Kind == commentAnchored {
-				if err := check(idComment, s.C.ID); err != nil {
-					return r, err
-				}
+				check(idComment, s.C.ID)
 			}
 		}
 		for _, a := range is.Asks {
 			if a.BlockID == nil && a.Approval == nil && a.Anchor != nil {
-				if err := check(idAsk, a.ID); err != nil {
-					return r, err
-				}
+				check(idAsk, a.ID)
 			}
 		}
 	}
@@ -371,8 +368,7 @@ func readReplayIDs(ctx context.Context, conn *pgx.Conn) (map[[2]string]string, e
 
 // textDigest names a text by its length and sha256 prefix.
 func textDigest(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%d bytes sha256 %s", len(s), hex.EncodeToString(h[:6]))
+	return fmt.Sprintf("%d bytes sha256 %s", len(s), sha256Hex([]byte(s))[:12])
 }
 
 func checkSeed(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (seedCheck, error) {
@@ -383,7 +379,7 @@ func checkSeed(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []see
 	ww := countWindowWrites(b.Window)
 	var atSeed, withWindow, weights []int
 	for _, p := range plans {
-		if p.Placeholder {
+		if p.placeholder() {
 			continue
 		}
 		is := p.Issue
@@ -503,7 +499,7 @@ type replaySum struct {
 }
 
 // md5Fields feeds each field length-prefixed, so field boundaries are part of the digest.
-func md5Fields(h interface{ Write([]byte) (int, error) }, fields ...string) {
+func md5Fields(h io.Writer, fields ...string) {
 	var n [8]byte
 	for _, f := range fields {
 		binary.LittleEndian.PutUint64(n[:], uint64(len(f)))
@@ -667,7 +663,6 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 		_, err = w.Write(append(b, '\n'))
 		return err
 	}
-	// Issues.
 	type issueRow struct {
 		Key, Title, Status      string
 		Priority                *int
@@ -708,8 +703,6 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 	}
 	// Documents and their versions; a document's ordinal is its place in this order within its issue.
 	docOrd := map[string]int{} // local artifact id -> ordinal within its issue
-	var id, key, name, slug, kind string
-	var primary bool
 	rows, err = conn.Query(ctx, `select id::text, coalesce(issue_key, project_key), name, slug, kind, is_primary
 		from artifacts order by 2, name, slug`)
 	if err != nil {
@@ -719,11 +712,11 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 		id, key, name, slug, kind string
 		primary                   bool
 	}
-	var arts []art
-	if _, err := pgx.ForEachRow(rows, []any{&id, &key, &name, &slug, &kind, &primary}, func() error {
-		arts = append(arts, art{id, key, name, slug, kind, primary})
-		return nil
-	}); err != nil {
+	arts, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (art, error) {
+		var a art
+		return a, r.Scan(&a.id, &a.key, &a.name, &a.slug, &a.kind, &a.primary)
+	})
+	if err != nil {
 		return lines, fmt.Errorf("artifacts: %w", err)
 	}
 	perIssue := map[string]int{}
@@ -787,14 +780,13 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 		if x.BlockArtifact != nil {
 			line["block_doc"] = docOrd[*x.BlockArtifact]
 			if x.BlockID != nil {
-				line["block"] = scope(*x.BlockArtifact).of(*x.BlockID)
+				line["block"] = scope(*x.BlockArtifact).of(strings.ToLower(*x.BlockID))
 			}
 		}
 		if err := emit(line); err != nil {
 			return lines, err
 		}
 	}
-	// Comments.
 	type commentRow struct {
 		ID, Key, Body                   string
 		Author, Anchor, Sug, ResolvedBy []byte
