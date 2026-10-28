@@ -1,4 +1,4 @@
--- 0061_claim_suspended_by_idle.up.sql — the idle suspend's source on a claim
+-- 0062_claim_suspended_by_idle.up.sql — the idle suspend's source on a claim
 -- (supervise.SuspendedByIdle, 'idle'): a worker that had nothing to do for
 -- worker_idle_suspend_seconds, whose process the daemon took back and whose session it kept. It is
 -- the daemon's own suspension by rule, as 'daemon' and a root's 'exit' are, so the boot's resume by
