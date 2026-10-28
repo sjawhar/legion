@@ -100,26 +100,16 @@ type lineCandidate struct {
 // character reference, which is punctuation to the flanking rules, as the browser editor writes it
 // (flanking).
 //
-// It reads a run back under readBackReaders, in order: inlineMarkdown, which reads as every
-// document is read now (editorRules), and the two readers Dispatch read stored markdown under
-// before, storedMarkdown (storedRules: a `*` or `_` run may open or close beside a `*` or `_` but
-// not a `~`, a `~` run is read by goldmark's strikethrough, which pairs runs of either length and
-// refuses one after any `~`, and every run is paired in goldmark's one loop over them in order) and
-// flankingMarkdown (flankingRules: those, with a `*` or `_` run judged by CommonMark's flanking
-// rules alone). It keeps the first writing if it reads back under all three; else the first
-// respelling that does; else the first writing if it reads back under the first two; else the
-// first respelling that does; else the first writing if it reads back under inlineMarkdown; else
-// the first respelling that does; else the first writing.
-//
-// Main's writer read back under storedMarkdown and flankingMarkdown alone, in five steps: the
-// first writing if it reads back under both; else the first respelling that does; else the first
-// writing if it reads back under storedMarkdown; else the first respelling that does; else the
-// first writing. Each of the first five steps here is main's step with inlineMarkdown added to
-// what a writing must read back under, so wherever the writing main chose reads back under
-// inlineMarkdown this writer chooses it too: every writing an earlier step here tries, main's
-// matching step tried under a test it asks less of and found failing, so it fails here, and the
-// writing main chose passes its own step here. Stored markdown keeps its bytes wherever they read
-// back as the browser editor reads them.
+// It reads a run back under readBackReaders: inlineMarkdown, which reads as every document is read
+// now (editorRules), and the two readers Dispatch read stored markdown under before, storedMarkdown
+// (storedRules: a `*` or `_` run may open or close beside a `*` or `_` but not a `~`, a `~` run is
+// read by goldmark's strikethrough, which pairs runs of either length and refuses one after any
+// `~`, and every run is paired in goldmark's one loop over them in order) and flankingMarkdown
+// (flankingRules: those, with a `*` or `_` run judged by CommonMark's flanking rules alone). A
+// writing's depth is how many of readBackReaders, from inlineMarkdown, it reads back under
+// (readBackDepth), and the writer keeps the earliest writing of the greatest depth, the first
+// writing counting first. Each depth asks more than the writer before INFRA-534 asked at that
+// step, so wherever its choice reads back under inlineMarkdown this writer makes it too.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
@@ -129,15 +119,11 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
 		return
 	}
-	// firstReads is how many of readBackReaders, from the first, the first writing reads back under.
-	firstReads := 0
-	for firstReads < len(readBackReaders) && r.runReadsBack(from, prefix, nodes, readBackReaders[firstReads]) {
-		firstReads++
-	}
-	if firstReads == len(readBackReaders) {
+	depth := r.readBackDepth(from, prefix, nodes)
+	if depth == len(readBackReaders) {
 		return
 	}
-	written := string(r.b.Bytes()[from:])
+	kept := string(r.b.Bytes()[from:])
 	spellings := respellings(held, bareURL, false)
 	if fused {
 		spellings = append(spellings, respellings(held, bareURL, true)...)
@@ -150,21 +136,31 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		}
 		spellings = append(spellings, flanked...)
 	}
-	for under := len(readBackReaders); under > 0 && firstReads < under; under-- {
-		for _, spelling := range spellings {
-			r.b.Truncate(from)
-			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBackUnder(from, prefix, nodes, readBackReaders[:under]) {
-				return
-			}
+	// Every writing leaves the renderer in the same state but for the bytes: writeInlineRun closes
+	// its marks, which clears the open code fence, and ends its line, which clears the held line
+	// start, and the link label verdict it leaves is read only inside a link, which a later run
+	// opens again first. So the kept bytes written back after other spellings write what writing
+	// them last would.
+	for _, spelling := range spellings {
+		r.b.Truncate(from)
+		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
+		if r.err != nil || spelling.keepOpen && fusedAgain {
+			continue
+		}
+		reads := r.readBackDepth(from, prefix, nodes)
+		if reads == len(readBackReaders) {
+			return
+		}
+		if reads > depth {
+			depth, kept = reads, string(r.b.Bytes()[from:])
 		}
 	}
 	r.b.Truncate(from)
-	r.b.WriteString(written)
+	r.b.WriteString(kept)
 }
 
-// readBackReaders is the readers inlineWithEscapes reads a run back under, in the order it drops
-// them from the last.
+// readBackReaders is the readers inlineWithEscapes reads a run back under, in the order a
+// writing's depth counts them (readBackDepth).
 var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flankingMarkdown}
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
@@ -268,15 +264,15 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader i
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
-// runReadsBackUnder reports whether the inline markdown written since from reads back as nodes by
-// every one of readers (runReadsBack).
-func (r *renderer) runReadsBackUnder(from int, prefix string, nodes []*Node, readers []inlineReader) bool {
-	for _, reader := range readers {
-		if !r.runReadsBack(from, prefix, nodes, reader) {
-			return false
-		}
+// readBackDepth is how many of readBackReaders, from the first, the inline markdown written since
+// from reads back as nodes under (runReadsBack), stopping at the first it does not: a writing
+// that does not beat a depth is read under at most one reader more than that depth.
+func (r *renderer) readBackDepth(from int, prefix string, nodes []*Node) int {
+	depth := 0
+	for depth < len(readBackReaders) && r.runReadsBack(from, prefix, nodes, readBackReaders[depth]) {
+		depth++
 	}
-	return true
+	return depth
 }
 
 // delimiterBesidePunctuation reports whether nodes write a delimiter run (a strong, emphasis or

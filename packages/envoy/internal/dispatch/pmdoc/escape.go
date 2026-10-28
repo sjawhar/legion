@@ -800,17 +800,15 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // character. That is kept only if it reads back, so an alt that fails for another
 // reason keeps the bytes it had, as inlineWithEscapes does.
 //
-// It reads back where Parse reads it so (altReadsBack), and it is kept first where storedMarkdown
-// reads it so as well: the written alt if it reads back under both, else the escaped one if that
-// does, else the written alt if it reads back under Parse, else the escaped one if that does, else
-// the written alt. Main wrote the written alt if it read back under its Parse, which read by
-// storedRules, else the escaped one if that did, else the written alt; each of those steps is a
-// step here with Parse added to what an alt must read back under, so wherever the alt main wrote
-// reads back under Parse it is written here too, as inlineWithEscapes argues for a run.
+// An alt's depth is 0 where Parse does not read it back, 1 where Parse alone does, and 2 where
+// storedMarkdown does too (altReadsBack); the escaped alt is written only where its depth is greater
+// than the written alt's, so the earlier of the two at the greater depth is kept. Each depth asks
+// more than the writer before INFRA-534 asked at that step, so wherever its choice reads back under
+// Parse this writer makes it too.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
-	writtenReads, writtenStored := altReadsBack(written, alt, context)
-	if writtenStored {
+	writtenDepth := altReadsBack(written, alt, context)
+	if writtenDepth == 2 {
 		return written
 	}
 	var out strings.Builder
@@ -826,28 +824,22 @@ func imageAlt(alt string, context inlineContext) string {
 		}
 	}
 	fallback := escapeTablePipes(out.String(), context.tableCell)
-	fallbackReads, fallbackStored := altReadsBack(fallback, alt, context)
-	switch {
-	case fallbackStored:
-		return fallback
-	case writtenReads:
-		return written
-	case fallbackReads:
+	if altReadsBack(fallback, alt, context) > writtenDepth {
 		return fallback
 	}
 	return written
 }
 
-// altReadsBack reports whether an image label written as written reads back as the alt text alt
-// under Parse (reads), and if so whether it also does under storedMarkdown (stored). Parse reads it
-// in the block it is written in: a table cell, where the cell takes its escaped pipes first and a
-// line ending ends the row; a heading, which a line ending ends; or a paragraph, where a line of
-// the label can open a block. storedMarkdown reads the image alone, as inline markdown: once Parse
-// reads the block as one holding only the image, the block is the same block under storedRules,
-// which change only how delimiter runs pair, and the cell's pipes come out as inline markdown
-// reads their escapes. `![\~b\~\~](u)`, written while Dispatch read by storedRules, stays as it
-// was, where `![~b~~](u)` reads back only under Parse.
-func altReadsBack(written, alt string, context inlineContext) (reads, stored bool) {
+// altReadsBack is how far an image label written as written reads back as the alt text alt: 0
+// where Parse does not read it so, 1 where Parse does, and 2 where storedMarkdown does as well.
+// Parse reads it in the block it is written in: a table cell, where the cell takes its escaped
+// pipes first and a line ending ends the row; a heading, which a line ending ends; or a paragraph,
+// where a line of the label can open a block. storedMarkdown reads the image alone, as inline
+// markdown: once Parse reads the block as one holding only the image, the block is the same block
+// under storedRules, which change only how delimiter runs pair, and the cell's pipes come out as
+// inline markdown reads their escapes. `![\~b\~\~](u)`, written while Dispatch read by
+// storedRules, stays as it was, where `![~b~~](u)` reads back only under Parse.
+func altReadsBack(written, alt string, context inlineContext) int {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
@@ -860,20 +852,22 @@ func altReadsBack(written, alt string, context inlineContext) (reads, stored boo
 	}
 	doc, err := Parse(markdown)
 	if err != nil || len(doc.Children) != 1 {
-		return false, false
+		return 0
 	}
 	block := doc.Children[0]
 	if context.tableCell {
 		if block.Type != "table" || len(block.Children) != 2 {
-			return false, false
+			return 0
 		}
 		block = block.Children[1].Children[0].Children[0]
 	}
 	if !isAlt(block.Children, alt) {
-		return false, false
+		return 0
 	}
-	nodes, err := readInline(image, storedMarkdown.run, nil)
-	return true, err == nil && isAlt(nodes, alt)
+	if nodes, err := readInline(image, storedMarkdown.run, nil); err == nil && isAlt(nodes, alt) {
+		return 2
+	}
+	return 1
 }
 
 // isAlt reports whether nodes are only an image whose alt text is alt.

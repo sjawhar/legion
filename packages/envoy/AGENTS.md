@@ -1784,10 +1784,12 @@ under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dis
 markdown under (`storedMarkdown`: `*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs
 of either length paired, a run after any `~` refused, every run in one loop; `flankingMarkdown`:
 the same with flanking alone), and failing that under the first two, and failing that under
-that parser's alone (`inlineWithEscapes`), so wherever the bytes main wrote read back as that
-parser reads them they stay; an image's alt text is kept the same way under `Parse` and
-`storedMarkdown` (`altReadsBack`). A code span keeps the whitespace that
-starts each of its later lines past the prefix of the containers around it, as the browser editor's
+that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before INFRA-534 wrote
+read back as that parser reads them they stay: the one rule is that the writer keeps the earliest
+spelling of the greatest read-back prefix depth under `readBackReaders` (`readBackDepth`). An
+image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`). A code
+span keeps the whitespace that starts each of its later lines past the prefix of the containers
+around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
 such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the

@@ -58,7 +58,7 @@ func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
 		{`&#126;~a~`, `paragraph: "~" | "a" strike_through`, false},
 		{`~&#126;~`, `paragraph: "~" strike_through`, false},
 		{`~a~&#126;`, `paragraph: "a" strike_through | "~"`, false},
-		// The order the two kinds pair in: the kind whose run was tokenized first, where a run that
+		// The order the two groups pair in: the group whose run was tokenized first, where a run that
 		// can neither open nor close, one in a link's label and one after an escaped `~` count, and
 		// one inside a www URL or a defined footnote call's label does not.
 		{`*a ~b* c~`, `paragraph: "a ~b" emphasis | " c~"`, false},
