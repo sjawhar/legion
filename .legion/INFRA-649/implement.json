@@ -2,11 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-649",
-  "completed": "2026-10-28T11:01:00Z",
+  "completed": "2026-10-28T13:00:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2451",
-  "head": "0483541b8cbe5388022f03da65eae870d5d7a438",
-  "base": "59f6647db9d72d25feac2edaedd9e0d4e5005f12",
+  "head": "ae9eea241138b9693323d13baade5616eae060bd",
+  "base": "2d872499b668aabf3331ce95d429f83aaabc04af (main@origin merged forward); the earlier round's base 59f6647db9d72d25feac2edaedd9e0d4e5005f12",
+  "round": "conflict round after the tester's fail: GitHub reported #2451 CONFLICTING on packages/envoy/CHANGELOG.md, because main moved changelog entries to fragment files (#2419). Forward merge of legion/INFRA-649 with main@origin 2d872499 (merge commit ae9eea241138); CHANGELOG.md taken from main unchanged; the entry is packages/envoy/.changes/unreleased/pr2451-Changed-20261028-123024.yaml written with `changie new --kind Changed --custom Issue=pr2451`, as the architect directed (pull request number, no Dispatch key). Fingerprint 6b5da9d6... -> 6b85e577... (changed: the changelog hunk became a fragment), posted at https://github.com/sjawhar/legion/pull/2451#issuecomment-6469549147. The proofs below at 0483541b8cbe are from the first round; the first proof here re-proves tokens at the merged head.",
   "proof": [
+    {
+      "criterion": "Block tokens and document tokens byte-identical to today's on every LINUX spec, at the merged head",
+      "surface": "the read fold (treeOf + buildDocumentRead) on all 1,200 LINUX specs and Dispatch's /text and /blocks API on the seeded load-test stack, in git-archive exports of main 2d872499 (head's token_corpus_test.go copied in) and merged head ae9eea241138",
+      "command": "cd $TMPDIR/infra649/<main2|head2>/packages/envoy && GOWORK=off DISPATCH_TOKEN_CORPUS=$TMPDIR/infra649/linux-specs DISPATCH_TOKEN_CORPUS_OUT=$TMPDIR/infra649/tokens-<side>.jsonl go test ./internal/dispatch/docs/ -run TestTokenCorpus -count=1 -timeout 2h; cmp tokens-main2.jsonl tokens-head2.jsonl; then LOADTEST_SRC=<export> stack.sh setup && stack.sh reset; python3 api_dump.py api-<side>.txt; cmp api-main2.txt api-head2.txt",
+      "observed": "corpus cmp identical, 94,779,048 bytes (1,200 specs, 200,379 block tokens), and main's dump is also byte-identical to the first round's base dump; treeOf+buildDocumentRead 76.3 s on main, 28.7 s at head. API: 2,000 responses per side, all 200, cmp identical, 93,095,124 bytes. go build, go vet, gofmt and the full docs suite (ok 718.6 s) pass at ae9eea241138",
+      "headSha": "ae9eea241138b9693323d13baade5616eae060bd",
+      "negativeControl": "a head2 export with HTML escaping of < > & turned off in appendTokenString: cmp against main reports 'differ: char 240381, line 4'"
+    },
     {
       "criterion": "Block tokens and document tokens byte-identical to today's on every LINUX spec",
       "surface": "the read fold (treeOf + buildDocumentRead) on all 1,200 LINUX specs, through the env-gated docs/token_corpus_test.go run unchanged in git-archive exports of base 59f6647d and head 0483541b8cbe",
