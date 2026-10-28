@@ -168,8 +168,8 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
 	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
 	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
-	// The app container's size is two optional plain strings, Kubernetes quantities.
-	for _, input := range []string{"appCpu", "appMemory"} {
+	// The app container's size is three optional plain strings, Kubernetes quantities.
+	for _, input := range []string{"appCpu", "appMemory", "appEphemeralStorage"} {
 		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)

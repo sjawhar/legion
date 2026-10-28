@@ -378,6 +378,13 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			a.AppCpu = pulumi.StringRef("10000000000000000000000000000000000000000e-39")
 		}, err: []string{`appCpu "10000000000000000000000000000000000000000e-39"`, "decimal exponent outside e-9 to e18"}},
 		{name: "an app memory with an exponent past int's range", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("1e99999999999999999999") }, err: []string{`appMemory "1e99999999999999999999"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an app ephemeral storage that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("4 GiB") }, err: []string{`appEphemeralStorage "4 GiB"`, "Kubernetes quantity"}},
+		{name: "an empty app ephemeral storage", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("") }, err: []string{"appEphemeralStorage is empty", "leave it unset for Autopilot's default of 1Gi"}},
+		{name: "an app ephemeral storage with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("4Gi ") }, err: []string{`appEphemeralStorage "4Gi "`, "Kubernetes quantity"}},
+		{name: "a negative app ephemeral storage", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("-1Gi") }, err: []string{`appEphemeralStorage "-1Gi"`, "at least 10Mi"}},
+		{name: "an app ephemeral storage below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("9Mi") }, err: []string{`appEphemeralStorage "9Mi"`, "at least 10Mi", "logs count against it"}},
+		{name: "an app ephemeral storage above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("9217Mi") }, err: []string{`appEphemeralStorage "9217Mi"`, "at most 9216Mi", "cloud-sql-proxy", "above 10Gi", "rejects"}},
+		{name: "an app ephemeral storage with an exponent past e18", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("0.0000000000000000000001e30") }, err: []string{`appEphemeralStorage "0.0000000000000000000001e30"`, "decimal exponent outside e-9 to e18"}},
 		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
 			setAzureKey(a)
 			a.AzureEmbedTokensPerMinute = nil
@@ -477,6 +484,7 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
 		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
 		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
+		{"a seed as the app ephemeral storage", "appEphemeralStorage", func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef(seed) }},
 		{"a seed as the app priority class", "appPriorityClassName", func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(lower) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
@@ -1530,6 +1538,65 @@ func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
 	args.AppCpu = pulumi.StringRef("100m")
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appCpu "100m" must be at least 300m`)
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
+// Unset, appEphemeralStorage renders nothing, so Autopilot gives envoy-dispatch its default 1Gi
+// and a deployment that leaves it unset renders the pod it always had
+// (TestDispatchAppContainerDefaultsToOneCPUAnd4Gi and TestDispatchPodMatchesGolden).
+func TestDispatchRendersNoAppEphemeralStorageByDefault(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Empty(t, settings.AppEphemeralStorage)
+}
+
+// The quantity forms Kubernetes reads are taken as written, from Autopilot's 10Mi pod floor to
+// 9Gi, which with the 1Gi Autopilot gives cloud-sql-proxy makes its 10Gi pod ceiling.
+func TestDispatchAcceptsAppEphemeralStorageWithinAutopilotsBounds(t *testing.T) {
+	for _, value := range []string{"10Mi", "4Gi", "4096Mi", "5G", "9Gi", "9216Mi", "0.5e10"} {
+		t.Run(value, func(t *testing.T) {
+			args := dispatchArgs()
+			args.AppEphemeralStorage = pulumi.StringRef(value)
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, value, settings.AppEphemeralStorage)
+		})
+	}
+}
+
+// appEphemeralStorage is envoy-dispatch's ephemeral-storage request and limit and nothing else:
+// the app's pod template is the default's with that one container's resources gaining it, beside
+// the CPU and memory it had, so cloud-sql-proxy still names none, and the front door's and the
+// listener's pods match their goldens.
+func TestDispatchAppEphemeralStorageReachesEnvoyDispatchAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	args := dispatchArgs()
+	args.AppEphemeralStorage = pulumi.StringRef("4Gi")
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	values := map[string]any{"cpu": "1", "memory": "4Gi", "ephemeral-storage": "4Gi"}
+	sized := map[string]any{"requests": values, "limits": values}
+	got := deploymentPodTemplate(t, m, "example-dispatch")
+	require.Equal(t, sized, podContainer(t, got, "envoy-dispatch")["resources"])
+	want := deploymentPodTemplate(t, defaults, "example-dispatch")
+	podContainer(t, want, "envoy-dispatch")["resources"] = sized
+	require.Equal(t, want, got)
+	proxy := got["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	require.Equal(t, "cloud-sql-proxy", proxy["name"])
+	require.Equal(t, appResources("200m", "256Mi"), proxy["resources"])
+	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+}
+
+// An ephemeral-storage size Autopilot would raise or reject is refused by the resolver, before
+// the component registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAppEphemeralStorageBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.AppEphemeralStorage = pulumi.StringRef("10Gi")
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appEphemeralStorage "10Gi" must be at most 9216Mi`)
 	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }
 

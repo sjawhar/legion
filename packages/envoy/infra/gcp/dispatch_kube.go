@@ -113,6 +113,17 @@ func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
 	return &corev1.ResourceRequirementsArgs{Requests: values, Limits: values}
 }
 
+// appResources is the envoy-dispatch container's resources: its CPU and memory, and its ephemeral
+// storage when appEphemeralStorage sets it. Unset, none is rendered and Autopilot gives the
+// container its default.
+func appResources(cpu, memory, ephemeralStorage string) *corev1.ResourceRequirementsArgs {
+	values := pulumi.StringMap{"cpu": pulumi.String(cpu), "memory": pulumi.String(memory)}
+	if ephemeralStorage != "" {
+		values["ephemeral-storage"] = pulumi.String(ephemeralStorage)
+	}
+	return &corev1.ResourceRequirementsArgs{Requests: values, Limits: values}
+}
+
 func valueEnv(name, value string) corev1.EnvVarArgs {
 	return corev1.EnvVarArgs{Name: pulumi.String(name), Value: pulumi.String(value)}
 }
@@ -503,7 +514,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources(dispatchProxyCPU, dispatchProxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
 		},
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appCPU, s.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
+			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: appResources(s.appCPU, s.appMemory, s.appEphemeralStorage), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 		},
 		Volumes: appVolumes,
 	}

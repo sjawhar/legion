@@ -140,6 +140,15 @@
   containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
   CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
   Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appEphemeralStorage`, the Kubernetes quantity that sizes the
+  app Deployment's `envoy-dispatch` container's `ephemeral-storage` request and limit: the disk
+  its writable layer, temporary files and logs may use before the kubelet evicts the pod. Unset,
+  nothing is rendered and Autopilot gives the container its default `1Gi`, so a deployment that
+  leaves it unset renders the pod it always had. The `cloud-sql-proxy` sidecar, the front door and
+  the listener are unchanged. The component refuses, naming the input, a value that is not a
+  quantity or is empty, one below Autopilot's `10Mi` pod floor, and one that, with the `1Gi`
+  Autopilot gives `cloud-sql-proxy`, takes the pod above the `10Gi` ceiling Autopilot rejects
+  (so at most `9216Mi`).
 - `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
   the app Deployment's pods from being displaced, so a deployment sets both in its program rather
   than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
@@ -1805,6 +1814,14 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- An artifact file upload no longer leaves its spooled part on the pod's disk. The multipart
+  parser spools a file part past a megabyte to a temporary file; `net/http` removes the files of
+  the request it hands a handler, but the upload parses a copy the access log and the transaction
+  tracking made with `WithContext`, so the server never saw them, and every such upload left its
+  file behind until the pod's `ephemeral-storage` limit was reached and the kubelet evicted the
+  pod, taking Dispatch down until a replacement pod was ready. The upload removes the files itself
+  when it returns, whether it stored the file or refused the request after parsing it.
 
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document

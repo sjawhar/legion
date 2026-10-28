@@ -193,6 +193,20 @@ that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m (the
 A change to either replaces the app's pods as any change to its pod template does: recreated at
 one replica, rolled above one.
 
+`appEphemeralStorage` sizes the app Deployment's `envoy-dispatch` container's `ephemeral-storage`
+request and limit: a plain Kubernetes quantity (`4Gi`, `4096Mi`), the disk its writable layer,
+temporary files and logs may use before the kubelet evicts the pod. Unset, nothing is rendered and
+Autopilot gives the container its default `1Gi`, so a deployment that leaves it unset renders the
+pod it always had; the `cloud-sql-proxy` sidecar, the front door and the listener are unchanged.
+Autopilot sizes the pod's ephemeral storage by its containers' sum, so before it registers a
+resource the component refuses, by name, a value that is not a quantity or is empty, one below
+Autopilot's `10Mi` pod floor (the container's own logs count against it), and one that, with the
+`1Gi` Autopilot gives `cloud-sql-proxy`, takes the pod above the `10Gi` ceiling Autopilot rejects
+(so `appEphemeralStorage` at most `9216Mi`). A larger working set belongs in a
+[generic ephemeral volume](https://cloud.google.com/kubernetes-engine/docs/how-to/generic-ephemeral-volumes),
+not the container filesystem. A change to it replaces the app's pods as any change to its pod
+template does.
+
 `pprofPort`, unset by default, turns on `envoy-dispatch`'s Go profiler: the component sets
 `DISPATCH_PPROF_PORT` to it on the `envoy-dispatch` container alone, and Dispatch serves
 `net/http/pprof` on `127.0.0.1` at that port inside the pod. No Service, NetworkPolicy or other
@@ -334,7 +348,8 @@ Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
 [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
-namespaces, allowed namespaces, an `appCpu` or `appMemory` outside Autopilot's bounds for the app
+namespaces, allowed namespaces, an `appCpu`, `appMemory` or `appEphemeralStorage` outside
+Autopilot's bounds for the app
 pod (above), a `pprofPort` outside 1-65535 or on a port the app pod already binds (above), an
 `appPriorityClassName` that is empty, not a DNS subdomain or a `system-` class, an
 `appPdbMinAvailable` outside 1 to `replicas`, missing inputs, and nkey seeds in its own name and in

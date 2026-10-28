@@ -51,6 +51,10 @@ const (
 	// Autopilot counts in the pod's request beside envoy-dispatch.
 	dispatchProxyCPU    = "200m"
 	dispatchProxyMemory = "256Mi"
+
+	// autopilotDefaultEphemeralStorage is the ephemeral storage Autopilot gives a container that
+	// names none: cloud-sql-proxy always, and envoy-dispatch while appEphemeralStorage is unset.
+	autopilotDefaultEphemeralStorage = "1Gi"
 )
 
 // Autopilot's bounds for the app pod's total request, the general-purpose compute class's under the
@@ -64,6 +68,10 @@ var (
 	autopilotPodMaxMemory = new(big.Rat).SetInt64(110 << 30)
 	autopilotMinGiBPerCPU = big.NewRat(1, 1)
 	autopilotMaxGiBPerCPU = big.NewRat(13, 2)
+	// A pod's ephemeral storage, the sum over its containers, outside the general-purpose class's
+	// 10Mi to 10Gi: Autopilot raises a pod below the floor and rejects one above the ceiling.
+	autopilotPodMinEphemeralStorage = new(big.Rat).SetInt64(10 << 20)
+	autopilotPodMaxEphemeralStorage = new(big.Rat).SetInt64(10 << 30)
 )
 
 var (
@@ -136,6 +144,12 @@ type DispatchArgs struct {
 	// are unchanged.
 	AppCpu    *string `pulumi:"appCpu,optional"`
 	AppMemory *string `pulumi:"appMemory,optional"`
+
+	// AppEphemeralStorage is the envoy-dispatch container's ephemeral-storage request and limit, a
+	// Kubernetes quantity: the disk its writable layer, temporary files and logs may use before the
+	// kubelet evicts the pod. Unset, nothing is rendered and Autopilot gives the container its
+	// default 1Gi. The cloud-sql-proxy sidecar, the front door and the listener are unchanged.
+	AppEphemeralStorage *string `pulumi:"appEphemeralStorage,optional"`
 
 	// PprofPort turns on envoy-dispatch's Go profiler: DISPATCH_PPROF_PORT on its container alone,
 	// so it serves net/http/pprof on 127.0.0.1 at this port, reachable through kubectl
@@ -229,6 +243,9 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
 		return "appMemory", true
 	}
+	if args.AppEphemeralStorage != nil && bus.HoldsSeed(*args.AppEphemeralStorage) {
+		return "appEphemeralStorage", true
+	}
 	if args.AppPriorityClassName != nil && bus.HoldsSeed(*args.AppPriorityClassName) {
 		return "appPriorityClassName", true
 	}
@@ -277,7 +294,7 @@ type dispatchSettings struct {
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
-	appCPU, appMemory                           string
+	appCPU, appMemory, appEphemeralStorage      string
 	pprofPort                                   int
 	appPriorityClassName                        string
 	appPDBMinAvailable                          int
@@ -536,6 +553,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
+	if s.appEphemeralStorage, err = newDispatchAppEphemeralStorage(args); err != nil {
+		return dispatchSettings{}, err
+	}
 	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
 		return dispatchSettings{}, err
 	}
@@ -683,6 +703,36 @@ func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error)
 			cpu, memory, dispatchProxyCPU, dispatchProxyMemory)
 	}
 	return cpu, memory, nil
+}
+
+// newDispatchAppEphemeralStorage resolves appEphemeralStorage, the envoy-dispatch container's
+// ephemeral-storage request and limit: "", rendering nothing, when unset. It refuses a value that
+// is not a quantity or is empty, one below autopilotPodMinEphemeralStorage, the least Autopilot
+// lets a pod hold (the container's own logs count against it), and one that, with the default
+// Autopilot gives cloud-sql-proxy, takes the pod above autopilotPodMaxEphemeralStorage, which
+// Autopilot rejects.
+func newDispatchAppEphemeralStorage(args *DispatchArgs) (string, error) {
+	if args.AppEphemeralStorage == nil {
+		return "", nil
+	}
+	value := *args.AppEphemeralStorage
+	if value == "" {
+		return "", errors.New("appEphemeralStorage is empty; leave it unset for Autopilot's default of " + autopilotDefaultEphemeralStorage)
+	}
+	storage, err := appQuantity("appEphemeralStorage", value, "4Gi or 4096Mi")
+	if err != nil {
+		return "", err
+	}
+	if storage.Cmp(autopilotPodMinEphemeralStorage) < 0 {
+		return "", fmt.Errorf("appEphemeralStorage %q must be at least %s, the least ephemeral storage Autopilot lets a pod hold; the container's own logs count against it",
+			value, mebibytes(autopilotPodMinEphemeralStorage))
+	}
+	proxy, _ := quantityValue(autopilotDefaultEphemeralStorage)
+	if new(big.Rat).Add(storage, proxy).Cmp(autopilotPodMaxEphemeralStorage) > 0 {
+		return "", fmt.Errorf("appEphemeralStorage %q must be at most %s: with the %s Autopilot gives cloud-sql-proxy the app pod would request above 10Gi of ephemeral storage, and Autopilot rejects such a pod",
+			value, mebibytes(new(big.Rat).Sub(autopilotPodMaxEphemeralStorage, proxy)), autopilotDefaultEphemeralStorage)
+	}
+	return value, nil
 }
 
 // appQuantity is the exact value of input's quantity, or a refusal naming input.
