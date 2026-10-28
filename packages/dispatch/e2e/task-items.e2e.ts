@@ -233,7 +233,7 @@ async function withAlice(browser: Browser, run: (page: Page) => Promise<void>): 
 }
 
 for (const colorScheme of ["light", "dark"] as const) {
-  test(`a comment's ticked and unticked task items show a ticked and an unticked checkbox (${colorScheme})`, async ({
+  test(`a comment's ticked and unticked task items show a ticked and an unticked checkbox (${colorScheme}) @phone`, async ({
     browser,
   }, testInfo) => {
     const checklist = await seedChecklist();
@@ -264,7 +264,7 @@ for (const colorScheme of ["light", "dark"] as const) {
 
   // Windows High Contrast forces every fill and border to the system colours, so a box drawn by
   // the page alone could lose what tells a ticked one from an unticked one.
-  test(`under forced colors a comment's ticked and unticked task items still look different (${colorScheme})`, async ({
+  test(`under forced colors a comment's ticked and unticked task items still look different (${colorScheme}) @phone`, async ({
     browser,
   }, testInfo) => {
     const checklist = await seedChecklist();
