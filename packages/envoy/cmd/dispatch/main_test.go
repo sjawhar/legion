@@ -1430,6 +1430,79 @@ func TestBackfillFilesExitsNonZeroUntilEveryFileReadsBackFromTheBucket(t *testin
 	}
 }
 
+// envoy-dispatch backfill-files moves no row while a live server process stores no file in a
+// bucket, since that process serves a file only from its row: it exits 1 naming each such
+// process, one started without DISPATCH_FILE_STORE_BUCKET and one of a build before INFRA-558,
+// which registers no file_store. --verify-only and --restore, which take no bytes out of a row,
+// still run. Once those rows lapse, the backfill moves the row.
+func TestBackfillFilesRefusesWhileAProcessWithoutABucketIsLive(t *testing.T) {
+	database := storetest.Open(t)
+	const bucket = "example-files-bucket"
+	filestest.ServeS3(t, bucket)
+	ctx := context.Background()
+	body := []byte("an uploaded file")
+	for _, statement := range []string{
+		`insert into projects (key, name) values ('FILES', 'Files')`,
+		`insert into issues (key, project_key, number, title, status, created_by, rank) values ('FILES-1', 'FILES', 1, 'Issue', 'todo', '{"kind":"user","id":"alice"}', 'U')`,
+		`insert into artifacts (issue_key, project_key, slug, name, kind, created_by) values ('FILES-1', 'FILES', 'notes-bin', 'notes.bin', 'file', '{"kind":"user","id":"alice"}')`,
+	} {
+		if _, err := database.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, content, mime, size, sha256)
+		select id, 1, $1, 'application/octet-stream', $2, $3 from artifacts where slug = 'notes-bin'
+	`, body, len(body), files.SHA256(body)); err != nil {
+		t.Fatalf("seed version: %v", err)
+	}
+	var bucketless, older string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, commit, signing_keys, schema_version, schema_creatable, file_store)
+		values (gen_random_uuid(), 'bucketless0commit', '{fingerprint}', 1, 1, false) returning instance::text`).Scan(&bucketless); err != nil {
+		t.Fatalf("add a bucketless server process: %v", err)
+	}
+	if err := database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, commit, signing_keys) values (gen_random_uuid(), 'older0commit', '{fingerprint}')
+		returning instance::text`).Scan(&older); err != nil {
+		t.Fatalf("add a server process of a build before INFRA-558: %v", err)
+	}
+	rowHoldsBytes := func() bool {
+		t.Helper()
+		var held bool
+		if err := database.Pool.QueryRow(ctx, `select content is not null from artifact_versions where number = 1`).Scan(&held); err != nil {
+			t.Fatalf("read version 1: %v", err)
+		}
+		return held
+	}
+	run := func(args ...string) (int, string) {
+		t.Helper()
+		env := envGetter(map[string]string{"DATABASE_URL": database.Pool.Config().ConnString(), "DISPATCH_FILE_STORE_BUCKET": bucket})
+		var stdout, stderr bytes.Buffer
+		code := runSubcommand(ctx, append([]string{"backfill-files"}, args...), env, &stdout, &stderr)
+		return code, stdout.String() + stderr.String()
+	}
+
+	code, out := run()
+	if code != 1 || !rowHoldsBytes() || !strings.Contains(out, bucketless) || !strings.Contains(out, older) {
+		t.Fatalf("backfill-files beside live processes without a bucket: exit %d, row holds bytes %t, want exit 1 naming %s and %s with the row untouched:\n%s",
+			code, rowHoldsBytes(), bucketless, older, out)
+	}
+	if code, out := run("--verify-only"); code != 0 {
+		t.Fatalf("backfill-files --verify-only beside them: exit %d, want 0:\n%s", code, out)
+	}
+	if code, out := run("--restore"); code != 0 {
+		t.Fatalf("backfill-files --restore beside them: exit %d, want 0:\n%s", code, out)
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update server_processes set heartbeat_at = now() - interval '1 hour'`); err != nil {
+		t.Fatalf("let the processes lapse: %v", err)
+	}
+	if code, out := run(); code != 0 || rowHoldsBytes() {
+		t.Fatalf("backfill-files once they lapsed: exit %d, row holds bytes %t, want exit 0 with the row cleared:\n%s", code, rowHoldsBytes(), out)
+	}
+}
+
 func TestExplainMigrateErrorNamesTheDeploymentBootstrapOnAVectorPermissionDenial(t *testing.T) {
 	pgErr := &pgconn.PgError{Code: "42501", Message: `permission denied to create extension "vector"`}
 	original := fmt.Errorf("apply migration 72: execute migration: migration 0072_embeddings_core.up.sql: %w", pgErr)
