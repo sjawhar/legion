@@ -2,43 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T11:09:41Z",
+  "completed": "2026-10-28T14:51:14Z",
   "decision": "changes_requested",
-  "round": 2,
-  "reviewedHead": "35afd068835aca88ce42a5fc71a784d7c3005f97",
-  "codeHead": "b923561bb2fa",
+  "round": 3,
+  "reviewedHead": "21c336688c08f86d43982f6e28ed338e7027441b",
+  "codeHead": "8e7111478fb3",
+  "ciHead": "e6b6698ad80f",
   "critical": 0,
   "important": 1,
-  "minor": 4,
-  "previousRound": "All nine findings of round 1 are verified fixed in 66e8d5c3, 8c2e6451, eadaba02 and 3bcb24a5. I accept the cold-stream rationale: the browser refreshes every query when the stream opens (web/src/api/sse.ts:762-780), and a cold reconnect carries no since (sse.ts:872). The round-1 fast-follow (shared reset predicate, reseed and gap timer) is done in eadaba02.",
+  "minor": 0,
+  "previousRound": "Every item the architect's round cap named is done, and I verified each in the code at 8e711147: Await returns an observation's error after 10 s of failures and run logs failures, rate-limited; the hub seed, the relay start and the relay reseed each surface it and retry; the stall diagnosis runs on context.Background(); start checks the lifetime under mu before running.Add, and wait takes mu before Wait (waitBackground runs only after the lifetime ends: cmd/dispatch/shutdown.go:68, server_test.go:158); the seed send selects on the lifetime; a resuming stream that opened early ends on a reset it finds while it subscribes; streamEvents waits in one select; horizon() now lives in event_stream_relay.go. The changelog fragment carries no issue key, per the controller's ruling on this public repository.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:235",
-      "description": "Await keeps an observation error in `failed` and reports it only when ctx ends. Its long-lived callers therefore wait forever, with nothing logged, while every observation fails: the hub seed (delivery_live_hub_intake.go:123, on the hub's lifetime, so the retry log at :135 never fires), the relay's first start (event_stream_relay.go:210, where a resuming stream heartbeats but carries no events), and the relay reseed after a reset. Main logged a failed cursor read (readCursors) and returned start's error to the SSE handler. A plausible trigger: the horizon pool's 2 connections cannot dial while the shared pool's existing connections keep working. This hides an error, so it is fixed in this pull request: log observation failures the caller's ctx did not cause, rate-limited like the stall warning."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/events.go:211",
-      "description": "A cold stream that has not opened sends no bytes. The browser's 45 s watchdog (sse.ts:80-86) then aborts and reconnects it cold, with backoff up to 30 s, for as long as a stall holds on a newly started process. No event is lost. Name this interaction and its bound in the handler comment."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:445",
-      "description": "The stall diagnosis derives its context with context.WithoutCancel(ctx), so it keeps the caller's store hold mark. In the shared-pool fallback it can be refused (nested acquire), and since it now runs concurrently it can block the caller's next read. Derive it from context.Background()."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/event_stream_relay.go:220",
-      "description": "The subscribe goroutine is detached from the handler (events.go awaitEventSubscription), so a start that finishes after the server's lifetime ends can call r.running.Add(2) concurrently with or after waitBackground's Wait. That Add/Wait ordering is one the race detector reports. Check the lifetime under mu before Add, or track the goroutine."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go:129",
-      "description": "The seed goroutine sends to h.seeds without a select. It cannot block only because no second seed starts while one runs, and that rule is kept in other functions. Make the send select on h.lifetime.Done()."
+      "file": "packages/envoy/internal/dispatch/store/pool.go:308",
+      "description": "This is a semantic conflict with main that no text merge shows. Since #2368 and #2390, main's store.ConnectionsPerProcess (pool.go:312 on main) is the sum of every pool the server opens, and gcp's dispatchConnectionsPerPod (infra/gcp/dispatch.go:97, now 86) must equal it, because the pair sizes the Cloud SQL max_connections budget for every pod during a roll. main's comment says a new pool goes into ConnectionsPerProcess with it. This PR adds the 2-connection horizon pool (horizonPoolSize), and the merged tree counts it in neither constant, so each pod can open 2 more connections than the budget allows. Fix: forward-merge main, add horizonPoolSize to ConnectionsPerProcess, and raise dispatchConnectionsPerPod by 2."
     }
   ],
-  "fastFollow": "streamEvents (events.go:79-325) has two select loops and an `opened` flag shadowing startsAtPublished: one loop with a nil-channel ready, and one immutable opensEarly; move horizon() out of server.go (now 1002 lines) into event_stream_relay.go; rename the changelog fragment to INFRA-591-<slug>.yaml with Issue: INFRA-591 (AGENTS.md 'Changelog entries are fragment files').",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 35afd068 (code b923561b): both CHANGES, adjudicated above (code-quality's three items are cleanup with no behavior change: fast-follow, or minor for the seeds send).",
-  "ci": "At code head b923561b the required checks lint, typecheck and pr-title are green and test is in progress. The envoy jobs (envoy-go, dispatch and the rest) are queued. At the previous code head 312e84c6, envoy-go failed: internal/dispatch/api passed go test's 10 min deadline (600 s, with no test hung). On main 4e55b2e0 it runs 454-482 s. 4d00a61f raises the deadline to 20 m."
+  "ci": "At CI head e6b6698a (code 8e711147) the required checks lint, typecheck, test and pr-title are green. envoy-go is green; internal/dispatch/api took 507 s under the 20 m deadline. envoy-infra-go is red on TestDispatchConnectionsPerPodIsTheServers (expected 84, actual 83); the controller has ruled that red is main's (#2233). dispatch and envoy-go-race were still running.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 21c33668 (code 8e711147): both APPROVE with no correctness-blocking finding. Their non-blocking notes: an observation that hangs rather than fails still waits silently, because take has no per-observation deadline, which is also true of main's readCursors; queued relay starts each run their own 10 s Await; the seed send's select is redundant; the heartbeat reads 'opened' from ready == nil. The connection-budget finding is mine, from reading main.",
+  "notes": "D2 (from the plan) is now live on main: since #2368, gcp:Dispatch can run more than one replica with a rolling roll. I sent this to the architect."
 }
