@@ -98,6 +98,9 @@ type testServerOptions struct {
 	// testTakeoverWindow. A test proving the window itself passes its own, listenerTakeoverWindow
 	// for the production twelve seconds.
 	takeoverWindow time.Duration
+	// testHookTimeout replaces the test hooks' acknowledgement timeout (Deps.TestHookTimeout);
+	// zero keeps the production ten seconds.
+	testHookTimeout time.Duration
 }
 
 // testTakeoverWindow is the listener take-over window of a test server that sets none. A send to
@@ -198,6 +201,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		EnvoyURL:               options.envoyURL,
 		EnvoyTimeout:           options.envoyTimeout,
 		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),
+		TestHookTimeout:        options.testHookTimeout,
 		OIDC:                   options.oidc,
 		AgentStream:            options.agentStream,
 		Embedder:               options.embedder,

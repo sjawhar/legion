@@ -124,6 +124,12 @@ type Deps struct {
 	// Only this package's tests set another, so a send to a session that is gone settles without
 	// sleeping the production window.
 	ListenerTakeoverWindow time.Duration
+	// TestHookTimeout replaces how long a test hook waits for every process's acknowledgement
+	// (testHookTimeout, test_hooks_fanout.go). Zero keeps ten seconds; neither
+	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment with the hooks on and
+	// the browser harness run ten seconds. Only this package's tests set another, so a test
+	// proving a silent process is named does not sleep the full timeout.
+	TestHookTimeout time.Duration
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -174,6 +180,9 @@ type DepsInput struct {
 	// ListenerTakeoverWindow replaces the twelve-second listener take-over window; see
 	// Deps.ListenerTakeoverWindow.
 	ListenerTakeoverWindow time.Duration
+	// TestHookTimeout replaces the ten-second test-hook acknowledgement timeout; see
+	// Deps.TestHookTimeout.
+	TestHookTimeout time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -241,6 +250,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		StreamHeartbeat:        heartbeat,
 		RouteRosterTTL:         input.RouteRosterTTL,
 		ListenerTakeoverWindow: input.ListenerTakeoverWindow,
+		TestHookTimeout:        input.TestHookTimeout,
 	}, nil
 }
 

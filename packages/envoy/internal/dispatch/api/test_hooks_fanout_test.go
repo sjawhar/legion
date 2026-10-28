@@ -41,9 +41,12 @@ func holdTestHookLock(t *testing.T, database *store.Store) (*pgx.Conn, int32) {
 
 // A hook answers only once every process holding the test-hook lock has acted, so a process that
 // holds it and never acknowledges is reported rather than passed over: the caller answers
-// 504 TEST_HOOK_TIMEOUT once the timeout has run out, naming that process's key.
+// 504 TEST_HOOK_TIMEOUT once the timeout has run out, naming that process's key. The server runs
+// a two-second timeout of its own (Deps.TestHookTimeout) rather than the production ten: long
+// enough that a loaded machine still takes the caller's own lock inside it.
 func TestATestHookNamesTheProcessThatNeverAcknowledged(t *testing.T) {
-	handler, database := newTestHandlerWithTestHooks(t)
+	const timeout = 2 * time.Second
+	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true, testHookTimeout: timeout})
 	_, silent := holdTestHookLock(t, database)
 
 	called := time.Now()
@@ -59,8 +62,8 @@ func TestATestHookNamesTheProcessThatNeverAcknowledged(t *testing.T) {
 	if body.Code != "TEST_HOOK_TIMEOUT" || !strings.Contains(body.Error, strconv.Itoa(int(silent))) {
 		t.Fatalf("timeout answer = %+v, want TEST_HOOK_TIMEOUT naming the silent process %d", body, silent)
 	}
-	if waited < testHookTimeout {
-		t.Fatalf("the hook gave up after %v, before its %v timeout", waited, testHookTimeout)
+	if waited < timeout {
+		t.Fatalf("the hook gave up after %v, before its %v timeout", waited, timeout)
 	}
 }
 

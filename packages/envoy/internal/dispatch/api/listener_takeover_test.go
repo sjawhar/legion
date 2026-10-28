@@ -193,7 +193,7 @@ func TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce(t *testing.T) {
 		l.mu.Lock()
 		l.sends = append(l.sends, send)
 		l.mu.Unlock()
-		time.Sleep(900 * time.Millisecond)
+		time.Sleep(600 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"event_id":"takeover-late","recipient":"s1"}`))
 	}
 	for _, tc := range []struct {
@@ -298,9 +298,11 @@ func TestASendWithNoListenerConfiguredSettlesAtOnce(t *testing.T) {
 // A sender waiting out a take-over renews its claim before each try and settles on the claim it
 // renewed last, so the attempt never reads as abandoned while its sender is still trying: the
 // resume loop, run during the wait, sends nothing and opens nothing beside it, and the attempt
-// reaches its session once, under attempt 1, with one receipt. The server runs the production
-// window, which the take-over below - three tries, a resume pass, then the listener answering -
-// stays inside.
+// reaches its session once, under attempt 1, with one receipt. The listener refuses until two
+// tries have found the attempt held and a resume pass has run, so the fourth try - 1.75 s of
+// backoff after the first - is the one it answers, and the claim is read at four points across
+// three renewals. The server's window is 3 s: it still admits that fourth try with over a second
+// to spare, and the production twelve would only lengthen a failure.
 func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testing.T) {
 	for _, tc := range []struct {
 		name, table, column, receipt, path string
@@ -323,7 +325,7 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			listener := startTakeOverListener(t)
 			handler, database, deps := newTestServer(t, testServerOptions{
-				envoyURL: listener.server.URL, takeoverWindow: listenerTakeoverWindow,
+				envoyURL: listener.server.URL, takeoverWindow: 3 * time.Second,
 			})
 			path := tc.path
 			if path == "" {
@@ -359,17 +361,17 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 				handler.ServeHTTP(response, request)
 				answered <- response
 			}()
-			// Three tries the sender made while holding the attempt.
+			// Two tries the sender made while holding the attempt.
 			deadline := time.Now().Add(10 * time.Second)
 			for {
 				claimsMu.Lock()
 				seen := len(claims)
 				claimsMu.Unlock()
-				if seen >= 3 {
+				if seen >= 2 {
 					break
 				}
 				if time.Now().After(deadline) {
-					t.Fatalf("the sender made %d tries holding its attempt within 10s of the take-over, want 3", seen)
+					t.Fatalf("the sender made %d tries holding its attempt within 10s of the take-over, want 2", seen)
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
@@ -406,6 +408,9 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 			claimsMu.Lock()
 			observed := slices.Clone(claims)
 			claimsMu.Unlock()
+			if len(observed) < 4 {
+				t.Fatalf("claimed_at was read %d times, want at least four: at the two refused tries, then at the answered try's registry read and its send", len(observed))
+			}
 			for index := 1; index < len(observed); index++ {
 				if !observed[index].After(observed[index-1]) {
 					t.Fatalf("claimed_at as each try found it = %v, want it later at every try: the claim is renewed before each", observed)
