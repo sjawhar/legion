@@ -753,8 +753,8 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 // comparison so it returns exactly the rows that comparison alone would. Only the ask-block insert
 // sets block_artifact_id, and it writes no anchor, so an anchored ask's coalesce is its anchor's
 // artifact_id. The uuid casts cannot fail: both indexes evaluate the same casts on every row, so
-// a row whose artifact_id does not cast could not have been written.
-func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
+// a row whose artifact_id does not cast could not have been written. The rows are read through q.
+func recordedMarkRefs(ctx context.Context, q Queryer, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
 	for _, target := range []struct {
 		table   string
@@ -763,7 +763,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 		{table: "asks", indexed: `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)`},
 		{table: "comments", indexed: `(anchor->>'artifact_id')::uuid`},
 	} {
-		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
+		rows, err := q.Query(ctx, fmt.Sprintf(`
 			select anchor, %s
 			from %s
 			where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
@@ -796,8 +796,16 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 	return recorded, nil
 }
 
+// sweepUnrecordedMarks runs after a settlement commits, while the settlement still holds its slot,
+// so it reads the recorded marks through the settlements pool, as the settlement did: it is
+// settlement work, and a read of the request pool would take a connection from the requests.
 func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
-	recordedRefs, err := s.recordedMarkRefs(context.Background(), room)
+	settlements, err := s.store.Pool.Settlements()
+	if err != nil {
+		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
+		return
+	}
+	recordedRefs, err := recordedMarkRefs(context.Background(), settlements, room)
 	if err != nil {
 		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
 		return
