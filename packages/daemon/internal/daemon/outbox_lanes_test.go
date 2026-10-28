@@ -180,6 +180,9 @@ func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return 
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *postingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
+}
 
 // postsTo is how many messages were posted on issue.
 func (d *postingDispatch) postsTo(issue string) int {
@@ -234,6 +237,7 @@ func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", ni
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *laneBoard) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {

@@ -1602,6 +1602,46 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told each served repository Dispatch's GitHub App is
+// not known to be installed on, one line each with why, as the daemon serves the state; with none
+// the one line says so.
+func TestPlainStateNamesEachRepositoryWithoutTheWebhookApp(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	missing := "Dispatch's GitHub App is not installed on acme/widgets: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
+	for _, tc := range []struct {
+		name, gaps, want string
+	}{
+		{
+			name: "two repositories",
+			gaps: `[{"repo":"acme/widgets","reason":"` + missing + `"},{"repo":"zeta/tools","reason":"the webhook App check failed: GITHUB_UNREADABLE: GitHub answered 500"}]`,
+			want: "webhook App missing on acme/widgets: " + missing + "\n" +
+				"webhook App missing on zeta/tools: the webhook App check failed: GITHUB_UNREADABLE: GitHub answered 500\n",
+		},
+		{name: "none", gaps: `[]`, want: "webhook App missing: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"repositories":{"owners":["acme"],"mapped":[{"repo":"acme/widgets","default":true}],"refused":[],"withoutWebhookApp":` + tc.gaps + `,"caches":[]}}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the lines %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told, one line per durable consumer, how many
 // messages wait for it and how old the oldest is; when it is stalled, how long it has handled none
 // and since when — its last handled message, or the daemon's start before the first; and what NATS

@@ -180,6 +180,10 @@ func (r *statusRecorder) ListRepoProjects(context.Context) ([]dispatch.RepoProje
 	return nil, nil
 }
 
+func (r *statusRecorder) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
+}
+
 var _ dispatch.Client = (*statusRecorder)(nil)
 
 func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder, *statusRecorder) {

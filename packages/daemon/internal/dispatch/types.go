@@ -39,6 +39,9 @@ type Client interface {
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
+	// webhook events through, is installed on repo (owner/name).
+	WebhookAppInstalled(ctx context.Context, repo string) (bool, error)
 }
 
 // RepoProject is one mapping of a GitHub repository (owner/name) to a Dispatch project, and

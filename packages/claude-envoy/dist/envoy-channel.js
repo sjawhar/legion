@@ -45903,6 +45903,7 @@ var legionRepositories = strictObject({
     cache: legionCacheView.optional()
   })),
   refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
 });
 var legionConsumerLag = strictObject({

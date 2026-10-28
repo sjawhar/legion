@@ -97,6 +97,20 @@ func (c *HTTPClient) ListRepoProjects(ctx context.Context) ([]RepoProject, error
 	return mappings, nil
 }
 
+// WebhookAppInstalled reads GET /api/v1/github/app-installation/{owner}/{repo}: whether
+// Dispatch's GitHub App, the one GitHub sends repo's webhook events through to Envoy, is installed
+// on repo (owner/name). A Dispatch older than the route answers 404, an *Error Missing reports.
+func (c *HTTPClient) WebhookAppInstalled(ctx context.Context, repo string) (bool, error) {
+	owner, name, _ := strings.Cut(repo, "/")
+	var response struct {
+		Installed bool `json:"installed"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/api/v1/github/app-installation/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, &response); err != nil {
+		return false, err
+	}
+	return response.Installed, nil
+}
+
 func deref(value *string) string {
 	if value == nil {
 		return ""

@@ -149,6 +149,34 @@ func TestListRepoProjectsReadsEveryMappingWithItsDefault(t *testing.T) {
 	}
 }
 
+// Whether Dispatch's GitHub App is installed on a repository is its app-installation route's
+// answer; a Dispatch older than the route answers 404, which the caller tells apart (Missing).
+func TestWebhookAppInstalledReadsDispatchsAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/github/app-installation/acme/widgets":
+			writeJSON(t, w, map[string]bool{"installed": true})
+		case "/api/v1/github/app-installation/acme/gadgets":
+			writeJSON(t, w, map[string]bool{"installed": false})
+		default:
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "error": "not found"})
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	for repo, want := range map[string]bool{"acme/widgets": true, "acme/gadgets": false} {
+		installed, err := client.WebhookAppInstalled(context.Background(), repo)
+		if err != nil || installed != want {
+			t.Fatalf("WebhookAppInstalled(%s) = %v, %v; want %v", repo, installed, err, want)
+		}
+	}
+	if _, err := client.WebhookAppInstalled(context.Background(), "acme/older"); !Missing(err) {
+		t.Fatalf("WebhookAppInstalled on a Dispatch without the route = %v, want a 404 Missing reports", err)
+	}
+}
+
 // A hand-over is one PATCH carrying the status and an additive legion label under the daemon's
 // actor, so concurrent labels survive and the one event it makes carries both.
 func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {

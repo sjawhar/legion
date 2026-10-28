@@ -110,13 +110,16 @@ func ConsumerLagViewsOf(lags []intake.ConsumerLag) []ConsumerLagView {
 }
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
-// Refused and Caches are sorted, and never null. Caches are the repository caches of repositories
-// the mapping no longer names, each kept until its RetainedUntil (contract 32).
+// Refused, WithoutWebhookApp and Caches are sorted, and never null. Caches are the repository
+// caches of repositories the mapping no longer names, each kept until its RetainedUntil (contract
+// 32). WithoutWebhookApp is each served repository Dispatch's GitHub App is not known to be
+// installed on, with why (contract 41).
 type RepositoriesView struct {
-	Owners  []string                `json:"owners"`
-	Mapped  []MappedRepositoryView  `json:"mapped"`
-	Refused []RefusedRepositoryView `json:"refused"`
-	Caches  []CacheView             `json:"caches"`
+	Owners            []string                `json:"owners"`
+	Mapped            []MappedRepositoryView  `json:"mapped"`
+	Refused           []RefusedRepositoryView `json:"refused"`
+	WithoutWebhookApp []WebhookAppGapView     `json:"withoutWebhookApp"`
+	Caches            []CacheView             `json:"caches"`
 }
 
 // MappedRepositoryView is a repository the daemon serves, as GitHub names it, whether it is the
@@ -154,7 +157,14 @@ type RefusedRepositoryView struct {
 	Reason string `json:"reason"`
 }
 
-// MarshalJSON keeps the four lists arrays on the wire.
+// WebhookAppGapView is a served repository, as Dispatch maps it, that Dispatch's GitHub App is not
+// installed on, or whose check failed, and why. The daemon serves it all the same.
+type WebhookAppGapView struct {
+	Repo   string `json:"repo"`
+	Reason string `json:"reason"`
+}
+
+// MarshalJSON keeps the five lists arrays on the wire.
 func (r RepositoriesView) MarshalJSON() ([]byte, error) {
 	type wire RepositoriesView
 	out := wire(r)
@@ -166,6 +176,9 @@ func (r RepositoriesView) MarshalJSON() ([]byte, error) {
 	}
 	if out.Refused == nil {
 		out.Refused = []RefusedRepositoryView{}
+	}
+	if out.WithoutWebhookApp == nil {
+		out.WithoutWebhookApp = []WebhookAppGapView{}
 	}
 	if out.Caches == nil {
 		out.Caches = []CacheView{}

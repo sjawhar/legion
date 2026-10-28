@@ -79,7 +79,7 @@ var commands = map[string]commandEntry{
 	"version":        {runVersion, "print the version and the commit the binary was built from"},
 	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
 	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
-	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake, the durable consumers' lag (--json for all of it)"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake, served repositories without Dispatch's webhook App, the durable consumers' lag (--json for all of it)"},
 	"legions":        {runLegions, "list the daemons registered on this machine"},
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
@@ -519,6 +519,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
+		fmt.Fprintln(stdout, line)
+	}
 	for _, line := range consumerLines(state.Consumers, state.Daemon.StartedAt, time.Now()) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -689,6 +692,21 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// webhookAppLines are the lines an operator reads for the served repositories Dispatch's GitHub App
+// is not known to be installed on (api.RepositoriesView.WithoutWebhookApp): GitHub sends Legion no
+// event of such a repository. One line per repository with why, in the state's order; with none
+// the one line says so.
+func webhookAppLines(gaps []api.WebhookAppGapView) []string {
+	if len(gaps) == 0 {
+		return []string{"webhook App missing: none"}
+	}
+	lines := make([]string, len(gaps))
+	for i, gap := range gaps {
+		lines[i] = "webhook App missing on " + gap.Repo + ": " + gap.Reason
+	}
+	return lines
 }
 
 // consumerLines are the lines an operator reads for the daemon's durable consumers

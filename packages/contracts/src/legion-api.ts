@@ -421,9 +421,11 @@ const legionCacheView = z.strictObject({
 /** `api.RepositoriesView` — the project's repository mapping as the daemon serves it: the owners
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
  * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
- * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
- * of repositories the mapping no longer names. Every list sorted and never null (contracts 31,
- * 32). */
+ * mapped repository it leaves out with `reason`, a GitHub App not installed on it, each served
+ * repository Dispatch's GitHub App is not known to be installed on (`withoutWebhookApp`, as
+ * Dispatch maps it, with `reason`: not installed, the check failed, or Dispatch does not answer
+ * the check; served all the same, contract 41), and the `caches` of repositories the mapping no
+ * longer names. Every list sorted and never null (contracts 31, 32). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
   mapped: z.array(
@@ -434,6 +436,7 @@ const legionRepositories = z.strictObject({
     })
   ),
   refused: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: z.array(legionCacheView),
 });
 

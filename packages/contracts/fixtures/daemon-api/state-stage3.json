@@ -45,6 +45,7 @@
     "owners": [],
     "mapped": [],
     "refused": [],
+    "withoutWebhookApp": [],
     "caches": []
   },
   "settings": {

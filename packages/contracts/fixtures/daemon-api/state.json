@@ -380,6 +380,12 @@
         "reason": "the review App is not installed on acme/gadgets"
       }
     ],
+    "withoutWebhookApp": [
+      {
+        "repo": "zeta/tools",
+        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
+      }
+    ],
     "caches": [
       {
         "repo": "acme/legacy",

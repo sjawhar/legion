@@ -825,6 +825,34 @@ test("the state golden carries each durable consumer's lag, and the list cannot 
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
+// Each served repository Dispatch's GitHub App is not known to be installed on (contract 41): the
+// golden carries one with its reason, a state with none carries an empty list, an entry without
+// its reason is refused, and the list cannot be dropped: a plugin from before the field refuses
+// the state.
+test("the state golden names each served repository without the webhook App, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.repositories.withoutWebhookApp).toEqual([
+    {
+      repo: "zeta/tools",
+      reason:
+        "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes",
+    },
+  ]);
+  expect(
+    LegionStateResponse.parse(fixture("state-stage3.json")).repositories.withoutWebhookApp
+  ).toEqual([]);
+
+  const reasonless = fixture("state.json") as {
+    repositories: { withoutWebhookApp: Record<string, unknown>[] };
+  };
+  delete reasonless.repositories.withoutWebhookApp[0]?.reason;
+  expect(LegionStateResponse.safeParse(reasonless).success).toBeFalse();
+
+  const dropped = fixture("state.json") as { repositories: Record<string, unknown> };
+  delete dropped.repositories.withoutWebhookApp;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is
 // Stage 2's shape and the merge-queue holder's in production — and state lists that issue for the
 // claim's sake. The document parsed here is the one a live daemon served with such a claim on it:
