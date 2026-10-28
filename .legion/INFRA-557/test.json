@@ -2,50 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-27T18:00:00Z",
-  "round": 2,
-  "testedHead": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-  "handoffHead": "33aa6c4027c95c7fca556a7d3a99407e079f0374",
-  "fullRound": "The merge of main (98be5ec2) changed the diff, so this is a full round, not a fingerprint check.",
+  "completed": "2026-10-28T16:15:00Z",
+  "round": 3,
+  "testedHead": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+  "handoffHead": "38910f1c1b047dc53d73d22516e12174e439d7e6",
+  "fullRound": "The merge of main aeeee6c0 (ade9f69e) changed the diff, so this is a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 2e592cc8: every row PASS, ok 536.399s, including the round-1 red rows TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s (slowest 6.56 s) and TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder. Re-ran $TMPDIR/smoke/smoke.sh with a binary built at 2e592cc8: kill -9 of the active pod, then a send through the standby reached the port session 5.63 s after the kill; a send to an unregistered session answered 404."
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at dc6cf439: every row PASS, ok 554.178s. Re-ran $TMPDIR/smoke/smoke.sh with a binary built at dc6cf439 against a real nats-server 2.10.29 process. With SIGTERM: 40 of 40 sends prompted once, in send order, the last 3.34 s after the signal. With SIGKILL: 40 of 40, in order, the last 4.63 s after the signal. Ran TestTwoBuilds/a_build_from_before_the_lease against a listener I built from main 80cc97a6 (pre-INFRA-557): PASS, 302 messages each prompted once."
   },
   "failures": [
     {
-      "criterion": "README 'Take-over' (and the docs criterion 'packages/envoy/cmd/listener docs say what is true'): on a graceful stop per-session order is kept, because the stopping pod NAKs what it has not handled and the durable redelivers it before newer messages.",
-      "evidence": "Red test packages/envoy/cmd/listener/multiprocess_test.go TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder, shown failing in 3 of 3 runs by `cd packages/envoy && go test -tags multiprocess -count=3 -run '^TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder$' -v ./cmd/listener`: 'ses_mp_wirestop_one took evt-mp-0063 (published 3.1s, prompted 3.578s ...) before evt-mp-0055 (published 2.701s, prompted 8.705s ...), out of the publish order'. The active pod's link has a 300 ms delay, so messages are on the wire when it unsubscribes on SIGTERM. They come back exactly one ack wait (6 s) later, after the standby delivered newer ones. [inference from the 6 s delay: they are dropped without a NAK.] Without the delay, a throwaway row with two pods and a message every 2 ms failed 1 of 3 runs: 'evt-mp-1280 after 6.363s (published -357ms after the SIGTERM)', prompted after evt-mp-1284. A SIGKILL-then-SIGTERM row failed the same way once in 7 runs (evt-mp-0080 prompted 6.003 s after evt-mp-0082). Either the stop must keep order, or the README must stop claiming it."
+      "criterion": "CI green at the head (static checks read on GitHub); the head must merge into main",
+      "evidence": "`gh api repos/sjawhar/legion/pulls/2404` gives mergeable false and mergeable_state dirty. `gh api repos/sjawhar/legion/actions/runs?head_sha=…` gives total_count 0 for both dc6cf439 and 38910f1c. `git merge-tree --write-tree dc6cf439 80cc97a6` (main@origin) lists conflicts in .github/workflows/envoy-and-contracts.yaml, docs/solutions/architecture-patterns/envoy-ci-summary.md, packages/envoy/cmd/listener/main.go, packages/envoy/infra/README.md and packages/envoy/internal/cistore/cistore.go. Main changed them after aeeee6c0 in #2367 (CI summary loop), #2364 (PostgreSQL 18) and #2423 (claude-envoy build). The merge changes the diff, so the next round is a full round."
     }
   ],
   "failed": 1,
   "passedChecks": [
-    "Round-1 finding 1 on the real surface: smoke3.sh with three real listeners built at 2e592cc8 against a real nats-server 2.10.29 process; SIGSTOP the active pod, then SIGTERM the new holder: 'm00003 reached ses_smoke 1.04 s after the SIGTERM' (round 1 at 24a88452: 'NOT reached within 420 s'). Control: the same script with SIGKILL gave 1.04 s too.",
-    "Three pods, SIGKILL of the active pod: one takes over, 51 messages once each, slowest 6.3 s",
-    "Rolling update of two replicas with surge 1: 103 messages, no repeat, slowest 6 ms",
-    "Node loss, thaw, then SIGKILL of the new holder: the thawed pod takes over, delivering once and in order, slowest 6.2 s",
-    "Lease key deleted 3 times under the holder: one active pod, every message once",
-    "Whole nats-server restart under load (3 s and 9 s outage): once and in order",
-    "SIGKILL while a message to an unknown session is deferred: known-session messages slowest 6.1 s",
-    "Node loss, then SIGTERM of the new holder during its settle: delivered, in order",
-    "Node loss, then three graceful stops in a chain, the lost connection closed before the third: every message within 10 s, no repeat",
-    "Rollback to a pre-lease build (main 8e53cdf3) after a node loss, with a new-build standby present, 4 runs: each message once",
-    "Graceful stop under load at a message every 20 ms, 4 runs: order kept",
-    "CI at 2e592cc8 read on GitHub: build, changes, lint, test and typecheck queued (not waited on); PR mergeable (mergeable_state blocked)"
-  ],
-  "risks": [
-    "Graceful stop soon after a node loss: while the lost pod's connection lingers, each next holder settles for about one ack wait (about 6 s), and a second graceful stop during a settle starts the wait again. With SIGTERMs 3 s apart, messages published after the first SIGTERM arrived 9.37-9.48 s after it (3 runs), just under the 10 s graceful bound. [inference] A second stop 4-6 s after the first would exceed 10 s."
+    "Round-2 red row TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder: 7 of 7 PASS at dc6cf439 (3 of 3 FAIL at 2e592cc8)",
+    "Graceful stop under heavy load (a message every 2 ms to 4 sessions), 7 runs: in order, no repeat, slowest 4.7 s (round 2: 1 of 3 failed)",
+    "Both pods SIGTERMed at once, then a new pod 3 s later, 7 runs: every message, in order, no repeat",
+    "Sole pod restarted under load (a message every 2 ms), 7 runs: about 2,900 messages each run, every one delivered, no repeat",
+    "Rollback to a pre-lease build (main 80cc97a6) as standby, SIGTERM of this build: old build active 2.97 s later, 448 messages each prompted once",
+    "Rolling update of two replicas with surge 1 at a message every 20 ms: 366 messages within 10 s (slowest 2.93 s), in order, one active pod",
+    "Node loss, then a graceful stop of the new holder: in order, slowest 2.9 s after the SIGTERM"
   ],
   "proof": [
     {
-      "criterion": "Round-1 failure 1: after a node loss, a graceful stop of the pod that took the expired lease hands over to the next standby and loses no message",
-      "surface": "three real cmd/listener processes built at 2e592cc8 for machine id box-smoke, a real nats-server 2.10.29 process, a port session served by a local HTTP server, driven with curl",
-      "command": "bash $TMPDIR/infra557-test/smoke3.sh $TMPDIR/infra557-test/listener-head2 head2-stop stop",
-      "observed": "pod-a SIGSTOPped; pod-c took over 4.54 s later and m00002 reached ses_smoke; after SIGTERM of pod-c, pod-b acquired the released lease and logged 'durable receiving' at once; m00003 reached ses_smoke 1.04 s after the SIGTERM",
-      "headSha": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-      "negativeControl": "the same run at 24a88452 (round 1): 'm00003 NOT reached within 420 s', the standby waiting 3 min 42 s on the lost pod's binding"
+      "criterion": "Round-2 failure: a graceful stop with messages on the wire keeps each session's order (README 'Take-over')",
+      "surface": "two real cmd/listener binaries for one machine id against an in-process nats-server 2.10.29, the active pod behind a relay with a 300 ms delay",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=6 -run '^TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder$' -v ./cmd/listener (plus once in the full run)",
+      "observed": "7 of 7 PASS; 198 messages within 10 s, the slowest after 6.18 s, every session in publish order",
+      "headSha": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+      "negativeControl": "the same row at 2e592cc8: 'ses_mp_wirestop_one took evt-mp-0063 ... before evt-mp-0055 ..., out of the publish order', 3 of 3 runs"
+    },
+    {
+      "criterion": "Graceful and hard take-over on real binaries keep every message once and in order",
+      "surface": "two listener processes built at dc6cf439 against a real nats-server 2.10.29 process, a port session served by a local HTTP server, sends through the standby with curl",
+      "command": "bash $TMPDIR/smoke/smoke.sh $TMPDIR/infra557-test/listener-head3 tester3-TERM TERM; bash $TMPDIR/smoke/smoke.sh $TMPDIR/infra557-test/listener-head3 tester3-KILL KILL",
+      "observed": "SIGTERM: 0 refused, 40 unique, in send order, the last 3.34 s after the signal; the stopping pod logged 'handed the durable's messages back to the next holder'. SIGKILL: 0 refused, 40 unique, in send order, the last 4.63 s after the signal",
+      "headSha": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+      "negativeControl": "the wire red row at 2e592cc8 out of order, 3 of 3 runs (above)"
     }
   ],
   "notes": [
-    "Throwaway rows: $TMPDIR/infra557-test/tester_mp_test.go.r2keep. Scripts: $TMPDIR/infra557-test/smoke3.sh. Neither is committed."
+    "Throwaway rows: $TMPDIR/infra557-test/tester_mp_test.go.r3keep. Not committed.",
+    "Known reds on main named by the INFRA-63 architect (mermaid.e2e.ts:194; recipients-claim and TestDispatchConnectionsPerPodIsTheServers, fixed on main by #2324 and #2464) are main's, not this PR's. No CI ran here, so none was observed."
   ]
 }
