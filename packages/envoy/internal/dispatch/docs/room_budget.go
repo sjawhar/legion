@@ -83,14 +83,14 @@ const bytesOfHeapAByteAtTheDensest = 1_058
 // of heap in its room with the rendering unchanged (plan.md, departure 4), where the rendering's
 // count prices nothing for it. Measured on 2026-10-26
 // (TestTheRoomBudgetsPricePerStructHoldsEveryKind), what one copy keeps for each struct, in frames
-// of 20,000 of one kind: a GC run 129 bytes, a deleted item 130, a string or a binary 146, an
-// embed 154, an Any value 162, a format 170, a JSON value 178, an XML hook 354, an array, a map, a
-// text, an XML fragment or an XML text 418, an XML element 498; and as the entry of a key of its
-// own, as an XML element's attribute is and a margin record is, a string 219, an Any value 235, a
-// map 491 and an XML element 571. Every struct is charged at the largest, rounded up past it,
-// since the walk that charges a struct (peerWeighing) does not decide which kind of a browser's
-// frame is the expensive one; that test fails once any kind keeps more than this, or once the
-// largest falls under 0.8 of it.
+// of 20,000 of one kind: a GC run 129 bytes, a deleted item 130, a string 146, an Any value 162, a
+// format 170, a JSON value 178, an XML hook 354, an array, a map, a text, an XML fragment or an XML
+// text 418, an XML element 498; and as the entry of a key of its own, as an XML element's attribute
+// is and a margin record is, a string 219, an Any value 235, a map 491 and an XML element 571. The
+// walk refuses binary content and embeds from a browser (errUpdateNotFromEditor), so none is here.
+// Every struct is charged at the largest, rounded up past it, since the walk that charges a struct
+// (peerWeighing) does not decide which kind of a browser's frame is the expensive one; that test
+// fails once any kind keeps more than this, or once the largest falls under 0.8 of it.
 //
 // What integrating a struct splits is charged at the same price (splitsAStructCanCause, two for
 // each struct and two for each delete range the room did not already hold deleted, deletedRuns): a
@@ -100,17 +100,17 @@ const bytesOfHeapAByteAtTheDensest = 1_058
 const bytesOfHeapAStruct = 620
 
 // bytesOfHeapAByteOfText is the heap one copy of a document holds for each byte of text a
-// browser's update carries as content no rendering prices (peerWeighing.walkedStruct): a string, a
-// binary, an XML type's name, and the key of a map entry. ygo copies the bytes, 1.00 bytes of heap
-// a byte where the copy fills its allocation, but Go rounds an allocation up to its size class,
-// and one past the largest class to whole 8 KiB pages, so a text of 32,769 bytes keeps 1.24 a byte.
+// browser's update carries as content no rendering prices (peerWeighing.walkedStruct): a string,
+// an XML type's name, and the key of a map entry. ygo copies the bytes, 1.00 bytes of heap a byte
+// where the copy fills its allocation, but Go rounds an allocation up to its size class, and one
+// past the largest class to whole 8 KiB pages, so a text of 32,769 bytes keeps 1.24 a byte.
 // Measured on 2026-10-26 (TestTheRoomBudgetsContentFactorsHoldEveryKind), and charged at the next
 // whole byte; that test fails once any text keeps more than this, or the heaviest under half of it.
 const bytesOfHeapAByteOfText = 2
 
-// bytesOfHeapAByteOfValues is the heap one copy of a document holds for each byte of Any, JSON,
-// embed or format content a browser's update carries where no rendering prices it. Values decode
-// into Go maps, slices and interfaces, so they weigh many times their bytes, and the most is the
+// bytesOfHeapAByteOfValues is the heap one copy of a document holds for each byte of Any, JSON or
+// format content a browser's update carries where no rendering prices it. Values decode into Go
+// maps, slices and interfaces, so they weigh many times their bytes, and the most is the
 // shape that allocates a map for the fewest bytes: lib0 Any maps of one entry nested in each
 // other, 111.7 bytes a byte at a depth of 99, 88.0 for one map of one null entry; a JSON item ygo
 // reads as legacy Any weighs the same, and JSON text at most 66.9, as JSON objects of one entry

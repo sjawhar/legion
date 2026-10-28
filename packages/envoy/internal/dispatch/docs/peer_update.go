@@ -656,15 +656,19 @@ func (w *peerWeighing) structureHeap() int64 {
 
 // unrenderedContentHeap is the heap one copy of a room keeps for walked's content that no count of
 // the rendering prices: a map key's bytes, as text, and the content itself at its kind's heap a
-// byte - text for a string, a binary or an XML type's name (bytesOfHeapAByteOfText), values for
-// Any, JSON, an embed or a format (bytesOfHeapAByteOfValues). The rendering prices what it shows:
-// a string, an embed, a format or an XML type directly under the fragment. Everything else is
-// charged here, whether or not it is shown, since the walk cannot tell for a struct whose parent
-// is an item or its neighbour's (parentItem, parentOfNeighbour) where it sits: text typed into a
-// paragraph, and a later entry for a margin key, both read that way. Charged as unshown, typing
-// costs its text's price a byte beside the per-struct price, a few bytes a keystroke, against
-// content in the margin that no count would ever see were it taken as shown. A deleted item's or
-// a GC run's content is a length, which no heap follows.
+// byte - text for a string or an XML type's name (bytesOfHeapAByteOfText), values for Any, JSON or
+// a format (bytesOfHeapAByteOfValues). Binary content and embeds the walk refuses from a browser
+// (errUpdateNotFromEditor) before any weighing, so the room budget never charges them; they are
+// priced here as a binary's bytes and an embed's value would weigh, as text and as values, only so
+// that an estimate of an update a walk of a room's own state reads (fromRoom) holds them too
+// (TestEveryApplysTransientHeapIsWithinItsEstimate). The rendering prices what it shows: a string,
+// an embed, a format or an XML type directly under the fragment. Everything else is charged here,
+// whether or not it is shown, since the walk cannot tell for a struct whose parent is an item or
+// its neighbour's (parentItem, parentOfNeighbour) where it sits: text typed into a paragraph, and
+// a later entry for a margin key, both read that way. Charged as unshown, typing costs its text's
+// price a byte beside the per-struct price, a few bytes a keystroke, against content in the margin
+// that no count would ever see were it taken as shown. A deleted item's or a GC run's content is a
+// length, which no heap follows.
 func unrenderedContentHeap(walked updateStruct) uint64 {
 	heap := uint64(len(walked.key)) * bytesOfHeapAByteOfText
 	content := uint64(len(walked.content))

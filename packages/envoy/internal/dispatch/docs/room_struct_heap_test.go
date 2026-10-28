@@ -126,8 +126,9 @@ func weighedFresh(t *testing.T, update []byte) peerWeighing {
 // copy of its room, and the heaviest keeps at least 0.8 of it, so the price neither under-charges
 // any kind nor drifts far past the one it is set from. Each kind is measured in a frame of
 // structsAKind structs of the least content it can carry, directly under the fragment where it has
-// a parent, and as entries of keys of their own under the margin; the walk refuses subdocuments and
-// moves, and never integrates a skip, so those are not here.
+// a parent, and as entries of keys of their own under the margin; the walk refuses subdocuments,
+// moves, binary content and embeds from a browser (errUpdateNotFromEditor) before anything charges
+// them, and never integrates a skip, so those are not here.
 func TestTheRoomBudgetsPricePerStructHoldsEveryKind(t *testing.T) {
 	if !measuredAlone(t) {
 		return
@@ -162,8 +163,6 @@ func TestTheRoomBudgetsPricePerStructHoldsEveryKind(t *testing.T) {
 		{"a GC run", gcFrameFrom(7, structsAKind)},
 		{"a deleted item", item(structDeleted, func(f v1Frame) v1Frame { return f.uint(1) })},
 		{"a string", item(structString, func(f v1Frame) v1Frame { return f.str("a") })},
-		{"a binary", item(structBinary, func(f v1Frame) v1Frame { return f.str("") })},
-		{"an embed", item(structEmbed, func(f v1Frame) v1Frame { return f.str("0") })},
 		{"a format", item(structFormat, func(f v1Frame) v1Frame { return f.str("b").str("true") })},
 		{"an Any value", item(structAny, func(f v1Frame) v1Frame { return f.uint(1).any(nil) })},
 		{"a JSON value", item(structJSON, func(f v1Frame) v1Frame { return f.uint(1).str("0") })},
@@ -251,15 +250,16 @@ func TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd(t *testing.T) {
 // heap in one copy is within its structs at bytesOfHeapAStruct and its content at its kind's heap
 // a byte (peerWeighing.content). And each factor is tight: the heaviest shape charged at it keeps,
 // beyond the structs' price, at least a stated share of the factor for each byte. Text - a string,
-// a binary, an XML type's name and a map key - is a copy of its bytes in an allocation Go rounds up
-// to its size class, or past the largest class to whole 8 KiB pages, the heaviest a text just past
-// 32 KiB, 1.24 bytes a byte; the factor is the next whole byte, and the heaviest is held to half
-// of it. Values - Any, JSON, an embed, a format - decode into Go maps, slices and interfaces, the
-// heaviest a map for the fewest bytes: lib0 Any maps of one entry nested in each other, which a
-// JSON item read as legacy Any weighs the same as; JSON text is lighter, its objects nested the
-// same way the heaviest of it. The heaviest is held to 0.8 of the factor. The kinds the rendering
-// prices directly under the fragment are measured as entries under the margin, where the walk
-// charges them.
+// an XML type's name and a map key - is a copy of its bytes in an allocation Go rounds up to its
+// size class, or past the largest class to whole 8 KiB pages, the heaviest a text just past 32 KiB,
+// 1.24 bytes a byte; the factor is the next whole byte, and the heaviest is held to half of it.
+// Values - Any, JSON, a format - decode into Go maps, slices and interfaces, the heaviest a map for
+// the fewest bytes: lib0 Any maps of one entry nested in each other, which a JSON item read as
+// legacy Any weighs the same as; JSON text is lighter, its objects nested the same way the
+// heaviest of it. The heaviest is held to 0.8 of the factor. The kinds the rendering prices
+// directly under the fragment are measured as entries under the margin, where the walk charges
+// them. Binary content and embeds are not here: the walk refuses them from a browser
+// (errUpdateNotFromEditor) before the structure part charges anything.
 func TestTheRoomBudgetsContentFactorsHoldEveryKind(t *testing.T) {
 	if !measuredAlone(t) {
 		return
@@ -304,7 +304,6 @@ func TestTheRoomBudgetsContentFactorsHoldEveryKind(t *testing.T) {
 	}{
 		{"strings of 64 KiB under the margin", text, margin(16, structString, func(f v1Frame) v1Frame { return f.str(big) })},
 		{"strings of 32,769 bytes under the margin", text, margin(31, structString, func(f v1Frame) v1Frame { return f.str(pastAPage) })},
-		{"binaries of 64 KiB", text, fragmentItems(16, structBinary, func(f v1Frame) v1Frame { return f.str(big) })},
 		{"XML elements named in 64 KiB under the margin", text, margin(16, structType, func(f v1Frame) v1Frame { return f.raw(3).str(big) })},
 		{"margin entries of 1 KiB keys", mixed, longKeys.noDeletes()},
 		{"Any maps of one entry nested 99 deep", values, marginValues(500, nestedMaps(99))},
@@ -313,7 +312,6 @@ func TestTheRoomBudgetsContentFactorsHoldEveryKind(t *testing.T) {
 		{"Any strings of 64 KiB", values, marginValues(16, big)},
 		{"JSON objects of one entry nested 99 deep", values, marginJSON(500, nestedJSON)},
 		{"JSON read as legacy Any maps nested 99 deep", values, legacyJSON.noDeletes()},
-		{"embeds of JSON objects nested 99 deep under the margin", values, margin(500, structEmbed, func(f v1Frame) v1Frame { return f.str(nestedJSON) })},
 		{"formats of JSON objects nested 99 deep under the margin", values, margin(500, structFormat, func(f v1Frame) v1Frame { return f.str("b").str(nestedJSON) })},
 	}
 	measured := make([]measuredUpdate, len(rows))

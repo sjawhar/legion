@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -41,6 +42,14 @@ var atCapStates struct {
 // counts maxUpdateItems structs, and those characters then deleted, so it renders the fixture's
 // 5 KiB again while its state holds every keystroke. Characters typed one before another never
 // merge into one item, in the room or in a decode of its state.
+//
+// ygo anchors a text insert after the deleted items next to its left neighbour
+// (skipDeletedForTextAnchor, sjawhar/ygo v1.51.3-sami.7, crdt/ytext.go:964-988), and the
+// fixture's first paragraph opens with deleted characters, so each of the more than half a million
+// inserts at its very head walked past all of them: 1,240 s of the 1,426 s the long-edited case of
+// TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame took on 2026-10-28, against
+// 22 s now. One character is typed at the head first, in a transaction of its own, which lands past
+// them, and every later character is typed just after it, where no deleted item lies.
 func longEditedAtCapState(t *testing.T) []byte {
 	t.Helper()
 	atCapStates.Lock()
@@ -56,12 +65,13 @@ func longEditedAtCapState(t *testing.T) []byte {
 	if text == nil {
 		t.Fatal("the long-edited document holds no text")
 	}
-	typed := 0
+	doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
+	typed := 1
 	for structs := countRoomStructs(doc); structs < maxUpdateItems; structs = countRoomStructs(doc) {
 		more := int(maxUpdateItems - structs)
 		doc.Transact(func(txn *crdt.Transaction) {
 			for range more {
-				text.Insert(txn, 0, "x", nil)
+				text.Insert(txn, 1, "x", nil)
 			}
 		})
 		typed += more
@@ -105,29 +115,39 @@ func closeResidentRoom(t *testing.T, service *Service, artifactID string) {
 	waitForNoLiveDocument(t, service, artifactID)
 }
 
+// agentRewritesEnv is the environment variable that runs the rebuild of the document an agent
+// rewrote whole until the decode cap refused a write, whose 28 writes take about 200 s here
+// (agentRewrittenState): past what one test of the package's unit run may take.
+const agentRewritesEnv = "DISPATCH_REBUILD_AGENT_REWRITES"
+
 // A document whose history loads but stands at the decode cap can be changed by no one: a write
 // that trims it is refused by the decode cap (refuseUndecodable), and a browser's edit by the
 // room's struct total. A rebuild takes it, from its own text: the two documents a room keeps at
 // the cap - one an agent rewrote whole through the API until the cap refused a write, and the
 // long-edited 5 KiB document typed on until its state reached the cap - each rebuild to no more
 // structs than a fresh document of the same text and its list of retired clients, read the same
-// text, and take the trimming write that was refused.
+// text, and take the trimming write that was refused. The long-edited document's case takes about
+// 22 s here; the agent's runs with DISPATCH_REBUILD_AGENT_REWRITES=1, about 215 s.
 func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *testing.T) {
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	for _, row := range []struct {
 		name  string
+		gate  string
 		state func(t *testing.T) []byte
 	}{
-		{"an agent's whole rewrites until the cap refused one", func(t *testing.T) []byte {
+		{"an agent's whole rewrites until the cap refused one", agentRewritesEnv, func(t *testing.T) []byte {
 			state, refusal := agentRewrittenState(t)
 			if !errors.Is(refusal, ErrDocumentTooLarge) {
 				t.Fatalf("the agent's last write was refused with %v, want ErrDocumentTooLarge", refusal)
 			}
 			return state
 		}},
-		{"a long-edited document typed on until the cap", longEditedAtCapState},
+		{"a long-edited document typed on until the cap", "", longEditedAtCapState},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if row.gate != "" && os.Getenv(row.gate) == "" {
+				t.Skip("set " + row.gate + "=1 to run this rebuild")
+			}
 			state := row.state(t)
 			service, artifactID := newTestService(t)
 			storeHistory(t, service, artifactID, state)

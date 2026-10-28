@@ -327,8 +327,11 @@ func TestALongEditsKeystrokesLeaveTheRoomWhatTheirUpdatesLeaveThroughTheHook(t *
 // and at the end. What it measures is the frame a struct at the decode cap, so the room's count
 // holds structs alone, neither unrendered bytes nor the frame: the unrendered bound
 // (maxUnrenderedBytes) would refuse the shape at about 22,000 pairs, long before the struct total
-// does, and the frame total then counts only what the updates add, under F at the shape's
-// 33,609,343-byte end.
+// does. The frame total then counts only what the updates have added since the room's last count:
+// their frame shares, each struct priced with its place, its deletion and the splits it can cause
+// (frameBytes), pass F before the shape's 33,609,343-byte end, and each time they do, the hook's
+// confirmation counts the room again (structTotal.admits, recount), which re-bases them at
+// nothing, since this count holds no frame; so no pair is refused for the frame.
 func densestStructCapRoom(t *testing.T) (start, end []byte) {
 	t.Helper()
 	const pair = "- \n\n* \n\n"

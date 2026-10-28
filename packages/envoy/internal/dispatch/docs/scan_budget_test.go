@@ -166,11 +166,11 @@ func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 // rewrote whole until the decode cap refused a write (agentRewrittenState), and of the long-edited
 // 5 KiB document typed on until its state reached the decode cap (longEditedAtCapState) is each at
 // most half of roomScanTotal, so each leaves people at least half the total to edit it with. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 29 minutes here with the store, the long-edited
-// document's build 25 of them. Run on 2026-10-28: the heaviest document's 5,360,879-byte state
-// re-scans 49,156 items and the long-edited one's 16,090,083-byte state 10, each within half; the
-// agent-rewritten document's 12,596,348-byte state, 28 whole rewrites, re-scans 475,136, past half
-// and within one honest handoff of the whole total, so it fails until the architect rules on it.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 205 s here with the store, the agent's rewrites 197 s
+// of them. Run on 2026-10-28: the heaviest document's 5,360,879-byte state re-scans 49,156 items
+// and the long-edited one's 14,427,285-byte state 10, each within half; the agent-rewritten
+// document's 12,630,814-byte state, 28 whole rewrites, re-scans 475,136, past half and within one
+// honest handoff of the whole total, so it fails until the architect rules on it.
 func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the heavy documents' re-scans")
