@@ -918,14 +918,16 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the eight leases are observable inside a window a test can wait out:
+// Four of the ten leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other four
+// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other six
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
-// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake; and edit-notices' period is five
-// seconds, so this window holds many of its periods, each served once
+// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
+// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
+// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
+// their passes ever overlap is a coin toss no test should turn into a flake; edit-notices' period
+// is five seconds and settlement-resumption's a minute, and each pass is over in milliseconds, so
+// this window holds many of their periods, each served once
 // (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
@@ -984,9 +986,11 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
+		{"settlement-resumption", "its period is SettlementResumeInterval (1 min), so the window holds several periods, each served once"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",
@@ -2009,8 +2013,9 @@ func TestClosingAndReopeningAnIssueChangesEveryProcessesRooms(t *testing.T) {
 	}
 }
 
-// documentAsk is an ask a document's settlement indexed: its block and its author.
+// documentAsk is an ask a document's settlement indexed: its id, its block and its author.
 type documentAsk struct {
+	ID      string      `json:"id"`
 	BlockID *string     `json:"block_id"`
 	Author  model.Actor `json:"author"`
 }
@@ -2030,6 +2035,125 @@ func (p *dispatchProcess) askOfBlock(t *testing.T, issueKey, blockID string) (do
 		}
 	}
 	return documentAsk{}, false
+}
+
+// readAsk is the ask as the process's API reads it (GET /api/v1/asks/{id}).
+func (p *dispatchProcess) readAsk(t *testing.T, askID string) model.Ask {
+	t.Helper()
+	answer := p.call(t, http.MethodGet, "/api/v1/asks/"+askID, "", http.StatusOK)
+	var read struct {
+		Ask model.Ask `json:"ask"`
+	}
+	if err := json.Unmarshal(answer, &read); err != nil {
+		t.Fatalf("decode the ask: %v: %s", err, answer)
+	}
+	return read.Ask
+}
+
+// requireAskWithdrawn fails the test unless the process reads the ask as the close of issueKey
+// withdrew it: resolved, its resolution of kind withdrawn naming that close.
+func requireAskWithdrawn(t *testing.T, p *dispatchProcess, issueKey, askID, when string) {
+	t.Helper()
+	ask := p.readAsk(t, askID)
+	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "withdrawn" ||
+		ask.Resolution.Reason != "Withdrawn by the close of "+issueKey+"." {
+		t.Fatalf("%s: the ask reads %s with resolution %+v, want it withdrawn by the close of %s", when, ask.State, ask.Resolution, issueKey)
+	}
+}
+
+// closingAskSpec is the spec of the issue below: a paragraph to type into and an open decision.
+const closingAskSpec = "Context\n\n:::ask{#ship-it urgency=\"med\" multiple=\"false\"}\nShip it?\n\n- Yes: Now.\n- No: Later.\n:::\n"
+
+// The issue's close withdraws its open ask and freezes every process's room of its spec, and
+// neither undoes the other; its reopen brings both back.
+//
+// Bob's tab on B holds the spec, whose decision block is an open ask, and his keystroke there is
+// stored, which arms B's settlement of it. The issue closes through A. B's room closes and bob
+// reconnects read-only; the ask reads withdrawn and the block resolved, and both still do once
+// the settlement B had armed was due, with no version written on the closed issue. The reopen goes
+// through B: the ask reads open again, bob's read-only tab is closed and reconnects writable, his
+// keystroke is stored, and the settlement the reopened document owes leaves the ask open.
+func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoomUntilItsReopen(t *testing.T) {
+	const settleDelay = 2 * time.Second
+	pair := newPair(t)
+	pair.startSettling(t, nil, settleDelay, settleDelay)
+	project := uniqueProjectKey(t, "WDRN")
+	pair.a.createProject(t, project, "Asks of a closed issue across processes")
+	issueKey, artifactID := pair.a.createIssueIn(t, project, "Closed with an open ask", closingAskSpec)
+	var askID string
+	for deadline := time.Now().Add(10 * time.Second); askID == ""; time.Sleep(50 * time.Millisecond) {
+		if ask, found := pair.a.askOfBlock(t, issueKey, "ship-it"); found {
+			askID = ask.ID
+		} else if time.Now().After(deadline) {
+			t.Fatalf("A's settlement never made an ask of the spec's decision block:\nA:\n%s", pair.a.Output.String())
+		}
+	}
+	waitForSettlementOwed(t, pair.database, artifactID, false)
+	if ask := pair.b.readAsk(t, askID); ask.State != "open" {
+		t.Fatalf("the decision's ask reads %s before the close, want open", ask.State)
+	}
+
+	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, pair.b.documentText(t, artifactID))
+	if scope := authenticateEditor(t, bob); scope != "read-write" {
+		t.Fatalf("bob's tab on B on an open issue was granted %q, want read-write", scope)
+	}
+	head := storedHead(t, pair, artifactID)
+	typed := time.Now()
+	if err := typeAtEnd(bob, " late"); err != nil {
+		t.Fatalf("bob's keystroke before the close: %v", err)
+	}
+	pair.waitStoredPast(t, artifactID, head, 5*time.Second, "bob's keystroke before the close")
+	if peerEnded(bob) {
+		t.Fatalf("bob's tab on B was disconnected before the close (close code %d), so the close cannot be shown closing it; %s",
+			bob.CloseCode(), pair.roomCloses(t, artifactID))
+	}
+
+	pair.a.patchIssueStatus(t, issueKey, "done")
+	// Whatever settled before the close has committed; nothing may write a version from here.
+	versionBefore, _, _ := latestVersion(t, pair.database, artifactID)
+	requireEndsWithin(t, bob, liveWithin, "closing the issue through A left bob's tab on B connected", pair.b)
+	bob = reconnectWithScope(t, pair.b, "bob", artifactID, "readonly", "bob's tab on B, reconnected after the close")
+	requireAskWithdrawn(t, pair.b, issueKey, askID, "after the close")
+	const resolvedBlock = `#ship-it urgency="med" multiple="false" state="resolved"`
+	requireClosedText := func(what, text string) {
+		t.Helper()
+		if !strings.Contains(text, "Context late") || !strings.Contains(text, resolvedBlock) {
+			t.Fatalf("%s of the closed issue does not hold bob's keystroke and the decision block resolved:\n%s", what, text)
+		}
+	}
+	room, err := roomRendering(bob, 5*time.Second)
+	if err != nil {
+		t.Fatalf("read B's room after the close: %v", err)
+	}
+	requireClosedText("B's room", room)
+	// B armed its settlement of bob's keystroke a settle delay after its append, and the close
+	// stopped it; were it running, it would settle by then. The ask, the stored document and the
+	// versions are read once it was due, so nothing B's room did after the close is missed.
+	time.Sleep(time.Until(typed.Add(settleDelay + time.Second)))
+	requireAskWithdrawn(t, pair.a, issueKey, askID, "once B's settlement of bob's keystroke was due")
+	requireClosedText("the stored document", pair.a.documentText(t, artifactID))
+	if version, _, _ := latestVersion(t, pair.database, artifactID); version != versionBefore {
+		t.Fatalf("the document's latest version moved from %d to %d while its issue was closed: a settlement ran on the closed issue", versionBefore, version)
+	}
+
+	pair.b.patchIssueStatus(t, issueKey, "todo")
+	if ask := pair.a.readAsk(t, askID); ask.State != "open" || ask.Resolution != nil {
+		t.Fatalf("the reopen left the ask %s with resolution %+v, want it open again with none", ask.State, ask.Resolution)
+	}
+	requireEndsWithin(t, bob, liveWithin, "reopening the issue through B left bob's read-only tab on B connected", pair.b)
+	bob = reconnectWithScope(t, pair.b, "bob", artifactID, "read-write", "bob's tab on B, reconnected after the reopen")
+	if reopened, err := roomRendering(bob, 5*time.Second); err != nil || !strings.Contains(reopened, `#ship-it urgency="med" multiple="false" state="open"`) {
+		t.Fatalf("B's room of the reopened issue does not hold the decision block open (%v):\n%s", err, reopened)
+	}
+	head = storedHead(t, pair, artifactID)
+	if err := typeAtEnd(bob, " again"); err != nil {
+		t.Fatalf("bob's keystroke on the reopened issue: %v", err)
+	}
+	pair.waitStoredPast(t, artifactID, head, 5*time.Second, "bob's keystroke on the reopened issue")
+	waitForSettlementOwed(t, pair.database, artifactID, false)
+	if ask := pair.b.readAsk(t, askID); ask.State != "open" {
+		t.Fatalf("the reopened document's settlement left the ask %s, want open", ask.State)
+	}
 }
 
 // Spec item 3: an ask block keeps the author who wrote it, whichever process settles it.

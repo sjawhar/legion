@@ -110,7 +110,9 @@ type liveWrite struct {
 	// credits are the authors of the transaction's content changes no version the transaction
 	// wrote lists (Ledger.recordVersion takes out each author a version lists), and creditedBy the
 	// append that recorded each one's latest change, which its pending row names; actor made the
-	// latest content change, and is nil while the transaction has made none.
+	// latest content change, and is nil while the transaction has made none. A server lifecycle
+	// write (WriteIssueAskStates, withLifecycleWrite) is no edit, so it leaves credits, creditedBy
+	// and actor as they were (applyLive).
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
 	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.creditRooms,
 	// registerAskAuthors) rather than guessed from whichever update's observer happens to render

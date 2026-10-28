@@ -409,7 +409,9 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // after the delete that would otherwise take them out. It records the author of every ask block
 // each seed and write introduced, too (recordAskAuthors), which creditRooms registers in the room
 // once the transaction has committed, so a settlement on any process finds it. All of it commits
-// or rolls back with the content, before the request context can be canceled after commit.
+// or rolls back with the content, before the request context can be canceled after commit. A
+// transaction whose every write was a server lifecycle write (withLifecycleWrite) credited no
+// one, so it records nothing here.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
