@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T17:40:00Z",
+  "completed": "2026-10-28T19:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -137,8 +137,8 @@
       "criterion": "Mention delivery is not lost through a Dispatch restart: a mention a killed process claimed, whose resend then fails, still reaches its session (tester round 6; architect's ruling 2026-10-28T16:20Z).",
       "surface": "The API handler with a killed process's claimed attempt (claim lapsed), a listener that answers nothing after the restart, the real outbox running throughout, then the next process's stranded passes; outbox claim/record path against Postgres",
       "command": "go test ./internal/dispatch/api/ -run 'TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails|TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses|TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth|TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment|TestAClaimantWhoseResentMentionFailsStillHearsTheComment' -count=3; go test ./internal/dispatch/outbox/ -run 'TestABatchNeverMarksPublishedAnEventReopenedWhileItPublishedIt|TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey' -count=1",
-      "observed": "The resend fails, the settle reopens comment.created, and the outbox publishes s1's copy: exactly one copy (rounds 3-5's tests also pass, 3 of 3). The claimant case reaches s1 by the claimant copy. A batch publishing the row while the reopen commits leaves it unpublished and the next scan sends only s1's copy. The fallback copy carries agent.<session>.<comment>:<target>:<mode>.",
-      "headSha": "0ad38c9806b651f896fada51d0b56d7472501506",
+      "observed": "The resend fails, the settle reopens comment.created, and the outbox publishes s1's copy: exactly one copy (rounds 3-5's tests also pass, 3 of 3). The claimant case reaches s1 by the claimant copy. A batch publishing the row while the reopen commits leaves it unpublished and the next scan sends only s1's copy. The fallback copy carries agent.<session>.<comment>:<target>:<mode>. Re-run at the forward merge of main (855a4bcb): outbox, store, events, contracts, the named api tests, cmd/dispatch and cmd/listener all ok.",
+      "headSha": "855a4bcb54f0fb7536881718f305f4b2230386f2",
       "negativeControl": "At ab61c138 the red test failed (no copy) and the tester's crash.sh with the listener stopped left ses-a without c1; the claimant test fails with the reopen narrowed to suppressed_authors/route suppression; the claim test fails with recordBatch's guard removed."
     }
   ],
@@ -209,8 +209,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0135_comment_deliveries_pending.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0135_comment_deliveries_pending.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0136_comment_deliveries_pending.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0136_comment_deliveries_pending.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "scripts/e2e/README.md",
     "scripts/e2e/lib/operator-dispatch.sh",
@@ -242,7 +242,8 @@
     "The outbox settles an abandoned mention attempt only for a session or target a held-back copy asks about, so a mention no copy covers is still left to the stranded pass; settling also appends the comment.delivery receipt through the broker.",
     "The outbox counts an attempt a sender claimed as abandoned only past model.StrandedMentionWindow (one hour, moved from the API to model so both read one value); within it a lapsed claim leaves the copy to the stranded pass without deferring. A resend that then fails for good leaves the session with whatever the first send delivered.",
     "The outbox's claim guard in recordBatch is back (a batch never marks published a row reopened after it read it), as agreed in writing with INFRA-590's implementer, because a failed mention now reopens comment.created.",
-    "The fallback copy carries the failed mention's dedupe key; a same-mode retry after the copy reached the session is then recorded duplicate and dropped (named in the PR body's risk line)."
+    "The fallback copy carries the failed mention's dedupe key; a same-mode retry after the copy reached the session is then recorded duplicate and dropped (named in the PR body's risk line).",
+    "Forward merge of main at 855a4bcb (GitHub reported CONFLICTING; fingerprint posted): migration renumbered to 0136_comment_deliveries_pending after main's 0135_server_processes; suppressed_authors removed with main's #2366, whose session routes read the comment's mentions; restart tests share one signing key (#2390). `go vet ./...` fails on main's own internal/dispatch/deliveryaudit/deliveryaudit_test.go, fixed by open sjawhar/legion#2473; every other package vets clean."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
