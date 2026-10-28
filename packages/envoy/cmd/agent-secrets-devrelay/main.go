@@ -88,7 +88,7 @@ type commonFlags struct {
 
 func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 	c := &commonFlags{}
-	fs.StringVar(&c.broker, "broker", os.Getenv("AGENT_SECRETS_URL"), "broker base URL (default $AGENT_SECRETS_URL)")
+	fs.StringVar(&c.broker, "broker", "", "broker base URL (default $AGENT_SECRETS_URL)")
 	fs.StringVar(&c.tokenFile, "account-token-file", os.Getenv("AGENT_SECRETS_ACCOUNT_TOKEN_FILE"),
 		"file holding the token of a ServiceAccount the broker lists in BROKER_API_ACCOUNTS (default $AGENT_SECRETS_ACCOUNT_TOKEN_FILE)")
 	fs.StringVar(&c.login, "login", os.Getenv("AGENT_SECRETS_APPROVER"), "the deciding human's login (default $AGENT_SECRETS_APPROVER)")
@@ -96,6 +96,11 @@ func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 }
 
 func (c *commonFlags) validate() error {
+	if c.broker == "" {
+		// Read here, not as the flag's default: flag's usage text prints a non-empty default
+		// whole, credential included.
+		c.broker = os.Getenv("AGENT_SECRETS_URL")
+	}
 	if c.broker == "" {
 		return errors.New("--broker (or AGENT_SECRETS_URL) is required")
 	}

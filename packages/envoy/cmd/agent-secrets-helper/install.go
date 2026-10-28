@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved), the
@@ -50,7 +51,7 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 	}
 	const needsEscaping = " \t\r\n\"'\\%$;"
 	if strings.ContainsAny(*url, needsEscaping) {
-		return fmt.Errorf("broker URL %q holds characters a unit's Environment= line would need escaped", *url)
+		return fmt.Errorf("broker URL %q holds characters a unit's Environment= line would need escaped", redact.URL(*url))
 	}
 	environment := "Environment=AGENT_SECRETS_URL=" + *url + "\n"
 	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE"} {

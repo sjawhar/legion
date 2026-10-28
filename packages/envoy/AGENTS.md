@@ -2674,7 +2674,8 @@ matches its `agent-secrets: NAME from ` prefix); `request`, `status` and `self` 
 `source:`, and every denial, pending request and refusal carries it, so no answer or refusal of
 this CLI's is read as another secrets CLI's about the same name. None of these lines names the
 broker's host or the store's account, region or project, since an agent's output is quoted
-wherever it goes, a public pull request among them. Only the secret forms, which a person runs
+wherever it goes, a public pull request among them; only a broker that could not be reached is
+named, by its redacted URL, so a stale address reads as one. Only the secret forms, which a person runs
 under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account
 <id> in <region>`, `GCP Secret Manager project <number>`): `secret show` as `store:`, `secret list`
 one line on stderr, with `store` on each row under `--json`. No line names a secret's version: a

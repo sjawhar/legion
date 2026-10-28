@@ -218,6 +218,20 @@ func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
 	}
 }
 
+// TestUsageNamesNoCredentialTheEnvironmentURLCarries: a bad flag prints the usage text, which
+// prints each flag's default; AGENT_SECRETS_URL is read after parsing, so its credential is not
+// one of them.
+func TestUsageNamesNoCredentialTheEnvironmentURLCarries(t *testing.T) {
+	t.Setenv("AGENT_SECRETS_URL", "https://tokuser9f3:hunter2pw@broker.invalid")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"approve", "--bogus"}, &stdout, &stderr); code != exitUsageError {
+		t.Fatalf("exit %d, want %d", code, exitUsageError)
+	}
+	if out := stdout.String() + stderr.String(); strings.Contains(out, "hunter2pw") || strings.Contains(out, "tokuser9f3") {
+		t.Fatalf("usage output names the URL's credential: %q", out)
+	}
+}
+
 // TestDevStackEnrollsRequestsApprovesAndReleases runs the dev stack's whole story end to end: a
 // machine logs in and devrelay approves its typed code by the operator's login, the resulting
 // launcher credential enrolls a box, the box asks for an approval-required secret, devrelay

@@ -15,8 +15,9 @@ its source the same way - `request`, `status` and `self` as a `source:` line, a 
 request and every refusal as `; asked the broker AGENT_SECRETS_URL names (<store kind>)` - so an
 answer of this CLI's is never taken for another secrets CLI's about the same name. Those lines are
 quoted wherever an agent's output is, so none names the broker's host or the store's account,
-region or project; the secret forms below, which a person runs under their own cloud sign-in, name
-the account or project they write to. No output of `agent-secrets`, `agent-secrets-helper` or
+region or project (only a broker that could not be reached is named, by its redacted URL, so a
+stale address reads as one); the secret forms below, which a person runs under their own cloud
+sign-in, name the account or project they write to. No output of `agent-secrets`, `agent-secrets-helper` or
 `agent-secrets-devrelay` prints a user name, password, query or fragment the broker's URL carries:
 each prints as `xxxxx`. People and launchers use its other forms to log a machine in
 (`agent-secrets machine

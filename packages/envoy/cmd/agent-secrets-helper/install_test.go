@@ -354,6 +354,19 @@ func TestInstallRefusesWithoutAURL(t *testing.T) {
 	}
 }
 
+// TestInstallRefusesAnEscapedURLWithoutNamingItsCredential: a password with a character a URL
+// must percent-escape trips the unit's escaping check, and the refusal names the URL redacted.
+func TestInstallRefusesAnEscapedURLWithoutNamingItsCredential(t *testing.T) {
+	r := newInstallRig(t)
+	err := r.run("--url", "https://tokuser9f3:hunter2pw%40x@broker.invalid")
+	if err == nil || !strings.Contains(err.Error(), "https://xxxxx@broker.invalid") {
+		t.Fatalf("install: %v; want a refusal naming the redacted URL", err)
+	}
+	if strings.Contains(err.Error(), "hunter2pw") || strings.Contains(err.Error(), "tokuser9f3") {
+		t.Fatalf("install refusal names the URL's credential: %v", err)
+	}
+}
+
 // TestInstallRefusesAnExecutablePathSystemdWouldSplit: ExecStart splits on whitespace and expands
 // specifiers, so install refuses such a path rather than escaping it.
 func TestInstallRefusesAnExecutablePathSystemdWouldSplit(t *testing.T) {

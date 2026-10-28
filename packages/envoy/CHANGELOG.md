@@ -269,7 +269,12 @@
   that could not be reached, the secret forms' refusal of a plain-http broker, the helper's
   `listening` log line, and every error the helper's broker calls make (a machine login, an
   enrollment, a renewal, a refresh or a revoke, which `agent-secrets machine login`, `register
-  --wait` and the helper's log print). A URL the client cannot build a request from says `the
+  --wait` and the helper's log print), the helper's `sign-launcher` refusal of a URL that is not
+  its broker's (which `machine` and `grant` list and revoke print), `agent-secrets-helper
+  install`'s refusal of a URL a unit line would need escaped, and Dispatch's two boot errors about
+  `DISPATCH_AGENT_SECRETS_URL`. `agent-secrets-devrelay --broker` no longer takes
+  `AGENT_SECRETS_URL` as its flag default, which its usage text printed whole; it reads the
+  variable after parsing. A URL the client cannot build a request from says `the
   broker's address is not a valid URL` and nothing of the parser's own text, which quoted a bad
   escape in a password. Before, net/http masked a password alone and printed the user name and
   query, and the message about an unreachable broker printed the whole URL, twice since the entry
