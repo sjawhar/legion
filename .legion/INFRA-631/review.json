@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-631",
+  "completed": "2026-10-28T20:53:59Z",
+  "round": 17,
+  "headReviewed": "the handoff commit this file is pushed in (code head e3bf209c, merge of main c24ea568 onto retro's 7b0aa72e)",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "reason": "conflict-only round; reviews the merge only and approves under the architect's 16:38Z rule",
+  "mergeVerified": [
+    "scripts/semantic-line-breaks.ts and its two test files identical to approved code head e6f60222",
+    "restructure.ts as pinned at 1b2ea974 (the commit the PR body's recipe names), run --strict on main c24ea568's two files: exit 0, byte-identical to the head guides",
+    "the diff against main c24ea568 holds only this pull request's files, retro's docs/solutions notes and .legion/INFRA-631/",
+    "bunx biome check (script, tests, docs/solutions) and strict bunx tsc --noEmit: exit 0; bun test: 90 pass; checker exit 0 on both guides; check-private-names.sh exit 0",
+    "required checks at code head e3bf209c queued at 20:53Z, none red; compare e3bf209c...fe1fe58b is .legion/ only",
+    "GitHub reports MERGEABLE; main is still c24ea568; 23 threads, 0 unresolved"
+  ],
+  "keyFindings": [],
+  "thermonuclear": "not run: no code of the pull request changed since the approved code head e6f60222"
+}
