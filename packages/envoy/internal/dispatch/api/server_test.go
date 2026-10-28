@@ -3025,6 +3025,55 @@ func TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(
 	awaitSSELine(t, sseLines(t, opened.response.Body), committed, hold+sseFrameWait, "the event committed while the relay started")
 }
 
+// TestSSEFirstColdConnectionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts: the same
+// start as the test above, on a process where no reader has proven a horizon yet, which is every
+// process at boot. The delivery hub proves none at boot: it runs nothing until its first
+// subscriber (newDeliveryHub). A browser's first connection does not refresh when it opens
+// (web/src/api/sse.ts onOpen refreshes only after an attempt ended), so an event that commits
+// after the page's own reads and while the relay's first start waits on a transaction open
+// elsewhere on the instance must still reach that connection, or the page never shows it.
+func TestSSEFirstColdConnectionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts(t *testing.T) {
+	const hold = 2 * time.Second
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	holdClusterTransactionID(t, hold)
+	type answer struct {
+		response *http.Response
+		err      error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}))
+		answered <- answer{response, err}
+	}()
+	// Time for the request to reach its handler and start the relay.
+	time.Sleep(300 * time.Millisecond)
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed while the relay starts",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	committed := fmt.Sprintf("id: %d", eventHead(t, database))
+
+	var opened answer
+	select {
+	case opened = <-answered:
+	case <-time.After(hold + sseFrameWait):
+		t.Fatalf("the stream did not open within %s", hold+sseFrameWait)
+	}
+	if opened.err != nil {
+		t.Fatalf("open SSE stream: %v", opened.err)
+	}
+	t.Cleanup(func() { opened.response.Body.Close() })
+	if opened.response.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", opened.response.StatusCode)
+	}
+	awaitSSELine(t, sseLines(t, opened.response.Body), committed, hold+sseFrameWait, "event committed while the relay started, with no horizon proven before the request")
+}
+
 // TestShutdownEndsAStreamWaitingOnTheHorizon: http.Server.Shutdown waits for every handler, and an
 // event stream never ends on its own, so a stream ends when the server's lifetime does. A stream
 // whose subscription is still waiting for the first horizon, held back by a transaction open
