@@ -335,7 +335,9 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
   }
 });
 
-test("a change committed while the page loads is shown without a reload @phone", async ({ browser }) => {
+test("a change committed while the page loads is shown without a reload @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Before the page load" });
 
@@ -372,7 +374,9 @@ test("a change committed while the page loads is shown without a reload @phone",
   }
 });
 
-test("a first live socket opening without a change makes no API request @phone", async ({ browser }) => {
+test("a first live socket opening without a change makes no API request @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Quiet page load" });
 
