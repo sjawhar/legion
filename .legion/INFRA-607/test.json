@@ -2,31 +2,78 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T12:27:33Z",
-  "testedHead": "92f0eaa3604ccfd240d4643344adbd0ce849db9a",
-  "round": 2,
-  "scope": "Confirmation round, as the INFRA-514 architect directed (Envoy 8e303d87, 12:26Z): the next head will differ in code and migrations, so the full real-system round runs at the merged head. This round confirms the three items below at this head and re-drives nothing.",
+  "completed": "2026-10-28T16:51:18Z",
+  "testedHead": "a316fb0ea1218059422fed69df262c4bdfa52ad7",
+  "codeHead": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
+  "round": 4,
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Not re-driven this round. The proof is recorded at 775d9b83, a head that GitHub cannot merge (CONFLICTING) and that still carries the listener-count defect below, so it does not prove the head that will merge. Its claims that the round-1 red tests (TestAHandOverKeepsAPullRequestsMessagesInOrder, TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer, TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues) pass unmodified are to be checked at the merged head in the full round."
+    "verdict": "verified",
+    "how": "I re-drove the surfaces on my own builds of c83c0851 and of its fork point d47dbf05 (/legion/scratch/tmp/t607r3/bin), on the round-3 harness: Postgres 16 with every statement logged, NATS 2.10.29, the Envoy listeners, and the fake Azure embedder and fake GitHub App with FAKE_PULL_DELAY. Embedding: a comment POSTed through the API was embedded 0.49 s later. After both hub backends were terminated, the hub redialed about 1.2 s later, and a comment written during the outage was embedded 1.30 s after its POST. Hand-over: PR 201 was published three times beside 202-205, and the bound process got SIGTERM. pulls/201 was fetched 53.801-56.801 by the stopping process, then 57.057-00.058 and 00.059-03.060 by the standby, with no overlap. The stopping process exited 1.77 s after the signal. Shutdown: with GitHub holding pulls/401 for 50 s, the process exited 15.13 s after SIGTERM, and the message was fetched again by the standby 13 ms after the given-up call. Failed subscribe: NATS slot 1 was down at boot, and a psql session held the delivery-consumer-delivery-events lease. The intake logged one 'bind NATS consumer' error per 2 s poll, then bound 0.7 s after NATS returned, with no resubscribe line. PR 601 was fetched once, and the consumer showed delivered 1 = ack floor 1, 0 pending and 0 redelivered. Intake burst: 20 merged PRs were acknowledged in 3.526 s. Connections: 64+4+1+12+1+1+4 = 87 = dispatchConnectionsPerPod. I did not re-run the 1x step."
   },
   "failures": [
     {
       "criterion": "The pull request merges with its base and CI runs at its head",
-      "evidence": "`gh pr view 2391 -R sjawhar/legion --json mergeable,mergeStateStatus` at 12:27Z: CONFLICTING, DIRTY. main@origin moved past the branch's merge base 0a92102149 to 2d872499b6 (#2233, #2425, #2358), and those commits change eight files this PR also changes: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md, cmd/dispatch/README.md, cmd/dispatch/main.go, cmd/dispatch/multiprocess_test.go, internal/dispatch/api/copy_lock_order_test.go, internal/dispatch/store/pool.go. They add no migration, so 0135-0140 are still free on main. The check runs on 775d9b83 (build x2, changes, lint, pr-title, test, typecheck) and the workflow runs (Tests, Docs, PR Title, Legion Envoy and Contracts, Worker Image) have been queued since 11:54Z, and none ran. The head 92f0eaa3 is a handoff-only commit (skip-checks)."
+      "evidence": "At 16:48Z, `gh pr view 2391 -R sjawhar/legion --json mergeable,mergeStateStatus` reported CONFLICTING/DIRTY. Main moved from d47dbf05 to e82b013b66 (#2324, #2451, #2452, #2465, #2361, #2423). Those commits change eight files this PR also changes: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md, cmd/dispatch/README.md, infra/go.work.sum, internal/dispatch/docs/reference_excerpts.go, internal/dispatch/refs/excerpts.go and refs/excerpts_test.go. They add no migration. At c83c0851 changes, lint, test, typecheck, build x2, pr-title and the Daemon Go suite passed. The dispatch job, envoy-go, envoy-go-race, envoy-infra-go, the Dispatch and Broker Go suites on Postgres 16, dispatch-multiprocess, dispatch-memory, broker-multiprocess, envoy-e2e-local, envoy-smoke and pi-legion are queued."
     },
     {
-      "criterion": "No Dispatch project or issue key of the deployment goes into the public tree (AGENTS.md 'This repository is public'; dispatch://INFRA-472)",
-      "evidence": "`jj diff --from 0a92102149f2 --to 92f0eaa3604c --git '~.legion' | grep '^+' | grep -c INFRA-` = 28 added lines, outside .legion/: seven files named packages/envoy/.changes/unreleased/INFRA-607-Changed-20261028-12000{0..6}.yaml, each with 'Issue: INFRA-607' and '(INFRA-607)' in its body; '(INFRA-607)' in cmd/dispatch/README.md ('Dispatch's background loops come in three shapes (INFRA-607)') and in a main.go comment ('The loops come in these shapes (INFRA-607)'); '(INFRA-66)' in a main.go comment ('Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66)'); 'dispatch://INFRA-591' in internal/dispatch/api/suggestion_outcomes.go ('dispatch://INFRA-591 removes that lock'); '-- INFRA-607:' opening migrations 0135_embeddings_notify.up.sql and 0140_delivery_settings_notify.up.sql. The added packages/envoy/AGENTS.md lines name INFRA-66 once (and LEGION-542 three times, Legion's own key, which the rule allows). The fragments' file names need a name without the key as well as bodies without it."
+      "criterion": "The timers the plan keeps are jittered every period (plan decision 8: the delivery reconcile, the architecture ticker and the redelivery sweep 'each now jittered every period'; section 1a lists the redelivery sweep among RunJittered's callers)",
+      "evidence": "internal/dispatch/redeliver/sweep.go:246 at the head is still `ticker := time.NewTicker(interval)`, and the main.go loop comment says 'the webhook redelivery sweep every 2 minutes, on a plain ticker'. Measured with two head processes started together: their webhook-redelivery lease attempts fell 16-19 ms apart in each of five consecutive 2-minute periods (16:28:21.428/.447, 16:30:21.429/.447, 16:32:21.433/.449, 16:34:21.430/.445, 16:36:21.430/.445). Over the same window the jittered delivery reconcile and architecture import drifted apart. INFRA-627's spec (the split-out 2i) covers only the pending.<GUID> index and does not carry the jitter, so neither change does. Fix: run the sweep's loop on duty.RunJittered as the other two timers do, or have the architect record the departure. No red test: a test of the wait would pin which helper the loop calls, and the plan's jitter test already covers RunJittered."
     },
     {
-      "criterion": "store.ConnectionsPerProcess counts every connection one Dispatch process opens, so the deployment's per-pod connection budget holds",
-      "evidence": "cmd/dispatch/main.go:442 dials the new wake hub through database.Pool.Listener (pglisten.Hub{Owner: \"dispatch background wakes\", Dial: database.Pool.Listener}), and store/pool.go:238-241 and :250-252 now name four permanent listeners (the delivery hub, the event stream relay, the stale-room evictor and the shared wake hub), but store/pool.go:302 is still `const permanentListeners = 3` with a comment naming three, so ConnectionsPerProcess = 64+4+1+10+1+3 = 83, one short of the 84 a process opens. Round 1 saw the hub's own backend on the real binary ('listen dispatch_embeddings; listen dispatch_excerpts_owed; listen dispatch_events; listen dispatch_delivery_settings') beside the existing listeners. The figure is mirrored by infra/gcp/dispatch.go:91 `dispatchConnectionsPerPod = 83`, which infra/gcp/dispatch_connections_test.go:14 requires equal to store.ConnectionsPerProcess, so both move to 84 together. Reported first by the implementer (architect's note 12:26Z); no red test: the defect is a constant and the existing equality test pins the mirror."
+      "criterion": "Each keepalive or lease renewal the plan kept is named in the PR body with its period and why no event can replace it (INFRA-514 architect, 16:16Z)",
+      "evidence": "The body's Change line names only 'the kept timers (delivery reconcile, architecture import) are jittered every period', and the proof line gives only '+2/min' for the shared listener's keep-alive. The body does not name these: the shared wake listener's 30 s ping (pglisten DefaultListenIdle, the only way to notice a dead LISTEN connection, since a dead connection receives no notification); the webhook redelivery sweep every 2 min (GitHub has no feed of failed deliveries); the standby intake's 2 s bind poll and its consumer-lease reconcile every 30 s per durable (76 statements per 10 min over two processes; NATS gives no event when the durable's holder goes away); and plan decision 9's out-of-scope floor (outbox retry ticker 5 s, settlement resumption 1 min, per-feature listener pings 30 s). The body also has stale text. Its NOTIFY-site note cites migrations 0121, 0123 and 0126, which are now 0136, 0138 and 0141. Its INFRA-558 note gives `StopDelivering()`, which is now `StopDelivering(ctx)`. Its 'Proven by' idle figure, 2.81 -> 2.32 statements/s, was measured at bead55d4: at d47dbf05 and c83c0851 the measured idle is 4.55 -> 4.21 per process, because main added a 5 s server-process heartbeat (#2390) and a 5 s edit-notice sweep (#2137). Breakdown: dispatch://INFRA-607/artifact/idle-breakdown-round-4-md."
     }
   ],
   "failed": 3,
+  "proof": [
+    {
+      "criterion": "Each loop the plan made event-driven does nothing while nothing changes",
+      "surface": "Two real head processes (c83c0851) on one database and one NATS in config B, beside two fork-point (d47dbf05) processes on a copy, counted from the Postgres statement log",
+      "command": "python3 /legion/scratch/tmp/t607r3/count2.py <log> <offset 16:28:00> <offset 16:38:01> t3a t3b (output keep/idle.txt; dispatch://INFRA-607/artifact/idle-breakdown-round-4-md)",
+      "observed": "Head: 0 statements from the embedding scan (fork point 241), coverage (40), task progress, reference excerpts and suggestion outcomes (20 lease attempts and 30 rules). There were 2 delivery_settings reads (fork point 42), both the reconcile's. The new hub keep-alive made 40 pings, 2/min per process, on the two backends that LISTEN on dispatch_embeddings, dispatch_excerpts_owed, dispatch_events and dispatch_delivery_settings. Totals were 5,056 vs 5,462 statements, or 4.21 vs 4.55/s per process. Dispatch CPU was 0.0029/0.0044 vs 0.0038/0.0036 cores.",
+      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
+      "negativeControl": "`update comments set body = body` on an embedded comment left its embeddings row's content_hash and embedded_at unchanged over 8 s, and the fake embedder logged no call."
+    },
+    {
+      "criterion": "The GitHub intake keeps one pull request's order across a hand-over and stops inside the stop grace",
+      "surface": "Two real head processes sharing the delivery durable, fed through the Envoy listener's /v1/messages/publish, with a fake GitHub holding pulls/<n>",
+      "command": "publish-pr.sh 201 x3, 202-205, then kill -TERM <bound pid> with FAKE_PULL_DELAY=3s; then publish-pr.sh 401 and kill -TERM with FAKE_PULL_DELAY=50s",
+      "observed": "The three fetches of pulls/201 did not overlap (53.801-56.801, 57.057-00.058, 00.059-03.060), and different PRs were fetched at once. With GitHub hung, the process exited 15.13 s after SIGTERM. The given-up fetch ended with the fake logging 'caller gone', and the standby fetched PR 401 13 ms later.",
+      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
+      "negativeControl": "Round 1's head a5cc2a56 overlapped two fetches of pulls/201 across the same hand-over, and with GitHub hung it exited 58.0 s after SIGTERM."
+    },
+    {
+      "criterion": "A delivery settings change reaches the intake at once, and a freshness write does not reload it",
+      "surface": "PUT /api/v1/settings/delivery on the head binary, then published merges",
+      "command": "api.sh 18777 PUT /api/v1/settings/delivery (population_authors + newbot); publish PR 501 by newbot and PR 502 by stranger; psql update of last_event_at",
+      "observed": "PR 501 was fetched 30 ms after the PUT, and PR 502 was not fetched. Settings reads went 17 before, 17 after the last_event_at update, and 19 after the PUT.",
+      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
+      "negativeControl": "`update delivery_settings set last_event_at = now()` caused no settings read in the next 3 s."
+    },
+    {
+      "criterion": "A suggestion is judged only once it is settle old, so an agent's writes within a minute are judged together",
+      "surface": "Issues filed and commented on through the head binary's API",
+      "command": "api.sh POST /api/v1/issues (LGA-401 by ses-y, then ses-other comments; 50 s later LGA-402 by ses-x, suggested LGA-401); ses-x comments on LGA-402 at +3 s and on LGA-401 at +23 s",
+      "observed": "The suggestion (created 16:43:33) stayed ignored through 16:45:17 and was marked acted_on ('the suggested issue was updated directly') at 16:45:23.",
+      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
+      "negativeControl": "Round 1's head judged the same shape at 44 s old through ses-other's older event on the suggested issue."
+    },
+    {
+      "criterion": "A failed intake subscribe leaves nothing a reconnect binds",
+      "surface": "The head binary in config B with its NATS server down at boot while a psql session holds the delivery-consumer-delivery-events lease",
+      "command": "stop nats slot 1; psql 'select pg_advisory_lock(x''4C4F4F50''::int, hashtext(''delivery-consumer-delivery-events''))'; start.sh head 1 t3b B 1; start nats 16 s later; LISTENER=:19121 publish-pr.sh 601; /jsz?consumers=true",
+      "observed": "The intake logged 'bind NATS consumer ... outbound buffer limit exceeded' every 2 s, then bound at 16:46:36.801, 0.7 s after NATS started, with no resubscribe line. PR 601 was fetched once. The consumer showed delivered 1, ack_floor 1, num_ack_pending 0, num_redelivered 0 and push_bound true.",
+      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
+      "negativeControl": "The implementer's run of the fork point under the same conditions logged 'envoy nats resubscribing' 0.8 s after NATS started (head-proof-round-3-md, check f2). I did not re-run that control."
+    }
+  ],
+  "mainReds": [
+    "recipients-claim.e2e.ts:310 'a route change that closes the issue moves the open card's route row without a reload' is main's. I reproduced it on an export of main 2d872499b668 (checked byte-equal for three files): `bash /legion/scratch/tmp/infra607/e2e/run1.sh main2d8 e2e/recipients-claim.e2e.ts:310 tester3` -> rc=1, 1 failed (`expect(routeRow(moved)).toContainText('Routed next (e2e)')` element not found). It also failed in main's own CI: run 40689878159, job 122860957537 at c27469629a (1 failed, 1155 passed). #2324 has merged.",
+    "TestDispatchConnectionsPerPodIsTheServers failed on main's CI (job 122860957535 at c27469629a, expected 84 actual 83). main@origin now reads dispatchConnectionsPerPod 86 = its own sum 64+4+1+12+1+1+3, so main is consistent; #2464, still open and titled '84 connections', would now be stale. The head's 87 = main's 86 + the wake hub.",
+    "mermaid.e2e.ts:194 (#2311) is main's, by the controller's report. I did not reproduce it."
+  ],
   "notes": [
-    "No real-system run this round, by the architect's direction; round 1's real-surface results and red tests stand for the full round at the merged head, which must also re-run the before/after measurements there.",
-    "The pod's scratch was recreated since round 1: /legion/scratch/tmp/t607 and the harness's test Postgres on :25432 may be gone; the full round rebuilds what it needs."
+    "The merge the conflict forces changes the diff. The next round compares fingerprints; any code change (the redelivery jitter) makes it a full round.",
+    "Scratch: /legion/scratch/tmp/t607r3 (builds, start.sh with a shared DISPATCH_SIGNING_KEY, since two processes of main's release refuse each other's keys, count2.py, keep/idle.txt). I started and stopped the measure3 stack; the test Postgres on :25432 is the implementer's and was left running."
   ]
 }
