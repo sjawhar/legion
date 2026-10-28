@@ -45,6 +45,23 @@ import (
 // shutdown the message in hand gets inflightGrace to finish before its handling context is
 // cancelled, which aborts a prompt in flight; inflightCancelWait bounds the wait for the handler
 // to return after that.
+//
+// A holder's graceful stop hands its messages back (durableReceiver.handBack) and keeps its
+// subscription until the next holder has one, since nats-server loses a message when a push
+// consumer's last subscriber goes while a first delivery of it is still in the server's send queue
+// (the consumer counts the delivery undone below zero, and the message leaves the pending list at
+// its ack wait, never redelivered). It NAKs what it holds with handBackDelay, so the durable
+// redelivers it once the next holder has subscribed, releases the lease unsettled, so the next
+// holder settles, and then lingers: it NAKs, with the same delay, each message that reaches it for
+// the first time, drops a repeat, and reads the lease record every lingerPoll until it names
+// another holder that is receiving, or until lingerMax after the batch was NAKed. A record no
+// other pod has taken lingerUntaken after the release ends the linger too: a running standby
+// takes a released record at its next poll, so there is none to wait for. Then it drains its
+// subscription, waiting handBackDrainWait at most for the server's word that it sends no more.
+// handBackReleaseWait bounds the wait for the lease's loop to stop before the release. The 3 s
+// grace, its cancel's 1 s, lingerMax (the flush and the release inside it) and the drain come to
+// 9 s at most besides a lease call that hangs, inside the 10 s the shutdown gives the receive stop
+// and the HTTP stop together.
 const (
 	durableTakeoverAlarmLine  = "lease holder cannot deliver from the durable"
 	durableTakeoverAlarmAfter = 135 * time.Second
@@ -64,6 +81,21 @@ const (
 	// comes back one ack wait later again. The margin covers a redelivery the server sends a
 	// moment after its ack wait runs out.
 	settleMargin = time.Second
+	// handBackDelay is the NAK delay of every message a graceful stop hands back: long enough for
+	// a standby to take the released lease and subscribe, so the redelivery reaches it.
+	handBackDelay = 2 * time.Second
+	// lingerPoll is how often a pod that stopped gracefully reads the lease record for the next
+	// holder's receiving, and lingerMax the longest it keeps its subscription after it NAKed what
+	// it held. lingerUntaken, two standby polls, is how long after its release it waits for any
+	// other pod to take the lease at all.
+	lingerPoll    = 250 * time.Millisecond
+	lingerMax     = 3 * time.Second
+	lingerUntaken = 2 * leaseStandbyPoll
+	// handBackDrainWait bounds the drain of a stopping pod's subscription: past a slow link's
+	// latency, since what the server pushed before the drain must still reach the pod.
+	// handBackReleaseWait bounds its wait for the lease's loop to stop before the release.
+	handBackDrainWait   = 2 * time.Second
+	handBackReleaseWait = 2 * time.Second
 	// receiveQueueCapacity is the local queue's: the durable sends no more than MaxAckPending
 	// messages the holder has not settled, so the queue never fills; twice that leaves room for a
 	// redelivery that lands as a NAK is being processed.
@@ -86,6 +118,11 @@ type receiveConfig struct {
 	alarmEvery      time.Duration
 	inProgressEvery time.Duration
 	inflightGrace   time.Duration
+	// handBackDelay, lingerPoll, lingerMax and lingerUntaken time a graceful stop's hand-back.
+	handBackDelay time.Duration
+	lingerPoll    time.Duration
+	lingerMax     time.Duration
+	lingerUntaken time.Duration
 }
 
 func productionReceiveConfig() receiveConfig {
@@ -97,6 +134,10 @@ func productionReceiveConfig() receiveConfig {
 		alarmEvery:      durableTakeoverAlarmEvery,
 		inProgressEvery: inProgressEvery,
 		inflightGrace:   inflightGrace,
+		handBackDelay:   handBackDelay,
+		lingerPoll:      lingerPoll,
+		lingerMax:       lingerMax,
+		lingerUntaken:   lingerUntaken,
 	}
 }
 
@@ -210,10 +251,11 @@ func (r *durableReceiver) Start() {
 }
 
 // Stop ends receiving in the shutdown's order: the holder-only loops are told to stop, the
-// subscription ends, the message in hand gets inflightGrace before its handling is cancelled,
-// every queued message is NAKed for the next holder, and then the lease is marked released, so a
-// standby takes it at its next poll. It returns once that is done or ctx ends; a lease left
-// unreleased at ctx's end is taken as an expired one.
+// handler takes no more messages, the message in hand gets inflightGrace before its handling is
+// cancelled, and a holder hands every message it has not handled back to the next one, releases
+// the lease, so a standby takes it at its next poll, and keeps its subscription until the next
+// holder receives (durableReceiver.handBack). It returns once that is done or ctx ends; a lease
+// left unreleased at ctx's end is taken as an expired one.
 func (r *durableReceiver) Stop(ctx context.Context) {
 	r.mu.Lock()
 	stop, done := r.stop, r.done
@@ -376,7 +418,7 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus
 			r.lease.SetStaleBinding(status.Term, true)
 			if !beside {
 				beside = true
-				r.logger.Info("durable still push-bound by a lease holder that is gone; receiving beside it", slog.String("consumer", r.consumer))
+				r.logger.Info("durable still push-bound by an earlier lease holder; receiving beside it", slog.String("consumer", r.consumer))
 			}
 		}
 		err := r.begin(info.Config.DeliverSubject, settleCap, status.Term)
@@ -505,7 +547,9 @@ func (r *durableReceiver) awaitUnbound(ctx context.Context) error {
 // connection, the serial handler and the InProgress ticker. A settleCap above zero has the handler
 // first hold what arrives until the durable's outstanding messages are all in hand, or for
 // settleCap at most, then deliver it in stream order (receiveTerm.settle); term is the lease term
-// whose unsettled the hold's end clears.
+// whose unsettled the hold's end clears. Once the server has the subscription, the lease records
+// the term receiving, which a pod that stopped gracefully waits for before it lets go of the
+// deliver subject.
 func (r *durableReceiver) begin(subject string, settleCap time.Duration, term uint64) error {
 	t := &receiveTerm{
 		subject:   subject,
@@ -532,25 +576,47 @@ func (r *durableReceiver) begin(subject string, settleCap time.Duration, term ui
 	r.term, r.state = t, receiveActive
 	r.mu.Unlock()
 	// The server counts the subscription once it has read it; a flush that fails, while the
-	// connection is down, leaves it to nats.go to send again on the reconnect.
-	_ = conn.FlushTimeout(time.Second)
+	// connection is down, leaves it to nats.go to send again on the reconnect, and the term is
+	// recorded receiving once a resubscribe on the new connection has flushed.
+	if conn.FlushTimeout(time.Second) == nil && r.lease != nil {
+		r.lease.SetReceiving(term)
+	}
 	go t.handle(r)
 	go t.keepAlive(r.timing.inProgressEvery)
 	return nil
 }
 
-// end ends the term being served: it unsubscribes and stops taking messages, then settles. On a
-// lost lease (ctx still live) the queued messages are dropped without an ack, to come back after
-// the ack wait to whoever holds the lease, and the message in hand finishes, unless a shutdown
-// comes meanwhile. On a shutdown (ctx ended) the message in hand gets inflightGrace, then its
-// handling is cancelled, and every queued message is NAKed for the next holder, in that order so
-// the durable redelivers them in the order they came; during a settle hold, the held messages
-// are NAKed in stream order, and the lease's unsettled stays set for the next holder.
+// end ends the term being served. On a lost lease (ctx still live) it unsubscribes, the queued
+// messages are dropped without an ack, to come back after the ack wait to whoever holds the lease,
+// and the message in hand finishes, unless a shutdown comes meanwhile; a shutdown after the loss
+// then gives the message in hand inflightGrace, cancels its handling and NAKs what is queued. A
+// shutdown (ctx ended) of a term that still holds the lease hands its messages back (handBack),
+// and one without a lease drains (endWithoutLease).
 func (r *durableReceiver) end(ctx context.Context) {
 	r.mu.Lock()
 	t := r.term
 	r.term = nil
 	r.state = receiveStandby
+	r.mu.Unlock()
+	switch {
+	case ctx.Err() == nil:
+		r.endLost(ctx, t)
+	case r.lease == nil:
+		r.endWithoutLease(t)
+	case r.lease.Holding() && r.lease.Status().Term == t.leaseTerm:
+		r.handBack(t)
+	default:
+		r.endLost(ctx, t)
+	}
+	t.cancel()
+	close(t.stopped)
+}
+
+// endLost ends a term whose lease was lost: it unsubscribes and stops taking messages, drops what
+// is queued while ctx is live and waits for the message in hand, and once ctx has ended (a
+// shutdown) gives the message in hand inflightGrace, cancels its handling and NAKs what is queued.
+func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
+	r.mu.Lock()
 	sub, conn := t.sub, t.conn
 	t.sub = nil
 	r.mu.Unlock()
@@ -575,8 +641,119 @@ func (r *durableReceiver) end(ctx context.Context) {
 		}
 		r.logger.Info("stopped receiving the durable", slog.String("consumer", r.consumer), slog.Int("naked", len(queued)))
 	}
-	t.cancel()
-	close(t.stopped)
+}
+
+// endWithoutLease ends a listener's receiving without a lease on a shutdown: the handler takes no
+// more messages, the message in hand gets inflightGrace, the subscription drains, and everything
+// queued is NAKed at once, in stream order, and flushed.
+func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
+	t.stopHandling()
+	r.settleInHand(t)
+	conn := r.drain(t)
+	t.close()
+	queued := t.takeQueued()
+	sortByStreamSequence(queued)
+	for _, m := range queued {
+		_ = m.Nak()
+	}
+	if conn != nil {
+		_ = conn.FlushTimeout(time.Second)
+	}
+	r.logger.Info("stopped receiving the durable", slog.String("consumer", r.consumer), slog.Int("naked", len(queued)))
+}
+
+// handBack is a holder's graceful stop. The handler takes no more messages while the subscription
+// stays and what arrives is queued; the message in hand gets inflightGrace. Then every message
+// queued or held is NAKed with handBackDelay, as one batch in stream order, the lease's term is
+// marked unsettled, so the next holder settles, and the NAKs are flushed before the lease is
+// released. The pod then lingers on its subscription, so the deliver subject keeps a subscriber
+// while the server pushes to it: each message that reaches it is NAKed with the same delay the
+// first time its stream sequence does, and a repeat is dropped with neither ack nor NAK (it comes
+// back at its ack wait, and the next holder's settle hold waits for it). The linger ends once the
+// lease record names another holder that is receiving, or lingerMax after the batch was NAKed,
+// the flush and the release included, or once no other pod has taken the record lingerUntaken
+// after the release; then the subscription drains, by the same rule.
+func (r *durableReceiver) handBack(t *receiveTerm) {
+	t.stopHandling()
+	r.settleInHand(t)
+	deadline := time.Now().Add(r.timing.lingerMax)
+	t.handBack(r.timing.handBackDelay)
+	r.lease.Unsettle(t.leaseTerm)
+	r.mu.Lock()
+	conn := t.conn
+	r.mu.Unlock()
+	_ = conn.FlushTimeout(time.Second)
+	releaseCtx, cancel := context.WithTimeout(context.Background(), handBackReleaseWait)
+	err := r.lease.Release(releaseCtx)
+	cancel()
+	if err != nil {
+		r.logger.Warn("listener lease not released; a standby takes it once it expires", slog.String("error", err.Error()))
+	}
+	lingered, how := r.linger(deadline)
+	r.drain(t)
+	t.close()
+	handedBack, repeats := t.handBackCounts()
+	r.logger.Info("handed the durable's messages back to the next holder",
+		slog.String("consumer", r.consumer),
+		slog.Int("handed_back", handedBack),
+		slog.Int64("lingered_ms", lingered.Milliseconds()),
+		slog.String("linger_end", how),
+		slog.Int("dropped_repeats", repeats),
+	)
+}
+
+// linger waits, reading the lease record every lingerPoll, until it names another holder that is
+// receiving, or until deadline, or until lingerUntaken has passed with every read answering that
+// no other pod has taken the record, and reports how long it waited and which ended it.
+func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
+	start := time.Now()
+	poll := time.NewTicker(r.timing.lingerPoll)
+	defer poll.Stop()
+	untaken := true
+	for {
+		taken, receiving, err := r.lease.Successor()
+		switch {
+		case err != nil:
+			untaken = false
+		case receiving:
+			return time.Since(start), "receiving holder seen"
+		case taken:
+			untaken = false
+		}
+		if !time.Now().Before(deadline) {
+			return time.Since(start), "timeout"
+		}
+		if untaken && time.Since(start) >= r.timing.lingerUntaken {
+			return time.Since(start), "not taken"
+		}
+		<-poll.C
+	}
+}
+
+// drain ends the term's subscription as nats.go drains one: the server is told to stop sending,
+// and what it sent before that still reaches intake. It waits handBackDrainWait at most, then
+// unsubscribes, and returns the subscription's connection (nil when there was none).
+func (r *durableReceiver) drain(t *receiveTerm) *nats.Conn {
+	r.mu.Lock()
+	sub, conn := t.sub, t.conn
+	t.sub = nil
+	r.mu.Unlock()
+	if sub == nil {
+		return nil
+	}
+	closed := sub.StatusChanged(nats.SubscriptionClosed)
+	if sub.Drain() != nil {
+		_ = sub.Unsubscribe()
+		return conn
+	}
+	wait := time.NewTimer(handBackDrainWait)
+	defer wait.Stop()
+	select {
+	case <-closed:
+	case <-wait.C:
+		_ = sub.Unsubscribe()
+	}
+	return conn
 }
 
 // settleInHand gives the message in hand inflightGrace to settle, then cancels its handling, which
@@ -652,7 +829,9 @@ func (r *durableReceiver) resubscribe(ctx context.Context) error {
 	if r.lease != nil {
 		r.lease.SetDeliverSubject(subject)
 	}
-	_ = conn.FlushTimeout(time.Second)
+	if conn.FlushTimeout(time.Second) == nil && r.lease != nil {
+		r.lease.SetReceiving(t.leaseTerm)
+	}
 	r.logger.Info("durable resubscribed", slog.String("consumer", r.consumer), slog.String("deliver_subject", subject))
 	return nil
 }
@@ -727,19 +906,21 @@ type receiveTerm struct {
 	// handling is the context every message of the term is handled under; cancel ends it.
 	handling context.Context
 	cancel   context.CancelFunc
-	// closing is closed once the term takes no more messages, handled once the handler has
-	// returned, and stopped once the term is over, which ends the InProgress ticker.
-	closing chan struct{}
-	handled chan struct{}
-	stopped chan struct{}
-	logger  *logging.Logger
+	// closing is closed once the handler takes no more messages (stopHandling), handled once the
+	// handler has returned, and stopped once the term is over, which ends the InProgress ticker.
+	closing     chan struct{}
+	closingOnce sync.Once
+	handled     chan struct{}
+	stopped     chan struct{}
+	logger      *logging.Logger
 	// settleCap, when above zero, is the longest the handler holds what the term receives before
 	// it delivers it in stream order (settle): a term that must settle. leaseTerm is the lease
 	// term the hold's end reports settled.
 	settleCap time.Duration
 	leaseTerm uint64
 
-	mu     sync.Mutex
+	mu sync.Mutex
+	// closed is set once the term takes no more messages (close).
 	closed bool
 	// holding is set while the settle hold lasts.
 	holding bool
@@ -747,14 +928,26 @@ type receiveTerm struct {
 	// before it reads the queue again.
 	held      []*nats.Msg
 	unsettled map[*nats.Msg]struct{}
+	// handedBack is set once a graceful stop hands the term's messages back (handBack): the
+	// stream sequences it has NAKed with handBackDelay. naked counts those NAKs, and repeats the
+	// messages dropped because their stream sequence was already handed back.
+	handedBack    map[uint64]struct{}
+	handBackDelay time.Duration
+	naked         int
+	repeats       int
 }
 
 // intake is the core subscription's handler: it queues m, in the order the durable sent it, and
-// counts it unsettled from then on, so the InProgress ticker keeps it alive while it waits.
+// counts it unsettled from then on, so the InProgress ticker keeps it alive while it waits. Once
+// the term hands its messages back, it hands m back instead (handBackLocked).
 func (t *receiveTerm) intake(m *nats.Msg) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
+		return
+	}
+	if t.handedBack != nil {
+		t.handBackLocked(m)
 		return
 	}
 	select {
@@ -765,12 +958,53 @@ func (t *receiveTerm) intake(m *nats.Msg) {
 	}
 }
 
-// close stops the term taking messages.
+// stopHandling has the handler take no more messages; intake goes on taking what arrives.
+func (t *receiveTerm) stopHandling() {
+	t.closingOnce.Do(func() { close(t.closing) })
+}
+
+// close stops the term taking messages, and the handler with it.
 func (t *receiveTerm) close() {
 	t.mu.Lock()
 	t.closed = true
 	t.mu.Unlock()
-	close(t.closing)
+	t.stopHandling()
+}
+
+// handBack NAKs with delay every message the term holds or has queued, as one batch in stream
+// order, and from then on has intake hand back each message that arrives (handBackLocked).
+func (t *receiveTerm) handBack(delay time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	batch := t.takeQueuedLocked()
+	sortByStreamSequence(batch)
+	t.handedBack, t.handBackDelay = map[uint64]struct{}{}, delay
+	for _, m := range batch {
+		t.handBackLocked(m)
+	}
+}
+
+// handBackLocked NAKs m with the hand-back delay the first time the term hands its stream
+// sequence back, and drops a repeat with neither ack nor NAK: a second NAK of a message the
+// durable already redelivered once would have it come back again, to a pod that may no longer
+// receive. A message whose JetStream metadata cannot be read is NAKed.
+func (t *receiveTerm) handBackLocked(m *nats.Msg) {
+	if meta, err := m.Metadata(); err == nil {
+		if _, seen := t.handedBack[meta.Sequence.Stream]; seen {
+			t.repeats++
+			return
+		}
+		t.handedBack[meta.Sequence.Stream] = struct{}{}
+	}
+	_ = m.NakWithDelay(t.handBackDelay)
+	t.naked++
+}
+
+// handBackCounts reports how many messages the term handed back and how many repeats it dropped.
+func (t *receiveTerm) handBackCounts() (naked, repeats int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.naked, t.repeats
 }
 
 // takeQueued empties the held batch and the queue and returns what they held, in the order the
@@ -779,6 +1013,10 @@ func (t *receiveTerm) close() {
 func (t *receiveTerm) takeQueued() []*nats.Msg {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.takeQueuedLocked()
+}
+
+func (t *receiveTerm) takeQueuedLocked() []*nats.Msg {
 	if t.holding {
 		t.gatherLocked()
 	}

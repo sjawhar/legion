@@ -1341,9 +1341,11 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	loops.stop()
 
 	// 2. Stop receiving the durable, inside the 10 s budget the HTTP stop shares: the holder-only
-	// loops stop, the subscription ends, the message in hand gets inflightGrace (3 s) before its
-	// prompt is cancelled and it is NAKed, every queued message is NAKed, and the lease is marked
-	// released, so a standby takes the lease at its next poll and receives those messages first.
+	// loops stop, the handler takes no more messages, the message in hand gets inflightGrace (3 s)
+	// before its prompt is cancelled and it is NAKed, every message not handled is NAKed with a
+	// delay for the next holder, and the lease is marked released, so a standby takes the lease at
+	// its next poll; the subscription stays until the standby receives, 3 s at most (1 s when no
+	// other pod takes the lease), and then drains (durableReceiver.handBack, 9 s at most in all).
 	// HTTP keeps serving meanwhile.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

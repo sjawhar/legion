@@ -138,7 +138,15 @@ func sameLastError(a, b error) (same bool) {
 // connection), and cleared by one that finds the durable not push-bound before it subscribes;
 // every other write carries it on. unsettled is set from the acquiring write of a term that must
 // settle until that term's settle hold ends, and a release keeps it as it stands, so a holder
-// stopped mid-hold hands the duty on.
+// stopped mid-hold hands the duty on; a graceful stop that hands messages back sets it before its
+// release (Unsettle), so a release after one always carries it.
+//
+// receiving says the holder's subscription to the durable's deliver subject is up: every
+// acquiring write and every release writes it false, the holder sets it once it has subscribed
+// (SetReceiving), and its renewals keep it. A pod that stopped gracefully keeps its own
+// subscription until a record names another holder that is receiving (or until no other pod has
+// taken the record, when there is none to wait for), so the deliver subject does not lose its last
+// subscriber while the server still pushes to it and another pod is about to subscribe.
 type leaseFields struct {
 	Holder         string    `json:"holder"`
 	Boot           string    `json:"boot"`
@@ -148,6 +156,7 @@ type leaseFields struct {
 	Released       bool      `json:"released"`
 	StaleBinding   bool      `json:"stale_binding"`
 	Unsettled      bool      `json:"unsettled"`
+	Receiving      bool      `json:"receiving"`
 }
 
 // leaseRecordKeys are leaseFields' JSON keys; any other key a record carries is a newer build's,
@@ -241,6 +250,9 @@ type lease struct {
 	now      func() time.Time
 	logger   *logging.Logger
 	changes  chan struct{}
+	// renewals asks the running loop for a renewal now rather than at its next turn
+	// (SetReceiving).
+	renewals chan struct{}
 
 	// The loop's own state, read and written only by step (and by Release once the loop ended):
 	// the revision a standby is timing and when it first saw it, whether the holder's lapse has
@@ -259,10 +271,12 @@ type lease struct {
 	settle         bool
 	record         leaseRecord
 	deliverSubject string
-	// staleBinding and unsettled are the holder's stale_binding and unsettled, written into the
-	// record from the next renewal or release on (SetStaleBinding, Settled).
+	// staleBinding, unsettled and receiving are the holder's stale_binding, unsettled and
+	// receiving, written into the record from the next renewal or release on (SetStaleBinding,
+	// Settled, Unsettle, SetReceiving).
 	staleBinding bool
 	unsettled    bool
+	receiving    bool
 	stop         context.CancelFunc
 	done         chan struct{}
 }
@@ -282,6 +296,7 @@ func newLease(kv bus.KeyValue, machineID, instance string, cfg leaseConfig, now 
 		now:      now,
 		logger:   logger,
 		changes:  make(chan struct{}, 1),
+		renewals: make(chan struct{}, 1),
 	}
 }
 
@@ -296,8 +311,14 @@ func (l *lease) Start(ctx context.Context) {
 	go func() {
 		defer close(done)
 		for {
-			if waitUnlessDone(ctx, l.step()) != nil {
+			timer := time.NewTimer(l.step())
+			select {
+			case <-ctx.Done():
+				timer.Stop()
 				return
+			case <-timer.C:
+			case <-l.renewals:
+				timer.Stop()
 			}
 		}
 	}()
@@ -369,13 +390,63 @@ func (l *lease) Settled(term uint64) {
 	l.mu.Unlock()
 }
 
+// Unsettle records that term's holder handed messages back on a graceful stop, setting unsettled
+// from the next renewal or release on, so the next holder settles. A term that is no longer
+// current changes nothing.
+func (l *lease) Unsettle(term uint64) {
+	l.mu.Lock()
+	if l.term == term {
+		l.unsettled = true
+	}
+	l.mu.Unlock()
+}
+
+// SetReceiving records that term's holder has subscribed to the durable's deliver subject, and
+// has the running loop renew at once to write receiving. A term that is no longer current changes
+// nothing.
+func (l *lease) SetReceiving(term uint64) {
+	l.mu.Lock()
+	set := l.term == term && !l.receiving
+	if set {
+		l.receiving = true
+	}
+	l.mu.Unlock()
+	if set {
+		select {
+		case l.renewals <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Successor reads the record and reports whether another process has taken it since this one
+// released it (it names another boot and is not released, or cannot be read) and whether that
+// holder's subscription is up (receiving). A pod that stopped gracefully reads it once its own
+// lease is released, so it lets go of the deliver subject only once another pod receives it, or
+// once no other pod has taken the lease.
+func (l *lease) Successor() (taken, receiving bool, err error) {
+	entry, err := l.kv.Get(l.key)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	record, err := decodeLeaseRecord(entry.Value())
+	if err != nil {
+		return true, false, nil
+	}
+	taken = record.Boot != l.boot && !record.Released
+	return taken, taken && record.Receiving, nil
+}
+
 // Release stops the lease and, when this process holds the record, marks it released at its
-// revision, keeping service_since, stale_binding and unsettled as they stand, so a standby takes
-// it at its next poll with no TTL wait, and settles in its turn when this term had not settled. A
-// record another pod has already taken is left as it is, and that is no error. It returns
-// ctx.Err() when ctx ends before the loop has stopped, and the write's error when the record
-// could not be marked; either way this process no longer holds the lease, and a record left
-// unreleased is taken as an expired one.
+// revision, no longer receiving, keeping service_since, stale_binding and unsettled as they
+// stand, so a standby takes it at its next poll with no TTL wait, and settles in its turn when
+// this term had not settled or handed messages back. A record another pod has already taken is
+// left as it is, and that is no error. It returns ctx.Err() when ctx ends before the loop has
+// stopped, and the write's error when the record could not be marked; either way this process no
+// longer holds the lease, and a record left unreleased is taken as an expired one.
 func (l *lease) Release(ctx context.Context) error {
 	l.mu.Lock()
 	stop, done := l.stop, l.done
@@ -390,7 +461,7 @@ func (l *lease) Release(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	held, rev, record := l.held, l.rev, l.record
-	record.StaleBinding, record.Unsettled = l.staleBinding, l.unsettled
+	record.StaleBinding, record.Unsettled, record.Receiving = l.staleBinding, l.unsettled, false
 	l.held, l.validUntil = false, time.Time{}
 	l.mu.Unlock()
 	if !held {
@@ -439,9 +510,10 @@ func (l *lease) step() time.Duration {
 
 // renew rewrites the holder's record at the revision it last wrote. A renewal that lands counts
 // from its own start; one that started after the validity ran out is a resume, a new term taken
-// as over an expired record, which must settle and so writes unsettled. A wrong revision means
-// another pod took the record, and this process steps down; any other failure is retried every
-// renewEvery, sooner when the validity ends first, so its end is signalled.
+// as over an expired record, which must settle and so writes unsettled, and has not subscribed
+// yet and so writes receiving false. A wrong revision means another pod took the record, and this
+// process steps down; any other failure is retried every renewEvery, sooner when the validity ends
+// first, so its end is signalled.
 func (l *lease) renew() time.Duration {
 	start := l.now()
 	l.mu.Lock()
@@ -449,6 +521,7 @@ func (l *lease) renew() time.Duration {
 	record, rev := l.record, l.rev
 	record.DeliverSubject = l.deliverSubject
 	record.StaleBinding, record.Unsettled = l.staleBinding, l.unsettled || lapsed
+	record.Receiving = l.receiving && !lapsed
 	l.mu.Unlock()
 	if lapsed && !l.lapseSignalled {
 		l.lapseSignalled = true
@@ -497,7 +570,7 @@ func (l *lease) renew() time.Duration {
 	if lapsed {
 		l.term++
 		l.how = leaseTakenExpired
-		l.settle, l.unsettled = true, true
+		l.settle, l.unsettled, l.receiving = true, true, false
 	}
 	term := l.term
 	l.mu.Unlock()
@@ -586,10 +659,11 @@ func (l *lease) poll() time.Duration {
 // write's server timestamp, holds the lease from the write's start. service_since starts again
 // at that timestamp when no record was there, when it carried none, or when its last write is
 // more than two ttl older than this one, since then no pod of the machine was serving; otherwise
-// it is kept. stale_binding is carried over, and unsettled is written when the term must settle
-// (leaseAcquisition). The record is renewed at once to store service_since and acquired_at. A
-// write whose timestamp cannot be read back is not counted as held: the record then expires as
-// any unreleased one does, and a standby, this one included, takes it after the ttl.
+// it is kept. stale_binding is carried over, unsettled is written when the term must settle
+// (leaseAcquisition), and receiving is written false until the term subscribes. The record is
+// renewed at once to store service_since and acquired_at. A write whose timestamp cannot be read
+// back is not counted as held: the record then expires as any unreleased one does, and a standby,
+// this one included, takes it after the ttl.
 func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how leaseAcquisition) time.Duration {
 	start := l.now()
 	l.mu.Lock()
@@ -597,7 +671,7 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	l.mu.Unlock()
 	record.Holder, record.Boot, record.Released, record.AcquiredAt = l.instance, l.boot, false, time.Time{}
 	settle := how == leaseTakenExpired || record.StaleBinding || record.Unsettled
-	record.Unsettled = settle
+	record.Unsettled, record.Receiving = settle, false
 	value, err := record.encode()
 	if err != nil {
 		l.noteFailure("encode", err)
@@ -635,7 +709,7 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
 	l.term++
 	l.how = how
-	l.settle, l.staleBinding, l.unsettled = settle, record.StaleBinding, settle
+	l.settle, l.staleBinding, l.unsettled, l.receiving = settle, record.StaleBinding, settle, false
 	term := l.term
 	l.mu.Unlock()
 	l.seenRev, l.lapseSignalled = 0, false

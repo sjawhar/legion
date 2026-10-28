@@ -273,8 +273,9 @@ func TestLeaseRenewalWhoseReplyWasLostKeepsTheLease(t *testing.T) {
 	}
 }
 
-// A graceful release marks the record released; a standby's next poll takes it at once, with no
-// TTL wait, reports it taken from a released record, and keeps the machine's service_since.
+// A release with nothing handed back (no Unsettle: a holder stopped before it subscribed) marks
+// the record released; a standby's next poll takes it at once, with no TTL wait, reports it taken
+// from a released record, and keeps the machine's service_since.
 func TestLeaseReleasedRecordIsTakenAtTheNextPollKeepingServiceSince(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -363,8 +364,8 @@ func TestLeaseStaleBindingIsSetCarriedAndCleared(t *testing.T) {
 
 // unsettled is written from the acquiring write of a term that must settle. A release before that
 // term's settle hold ends keeps it, so the next holder's term must settle too, though it takes a
-// released record; once the hold ends it is cleared, and a release then hands over a term that
-// need not settle.
+// released record; once the hold ends it is cleared, and a release then, with nothing handed back
+// (no Unsettle), hands over a term that need not settle.
 func TestLeaseUnsettledIsHandedOnByAReleaseBeforeTheHoldEnds(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -409,6 +410,103 @@ func TestLeaseUnsettledIsHandedOnByAReleaseBeforeTheHoldEnds(t *testing.T) {
 	}
 	if record, _ := readLease(t, kv); record.Holder != "pod-c" || record.Unsettled || record.StaleBinding {
 		t.Fatalf("record = %+v, want pod-c's with neither flag", record.leaseFields)
+	}
+}
+
+// receiving is written false by every acquiring write, set by SetReceiving once the holder's
+// subscription is up and kept by every renewal, and written false by the release. A graceful stop
+// that hands messages back marks its term unsettled (Unsettle), so its release carries unsettled
+// and the next holder's term settles. A call for a term that is no longer current changes nothing.
+// Successor tells the pod that released whether another pod has taken the record and whether that
+// holder is receiving.
+func TestLeaseReceivingIsWrittenAndAGracefulReleaseCarriesUnsettled(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	putLease(t, kv, `{"holder":"pod-gone","boot":"0011223344556677","released":true,"receiving":true}`)
+	a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+	b := testLease(kv, "pod-b", productionLeaseConfig(), clock.now)
+	a.step()
+	status := a.Status()
+	if !status.Holding || status.How != leaseTakenReleased || status.Settle {
+		t.Fatalf("pod-a status = %+v, want held from a released record, not settling", status)
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-a" || record.Receiving || record.Unsettled {
+		t.Fatalf("record after pod-a's acquisition = %+v, want pod-a's, not receiving, not unsettled", record.leaseFields)
+	}
+	a.SetReceiving(status.Term - 1)
+	clock.advance(leaseRenewEvery)
+	a.step()
+	if record, _ := readLease(t, kv); record.Receiving {
+		t.Fatalf("record after SetReceiving for an earlier term = %+v, want not receiving", record.leaseFields)
+	}
+	a.SetReceiving(status.Term)
+	for renewal := range 2 {
+		clock.advance(leaseRenewEvery)
+		a.step()
+		if record, _ := readLease(t, kv); !record.Receiving || record.Unsettled {
+			t.Fatalf("record after renewal %d = %+v, want receiving, not unsettled", renewal+1, record.leaseFields)
+		}
+	}
+	a.Unsettle(status.Term - 1)
+	clock.advance(leaseRenewEvery)
+	a.step()
+	if record, _ := readLease(t, kv); record.Unsettled {
+		t.Fatalf("record after Unsettle for an earlier term = %+v, want not unsettled", record.leaseFields)
+	}
+
+	a.Unsettle(status.Term)
+	if err := a.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-a: %v", err)
+	}
+	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || record.Receiving {
+		t.Fatalf("record after the graceful release = %+v, want released, unsettled, not receiving", record.leaseFields)
+	}
+	if taken, receiving, err := a.Successor(); err != nil || taken || receiving {
+		t.Fatalf("pod-a reads a successor taken %v, receiving %v (%v) over its own released record, want none", taken, receiving, err)
+	}
+
+	b.step()
+	next := b.Status()
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle {
+		t.Fatalf("pod-b status = %+v, want held from a released record, settling for the messages handed back", next)
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-b" || !record.Unsettled || record.Receiving {
+		t.Fatalf("record after pod-b's acquisition = %+v, want pod-b's, unsettled, not receiving", record.leaseFields)
+	}
+	if taken, receiving, err := a.Successor(); err != nil || !taken || receiving {
+		t.Fatalf("pod-a reads a successor taken %v, receiving %v (%v) before pod-b subscribed, want taken, not receiving", taken, receiving, err)
+	}
+	b.SetReceiving(next.Term)
+	clock.advance(leaseRenewEvery)
+	b.step()
+	if taken, receiving, err := a.Successor(); err != nil || !taken || !receiving {
+		t.Fatalf("pod-a reads a successor taken %v, receiving %v (%v) once pod-b's record says so, want taken and receiving", taken, receiving, err)
+	}
+	if taken, receiving, err := b.Successor(); err != nil || taken || receiving {
+		t.Fatalf("pod-b reads a successor taken %v, receiving %v (%v) over its own record, want none", taken, receiving, err)
+	}
+}
+
+// A running lease writes receiving at once on SetReceiving rather than at its next renewal, so a
+// pod that stopped gracefully lets go of the deliver subject a renewal sooner.
+func TestLeaseSetReceivingIsWrittenAtOnce(t *testing.T) {
+	kv := leaseBucket(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := testLease(kv, "pod-a", productionLeaseConfig(), time.Now)
+	a.Start(ctx)
+	defer func() { _ = a.Release(context.Background()) }()
+	awaitLease(t, "pod-a holds", 5*time.Second, a.Holding)
+	time.Sleep(100 * time.Millisecond) // past the acquisition's own renewal, a second from the next
+
+	set := time.Now()
+	a.SetReceiving(a.Status().Term)
+	written := awaitLease(t, "the record says receiving", leaseRenewEvery, func() bool {
+		record, _ := readLease(t, kv)
+		return record.Receiving
+	})
+	if took := written.Sub(set); took > leaseRenewEvery/2 {
+		t.Fatalf("receiving written %s after SetReceiving, want at once rather than at the next renewal", took)
 	}
 }
 

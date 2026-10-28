@@ -31,8 +31,8 @@ The lease is the key `lease.<durable>` (`lease.listener-<machine id>`) in the KV
 `envoy_listener` (`bus.ListenerStateBucket`), which the listener creates at `ENVOY_NATS_REPLICAS`
 replicas, file storage, one value per key and a 10 minute `MaxAge`. Its value is JSON: `holder`
 (the holding pod's instance), `boot` (random per process start), `deliver_subject`,
-`service_since`, `acquired_at` and `released`; a field this build does not know is kept across
-every rewrite.
+`service_since`, `acquired_at`, `released`, and `stale_binding`, `unsettled` and `receiving`
+("Take-over" below); a field this build does not know is kept across every rewrite.
 
 | Constant (`lease.go`) | Value | What it does |
 | --- | --- | --- |
@@ -55,10 +55,22 @@ wait only once the pod holding it has died or lost the lease.
 
 ### Take-over
 
-- **Graceful stop** (SIGTERM on the active pod): a standby delivers within about 1 to 3 s, the
-  message in hand's grace and one standby poll. The tests bound it at 10 s. Per-session order is
-  kept: the stopping pod NAKs what it has not handled before it releases the lease, and the durable
-  redelivers those before newer messages.
+- **Graceful stop** (SIGTERM on the active pod): the stopping pod stops handing messages to the
+  handler, gives the message in hand its grace, and hands back everything it has not handled: it
+  NAKs those messages with a 2 s delay (`handBackDelay`), as one batch in stream order, and
+  releases the lease marked `unsettled`. A standby takes the released lease at its next poll and
+  settles (below): it subscribes at once and holds what it receives until every outstanding
+  message is in its hands, then delivers in stream order, so per-session order is kept. The
+  stopping pod keeps its subscription meanwhile, since nats-server loses a message whose first
+  delivery is still in its send queue when the deliver subject's last subscriber goes: it NAKs
+  with the same delay each message that reaches it after the stop, the first time it sees it,
+  drops a repeat with neither ack nor NAK, and reads the lease record every 250 ms (`lingerPoll`)
+  until it names another holder with `receiving` true (which the holder writes once its
+  subscription is up), or for 3 s (`lingerMax`) after the batch at most. When no other pod has
+  taken the record 1 s after the release (`lingerUntaken`, two standby polls), there is no
+  standby to wait for and it stops waiting. Then it drains the subscription. The standby delivers
+  about 2 to 3 s after the stop (the hand-back delay and a settle read), plus the message in
+  hand's grace when it takes it. The tests bound it at 10 s.
 - **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 5 to 6 s
   after the last renewal (the TTL and one poll). Its term must settle: it subscribes at once,
   beside the dead pod's push binding when the server still counts a lost node's connection, and
@@ -75,21 +87,25 @@ wait only once the pod holding it has died or lost the lease.
   so messages can then take up to about 19 s.
 - **Graceful stop after a hard one.** The lease record carries two flags for the next holder.
   `stale_binding` is set by a holder that subscribed beside a push binding it did not wait out (a
-  lost node's lingering connection), carried by every renewal, release and take-over, and cleared
-  by a holder that finds the durable not push-bound. `unsettled` is written from the acquiring
-  write of a term that must settle until its hold ends, and a release keeps it, so a pod stopped
-  mid-hold hands the hold on. A pod that takes a released record carrying either flag settles too,
-  subscribing at once beside any binding rather than waiting it out as a pre-lease build's. What
-  the stopping pod NAKed before the next one subscribed went to the lingering binding alone and
-  comes back one ack wait later, so the next pod delivers about 6 to 7 s after the stop.
+  lost node's lingering connection, or a stopping pod's subscription it keeps until this one
+  receives), carried by every renewal, release and take-over, and cleared by a holder that finds
+  the durable not push-bound. `unsettled` is written from the acquiring write of a term that must
+  settle until its hold ends, and a release keeps it, so a pod stopped mid-hold hands the hold on;
+  a graceful stop that hands messages back always releases it set. A pod that takes a released
+  record carrying either flag settles too, subscribing at once beside any binding rather than
+  waiting it out as a pre-lease build's. The messages the stopping pod handed back come back after
+  the hand-back delay to the next pod and to a lingering binding alike; one that went to such a
+  binding alone comes back one ack wait later, and the next pod's hold waits for it.
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
 and `settle` and `stale_binding`), `listener lease term must settle; receiving at once and holding
-what arrives until the durable's outstanding messages are in hand`, `durable still push-bound by a
-lease holder that is gone; receiving beside it`, `settle hold ended; delivering the held messages
-in stream order` (with `outcome` `settled` or `cap`, `held_ms`, `messages` and `ack_pending`),
-`durable receiving` (with `lease`, `waited_ms` and `settle`), `listener lease lost: another
-listener holds it` and `listener lease released`.
+what arrives until the durable's outstanding messages are in hand`, `durable still push-bound by an
+earlier lease holder; receiving beside it`, `settle hold ended; delivering the held messages in
+stream order` (with `outcome` `settled` or `cap`, `held_ms`, `messages` and `ack_pending`),
+`durable receiving` (with `lease`, `waited_ms` and `settle`), `handed the durable's messages back to
+the next holder` (with `handed_back`, `lingered_ms`, `linger_end` `receiving holder seen`,
+`not taken` or `timeout`, and `dropped_repeats`), `listener lease lost: another listener holds it`
+and `listener lease released`.
 
 ### Graceful stop order
 
@@ -97,10 +113,14 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
 
 1. the self-health monitor stops;
 2. receiving stops, inside a 10 s budget the HTTP stop shares: the holder-only loops are told to
-   stop, the subscription ends, the message in hand gets 3 s (`inflightGrace`) before its prompt is
-   cancelled (a cancelled prompt is a retryable failure: its ledger attempt is cleared and the
-   message NAKed), every queued message is NAKed (during a settle hold, what it holds in stream
-   order, and the record keeps `unsettled`), and the lease is marked released;
+   stop, the handler takes no more messages, the message in hand gets 3 s (`inflightGrace`)
+   before its prompt is cancelled (a cancelled prompt is a retryable failure: its ledger attempt
+   is cleared and the message NAKed), every message not handled (queued, or held by a settle hold)
+   is NAKed with the 2 s hand-back delay in stream order, the lease is marked released and
+   `unsettled`, and the subscription stays until the next holder receives, 3 s after the NAKs at
+   most (1 s after the release when no other pod takes the lease), then drains (2 s at most). A
+   listener without a lease drains its subscription and NAKs what it has not handled at once, in
+   stream order;
 3. the HTTP server shuts down within what is left of the budget;
 4. the live topics lane drains (3 s), the cache watchers stop, and the NATS client drains (13 s).
 
