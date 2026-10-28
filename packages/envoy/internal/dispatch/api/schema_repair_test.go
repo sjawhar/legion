@@ -136,16 +136,8 @@ func storedBlockID(t *testing.T, database *store.Store, artifactID string) strin
 // send, and what a server whose bound did not count the map ygo stores a mark as could write.
 func appendNestedLink(t *testing.T, database *store.Store, artifactID string) {
 	t.Helper()
-	persistence := docs.NewPgVersioned(database)
-	loaded, err := persistence.Load(context.Background(), artifactID)
-	if err != nil {
-		t.Fatalf("load document before crafted link: %v", err)
-	}
-	doc := crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
-		t.Fatalf("decode document before crafted link: %v", err)
-	}
-	if _, err := persistence.AppendUpdate(context.Background(), artifactID, docstest.NestedLinkUpdate(t, doc, docstest.NestedValue(100))); err != nil {
+	doc := loadStoredDocument(t, database, artifactID)
+	if _, err := docs.NewPgVersioned(database).AppendUpdate(context.Background(), artifactID, docstest.NestedLinkUpdate(t, doc, docstest.NestedValue(100))); err != nil {
 		t.Fatalf("append crafted link: %v", err)
 	}
 }
@@ -266,8 +258,6 @@ func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
 		base := "/api/v1/artifacts/" + artifact.ID
 		text := dispatchRequest(t, handler, http.MethodGet, base+"/text", nil, "alice")
 		blocks := dispatchRequest(t, handler, http.MethodGet, base+"/blocks", nil, "alice")
-		t.Logf("GET /text: %d %s", text.Code, text.Body.String())
-		t.Logf("GET /blocks: %d %s", blocks.Code, blocks.Body.String())
 		if text.Code != http.StatusOK || blocks.Code != http.StatusOK {
 			t.Fatalf("read a text holding a string embed: /text %d %s, /blocks %d %s, want 200 each", text.Code, text.Body.String(), blocks.Code, blocks.Body.String())
 		}

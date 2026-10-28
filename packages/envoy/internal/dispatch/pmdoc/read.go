@@ -190,16 +190,6 @@ func readUnsharedText(text *crdt.YXmlText, copyAttrs bool) ([]*Node, error) {
 	var runAttrs crdt.Attributes // the buffered run's attributes; nil when it is unformatted
 	attrsDirty := false
 
-	snapshot := func() crdt.Attributes {
-		if len(current) == 0 {
-			return nil
-		}
-		attrs := make(crdt.Attributes, len(current))
-		for key, value := range current {
-			attrs[key] = value
-		}
-		return attrs
-	}
 	sameAsRun := func() bool {
 		if len(current) != len(runAttrs) {
 			return false
@@ -233,12 +223,12 @@ func readUnsharedText(text *crdt.YXmlText, copyAttrs bool) ([]*Node, error) {
 		case *crdt.ContentString:
 			switch {
 			case run.Len() == 0:
-				runAttrs = snapshot()
+				runAttrs = cloneYAttributes(current)
 			case attrsDirty && !sameAsRun():
 				if err := flush(); err != nil {
 					return nil, err
 				}
-				runAttrs = snapshot()
+				runAttrs = cloneYAttributes(current)
 			}
 			attrsDirty = false
 			run.WriteString(content.Str)

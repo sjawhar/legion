@@ -540,7 +540,12 @@ func cloneYAttributes(attrs crdt.Attributes) crdt.Attributes {
 // walk of a text's items (yTextDeltaInTransaction, readUnsharedText, AuthoredTextRuns) starts
 // from. ygo exports the items but not their head.
 func yTextStart(text *crdt.YXmlText) *crdt.Item {
-	return *(**crdt.Item)(unsafe.Add(unsafe.Pointer(text), yTextStartOffset()))
+	return *yTextStartField(text)
+}
+
+// yTextStartField is the address of text's item-list head (yTextStart).
+func yTextStartField(text *crdt.YXmlText) **crdt.Item {
+	return (**crdt.Item)(unsafe.Add(unsafe.Pointer(text), yTextStartOffset()))
 }
 
 // yTextStartOffset is the offset of the item-list head in a crdt.YXmlText, found by name once. A

@@ -97,18 +97,20 @@ func (b *SpanBudget) Render(doc *Node) (string, error) {
 // RenderWithBlockOffsets renders a document and records each identified block's
 // byte range in the returned markdown. It validates doc first.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
-	r, err := render(doc, maxSpanCells)
-	if err != nil {
-		return "", nil, err
-	}
-	return r.b.String(), r.blockOffsets, nil
+	return renderWithBlockOffsets(doc, true)
 }
 
 // RenderWithBlockOffsets is RenderWithBlockOffsets of d's tree without validating it again: the
 // renderer's own refusals still run, and a panic in it is still an ErrPanic. The zero
 // ValidDocument is RenderWithBlockOffsets' error for a nil tree.
 func (d ValidDocument) RenderWithBlockOffsets() (string, []BlockOffset, error) {
-	r, err := renderDocument(d.doc, maxSpanCells, false)
+	return renderWithBlockOffsets(d.doc, false)
+}
+
+// renderWithBlockOffsets is the markdown of doc and its blocks' byte ranges in it, validating doc
+// first only when validate says so (renderDocument).
+func renderWithBlockOffsets(doc *Node, validate bool) (string, []BlockOffset, error) {
+	r, err := renderDocument(doc, maxSpanCells, validate)
 	if err != nil {
 		return "", nil, err
 	}

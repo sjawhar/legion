@@ -14,6 +14,8 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 )
 
 // ReadUnshared reads a text by walking its items rather than through ygo's ToDelta, which Read
@@ -385,7 +387,7 @@ func readersAgreeOn(t *testing.T, doc *crdt.Doc) {
 // right neighbour.
 func itemsDoc(items ...*crdt.Item) *crdt.Doc {
 	doc := runTextScript(insertStep(0, "a"))
-	text := doc.GetXmlFragment("prosemirror").Children()[0].(*crdt.YXmlElement).Children()[0].(*crdt.YXmlText)
+	text := docstest.FirstText(doc.GetXmlFragment("prosemirror"))
 	for index := range items {
 		if index > 0 {
 			items[index].Left = items[index-1]
@@ -396,7 +398,7 @@ func itemsDoc(items ...*crdt.Item) *crdt.Doc {
 	if len(items) > 0 {
 		head = items[0]
 	}
-	*(**crdt.Item)(unsafe.Add(unsafe.Pointer(text), yTextStartOffset())) = head
+	*yTextStartField(text) = head
 	return doc
 }
 
@@ -523,14 +525,7 @@ func TestReadUnsharedReadsWhatReadReads(t *testing.T) {
 func updatedDoc(t *testing.T, tree *Node) *crdt.Doc {
 	t.Helper()
 	doc := crdt.New(crdt.WithClientID(1))
-	fragment := doc.GetXmlFragment("prosemirror")
-	var err error
-	doc.Transact(func(txn *crdt.Transaction) {
-		err = Update(txn, fragment, tree)
-	})
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
+	writeUpdate(t, doc, doc.GetXmlFragment("prosemirror"), tree)
 	return doc
 }
 
