@@ -57,7 +57,16 @@ export function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
-    thread: { answers: [], edits: [], followers: [], replies: [] },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
+    },
     question: "Which approach?",
     state: "open",
     waiting_on: "human",
@@ -73,6 +82,16 @@ export function mockAskReads(rows: readonly InboxRow[]) {
   return spyOn(api, "getAsk").mockImplementation(async (id: string) => {
     const ask = rows.find((row) => row.id === id);
     if (ask === undefined) throw new Error(`no fixture for ${id}`);
-    return { ask, answers: [], edits: [], followers: [], replies: [] };
+    return {
+      ask,
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
+    };
   });
 }

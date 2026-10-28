@@ -1,8 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Changed
+
+- The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
+  a gated write without a matching marker only when a live owner's store records `block`.
+- `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
+  their `--help` asks for the concrete case first and the choice in its terms
+  (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
+  `--image`, the appended `Ref:` line and picture lines count toward the limit.
 
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
@@ -42,6 +49,30 @@
 
 ### Added
 
+- `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
+  pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
+  `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
+  that uploads a markdown document); the record a live Oh My Pi process keeps in a session's
+  state directory, one owner-only file per process under `askgate/` (`<pid>-<start>.json`), naming
+  its pid, its Linux start time and its marker store, so two processes that bind one session never
+  drop each other (an owner whose process is gone, or whose pid another process holds, is inert);
+  and single-use markers (version 2), minted exclusively and owner-only, keyed by the argv's
+  digest and bound to the dry run's arguments and to the sha256 of each file the argv names
+  (`fileOperands`) for a reviewed write. A marker older than two hours, longer than any tool's
+  time limit, is refused. Before a gated write posts, after `--help`, `--dry-run` and the session
+  and Dispatch settings, the CLI reads the session's record; with a live one it reads each named
+  file once and consumes one matching marker by unlinking it, and an upload by `--path` sends the
+  bytes of that read. In block mode it refuses a write with no matching marker
+  (`dispatch <command> was not called: AskGate is on for this session, …`, logged to the ledger
+  with an `askgate` field), and a file that changed after the review with the advice to send the
+  call again in a later message. In warn mode it writes that ledger line before it posts, refuses
+  the write when the ledger cannot take it, and posts with a `dispatch: warning:` line. A record
+  that cannot be read, or names a store that is gone, is a refusal; a session no live record names
+  needs no marker, so a terminal, CI, Claude Code, OpenCode and a pod without pi-envoy are
+  unchanged. `pruneSessions` keeps a directory whose record is live, and removes the marker store
+  of a process that is gone and that nothing changed for two hours (`sweepStores`).
+- The `dispatch` refusal for a missing `DISPATCH_HOST` says to send the command as a bash call from
+  an agent's session, or to set your own session id to run it by hand.
 - `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
   notification stream stored on a subject it follows while its own NATS subscription was down,
   through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
@@ -91,7 +122,6 @@
   nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
   close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
   warning (`routeReplayNotice`) (INFRA-439).
-
 - Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
   and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
   `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
@@ -154,6 +184,21 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
+
+- `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
+  envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse
+  leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
+  read. A checkout's `askgate` section is not read: `CheckoutEnvoyConfig.askgateError` names it,
+  and `sessionSettings` says it in its notice.
 
 ### Fixed
 

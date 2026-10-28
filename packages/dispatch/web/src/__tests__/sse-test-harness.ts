@@ -1,25 +1,33 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+const WHOLE_CACHE_PROBE = ["whole-cache-refresh-probe"] as const;
+
 /**
- * Counts whole-cache refreshes: `refreshQueries` is the only caller that invalidates with no key,
- * so an invalidation naming none is exactly one of them. Returns the count and a restore.
+ * Counts whole-cache refreshes: a refresh that names no target marks every query the app holds
+ * stale, and no event names this probe's key, so each time the probe goes stale is one of them.
+ * The probe is made fresh again at once, ready for the next. Returns the count and a restore.
  */
 export function countWholeCacheRefreshes(queryClient: QueryClient): {
   count: () => number;
   restore: () => void;
 } {
-  const invalidate = queryClient.invalidateQueries.bind(queryClient);
   let refreshes = 0;
-  queryClient.invalidateQueries = ((filters?: { queryKey?: readonly unknown[] }) => {
-    if (filters?.queryKey === undefined) {
+  queryClient.setQueryData(WHOLE_CACHE_PROBE, refreshes);
+  const unsubscribe = queryClient.getQueryCache().subscribe((change) => {
+    if (
+      change.type === "updated" &&
+      change.action.type === "invalidate" &&
+      change.query.queryKey[0] === WHOLE_CACHE_PROBE[0]
+    ) {
       refreshes += 1;
+      queryClient.setQueryData(WHOLE_CACHE_PROBE, refreshes);
     }
-    return invalidate(filters);
-  }) as typeof queryClient.invalidateQueries;
+  });
   return {
     count: () => refreshes,
     restore: () => {
-      queryClient.invalidateQueries = invalidate;
+      unsubscribe();
+      queryClient.removeQueries({ exact: true, queryKey: WHOLE_CACHE_PROBE });
     },
   };
 }
