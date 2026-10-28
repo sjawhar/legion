@@ -57,7 +57,8 @@ func nudge(wake chan struct{}) {
 // restart drops the pool's connections) is logged and tried again at the next tick, so the runner
 // outlives the failure instead of ending with it. Once ctx ends it closes the registry, so no wake
 // starts a lane, and waits for every lane to return: a row mid-run ends and settles first
-// (runRow), so the daemon's stop is a real join.
+// (runRow), so the daemon's stop is a real join. It does the same for the exception lane's reclaim
+// relaunches (reclaimUnheldDetached): open while it runs, joined at its stop.
 func (r *outbox) Run(ctx context.Context) {
 	if r.log == nil {
 		r.log = slog.Default()
@@ -68,6 +69,7 @@ func (r *outbox) Run(ctx context.Context) {
 		r.lanes = map[record.LaneKey]*outboxLane{}
 	}
 	r.mu.Unlock()
+	r.openReclaims()
 	clock := r.timers()
 	poke := make(chan struct{}, 1)
 	for {
@@ -80,6 +82,7 @@ func (r *outbox) Run(ctx context.Context) {
 			r.running = false
 			r.mu.Unlock()
 			r.wg.Wait()
+			r.closeReclaims()
 			return
 		case <-poke:
 		}

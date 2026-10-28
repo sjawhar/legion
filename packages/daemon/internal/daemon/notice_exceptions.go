@@ -137,6 +137,14 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
+	// A failed forward to the architect means a copy the listener accepted for it did not reach a
+	// pane that takes its messages. The report names the copy as its original's row and its copy count
+	// (record.Notice.Published), which the reclaim record maps to the row it went out as: a copy the
+	// claim's current process got stops the healing clock, or reopens an incident that healed while
+	// the report was on its way; a copy that went to a process a relaunch has since replaced changes
+	// nothing (reclaim_unheld.go, noteReclaimReport). Recorded for every report, before the reclaim
+	// gate below, so an accepted copy that a failed forward follows never ends an incident.
+	current := r.noteReclaimReport(reported.architect, reclaimCopy{keyRow: reported.row, resends: notice.Resends})
 	held := r.supervisedClaim(reported.architect)
 	if !holdsRole(held) {
 		lingers, err := r.issueTreeLingers(ctx, issue)
@@ -148,6 +156,19 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "state", held.State, "stopping", held.Stopping)
 			return nil
 		}
+	}
+	// A running architect whose own live session (RecipientSession == held.Session) failed to take
+	// this notice again (notice.Resends > 0, so a re-held copy already tried and failed) has gone
+	// deaf while still registered: the listener resolved its stale registration and forwarded, and
+	// the forward kept failing, so the publish path's ErrNoHolder never fires for it. Relaunch it
+	// to re-claim, in addition to re-holding the notice below — the two do not fight: the relaunch
+	// re-claims the role, and the re-held copy lands once it does. A first receipt timeout, one whose
+	// recipient is a stale predecessor session the claim already moved off, and one about a copy a
+	// relaunch has since replaced the process of (current) are left for the re-held copy, so a healthy
+	// architect is not relaunched. The relaunch runs off this callback, which every architect's report
+	// shares (reclaimUnheldDetached).
+	if current && notice.Resends > 0 && exception.RecipientSession != "" && exception.RecipientSession == held.Session {
+		r.reclaimUnheldDetached(ctx, reported.architect, "exception")
 	}
 	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",

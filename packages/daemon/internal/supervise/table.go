@@ -123,6 +123,25 @@ type StalePlugin struct {
 	Trigger string
 }
 
+// RoleUnheld is a daemon publish to a role topic, or a delivery exception for one, that found the
+// role had no Envoy holder while the topic's claim is a running pane of this daemon: a listener
+// reset drops a role's holder, and the pane's heartbeat re-asserts only a role its in-process
+// envoy instance still believes it holds, which the reset can erase
+// (docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md), so nothing on the session
+// side re-claims until the pane's next claim boot. The pane is relaunched on its own session so
+// that claim boot re-claims the role and the next copy of the held message lands: the relaunch
+// refreshPlugin and repoint share (replaceProcess), charged nothing by its row, reached only for a ready or idle
+// claim (the table), so no turn is interrupted, and the relaunch moves the claim out of ready/idle
+// at once, so a burst of publishes or exceptions for one topic triggers one relaunch and no more
+// while it is in flight. Trigger says where it came from — "publish" or "exception" — for the
+// relaunch's log line. The daemon's recognizer (internal/daemon/reclaim_unheld.go) sends it only
+// for a ready or idle claim; the ignores below are its completeness and its defense against a
+// racing state.
+type RoleUnheld struct {
+	Claim   claim.Token
+	Trigger string
+}
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -256,6 +275,7 @@ func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
 func (StalePlugin) isEvent()          {}
+func (RoleUnheld) isEvent()           {}
 func (RequestSpawn) isEvent()         {}
 func (RequestRegister) isEvent()      {}
 func (RequestReady) isEvent()         {}
@@ -306,6 +326,7 @@ const (
 	onExit          eventKind = "request_exit"
 
 	onStalePlugin eventKind = "stale_plugin"
+	onRoleUnheld  eventKind = "role_unheld"
 
 	timerPrefix eventKind = "timer:"
 )
@@ -332,6 +353,8 @@ func kindOf(ev Event) eventKind {
 		return timerPrefix + eventKind(ev.Kind)
 	case StalePlugin:
 		return onStalePlugin
+	case RoleUnheld:
+		return onRoleUnheld
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -530,6 +553,16 @@ func fillTable(t *builder) {
 		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateSuspended, StateFailed, StateRetired)
+
+	// A daemon publish or a delivery exception found a running pane's role topic has no Envoy
+	// holder: relaunch the pane on its session so its claim boot re-claims (reclaim_unheld.go).
+	t.row(onRoleUnheld, "the pane's Envoy role has no holder: relaunch it on its session so its claim boot re-claims", reclaimRole,
+		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle)
+	t.ignore(onRoleUnheld, "a turn is in flight: a relaunch would lose its work; the held message's retry catches the pane idle", StateWorking)
+	t.ignore(onRoleUnheld, "a booting claim's own claim boot takes the role the moment it is ready", StateLaunching, StateShimConnected, StateRegistered)
+	// SUSPENDED is left alone: it runs no process to relaunch, and the relaunch that resumes it (the
+	// operator's resume, or the daemon's by rule) re-runs the claim boot, which takes the role.
+	t.ignore(onRoleUnheld, "no running pane holds a role to re-claim", StateQueued, StateLaunchUncertain, StateSuspended, StateFailed, StateRetired)
 
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)

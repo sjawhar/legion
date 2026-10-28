@@ -59,3 +59,24 @@ func (m *Machine) replaceProcess(ctx context.Context, interruption string) error
 	}
 	return m.launch(ctx)
 }
+
+// reclaimRole is the onRoleUnheld row: a daemon publish or a delivery exception found a running
+// pane's role topic has no Envoy holder (RoleUnheld), so the pane is relaunched on its session and
+// its claim boot re-claims the role. It is the relaunch repoint and refreshPlugin share
+// (replaceProcess), charged nothing by this row: the pane did nothing wrong, its listener-side role
+// claim was dropped under it. The table reaches it only for a ready or idle claim, which runs no
+// turn, so the turn's recovery (interrupted) has nothing to do; replaceProcess then launches — a
+// Resume of the recorded session — unless the claim still holds a suspension, which an idle claim can
+// when its runtime refused the stop at its turn's end (turnEnded): that suspension is completed
+// instead (endHeld) and nothing is launched. A launch the tree lifecycle refuses (checkLaunch) leaves
+// the claim as it is and is charged nothing (launchAfter's relaunchRefused). A Resume the runtime
+// refuses is charged one launch failure, as any launch's is (launchAfter). The Kubernetes runtime's
+// Resume stops the role's earlier generation itself, so there the relaunch is uncharged; the tmux
+// runtime's refuses while the live pane it replaces runs, a known tmux-only defect, so there it is
+// charged one failure. The daemon's limiter reads the claim's generation afterwards and refunds a
+// reclaim that launched nothing (relaunchUnheld, internal/daemon).
+func reclaimRole(m *Machine, ctx context.Context, ev Event) error {
+	m.log.Warn("supervise: the pane's Envoy role has no holder; relaunching it on its session so its claim boot re-claims",
+		"trigger", ev.(RoleUnheld).Trigger, "state", m.claim.State, "session", m.claim.Session, "suspensionHeld", m.held != nil)
+	return m.replaceProcess(ctx, "the pane's lost Envoy role is re-claimed by relaunching it on its session")
+}
