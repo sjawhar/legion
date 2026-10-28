@@ -2444,7 +2444,9 @@ function argumentStrings(value: unknown): string[] {
 }
 /** The first absolute path a tool call of the run, its own or a subagent's (each transcript under
  * sessions/), names outside `allowed` and SYSTEM_DIRS, whose top-level directory exists on this
- * machine (so a route such as `/v1/messages` in a command is no path). */
+ * machine (so a route such as `/v1/messages` in a command is no path). A `task` call is skipped:
+ * its assignment is text for the subagent ("do not read files under …"), and what the subagent
+ * does reach is in its own transcript, which this reads. */
 function outsidePath(
   runDir: string,
   allowed: string[]
@@ -2472,7 +2474,7 @@ function outsidePath(
       const parsed = SessionEntry.safeParse(entry);
       if (!parsed.success || parsed.data.message?.role !== "assistant") continue;
       for (const part of parsed.data.message.content ?? []) {
-        if (part.type !== "toolCall") continue;
+        if (part.type !== "toolCall" || part.name === "task") continue;
         for (const [named] of argumentStrings(part.arguments).join("\n").matchAll(ABSOLUTE_PATH)) {
           // `/../tmp/x` is /tmp/x: judge the path a call reaches, not how it spells it.
           const target = path.posix.normalize(named);

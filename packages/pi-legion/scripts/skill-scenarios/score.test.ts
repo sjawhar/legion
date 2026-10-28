@@ -1666,6 +1666,25 @@ specRun("spec-writing-head-94", {
     finish
   ),
 });
+// A subagent's assignment names a path to stay out of: text for the subagent, no reach.
+specRun("spec-writing-head-95", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("t9", "task", {
+        context: `Do not read files under ${path.join(homedir(), "work")} other than via the dispatch command.`,
+        tasks: [{ name: "Summary", task: "Summarize the person's messages." }],
+      }),
+      result("t9", "The person wants a greeting."),
+    ],
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
 // counted once, at the command, so the read before it is no read between it and its fix.
@@ -2094,6 +2113,8 @@ test("a run whose tool call names a path outside its sandbox is a rig error; URL
   expect(scoresOf("spec-writing-head-93")).toEqual(allPass);
   // A skill path inside the text a write puts in a file is no read of that skill.
   expect(scoresOf("spec-writing-head-94")).toEqual(allPass);
+  // A path inside a subagent's assignment is text for the subagent, not a reach of the run.
+  expect(scoresOf("spec-writing-head-95")).toEqual(allPass);
 });
 
 test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {
