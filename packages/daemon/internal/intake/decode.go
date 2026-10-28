@@ -20,6 +20,7 @@ import (
 
 // decodedMessage is the checked envelope identity and its workflow fact. A nil Fact is a valid
 // additive or non-workflow event that the shipped reducer acknowledges without a state change.
+// EventID is the id ApplyFact records the fact under (envoyEnvelope.factID).
 type decodedMessage struct {
 	Source  string
 	EventID string
@@ -90,7 +91,7 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, de
 	if err != nil {
 		return decodedMessage{}, err
 	}
-	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact, Unread: unread}, nil
+	return decodedMessage{Source: envelope.Source, EventID: envelope.factID(), Fact: fact, Unread: unread}, nil
 }
 
 func (e envoyEnvelope) valid() error {
@@ -115,6 +116,24 @@ func (e envoyEnvelope) valid() error {
 		return fmt.Errorf("Envoy envelope payload is not JSON")
 	}
 	return nil
+}
+
+// factID is the id the envelope's fact is recorded under in processed_events, which skips a fact
+// already applied (ApplyFact, Applied): the envelope's event_id, except for a GitHub webhook
+// delivery's envelope, whose dedupe_key names the delivery, "github." and its X-GitHub-Delivery
+// (Envoy's GithubEnvelope), and which takes that dedupe_key. The listener mints a new event_id for
+// every request GitHub sends, so a redelivery of the same delivery the stream stored again (asked
+// for after the stream's 72-hour duplicate window, or published without a MsgId) would otherwise
+// be a new fact. The topic is left out, though the stream's MsgId adds it: a review that mentions
+// the trigger is published on its mention topics beside its own, each copy the same fact, decoded
+// from the payload and applied once. A checks settlement keeps its event_id: its dedupe_key names a
+// commit's settlement generation, which Envoy's CI store starts again once the commit's record
+// expires, and processed_events is never pruned. A Dispatch event's event_id is its dedupe_key.
+func (e envoyEnvelope) factID() string {
+	if e.Source == "github" && e.DedupeKey == "github."+e.SourceEventID {
+		return e.DedupeKey
+	}
+	return e.EventID
 }
 
 // decodeServerStarted decodes Dispatch's server.started: the build commit Dispatch started on

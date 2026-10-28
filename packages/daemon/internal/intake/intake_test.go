@@ -1170,7 +1170,7 @@ func TestConsumeAppliesOnlyAPushToAnIssuesBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read processed_events: %v", err)
 	}
-	if !slices.Equal(marks, []string{"task315-push"}) {
+	if !slices.Equal(marks, []string{"github.task315-push"}) {
 		t.Fatalf("processed_events = %q, want only the push to the issue's branch marked", marks)
 	}
 }
