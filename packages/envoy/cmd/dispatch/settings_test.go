@@ -31,10 +31,12 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -756,6 +758,59 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PORT": "0"}, "DISPATCH_PORT")
 		},
+		"DISPATCH_LISTEN_FD": func(t *testing.T) {
+			descriptor, address := listeningFD(t, "tcp4", "127.0.0.1:0")
+			port := strconv.Itoa(address.Port)
+			// Unset, the server binds the address the other two settings build.
+			if boot := resolveWith(t, nil); boot.ListenSocket != nil {
+				t.Errorf("unset: ListenSocket = %v, want none", boot.ListenSocket)
+			}
+			// Set, the server serves on the socket at its own address, with neither other setting
+			// set, with both naming that address, or with both empty, which is unset: an empty
+			// DISPATCH_LISTEN_HOST does not ask for every interface of a socket on one address.
+			for _, overrides := range []map[string]string{
+				{"DISPATCH_LISTEN_FD": descriptor},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " [127.0.0.1] ", "DISPATCH_PORT": " " + port + " "},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": ""},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " ", "DISPATCH_PORT": " "},
+			} {
+				boot := resolveWith(t, overrides)
+				if boot.ListenSocket == nil || boot.ListenAddr != address.String() || boot.ListenSocket.Addr().String() != address.String() {
+					t.Errorf("%v: ListenAddr = %q, ListenSocket = %v; want the socket on %s", overrides, boot.ListenAddr, boot.ListenSocket, address)
+				}
+			}
+			// A setting that names another address than the socket's is refused, naming the
+			// setting and the socket; so is port 0, which never names a socket's port.
+			otherPort := strconv.Itoa(address.Port%65535 + 1)
+			for name, value := range map[string]string{
+				"DISPATCH_PORT":        otherPort,
+				"DISPATCH_LISTEN_HOST": "127.0.0.2",
+			} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_LISTEN_FD": descriptor, name: value}))
+				if err == nil || !strings.Contains(err.Error(), name+"="+value) || !strings.Contains(err.Error(), "DISPATCH_LISTEN_FD="+descriptor) {
+					t.Errorf("%s=%s with the socket on %s: err = %v, want a refusal naming both", name, value, address, err)
+				}
+			}
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_PORT": "0"}, "DISPATCH_PORT=0")
+			// A descriptor that is not a listening socket is refused, and nothing is bound in its
+			// place.
+			notASocket, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer notASocket.Close()
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": strconv.Itoa(int(notASocket.Fd()))}, "DISPATCH_LISTEN_FD")
+		},
+		"DISPATCH_PPROF_PORT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_PPROF_PORT": "6060"}); boot.PprofAddr != "127.0.0.1:6060" {
+				t.Errorf("PprofAddr = %q, want 127.0.0.1:6060", boot.PprofAddr)
+			}
+			if boot := resolveWith(t, nil); boot.PprofAddr != "" {
+				t.Errorf("unset: PprofAddr = %q, want none", boot.PprofAddr)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
+		},
 		"DISPATCH_SERVER_URL": func(t *testing.T) {
 			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
 				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
@@ -1230,6 +1285,99 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_EMBEDDER": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("unset: Embedder.Place = %q, want bedrock", boot.Embedder.Place)
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": "bedrock"}); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("bedrock: Embedder.Place = %q", boot.Embedder.Place)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_EMBEDDER": "cohere"}, `DISPATCH_EMBEDDER="cohere" (expected bedrock or azure)`)
+			// The place newEmbedder builds: Azure's client, named by the endpoint's host.
+			if embedder := azureEmbedderFor(t, nil); !strings.HasPrefix(embedder.Identity(), "azure:") {
+				t.Errorf("DISPATCH_EMBEDDER=azure built %s, want an Azure identity", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_EMBED_ENDPOINT": func(t *testing.T) {
+			boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": " https://Embed.Example/models/ "}))
+			if boot.Embedder.AzureEndpoint != "https://Embed.Example/models/" {
+				t.Errorf("AzureEndpoint = %q, want the trimmed URL", boot.Embedder.AzureEndpoint)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://Embed.Example/models/"}); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("Identity() = %q, want the endpoint's host", embedder.Identity())
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": ""}), "DISPATCH_AZURE_EMBED_ENDPOINT is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "http://embed.example/models"}), "DISPATCH_AZURE_EMBED_ENDPOINT=")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://embed.example/models"}, "DISPATCH_AZURE_EMBED_ENDPOINT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_DEPLOYMENT": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(nil)); boot.Embedder.AzureDeployment != "embed-v-4-0" {
+				t.Errorf("unset: AzureDeployment = %q, want embed-v-4-0", boot.Embedder.AzureDeployment)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": " cohere-embed "}); embedder.Identity() != "azure:embed.example/cohere-embed" {
+				t.Errorf("Identity() = %q, want the trimmed deployment", embedder.Identity())
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": "cohere-embed"}, "DISPATCH_AZURE_EMBED_DEPLOYMENT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": func(t *testing.T) {
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": " 90000 "}); embedder.Limits().BackgroundTokensPerMinute != 60_000 {
+				t.Errorf("BackgroundTokensPerMinute = %d, want two thirds of 90,000", embedder.Limits().BackgroundTokensPerMinute)
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": ""}), "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "0"}), `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE="0"`)
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "90000"}, "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_KEY": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": " bare-key "})); boot.Embedder.AzureKey != "bare-key" {
+				t.Errorf("bare: AzureKey = %q", boot.Embedder.AzureKey)
+			}
+			file := writeFile(t, "azure-key", "  file-key\n")
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("both: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": "", "DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("file alone: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			// An unreadable or blank file refuses, naming both variables, rather than falling back to
+			// the bare key.
+			missing := filepath.Join(t.TempDir(), "missing")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": missing}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+missing+", which could not be read, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			blank := writeFile(t, "blank", "\n")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": blank}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+blank+", which is empty, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY": "bare-key"}, "DISPATCH_AZURE_EMBED_KEY set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}, "DISPATCH_AZURE_EMBED_KEY_FILE set, but DISPATCH_EMBEDDER is unset")
+			if _, ok := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}).(*embed.AzureClient); !ok {
+				t.Error("the key form built no Azure client")
+			}
+		},
+		"DISPATCH_AZURE_TENANT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": " tenant "}))); boot.Embedder.AzureTenantID != "tenant" {
+				t.Errorf("AzureTenantID = %q", boot.Embedder.AzureTenantID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": ""})), "DISPATCH_AZURE_TENANT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_TENANT_ID": "tenant"}, "DISPATCH_AZURE_TENANT_ID set, but DISPATCH_EMBEDDER is unset")
+			if embedder := azureEmbedderFor(t, azureKeyless); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("keyless: Identity() = %q", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_CLIENT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": " client "}))); boot.Embedder.AzureClientID != "client" {
+				t.Errorf("AzureClientID = %q", boot.Embedder.AzureClientID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": ""})), "DISPATCH_AZURE_CLIENT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CLIENT_ID": "client"}, "DISPATCH_AZURE_CLIENT_ID set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": func(t *testing.T) {
+			// A path, read at each exchange, not at boot: a file that is not there yet boots.
+			missing := filepath.Join(t.TempDir(), "token")
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": " " + missing + " "}))); boot.Embedder.AzureTokenFile != missing {
+				t.Errorf("AzureTokenFile = %q, want %q", boot.Embedder.AzureTokenFile, missing)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
+		},
 		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
 				t.Errorf("AssetStoreBucket = %q", boot.AssetStoreBucket)
@@ -1314,6 +1462,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
+			const shortQuiet = 3 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_EDIT_NOTICE_QUIET": shortQuiet.String(),
+			})
+			if boot.EditNoticeQuiet != shortQuiet {
+				t.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET: EditNoticeQuiet = %v, want %v", boot.EditNoticeQuiet, shortQuiet)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EDIT_NOTICE_QUIET": invalid},
+					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]
@@ -1358,7 +1521,8 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 // setting does not list. A request that authenticates with a value after the first is logged once
 // per address and User-Agent, with the load balancer's address and never a token.
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
-	var logged bytes.Buffer
+	// The server's request goroutines write the log while the test reads it.
+	var logged cmdtest.LockedBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })

@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
+  their `--help` asks for the concrete case first and the choice in its terms
+  (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
+  `--image`, the appended `Ref:` line and picture lines count toward the limit.
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -42,6 +47,85 @@
 
 ### Added
 
+- `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
+  notification stream stored on a subject it follows while its own NATS subscription was down,
+  through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
+  merges subjects by stream sequence, passes over role forwards, leaves a frame the live path is
+  still delivering for later, and hands the host each frame neither path showed; one sweep runs at
+  a time and none rejects. A ledger of the frames the session finished with (event id, and dedupe
+  key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
+  lets the live path drop a repeat after a restart. A frame the host fails to show three times
+  becomes a failure notice the host shows instead, and `liveFailed` shows it at once for a live
+  frame no sweep will show, a frame received before its subject's cursor started included (a host
+  stamps when the frame arrived with `readArrivals` from `@legion/envoy-client/delivery`, which
+  reads a subscription as its messages arrive, so a frame queued behind a slow delivery is not
+  stamped late, and yields every message it read before the subscription's end or error, as
+  nats.js's own iterator does);
+  `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
+  field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
+  from a listener that answers no id, a changed `created`; a `created` that moved under the same
+  id is no recreation, and a state stored before ids takes the answer's id), a stream that moved
+  back, a cursor older than the stream's oldest message,
+  and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
+  each told once. A stream that is not recreated has moved back when any cursor stands past its
+  end (restored from a backup older than the cursor, or re-added empty from its exported
+  configuration, keeping its id): every followed subject is read again from the stream's oldest
+  message, so the session is shown what was published after the restore and, through the ledger,
+  nothing it was shown before, and is told once (`stream_moved_back`) that messages may be shown
+  again and any published between the backup and the restore are missing. A sweep that only moved
+  its cursors to the stream's end is written at most hourly; a recreation's cursor reset, a
+  moved-back stream's cursor rewind and a retention gap's cursor move are written at once with
+  their
+  notice pending in the state (`notices`), so a session that ends before the notice is raised
+  raises it once at its first sweep after the restart, and a resume does not find the gap again.
+  A host that handed a frame or a failure
+  notice on without writing it yet answers `queued`: the frame stays claimed and unrecorded, its
+  cursor before it, until the host records it once written (`recordDelivered`), so a process that
+  ends first shows it after the restart;
+  `recordDeliveredFor` records for the session a frame was delivered in while the host shuts down
+  (through the host's optional `writeSessionID`); `replayLedgerIdentity` names a frame as the
+  ledger does. The transport gains `replay()` (one
+  try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
+  dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
+  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), never a
+  role's or one reaching a private stream subject (`reachesPrivateStreamSubject`, the listener's
+  rule in `packages/envoy/internal/bus/stream.go`: another session's `notifications.agent.<id>`,
+  a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` the session's
+  own included, a `notifications.legion.` controller lane, or a wildcard reaching one such as
+  `notifications.agent.*` or `notifications.>`, which the listener neither stores as an interest
+  nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
+  close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
+  warning (`routeReplayNotice`) (INFRA-439).
+
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
+  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
+  message:
+  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
+  an empty actor list written `nobody recorded` and a null time, version or parent left out.
+  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
+  `Node:` line.
+- `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
+  person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
+  4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
+  names the same line.
+- `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
+  `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
+  optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
+  `Document:`, `Changed in version:` and `Text:`, then, for a pinned reference, `Pinned to version:`,
+  whether the block is unchanged, changed or removed since, and `Text at version N:`, then
+  `Referenced by:` and `Links:`. An unpinned reference to a block the document no longer holds
+  exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
+  `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
+  arguments for its document, and every read's reference row on a document ends
+  `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
+  gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
+  so a pin past 2^53 is never rounded. As the server reads it, a pin past 9223372036854775807 is
+  no reference. `parseDispatchRef` and `dispatchRefFromUrl` read a reference of any length, as the
+  server reads a request's (`text.ParseRef`): the 256-byte block-id and 2048-byte target-id bounds
+  decide only what text the server indexes, so a document of any name is read by its own
+  reference, and a block whose id is past 256 bytes, no graph node, reads as
+  `No block <id> in <document>.`
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying
@@ -149,9 +233,10 @@
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
   code 0.
-- A `dispatch` command that takes `--issue` takes a bare issue key as its `--issue`
-  (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), once and only when `--issue` is
-  not also given. Every other positional value is still refused.
+- A `dispatch` command that takes `--issue` takes a bare issue key as its first argument as its
+  `--issue` (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), only when `--issue` is
+  not also given. A key-shaped word anywhere later (`message --body hi SHA-256`) is refused, as is
+  every other positional value.
 - `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse an ask, comment or message link
   as `--ref`, before any request. They take `--ref` as the issue or document they act on, so such
   a link used to post or read on its owner and drop the item: a comment meant for an ask's thread
@@ -161,6 +246,15 @@
 
 ### Changed
 
+- The notice after a primary spec with no ask block reads: "This spec holds no ask blocks. A person
+  does not watch your chat. They see that you need them only through an open ask or a spec that
+  waits for their approval. If the design needs a person's choice, add an ask block. If it does not,
+  request approval with `dispatch request-approval`." The notice for a typed-block
+  opening stored as text cites the `dispatch-writing-specs` skill, "Questions". A test holds each
+  skill section a notice cites to a heading of that skill.
+- `dispatch read` names each message, comment and ask on an issue's event log by its
+  `dispatch://KEY/message|comment|ask/<id>` reference, after the event type. A message had no other
+  address there, so an agent that read the log could not open or link one.
 - `dispatch whoami` under the shared token says an issue you create without an assignee takes its
   parent's assignee, else the project's default assignee, else nobody, rather than calling it
   unassigned: a project whose default a person set on the Settings page is the create chain's last

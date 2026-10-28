@@ -138,9 +138,10 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount. |
+| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
+| PodDisruptionBudget (only with `appPdbMinAvailable`) | `<hostname>`, over the app's pods (`app=<hostname>`) alone, with `minAvailable` set to `appPdbMinAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain cannot take the app below that many ready pods. |
 
 ### Inputs
 
@@ -172,6 +173,79 @@ auth key left behind, and two listeners sharing one machine id never both bind i
 durable. There is no strategy, surge or front-door-replica input for that reason: the app's safe
 strategy follows from its replica count, and every value but one is wrong for the other two
 workloads.
+
+`appCpu` and `appMemory` size the app Deployment's `envoy-dispatch` container: plain Kubernetes
+quantities (`2`, `1500m`; `8Gi`, `6144Mi`), each rendered as both its request and its limit, 1 CPU
+and `4Gi` by default, so a deployment that sets neither renders the pod it always had. The pod's
+`cloud-sql-proxy` sidecar keeps its own `200m` and `256Mi`, and the front door and the listener
+keep theirs. Autopilot sizes the pod by the two containers' sum, so before it registers a resource
+the component refuses, by name, a value that is not a quantity or is empty, a decimal exponent
+outside `e-9` to `e18` (the range the suffixes `n` to `E` cover; write a suffix instead), and a
+size at which Autopilot would not run the pod as rendered: a pod below `500m` or `512Mi` (the
+floor of a `safe-to-evict: "false"` pod, so `appCpu` at least `300m` and `appMemory` at least
+`256Mi`) or outside 1 to 6.5 GiB of memory per CPU, which Autopilot raises, and a pod above 30 CPU
+or `110Gi` (`appCpu` at most `29800m`, `appMemory` at most `112384Mi`), which Autopilot rejects;
+these are the bounds of Autopilot's default general-purpose compute class
+([Resource requests in Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests)).
+The pod runs at exactly the rendered size only on a cluster that supports Pod bursting; on one
+that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m (the default pod's
+1200m becomes 1250m).
+A change to either replaces the app's pods as any change to its pod template does: recreated at
+one replica, rolled above one.
+
+`pprofPort`, unset by default, turns on `envoy-dispatch`'s Go profiler: the component sets
+`DISPATCH_PPROF_PORT` to it on the `envoy-dispatch` container alone, and Dispatch serves
+`net/http/pprof` on `127.0.0.1` at that port inside the pod. No Service, NetworkPolicy or other
+container changes, so the profiler is reached only through `kubectl port-forward <pod>
+<port>:<port>`, then `go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile`
+(`packages/envoy/cmd/dispatch/README.md`, "Profiling"). Unset, nothing is rendered, so a
+deployment that leaves it unset renders the pod it always had. Before it registers a resource the
+component refuses, by name, a value outside 1-65535 and the two ports the app pod already binds on
+its loopback, `envoy-dispatch`'s `8766` and the `cloud-sql-proxy` sidecar's `5432`. Setting or
+unsetting it replaces the app's pods as any change to its pod template does.
+
+`appPriorityClassName` and `appPdbMinAvailable` protect the app's pods from being displaced; the
+front door and the listener are unchanged by either, and with neither set the component renders
+what it always did.
+
+`appPriorityClassName` is the app pod's `priorityClassName`: the name, a DNS subdomain, of a
+PriorityClass that already exists in the cluster. The component never creates the class, but it
+reads it, and the app Deployment waits on that read: Kubernetes refuses every pod that names a
+class the cluster does not have, and at one replica `Recreate` would already have stopped the old
+pod, so a missing class fails the update, and the preview too once the cluster exists (on a first
+deploy the cluster's provider is unknown at preview, so the read waits for the update), instead of
+leaving Dispatch down. Create the class before, or outside, the program that sets the name. The
+`system-` prefix is refused: Kubernetes reserves it for `system-cluster-critical` and
+`system-node-critical`, which outrank every workload so the cluster's own components are placed
+first. A pod's priority decides which pods the scheduler may preempt to place it, when its class
+allows preemption, and, among pods that alike exceed (or alike stay within) their requests,
+decides which a node under memory or disk pressure evicts first. Like `appCpu`, a change to it
+replaces the app's pods.
+
+`appPdbMinAvailable`, from 1 to `replicas`, registers the PodDisruptionBudget `<hostname>` with
+that `minAvailable`. The `safe-to-evict` annotation above already holds off the autoscaler's
+scale-down and node auto-upgrade for up to seven days; the budget also makes a drain wait, a
+manual upgrade, a node repair or an auto-upgrade past that window among them, and at `replicas`
+it refuses every voluntary eviction. So at one replica with `appPdbMinAvailable` 1, every drain
+of the app's node waits: `kubectl drain` waits with no limit (until its own `--timeout`, if one is
+given), and a GKE upgrade waits up to an hour (below). It keeps Kubernetes' default
+`unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod that is not ready too while
+the budget is not met:
+`envoy-dispatch` reports not ready whenever NATS or Postgres is briefly out of reach (the front
+door's own eviction in the same drain is one way), and evicting it then would turn that into a
+cold restart. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
+up to an hour while it drains a node for an upgrade and then evicts anyway
+([Autopilot cluster upgrades](https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades-autopilot)).
+The budget never slows the app's own rollouts, which Kubernetes does not run through the eviction
+API. Delete every budget made by hand over the app's pods (`kubectl -n <namespace> delete pdb
+<name>`) just before the first update that sets it, one named `<hostname>` included: the
+component's Kubernetes provider does not adopt an object that already exists, so the update fails
+with the budget's `AlreadyExists`, and a hand-made budget under another name would select the
+same pod, which makes the eviction API refuse every eviction of it.
+
+The component refuses, each by name, before it registers a resource, an empty or malformed
+`appPriorityClassName`, one with the `system-` prefix, and an `appPdbMinAvailable` below 1 or
+above `replicas`.
 
 Two optional groups each come as all their inputs or none. Neither takes a secret value: the
 broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
@@ -230,21 +304,55 @@ Setting the App also starts Dispatch's webhook redelivery sweep, which needs the
 bucket the hub's Dispatch user is granted (`DispatchPermissions`): a pod whose NATS user lacks it
 exits at boot. With either group unset, nothing renders and the app's pod template is unchanged.
 
+The Azure embedder's inputs are a third optional group, which takes no secret value either, and
+which reaches the app's `envoy-dispatch` container alone. `azureEmbedEndpoint` turns meaning search
+onto Azure AI Foundry: `DISPATCH_EMBEDDER=azure` and `DISPATCH_AZURE_EMBED_ENDPOINT`, the base URL
+the embeddings route is appended to (`https://<resource>.services.ai.azure.com/models`). It comes
+with `azureEmbedTokensPerMinute` (plain, a positive integer, the deployment's quota, rendered as
+`DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE`), may come with `azureEmbedDeployment`
+(`DISPATCH_AZURE_EMBED_DEPLOYMENT`; unset, Dispatch's default `embed-v-4-0`), and takes exactly one
+credential form. The key form is `azureEmbedKeySecret`, a Secret Manager secret's resource path
+holding the deployment's API key, read at run time as the NATS seed is: through the
+SecretProviderClass `<hostname>-azure-embed-key` and its own CSI volume, mounted read-only at
+`/var/run/secrets/azure-embed`, whose file `key` `DISPATCH_AZURE_EMBED_KEY_FILE` names, under a
+grant of its own (`<hostname>-azure-embed-key-accessor`) the app Deployment waits for. The keyless
+form is `azureTenantId` with `azureClientId`, an Azure managed identity's tenant and client ids,
+rendered as `DISPATCH_AZURE_TENANT_ID` and `DISPATCH_AZURE_CLIENT_ID`: the kubelet projects a
+service-account token for the audience `azureFederationAudience` (plain; unset,
+`api://AzureADTokenExchange`), valid for an hour and rotated before it runs out, into the volume
+`azure-federation` at `/var/run/secrets/azure-federation/token`, which
+`DISPATCH_AZURE_FEDERATED_TOKEN_FILE` names, and Dispatch exchanges it with Microsoft Entra for an
+access token on every renewal. The endpoint, the deployment, the key secret's path and the two ids
+are Pulumi inputs and may be another resource's outputs (an Azure program's, for the endpoint and
+the identity). Every replica gets the same values, which Dispatch requires: one deployment runs
+one embedder configuration, and a model change on Azure takes a new `azureEmbedDeployment`, since
+the vectors' identity names the deployment, not the model (`packages/envoy/cmd/dispatch/README.md`,
+"Search"). Without `azureEmbedEndpoint`, Dispatch embeds on Bedrock as it always did, and nothing of
+this group renders.
+
 Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
 [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
-namespaces, allowed namespaces, missing inputs, and nkey seeds in its own name and in plain inputs
+namespaces, allowed namespaces, an `appCpu` or `appMemory` outside Autopilot's bounds for the app
+pod (above), a `pprofPort` outside 1-65535 or on a port the app pod already binds (above), an
+`appPriorityClassName` that is empty, not a DNS subdomain or a `system-` class, an
+`appPdbMinAvailable` outside 1 to `replicas`, missing inputs, and nkey seeds in its own name and in
+plain inputs
 before it registers a resource; it refuses an
 `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
 input named), an `appId` that is not digits or is 0, an `appPrivateKeySecretName` that is not a DNS
 subdomain, an `appPrivateKeySecretKey` outside `[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is
-not an absolute http(s) URL with no path. Once each Pulumi input resolves, before any child takes
-it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret` and `natsSeedSecret`; a blank or
-whitespace-only `tailnetAuthKey` or `signInClientSecret`, neither of which can work blank (the
-front door cannot join the tailnet, Dispatch refuses a blank sign-in secret at boot) — each a
-refusal naming the input and never echoing it; and a `natsUrl`
+not an absolute http(s) URL with no path; and, of the Azure group, any of its inputs without
+`azureEmbedEndpoint`, an endpoint without `azureEmbedTokensPerMinute` or with one below 1, both
+credential forms or neither, `azureTenantId` or `azureClientId` without the other, and an
+`azureFederationAudience` without them or empty. Once each Pulumi input resolves, before any child
+takes it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`,
+`azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and
+`azureClientId`; a blank or whitespace-only `tailnetAuthKey` or `signInClientSecret`,
+neither of which can work blank (the front door cannot join the tailnet, Dispatch refuses a blank
+sign-in secret at boot) — each a refusal naming the input and never echoing it; and a `natsUrl`
 that holds a seed, is local (the pods reach NATS only through the front door's SOCKS5 proxy), is
 empty, or holds a comma or a control character, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
 creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
@@ -263,12 +371,24 @@ accepts that member before the project's first Workload Identity cluster creates
 unproven (`docs/plans/2026-10-14-dispatch-gcp-plan.md`, the hardening ledger); if it refuses it,
 the first apply stops at the app's readiness wait, and a grant made then lets the next apply
 finish. The component itself grants that
-principal `roles/secretmanager.secretAccessor` only on the NATS seed secret, and the app and the
-listener, which mount the seed, wait for that grant to be written. IAM can take minutes to apply
+principal `roles/secretmanager.secretAccessor` only on the NATS seed secret (and on the Azure key
+secret when `azureEmbedKeySecret` is set), and the app and the listener, which mount the seed,
+wait for that grant to be written, as the app waits for the Azure key's. IAM can take minutes to apply
 a new binding (Google cites typically two, sometimes seven or more), and a pod restarts until it
 can mount. The three Deployments share that one Kubernetes service account, whose Role lets it
 read and update the Tailscale state Secret and create Secrets in its namespace, since Tailscale
 creates its state Secret on first start.
+
+The `serviceAccountIssuer` and `serviceAccountSubject` outputs are the issuer and subject of the
+Dispatch pods' Kubernetes service-account tokens: the cluster's own issuer,
+`https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<cluster name>`,
+and `system:serviceaccount:<namespace>:<hostname>`. The keyless Azure form rests on them: the
+managed identity `azureClientId` names holds a federated identity credential whose issuer is
+`serviceAccountIssuer`, whose subject is `serviceAccountSubject` and whose audience is
+`api://AzureADTokenExchange` (or the `azureFederationAudience` set), which admits these pods'
+projected tokens and no other, and the identity needs a role on the Azure AI Foundry resource that
+lets it call the deployment. The component writes nothing in Azure: the consumer's Azure program
+declares the credential and the role from these two outputs.
 
 ### The pods
 
@@ -287,17 +407,20 @@ keeps it in the Secret `<hostname>-listener`, and gives the same value to `envoy
 sets `dispatchMachineId` to the component's `hostname`. Both Envoy containers mount the NATS seed
 at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state. With
 `agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts its projected
-ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-account-token`.
+ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-account-token`; with
+`azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; and with the keyless
+Azure form, the projected token at `/var/run/secrets/azure-federation/token`.
 
-Dispatch reads every value of the `<hostname>-dispatch` Secret and the NATS seed once, at boot, as
-the listener reads the seed and the listener's bearer, and rotating a secret's value changes only
-the Secret, never the pod template, so no rotation restarts a pod on its own — this holds for every
-secret the component renders, the original four keys as much as the App key and the listener's
-bearer. The projected broker token is the exception: Dispatch reads it on every call, so the
-kubelet's rewrite needs no restart. After rotating one of the others, restart the Deployments that
-read it so their pods boot on the new value:
+Dispatch reads every value of the `<hostname>-dispatch` Secret, the Azure key file and the NATS
+seed once, at boot, as the listener reads the seed and the listener's bearer, and rotating a
+secret's value changes only the Secret, never the pod template, so no rotation restarts a pod on
+its own — this holds for every secret the component renders, the original four keys as much as
+the App key, the Azure key and the listener's bearer. The projected tokens are the exception: the
+kubelet rewrites them in place, and Dispatch reads the broker token on every call and the keyless
+Azure form's token on every exchange with Entra, so neither rewrite needs a restart. After rotating
+one of the others, restart the Deployments that read it so their pods boot on the new value:
 
-- the `<hostname>-dispatch` Secret's keys and the App key: the app alone reads
+- the `<hostname>-dispatch` Secret's keys, the App key and the Azure key: the app alone reads
   them (`kubectl -n <namespace> rollout restart deployment/<hostname>`). `DISPATCH_AGENT_TOKEN`
   is also the `agentToken` output, so a consumer that hands it to its agents passes them the new
   value too;
@@ -387,7 +510,9 @@ resources:
       signInClientSecret: ${signInClientSecret}
       signInDomain: example.com
     options:
-      providers: [${gcp}, ${random}]
+      providers:
+        - ${gcp}
+        - ${random}
 ```
 
 ## host:Listener
@@ -1665,9 +1790,15 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
   the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
   core NATS (any `notifications.` topic the stream does not capture);
-- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
-  `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
-  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
+- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its stored-message get
+  `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, its durable consumer `listener-<m>`'s
+  `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
+  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`. The stored-message get is the
+  read `POST /v1/replay` makes to return the retained notifications a session missed while its
+  NATS subscription was down; it reads one stored message at a time and can create, change or
+  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
+  `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
+  what it missed only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
   stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
@@ -1695,7 +1826,9 @@ host, holds the whole grant above, host sessions included, since sessions run as
 that already reads the host's seed. This repository's listener and a session, connected as one
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
-2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
+2.10 and 2.15.1 servers, the listener's `/v1/replay` read of a send stored while its session had
+no subscription open and the session user's refusal of that JetStream read included; `AGENTS.md`
+in this directory says how.
 
 `HostPermissions` is also the one set under which a listener may set `ENVOY_SUBSCRIBE_ALL_TOPICS=1`
 (`host:Listener`'s and `aws:WebhookListener`'s `subscribeAllTopics`). The listener then holds a

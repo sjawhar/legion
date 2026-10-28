@@ -38,7 +38,9 @@
               "--provider-env-dir",
               "/var/run/legion/providers",
               "--role-references",
-              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}"
+              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}",
+              "--role-namespaces",
+              "/var/run/legion/role-probe"
             ],
             "env": [
               {
@@ -73,6 +75,10 @@
             },
             "volumeMounts": [
               {
+                "mountPath": "/var/run/legion/role-probe",
+                "name": "role-probe"
+              },
+              {
                 "mountPath": "/var/run/legion/providers",
                 "name": "providers",
                 "readOnly": true
@@ -103,6 +109,10 @@
           }
         ],
         "volumes": [
+          {
+            "emptyDir": {},
+            "name": "role-probe"
+          },
           {
             "name": "providers",
             "secret": {

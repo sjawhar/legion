@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
@@ -84,7 +85,7 @@ var commands = map[string]commandEntry{
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
 	"claude-bridge":  {runClaudeBridge, "run Claude Code in Oh My Pi's place under worker-shim, for a role worker_backends puts on claude"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
-	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
+	"launcher":       {runLauncher, "PID 1 of an issue pod's roles container or the controller's pod: starts and stops each role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
@@ -235,8 +236,8 @@ func pluginsSourceWords(source string) string {
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
-// Under kubernetes, when a role requests less cpu or memory than its limit, one plain `resources:`
-// line names those roles and the pods they make Burstable (capabilities.Deployment.BurstableLine);
+// Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
+// `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
 // probe's attempt budget is derived above slow_command_timeout_seconds (daemon.ProbeBudget), one
 // plain line names the derived bound and why; then one names the repository cache every mapped
@@ -308,10 +309,32 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 	log := slog.New(slog.NewJSONHandler(stderr, nil))
 	slog.SetDefault(log)
 
+	// The inherited socket is adopted first, before the configuration's key commands run, so none
+	// of them inherits its descriptor: from here on only the close-on-exec copy serving it is open.
+	inherited, socket, err := adoptListenFD()
+	if err != nil {
+		fmt.Fprintf(stderr, "legion start: %v\n", err)
+		return 1
+	}
+	if inherited != nil {
+		// daemon.Run closes it once it stops serving; this close is for a refusal before then, and
+		// is a harmless second close after.
+		defer inherited.Close()
+	}
 	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
+	}
+	// legion.yaml always resolves both bind and port, and both must name the inherited socket: the
+	// registry entry, the default daemon_url and `legion state --port` all dial them.
+	if inherited != nil {
+		bind := listenfd.Setting{Name: "bind", Value: cfg.Bind, Set: true}
+		port := listenfd.Setting{Name: "port", Value: strconv.Itoa(cfg.Port), Set: true}
+		if err := socket.CheckAgainst(bind, port); err != nil {
+			fmt.Fprintf(stderr, "legion start: %s: %v\n", configPath, err)
+			return 1
+		}
 	}
 	applyLinkedPlugins(&cfg)
 	absoluteConfig, err := filepath.Abs(configPath)
@@ -359,11 +382,42 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log); err != nil {
+	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log, inherited); err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// listenFDVariable names the listening TCP socket `legion start` serves its API on in place of
+// binding legion.yaml's bind and port: a test harness opens it on port 0 and holds it until the
+// daemon serves, so no other program takes the port in between. `legion start --check-config`
+// binds nothing and never reads it.
+const listenFDVariable = "LEGION_LISTEN_FD"
+
+// adoptListenFD is the listener serving the socket LEGION_LISTEN_FD names, with what Inspect found
+// of it, or nil when the variable is unset. Adopt closes the inherited descriptor whether it serves
+// or not; a descriptor Inspect refuses is left as it was, for the refused start's exit to close.
+// The variable is unset once the socket is adopted: its descriptor number no longer names it, and
+// every process the daemon starts, its panes among them, inherits the daemon's environment.
+func adoptListenFD() (net.Listener, listenfd.Socket, error) {
+	value, set := os.LookupEnv(listenFDVariable)
+	if !set {
+		return nil, listenfd.Socket{}, nil
+	}
+	socket, err := listenfd.Inspect(listenFDVariable, value)
+	if err != nil {
+		return nil, listenfd.Socket{}, err
+	}
+	listener, err := listenfd.Adopt(socket)
+	if err != nil {
+		return nil, listenfd.Socket{}, err
+	}
+	if err := os.Unsetenv(listenFDVariable); err != nil {
+		_ = listener.Close()
+		return nil, listenfd.Socket{}, fmt.Errorf("unset %s once its socket is adopted: %w", listenFDVariable, err)
+	}
+	return listener, socket, nil
 }
 
 func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
@@ -460,6 +514,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
+	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
@@ -494,6 +549,44 @@ func blockedSummary(blocked []api.BlockedIssue) string {
 		waits[i] = issue.Issue + " waits on " + strings.Join(issue.BlockedBy, ", ")
 	}
 	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
+}
+
+// awaitingSummary is the one line an operator reads for the roots that gave their admission slot
+// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
+// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
+// a person answered (each at the front of the waiting line for the next free slot), and each by
+// key with what it waits on and whether, when and by what act it was answered.
+func awaitingSummary(issues map[string]api.Issue) string {
+	var keys []string
+	answered := 0
+	for key, issue := range issues {
+		if issue.WaitingOn == nil {
+			continue
+		}
+		keys = append(keys, key)
+		if issue.WaitingOn.AnsweredAt != nil {
+			answered++
+		}
+	}
+	if len(keys) == 0 {
+		return "roots waiting on a person: none"
+	}
+	slices.Sort(keys)
+	waits := make([]string, len(keys))
+	for i, key := range keys {
+		wait := issues[key].WaitingOn
+		on := "ask " + wait.Ask
+		if wait.Kind == "gate" {
+			on = fmt.Sprintf("spec version %d of %s", wait.GateVersion, wait.ArtifactID)
+		}
+		state := "unanswered"
+		if wait.AnsweredAt != nil {
+			state = fmt.Sprintf("answered at %s (%s)", wait.AnsweredAt.UTC().Format(time.RFC3339), wait.AnsweredBy)
+		}
+		waits[i] = key + " waits on " + on + ", " + state
+	}
+	return fmt.Sprintf("roots waiting on a person: %d, %d answered and waiting for a slot — %s",
+		len(keys), answered, strings.Join(waits, "; "))
 }
 
 // pendingSummary is the one line an operator reads for the Dispatch status writes the daemon has

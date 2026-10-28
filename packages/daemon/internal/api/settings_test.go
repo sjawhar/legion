@@ -86,8 +86,13 @@ var settingsEmitted = map[string]string{
 	"Config.ControllerLaunch":                        "controller",
 	"Config.Capabilities":                            "capabilities",
 	"Config.WorkerBackends":                          "worker_backends",
+	"Config.RoleConfigFiles":                         "role_config_files",
 	"Runtime.Name":                                   "runtime.name",
 	"Runtime.Kubernetes":                             "runtime.kubernetes",
+	"Runtime.Tmux":                                   "runtime.tmux",
+	"Tmux.PaneEnv":                                   "runtime.tmux.pane_env (the variable names alone)",
+	"Tmux.PiConfigFiles":                             "runtime.tmux.pi_config_files",
+	"Tmux.TakeOver":                                  "runtime.tmux.take_over",
 	"Kubernetes.Namespace":                           "runtime.kubernetes.namespace",
 	"Kubernetes.Image":                               "runtime.kubernetes.image",
 	"Kubernetes.StorageClass":                        "runtime.kubernetes.storage_class",
@@ -110,12 +115,14 @@ var settingsEmitted = map[string]string{
 	"Toleration.Operator":                            "runtime.kubernetes.scheduling.tolerations[].operator",
 	"Toleration.Value":                               "runtime.kubernetes.scheduling.tolerations[].value",
 	"Toleration.Effect":                              "runtime.kubernetes.scheduling.tolerations[].effect",
-	"RoleResources.CPU":                              "runtime.kubernetes.resources.<role>.cpu",
-	"RoleResources.CPURequest":                       "runtime.kubernetes.resources.<role>.cpu_request",
-	"RoleResources.Memory":                           "runtime.kubernetes.resources.<role>.memory",
-	"RoleResources.MemoryRequest":                    "runtime.kubernetes.resources.<role>.memory_request",
-	"RoleResources.EphemeralStorage":                 "runtime.kubernetes.resources.<role>.ephemeral_storage",
-	"RoleResources.EphemeralStorageRequest":          "runtime.kubernetes.resources.<role>.ephemeral_storage_request",
+	"PodResources.Issue":                             "runtime.kubernetes.resources.issue",
+	"PodResources.Controller":                        "runtime.kubernetes.resources.controller",
+	"Reservation.CPU":                                "runtime.kubernetes.resources.<pod>.cpu",
+	"Reservation.CPURequest":                         "runtime.kubernetes.resources.<pod>.cpu_request",
+	"Reservation.Memory":                             "runtime.kubernetes.resources.<pod>.memory",
+	"Reservation.MemoryRequest":                      "runtime.kubernetes.resources.<pod>.memory_request",
+	"Reservation.EphemeralStorage":                   "runtime.kubernetes.resources.<pod>.ephemeral_storage",
+	"Reservation.EphemeralStorageRequest":            "runtime.kubernetes.resources.<pod>.ephemeral_storage_request",
 	"AgentSecretsConfig.URL":                         "runtime.kubernetes.agent_secrets.url",
 	"AgentSecretsConfig.Audience":                    "runtime.kubernetes.agent_secrets.audience",
 	"AgentSecretsConfig.TokenExpirySeconds":          "runtime.kubernetes.agent_secrets.token_expiry_seconds",
@@ -148,6 +155,7 @@ var settingsExcluded = map[string]string{
 	"GitHubApp.PrivateKeyCommand":   "the source of a credential",
 	"GitHubApp.PrivateKeySecret":    "the source of a credential",
 	"ProviderKey.Secret":            "the source of a credential: a secretsd key or a providers Secret key",
+	"ProviderKey.File":              "the path of a file holding a credential",
 	"Config.OperatorTokenFile":      "the path of a file holding a credential",
 	"Config.EnvoyTokenFile":         "the path of a file holding a credential",
 	"Config.NatsNkeySeedFile":       "the path of a file holding a credential",
@@ -198,6 +206,26 @@ func TestSettingsOfClassifiesEveryConfigField(t *testing.T) {
 	}
 }
 
+// The tmux block shows the runtime whose claims the daemon takes over, and leaves the key out when
+// the file names none.
+func TestTheTmuxSettingsShowTheTakeOver(t *testing.T) {
+	for _, tc := range []struct {
+		block *config.Tmux
+		want  string
+	}{
+		{&config.Tmux{TakeOver: config.TakeOverKubernetes}, `{"pane_env":[],"pi_config_files":[],"take_over":"kubernetes"}`},
+		{&config.Tmux{}, `{"pane_env":[],"pi_config_files":[]}`},
+	} {
+		encoded, err := json.Marshal(tmuxSettingsOf(tc.block))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != tc.want {
+			t.Errorf("tmuxSettingsOf(%+v) = %s, want %s", tc.block, encoded, tc.want)
+		}
+	}
+}
+
 // settingsFixturePlanted is every value of settingsFixtureFile that is a credential, the source of
 // one, the path of a file holding one, the userinfo of an address, or an operator pod piece: each
 // is in the file (so the list cannot go stale) and none is in the settings' bytes.
@@ -241,7 +269,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
 		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours", "review_round_cap",
-		"max_fix_attempts", "controller", "capabilities", "worker_backends",
+		"max_fix_attempts", "controller", "capabilities", "worker_backends", "role_config_files",
 	}
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
@@ -316,12 +344,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if settings.LingerHours != 1.5 || settings.WorkerStopTimeoutSeconds != 30 || settings.Controller != config.ControllerLaunchDaemon {
 		t.Errorf("linger_hours %v, worker_stop_timeout_seconds %d, controller %q; want 1.5, 30, daemon", settings.LingerHours, settings.WorkerStopTimeoutSeconds, settings.Controller)
 	}
-	controller := settings.Runtime.Kubernetes.Resources["controller"]
+	controller := settings.Runtime.Kubernetes.Resources.Controller
 	if controller.CPU != "2" || controller.CPURequest != "1" || controller.MemoryRequest != "4Gi" || controller.EphemeralStorage != "10Gi" {
 		t.Errorf("resources.controller = %+v, want the file's cpu, cpu_request and memory_request with the default ephemeral storage", controller)
 	}
-	if len(settings.Runtime.Kubernetes.Resources) != 7 {
-		t.Errorf("resources names %d roles, want the six workflow roles and the controller", len(settings.Runtime.Kubernetes.Resources))
+	if issue := settings.Runtime.Kubernetes.Resources.Issue; issue != (ReservationSettings{CPU: "4", CPURequest: "4", Memory: "24Gi", MemoryRequest: "24Gi", EphemeralStorage: "80Gi", EphemeralStorageRequest: "6Gi"}) {
+		t.Errorf("resources.issue = %+v, want the file's cpu and memory, each requested in full, with the default disk bound", issue)
 	}
 	if want := []string{"C0123ABCD", "C0123ABCE"}; !slices.Equal(settings.Projects["LEGION"].SlackChannels, want) {
 		t.Errorf("projects.LEGION.slack_channels = %q, want %q", settings.Projects["LEGION"].SlackChannels, want)

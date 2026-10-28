@@ -995,11 +995,25 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-// lastBytes reads r to its end, keeping only the last keep bytes (one buffer of 2×keep, compacted
-// in place), and answers that tail: with a leading … line (everything up to and including the
-// first \n dropped, so what remains starts on its own line) when anything of r was cut, unchanged
-// when r was keep bytes or shorter.
+// lastBytes reads r to its end, keeping only the last keep bytes (tailBytes), and answers that
+// tail: with a leading … line (everything up to and including the first \n dropped, so what
+// remains starts on its own line) when anything of r was cut, unchanged when r was keep bytes or
+// shorter.
 func lastBytes(r io.Reader, keep int) (string, error) {
+	buf, dropped, err := tailBytes(r, keep)
+	if err != nil || !dropped {
+		return string(buf), err
+	}
+	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+		buf = buf[i+1:]
+	}
+	return "…\n" + string(buf), nil
+}
+
+// tailBytes reads r to its end and answers its last keep bytes, and whether it dropped any before
+// them. It holds one buffer of 2×keep, compacted in place, and one read chunk of keep, whatever
+// r's length: no read grows the buffer, since at most keep bytes are added to at most keep kept.
+func tailBytes(r io.Reader, keep int) ([]byte, bool, error) {
 	buf := make([]byte, 0, 2*keep)
 	chunk := make([]byte, keep)
 	dropped := false
@@ -1011,19 +1025,12 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 			buf = append(buf[:0], buf[len(buf)-keep:]...)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
+			return buf, dropped, nil
 		}
 		if err != nil {
-			return "", err
+			return nil, false, err
 		}
 	}
-	if !dropped {
-		return string(buf), nil
-	}
-	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-		buf = buf[i+1:]
-	}
-	return "…\n" + string(buf), nil
 }
 
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
@@ -1042,10 +1049,12 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
 // roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
 // into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
-// twice. It must carry the capabilities mark too
-// (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
-// checked no capability, and a current one that found a capability missing exits 1 before the OK
-// line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the
+// twice. It must carry the capabilities mark too, at bootprobe.CapabilitiesAll
+// (bootprobe.Capabilities): a CLI that predates the capability check prints none, having checked
+// no capability, and a current one that found a capability missing exits 1 before the OK line, so
+// the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild; a line that left
+// the browser row unchecked (bootprobe.CapabilitiesBrowserSkipped, `probe-image --skip-browser`,
+// which this probe's command never passes) is refused naming that mark. When the
 // daemon has a pane NATS nkey seed (Options.NATSUser),
 // the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
 // refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
@@ -1073,6 +1082,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
 				name, ended, flag[1], logTail)
 		}
+		if role, why, ok := bootprobe.RoleOverlaysRefused(logTail); ok {
+			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s refused role %s's Oh My Pi overlays: %s; the probe pod mounts runtime.kubernetes.pod's volumes as every pod does, so the %s's Oh My Pi would not start: add the file to the ConfigMap its mount serves, or correct role_config_files.%s — log tail: %s",
+				name, role, why, role, role, logTail)}
+		}
 		if refused := r.unreadableShares(name, pod); refused != nil {
 			return *refused
 		}
@@ -1099,8 +1112,13 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
 			name, logTail)
 	}
-	if !bootprobe.CapabilitiesChecked(logTail) {
+	switch mark := bootprobe.Capabilities(logTail); mark {
+	case bootprobe.CapabilitiesAll:
+	case "":
 		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail)
+	default:
+		return imageRefusal(digest, "pod %s Succeeded without checking the whole capability list (its OK line's capabilities mark: %s, where the daemon's probe requires %s) — log tail: %s",
+			name, mark, bootprobe.CapabilitiesAll, logTail)
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {
@@ -1177,12 +1195,19 @@ type probeSpec struct {
 // Secret's keys exported as the worker's shim exports them (--provider-env-dir) when its pod mounts
 // that Secret (mountsProviders), each providers secret's `<NAME>_FILE` pointing at its file there
 // as a worker's does (so neither exports it), and resolving the daemon's own role prompts'
-// references (--role-references), which ProbeImage requires. Its command and env are escaped
-// against the kubelet's expansion as every worker container's are (kubeletLiteral). It carries
-// Karpenter's `do-not-disrupt` alone, not the Cluster Autoscaler's `safe-to-evict` (podTemplate
-// sets both): GKE Autopilot places a pod carrying that one on a node of its own whenever possible,
-// so each boot's probe would ask for a node, and a probe minutes long and already retried on
-// failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day eviction window.
+// references (--role-references), which ProbeImage requires, and, first, running one role
+// generation's namespaces as an issue pod's launcher runs every role (--role-namespaces), over a
+// disk emptyDir of its own at RoleProbeDir, as an issue pod's role homes volume is, so a runtime
+// that refuses a role's namespaces fails the probe rather than every role's start. Its command and
+// env are escaped against the kubelet's expansion as every worker container's are
+// (kubeletLiteral). It carries Karpenter's `do-not-disrupt` alone, not the Cluster Autoscaler's
+// `safe-to-evict` (podTemplate sets both): GKE Autopilot places a pod carrying that one on a node
+// of its own whenever possible, so each boot's probe would ask for a node, and a probe minutes long
+// and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day
+// eviction window.
+// For each role role_config_files names (Options.RoleConfigFiles), in the workflow's order, it
+// passes that role's overlays (--role-config-files), which the probe reads as that role's Oh My Pi
+// will: none are passed for a deployment that names none.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -1196,13 +1221,22 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if r.mountsProviders() {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
-	command = append(command, "--role-references", p.RoleReferences.Encode())
+	command = append(command, "--role-references", p.RoleReferences.Encode(), "--role-namespaces", RoleProbeDir)
+	// Each role that names overlays of its own is read as it will start: the probe pod mounts the
+	// operator's volumes as every pod does, so a file a role's PI_CONFIG_FILES names and the mounts
+	// lack refuses the boot here, naming the role and the file, rather than that role's Oh My Pi at
+	// its first launch.
+	for _, role := range roleConfigRoles {
+		if files := r.roleConfigFiles[role]; len(files) > 0 {
+			command = append(command, bootprobe.RoleConfigFilesFlag, bootprobe.RoleConfigFilesValue(string(role), files))
+		}
+	}
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
 		Env:             slices.Concat(r.operatorEnv(), r.providersPointers(), r.sessionDSNPointer()),
-		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
+		VolumeMounts:    slices.Concat([]corev1.VolumeMount{{Name: roleProbeVolume, MountPath: RoleProbeDir}}, providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),
 	}
@@ -1229,7 +1263,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 					NodeSelector:      r.nodeSelector(),
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
-					Volumes:           slices.Concat(providers, r.pod.Volumes),
+					Volumes:           slices.Concat([]corev1.Volume{{Name: roleProbeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}, providers, r.pod.Volumes),
 					Containers:        []corev1.Container{container},
 				},
 			},

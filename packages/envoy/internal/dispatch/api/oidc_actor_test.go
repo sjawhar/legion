@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"net/http"
@@ -9,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -215,8 +215,8 @@ func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 	claims["iss"] = chosen
 
 	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	logs := &storetest.LockedLog{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil,

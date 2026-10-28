@@ -109,12 +109,12 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 // what every agent of the issue can write. Then it removes the git locks an interrupted git or jj
 // left and provisions from the feed, an issue with no branch at defaultBranch. It makes no other
 // directory: the disk is the pod's own and starts empty, and the workspace this provisions is the
-// only thing on it a role container reads. No lock guards the clone: it is the issue's own, on the
-// pod's own disk, and no other pod mounts it. For the same reason, and because no role container
-// of the pod has started, no process holds a git lock on the disk while this runs, so every one
-// there is stale and would fail each later write of what it locks (LEGION-731) — the kubelet
-// restarts a failed init container on the same pod, and so on the same disk, so a first attempt
-// killed mid-fetch leaves exactly those locks for the retry to clear.
+// only thing on it a role reads. No lock guards the clone: it is the issue's own, on the pod's own
+// disk, and no other pod mounts it. For the same reason, and because the pod's launcher container
+// has not started, no process holds a git lock on the disk while this runs, so every one there is
+// stale and would fail each later write of what it locks (LEGION-731) — the kubelet restarts a
+// failed init container on the same pod, and so on the same disk, so a first attempt killed
+// mid-fetch leaves exactly those locks for the retry to clear.
 func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // logTailLines is how much of a failed container's log a Gone quotes (runtime-kubernetes.ts:678-689).
@@ -190,25 +192,30 @@ func displaced(v view, loc runtime.Locator, obs observation) bool {
 }
 
 // verdict is the observation mapping for one recorded role process, from the stores' view of its
-// Sandbox and pod. Pod loss applies to every role in the issue, but a live pod is judged through
-// the recorded role container: Ready changes during a neighbour's container restart and is never a
-// whole-pod death verdict.
+// Sandbox and pod. The process's role is its claim's (loc.Claim.Role, which Validate holds); its
+// container is its pod's one container, `roles` in an issue pod, whose launcher runs every role of
+// the issue, and `controller` in the controller's. Pod loss applies to every role in the pod, and so
+// does the one container's end: a launcher that exits takes every role's process with it. A live
+// pod is judged through that role's own launcher state: Ready changes during the container's
+// restart and is never a whole-pod death verdict, and a role's own process ending is that role's
+// alone.
 //
 // A live pod that holds, for the recorded role, something fixed for its life that a pod created now
-// is not handed (movedInPod: the stream its launcher dials, or the secrets broker's enrollment the
-// role's next generation runs against) is StaleAddress, before its launcher's state is read: a
-// launcher on a stale stream never reaches this daemon, so its state would only ever read
-// disconnected, and a pod lacking the enrollment cannot run the role's next generation at all. Every
-// role of such a pod reads so, so each is relaunched uncharged and they move into one new pod
-// together, rather than the first relaunch for some other reason replacing the pod under the rest.
-// A role running its recorded generation whose Sandbox records it was started with other addresses
-// than a generation started now is handed (movedEnvironment) is StaleAddress too. Either names each
-// moved address, never its credentials.
+// is not handed (movedInPod: the layout before one container, the stream its launcher dials, or the
+// secrets broker's enrollment the role's next generation runs against) is StaleAddress, before its
+// launcher's state is read: a launcher on a stale stream never reaches this daemon, so its state
+// would only ever read disconnected, and a pod lacking the enrollment cannot run the role's next
+// generation at all. Every role of such a pod reads so, so each is relaunched uncharged and they
+// move into one new pod together, rather than the first relaunch for some other reason replacing
+// the pod under the rest. A role running its recorded generation whose Sandbox records it was
+// started with other addresses than a generation started now is handed (movedEnvironment) is
+// StaleAddress too. Either names each moved address, never its credentials.
 func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) observation {
 	observe := func(kind runtime.ObservationKind, format string, args ...any) observation {
 		return observation{Observation: runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}}
 	}
-	name := loc.Sandbox.Name
+	name, container := loc.Sandbox.Name, loc.Sandbox.Container
+	role, _ := loc.Claim.Role()
 	switch {
 	case v.sandbox == nil:
 		return observe(runtime.Gone, "sandbox %s/%s is absent", r.namespace, name)
@@ -220,7 +227,7 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 	pod := v.pod
 	initName, initExit := failedInit(pod)
 	if terminal(pod) || initExit != nil {
-		ended := observe(runtime.Gone, "%s", r.ended(ctx, v, loc.Sandbox.Container, initName, initExit))
+		ended := observe(runtime.Gone, "%s", r.ended(ctx, v, container, role, initName, initExit))
 		ended.initFailed = initExit != nil && pod.DeletionTimestamp == nil
 		return ended
 	}
@@ -244,52 +251,79 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 	default:
 		return observe(runtime.Uncertain, "pod %s (uid %s) phase %s", name, pod.UID, pod.Status.Phase)
 	}
-	if moved := r.movedInPod(pod, claim.Role(loc.Sandbox.Container)); len(moved) > 0 {
+	if moved := r.movedInPod(pod, role); len(moved) > 0 {
 		return observe(runtime.StaleAddress, "pod %s (uid %s) holds addresses a pod launched now is not handed: %s", name, pod.UID, describeMoved(moved))
 	}
 	if pod.Status.Phase != corev1.PodRunning {
 		return observe(runtime.Alive, "pod %s (uid %s) %s", name, pod.UID, phaseOf(pod))
 	}
-	status := containerStatus(pod, loc.Sandbox.Container)
+	status := containerStatus(pod, container)
 	if status == nil {
-		return observe(runtime.Uncertain, "pod %s (uid %s) Running has no status for role container %s", name, pod.UID, loc.Sandbox.Container)
+		return observe(runtime.Uncertain, "pod %s (uid %s) Running has no status for container %s", name, pod.UID, container)
 	}
-	// A connected launcher running the recorded generation is the role container's current
-	// instance. The pod status can still show the previous instance terminated for a moment after
-	// Kubernetes restarts the container.
+	// A connected launcher running the recorded generation is the role's current process. The pod
+	// status can still show the container's previous instance terminated for a moment after
+	// Kubernetes restarts it.
 	state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
 	if connected && state.Child != nil && state.Child.Generation == loc.Sandbox.Generation {
-		moved, err := r.movedEnvironment(v.sandbox, claim.Role(loc.Sandbox.Container), loc.Sandbox.Generation)
+		moved, err := r.movedEnvironment(v.sandbox, role, loc.Sandbox.Generation)
 		if err != nil {
-			return observe(runtime.StaleAddress, "pod %s (uid %s) role container %s runs generation %d, whose addresses cannot be compared: %v",
-				name, pod.UID, loc.Sandbox.Container, state.Child.Generation, err)
+			return observe(runtime.StaleAddress, "pod %s (uid %s) role %s runs generation %d, whose addresses cannot be compared: %v",
+				name, pod.UID, role, state.Child.Generation, err)
 		}
 		if len(moved) > 0 {
-			return observe(runtime.StaleAddress, "pod %s (uid %s) role container %s runs generation %d, started with addresses a generation started now is not handed: %s",
-				name, pod.UID, loc.Sandbox.Container, state.Child.Generation, describeMoved(moved))
+			return observe(runtime.StaleAddress, "pod %s (uid %s) role %s runs generation %d, started with addresses a generation started now is not handed: %s",
+				name, pod.UID, role, state.Child.Generation, describeMoved(moved))
 		}
-		return observe(runtime.Alive, "pod %s (uid %s) role container %s runs generation %d", name, pod.UID, loc.Sandbox.Container, state.Child.Generation)
+		return observe(runtime.Alive, "pod %s (uid %s) role %s runs generation %d", name, pod.UID, role, state.Child.Generation)
 	}
 	if ended := status.State.Terminated; ended != nil {
-		return observe(runtime.Gone, "pod %s (uid %s) role container %s terminated (%s, exit code %d); last lines:\n%s",
-			name, pod.UID, loc.Sandbox.Container, ended.Reason, ended.ExitCode, r.logTail(ctx, name, loc.Sandbox.Container))
+		return observe(runtime.Gone, "pod %s (uid %s) container %s terminated (%s, exit code %d); last lines of %s:\n%s",
+			name, pod.UID, container, ended.Reason, ended.ExitCode, role, r.roleLog(ctx, name, container, role))
 	}
 	if !connected {
-		return observe(runtime.Uncertain, "pod %s (uid %s) role launcher %s is disconnected", name, pod.UID, loc.Sandbox.Container)
+		return observe(runtime.Uncertain, "pod %s (uid %s) role %s's launcher is disconnected%s", name, pod.UID, role, containerRestarts(status))
 	}
 	switch {
 	case state.Child != nil:
-		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role container %s runs generation %d, not the recorded %d",
-			name, pod.UID, loc.Sandbox.Container, state.Child.Generation, loc.Sandbox.Generation)
+		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role %s runs generation %d, not the recorded %d",
+			name, pod.UID, role, state.Child.Generation, loc.Sandbox.Generation)
+	case state.LastExit != nil && state.LastExit.Generation == loc.Sandbox.Generation && state.LastExit.Code == shimwire.LauncherExitSetupFailed:
+		return observe(runtime.Gone, "pod %s (uid %s) role %s reports generation %d failed setting up its namespaces before its shim started; last lines of %s:\n%s",
+			name, pod.UID, role, state.LastExit.Generation, role, r.roleLog(ctx, name, container, role))
 	case state.LastExit != nil && state.LastExit.Generation == loc.Sandbox.Generation:
-		return observe(runtime.Gone, "pod %s (uid %s) role container %s reports generation %d exited (code %d, signal %s)",
-			name, pod.UID, loc.Sandbox.Container, state.LastExit.Generation, state.LastExit.Code, state.LastExit.Signal)
+		return observe(runtime.Gone, "pod %s (uid %s) role %s reports generation %d exited (code %d, signal %s)",
+			name, pod.UID, role, state.LastExit.Generation, state.LastExit.Code, state.LastExit.Signal)
 	case state.LastExit != nil:
-		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role container %s last exited generation %d, not the recorded %d",
-			name, pod.UID, loc.Sandbox.Container, state.LastExit.Generation, loc.Sandbox.Generation)
+		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role %s last exited generation %d, not the recorded %d",
+			name, pod.UID, role, state.LastExit.Generation, loc.Sandbox.Generation)
 	default:
-		return observe(runtime.Gone, "pod %s (uid %s) role launcher %s reports no child", name, pod.UID, loc.Sandbox.Container)
+		return observe(runtime.Gone, "pod %s (uid %s) role %s's launcher reports no child", name, pod.UID, role)
 	}
+}
+
+// containerRestarts is what the kubelet says of the pod's one container while no launcher of it
+// is connected: the reason it waits, and, once it has ended at least once, its restart count and
+// how its last instance ended. That container runs every role's launcher, so a container that
+// crash-loops reads as every role's launcher disconnected, and this is the why each of them
+// carries. It is "" for a container that is running and never ended.
+func containerRestarts(status *corev1.ContainerStatus) string {
+	var detail strings.Builder
+	if waiting := status.State.Waiting; waiting != nil {
+		fmt.Fprintf(&detail, "; container %s waiting (%s", status.Name, waiting.Reason)
+		if waiting.Message != "" {
+			fmt.Fprintf(&detail, ": %s", waiting.Message)
+		}
+		detail.WriteString(")")
+	}
+	if last := status.LastTerminationState.Terminated; last != nil {
+		fmt.Fprintf(&detail, "; container %s restarted %d times, its last instance terminated (%s, exit code %d", status.Name, status.RestartCount, last.Reason, last.ExitCode)
+		if !last.FinishedAt.IsZero() {
+			fmt.Fprintf(&detail, " at %s", last.FinishedAt.UTC().Format(time.RFC3339))
+		}
+		detail.WriteString(")")
+	}
+	return detail.String()
 }
 
 // podAbsent describes the Sandbox mode, its current Suspended condition, and any same-named
@@ -309,32 +343,42 @@ func podAbsent(v view) string {
 }
 
 // ended is the terminal pod verdict. A failed init container applies to every role; otherwise the
-// locator's role container is the process that ended.
-func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName string, initExit *corev1.ContainerStateTerminated) string {
+// pod's one container, container, is what ended, and with it every role it ran. The quote is the
+// init container's log, or role's own lines of the container's (roleLog). A pod of the layout
+// before one container (movedLayout) that ended before this daemon replaced it has no `roles`
+// container: role's own container there is what ended, and its log is role's alone.
+func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) string {
 	pod := v.pod
-	kind, container, state := "role", roleContainer, initExit
+	kind, state := "container", initExit
 	if initExit != nil {
-		kind, container = "init", initName
+		kind, container = "init container", initName
+	} else if _, earlier := movedLayout(pod); earlier {
+		container = string(role)
 	}
 	if state == nil {
-		if status := containerStatus(pod, roleContainer); status != nil {
+		if status := containerStatus(pod, container); status != nil {
 			state = status.State.Terminated
 		}
 	}
 	var detail strings.Builder
+
 	fmt.Fprintf(&detail, "pod %s (uid %s) %s", pod.Name, pod.UID, pod.Status.Phase)
 	if state != nil {
-		fmt.Fprintf(&detail, ": %s container %s terminated (%s, exit code %d)", kind, container, state.Reason, state.ExitCode)
+		fmt.Fprintf(&detail, ": %s %s terminated (%s, exit code %d)", kind, container, state.Reason, state.ExitCode)
 	} else if pod.Status.Reason != "" {
 		fmt.Fprintf(&detail, ": %s: %s", pod.Status.Reason, pod.Status.Message)
 	}
 	if finished := v.sandbox.condition(conditionFinished); finished != nil {
 		fmt.Fprintf(&detail, "; sandbox Finished=%s %s", finished.Status, finished.Reason)
 	}
-	if kind == "init" && container == fetchContainer {
-		detail.WriteString(r.fetchCacheState(pod))
+	if initExit != nil {
+		if container == fetchContainer {
+			detail.WriteString(r.fetchCacheState(pod))
+		}
+		fmt.Fprintf(&detail, "; last lines of %s:\n%s", container, r.logTail(ctx, pod.Name, container))
+	} else {
+		fmt.Fprintf(&detail, "; last lines of %s:\n%s", role, r.roleLog(ctx, pod.Name, container, role))
 	}
-	fmt.Fprintf(&detail, "; last lines of %s:\n%s", container, r.logTail(ctx, pod.Name, container))
 	return detail.String()
 }
 
@@ -409,21 +453,184 @@ func initContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 }
 
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never
-// changes its verdict, so the read is bounded whole (call).
+// changes its verdict, so the read is bounded whole (call), in time and in bytes off the API
+// (readLog).
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
+	text, _, _, bounded, err := r.readLog(ctx, pod, container, logTailLines, logTailBytes, logTailReadBytes)
+	if err != nil {
+		return fmt.Sprintf("(the log could not be read: %v)", err)
+	}
+	if bounded {
+		text += "\n" + logBoundNote(logTailReadBytes)
+	}
+	return text
+}
+
+// sharedLogLines and sharedLogBytes bound how much of an issue pod's one container's log roleLog
+// reads to find one role's last lines among every role's, and sharedLogReadBytes how much of the
+// stream that read takes off the API. logTailBytes and logTailReadBytes are the same pair for one
+// container's own tail. A line is bounded at 64 KiB where the launcher writes it
+// (launcher.maxLogLine) and nowhere else, so 2000 lines are up to 128 MiB on the wire, read once
+// per role of a terminal pod: the read bound holds that to sharedLogReadBytes, enough for 2000
+// lines of 4 KiB, past what any quote keeps. A read the bound cut is read again for fewer lines
+// (readLog); one cut even so keeps the oldest of its tail, since a stream is read from its start,
+// so the quote says so (logBoundNote) rather than passing off older lines as the container's last.
+const (
+	sharedLogLines     = 2000
+	sharedLogBytes     = 1 << 20
+	sharedLogReadBytes = 8 << 20
+	logTailBytes       = 64 << 10
+	logTailReadBytes   = 1 << 20
+)
+
+// logBoundNote says a quote is short of the container's newest lines because the read stopped at
+// its byte bound.
+func logBoundNote(read int) string {
+	return fmt.Sprintf("(the log was read to its %d-byte bound: these are not the container's newest lines)", read)
+}
+
+// containerLinesHeader introduces, in a role's quote of an issue pod's one container, the lines
+// no role wrote (containerLines).
+const containerLinesHeader = "the container's own last lines, no role's:"
+
+// roleLog is role's last lines of container's log, quoted when that container has ended or role's
+// generation failed setting up its namespaces (shimwire.LauncherExitSetupFailed). The
+// controller's container runs its role alone, so its log is the role's whole. An issue pod's one
+// container interleaves every role's lines, each prefixed `<role>: ` by the launcher, so its quote
+// is role's own (roleLines), never a sibling's: a sibling's agent may have written anything there.
+// The container's own lines follow it (containerLines): what the launcher, PID 1, wrote itself
+// rather than for a role, such as a panic, is why every role of the container ended.
+//
+// The first line of the read is attributed to no one when the line bound alone cut it: the
+// kubelet's tail counts a long line's partial runtime entries as lines of their own, so a read can
+// start inside a role's line, at a fragment that role's agent chose, which could read as another
+// role's line or the launcher's. Dropping it costs the read's oldest line. A read the byte bound cut
+// already starts after a newline the log holds (readLog), on a whole line, so nothing more is
+// dropped from it.
+func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim.Role) string {
+	if container != runtime.IssuePodContainer {
+		return r.logTail(ctx, pod, container)
+	}
+	text, tail, whole, bounded, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes, sharedLogReadBytes)
+	if err != nil {
+		return fmt.Sprintf("(the log could not be read: %v)", err)
+	}
+	if !whole {
+		_, text, _ = strings.Cut(text, "\n")
+	}
+	quote := roleLines(text, role, logTailLines)
+	if quote == "" {
+		quote = fmt.Sprintf("(none of the container's last %d lines is %s's)", tail, role)
+	}
+	if own := containerLines(text, logTailLines); own != "" {
+		quote += "\n" + containerLinesHeader + "\n" + own
+	}
+	if bounded {
+		quote += "\n" + logBoundNote(sharedLogReadBytes)
+	}
+	return quote
+}
+
+// readLog is container's last lines of log, at most limit bytes of them, read under one bound
+// (call) and at most read bytes off the API, as probeLog reads the probe pod's log through an
+// io.LimitReader. TailLines bounds the read to lines, and the stream is read through tailBytes,
+// which holds only its newest limit bytes, so a log's size never decides how much the daemon
+// holds, and a quote never ends before the lines nearest the container's end. The read bound is
+// what a log's size cannot make the daemon pull: a line is bounded only where the launcher writes
+// it (64 KiB), so lines alone leave the stream in the hundreds of megabytes. A read the bound cut
+// ends before the container's newest lines, since a stream is read from its start, so readLog
+// reads once more, asking for half the whole lines the cut read held: the newest lines are then
+// what it reads, unless they are longer still, when that read is cut too and bounded says so, for
+// the caller to say so in its quote. A second read that fails (its stream refused, or the shared
+// bound expiring) gives back the first read, still bounded, rather than losing what it held. tail
+// is the TailLines of the read text came from. When the byte bound dropped older bytes, the read
+// starts from the first whole line it kept, and whole says so: the text then starts just after a
+// newline of the log. Otherwise it starts where the kubelet's line count did, which may be inside
+// a line.
+func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, tail int64, whole, bounded bool, err error) {
 	reading, cancel := call(ctx)
 	defer cancel()
-	lines := int64(logTailLines)
-	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
+	text, whole, seen, bounded, err := r.readLogOnce(reading, pod, container, lines, limit, read)
+	if err != nil || !bounded {
+		return text, lines, whole, bounded, err
+	}
+	fewer := max(1, seen/2)
+	if fewer >= lines {
+		return text, lines, whole, bounded, nil
+	}
+	again, againWhole, _, againBounded, err := r.readLogOnce(reading, pod, container, fewer, limit, read)
 	if err != nil {
-		return fmt.Sprintf("(the log could not be read: %v)", err)
+		return text, lines, whole, bounded, nil
+	}
+	return again, fewer, againWhole, againBounded, nil
+}
+
+// readLogOnce is one read of readLog's: the text, whether it starts on a whole line, how many
+// newlines the read took off the API, and whether it stopped at read bytes.
+func (r *Runtime) readLogOnce(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, whole bool, seen int64, bounded bool, err error) {
+	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(ctx)
+	if err != nil {
+		return "", false, 0, false, err
 	}
 	defer stream.Close()
-	text, err := io.ReadAll(io.LimitReader(stream, 64<<10))
+	counted := &logByteCounter{r: io.LimitReader(stream, int64(read)+1)}
+	kept, cut, err := tailBytes(counted, limit)
 	if err != nil {
-		return fmt.Sprintf("(the log could not be read: %v)", err)
+		return "", false, 0, false, err
 	}
-	return strings.TrimRight(string(text), "\n")
+	if cut {
+		if newline := bytes.IndexByte(kept, '\n'); newline >= 0 {
+			kept, whole = kept[newline+1:], true
+		}
+	}
+	return strings.TrimRight(string(kept), "\n"), whole, counted.newlines, counted.n > int64(read), nil
+}
+
+// logByteCounter counts the bytes and newlines read through it, so a read that stopped at an
+// io.LimitReader's bound is told from one that reached the stream's end, and how many lines it got.
+type logByteCounter struct {
+	r        io.Reader
+	n        int64
+	newlines int64
+}
+
+func (c *logByteCounter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	c.newlines += int64(bytes.Count(p[:n], []byte{'\n'}))
+	return n, err
+}
+
+// roleLines is role's last n lines of log, each with the launcher's `<role>: ` prefix dropped: the
+// lines of an issue pod's one container that are role's own, none of a sibling's (whose name
+// another's may begin with) or the launcher's unprefixed ones.
+func roleLines(log string, role claim.Role, n int) string {
+	prefix := string(role) + ": "
+	var own []string
+	for line := range strings.Lines(log) {
+		if rest, ok := strings.CutPrefix(strings.TrimRight(line, "\n"), prefix); ok {
+			own = append(own, rest)
+		}
+	}
+	return strings.Join(own[max(0, len(own)-n):], "\n")
+}
+
+// containerLines is the last n lines of an issue pod's one container's log that no role wrote:
+// every role's output reaches the log behind its `<role>: ` prefix, so a line with none of them is
+// the launcher's own, PID 1's.
+func containerLines(log string, n int) string {
+	var own []string
+	for line := range strings.Lines(log) {
+		if line = strings.TrimRight(line, "\n"); !rolePrefixed(line) {
+			own = append(own, line)
+		}
+	}
+	return strings.Join(own[max(0, len(own)-n):], "\n")
+}
+
+// rolePrefixed is whether line begins with a workflow role's `<role>: ` prefix.
+func rolePrefixed(line string) bool {
+	return slices.ContainsFunc(claim.Roles, func(role claim.Role) bool { return strings.HasPrefix(line, string(role)+": ") })
 }
 
 // events are the pod's events, "<type> <reason>: <message>" joined by " | ", or why they could

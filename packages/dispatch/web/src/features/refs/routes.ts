@@ -1,24 +1,28 @@
 import {
+  decodeBlockId,
   hasControlCharacter,
   isSessionId,
   itemFromSearch,
   SESSION_ID_PATTERN,
+  shortSessionId,
 } from "@legion/contracts";
 import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
-import { shortSessionId } from "./actor";
+import { type BlockTarget, blockFragment, parseBlockReference, withBlock } from "./block-reference";
+import { referenceSpans } from "./reference-spans";
+import { pageInBound, routeInBound } from "./target-id";
 
 export type IssueRoute =
   | { key: string; kind: "issue" }
-  | { key: string; kind: "spec" }
+  | ({ key: string; kind: "spec" } & BlockTarget)
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
-  | { key: string; kind: "artifact"; slug: string; version?: number }
+  | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
   | { key: string; kind: "ask"; id: string }
   | { key: string; kind: "comment"; id: string }
   | { key: string; kind: "message"; id: string };
@@ -31,13 +35,13 @@ export type ProjectRoute =
   | { kind: "architecture"; project: string }
   | { kind: "issues"; project: string }
   | { kind: "documents"; project: string }
-  | {
+  | ({
       kind: "document";
       project: string;
       slug: string;
       version?: number;
       item?: { kind: "ask" | "comment"; id: string };
-    };
+    } & BlockTarget);
 
 export type DispatchRoute = IssueRoute | ProjectRoute;
 export type ProjectDocumentRoute = Extract<ProjectRoute, { kind: "document" }>;
@@ -244,11 +248,33 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   };
 }
 
-/** A `dispatch://` reference's route. One holding a control character names nothing, as the
- * server's `text.Extract` reads it. */
+/** A `dispatch://` reference's route as text cites it, which the server's `text.Extract` indexes:
+ * one holding a control character names nothing, and so does one past the bounds the graph keys
+ * (`routeInBound`); a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. Only
+ * where plain text becomes a reference - linkifying or shortening a bare `dispatch://` string,
+ * titling a URL an author left as text in a rendered body (`referenceRouteFromHref`), reading a
+ * composer's text - since that must match what the server indexes. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
+  const route = parseNodeReference(value);
+  return route !== undefined && routeInBound(route) ? route : undefined;
+}
+
+/** A node's own `dispatch://` reference - one the API returned for a node, one the dashboard wrote
+ * for one it shows, or one an author named explicitly as a link's target or a picture's source -
+ * as its route, whatever the length of its target id or its block's id: the bounds
+ * `parseDispatchReference` holds text to decide only what text cites, and drawing or opening a
+ * node is a read, which the server answers for a node of any name by its own reference. */
+export function parseNodeReference(value: string): DispatchReferenceRoute | undefined {
   if (hasControlCharacter(value)) {
     return undefined;
+  }
+  const hash = value.indexOf("#");
+  if (hash !== -1) {
+    const document = value.slice(0, hash);
+    const target = parseBlockReference(document, value.slice(hash + 1));
+    return target === undefined
+      ? undefined
+      : withBlock(parseNodeReference(document), target.block, target.pin);
   }
   const match = value.match(/^dispatch:\/\/([^/]+)(?:\/(.*))?$/);
   if (match === null) {
@@ -389,10 +415,12 @@ export function routeProjectOf(pathname: string): string | undefined {
   return parseProjectPath(pathname)?.project ?? issueKey?.slice(0, issueKey.lastIndexOf("-"));
 }
 
-/** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
- * external link or a dashboard path that is not an issue/document reference. A reference holding a
- * control character, or naming a slug Dispatch never gives a document, names nothing, as the
- * server's `text.Extract` reads it. */
+/** The reference a `dispatch://` URL or a same-origin dashboard path names as text cites it, as
+ * the server's `text.Extract` reads it: a composer's text, and a URL an author left as text in a
+ * rendered body (`collectReferenceAnchors`); undefined for an external link or a dashboard path
+ * that is not an issue/document reference (`pageRoutes`). A `#b-<block id>` fragment names the
+ * page's block while text cites it (`pageInBound`), else the page; a reference past the bounds
+ * names nothing (`parseDispatchReference`). */
 export function referenceRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin
@@ -400,6 +428,36 @@ export function referenceRouteFromHref(
   if (href.startsWith("dispatch://")) {
     return parseDispatchReference(href);
   }
+  const routes = pageRoutes(href, appOrigin);
+  return routes === undefined ? undefined : pageInBound(routes.page, routes.block);
+}
+
+/** The reference a link names as the server reads a request - a search hit's `href`, the target of
+ * a link an author wrote, a `dispatch://` node reference - whatever the length of its names: the
+ * bounds text is held to decide only what text cites (`referenceRouteFromHref`). */
+export function nodeRouteFromHref(
+  href: string,
+  appOrigin: string = window.location.origin
+): DispatchReferenceRoute | undefined {
+  if (href.startsWith("dispatch://")) {
+    return parseNodeReference(href);
+  }
+  const routes = pageRoutes(href, appOrigin);
+  return routes?.block ?? routes?.page;
+}
+
+/** What a same-origin dashboard path names, as the server's `text` reads the page: `page`, and
+ * `block`, the block of it its `#b-<block id>` fragment names, of any length. A path holding a
+ * control character, naming a slug Dispatch never gives a document, or that is no issue/document
+ * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item, and a
+ * version of the spec (`?v=N`) the spec's artifact at N, as `dispatch read` reads the page; no
+ * fragment names a block of either, nor of any version page, whose stored text holds no block
+ * ids. A raw `@` in a fragment is no pin, since pins are written only in `dispatch://`
+ * references; any other fragment leaves the page. */
+function pageRoutes(
+  href: string,
+  appOrigin: string
+): { page: DispatchReferenceRoute; block: DispatchReferenceRoute | undefined } | undefined {
   if (hasControlCharacter(href)) {
     return undefined;
   }
@@ -425,76 +483,22 @@ export function referenceRouteFromHref(
   // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
   // `parseProjectPath` already applies to a project document. Without it a search hit's hover
   // card previewed the document instead of the comment the reader is about to open.
+  let page: DispatchReferenceRoute = route;
   if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
     const item = itemFromSearch(url.search);
+    const version = url.searchParams.get("v") ?? "";
     if (item === null) {
       return undefined;
     }
     if (item !== undefined) {
-      return { id: item.id, key: route.key, kind: item.kind };
+      page = { id: item.id, key: route.key, kind: item.kind };
+    } else if (route.kind === "spec" && version !== "") {
+      // `parseIssuePath` leaves the version to the spec's own page; a malformed one is the spec.
+      return { block: undefined, page: artifactRoute(route.key, "spec", version) ?? route };
     }
   }
-  return route;
-}
-
-export interface ReferenceSpan {
-  start: number;
-  value: string;
-}
-
-/**
- * The reference-shaped spans in text: `dispatch://` references and `http(s)://` URLs, each ending
- * at whitespace (Unicode space separators included), an angle or square bracket, a quote, a
- * backtick or a pipe, then trimmed by `trimReference`. The one bracket a span may hold is a
- * bracketed IPv6 host right after `http(s)://`, so a server at an IPv6 literal keeps its dashboard
- * URLs as references. The whitespace is spelled out rather than written `\s`, which in JavaScript
- * also matches a vertical tab and U+FEFF, where Go's `\s` matches neither. It is the rule the
- * server's `text.ExtractAt` indexes mentions by, and `DISPATCH_TEXT_REFERENCES` in
- * `@legion/contracts` is the table both are tested against.
- */
-const referencePattern =
-  /(?:dispatch:\/\/|https?:\/\/(?:\[[0-9A-Fa-f:.]+\])?)[^\t\n\f\r \p{Z}<>"'`[\]|]+/gu;
-
-/**
- * Every reference span in text that starts with `prefix`, trimmed; a span starting otherwise is
- * omitted from the result. The spans are the same whatever the prefix, so a `dispatch://` inside a
- * URL is never a span of its own, as the server reads it.
- */
-export function referenceSpans(text: string, prefix = ""): ReferenceSpan[] {
-  const spans: ReferenceSpan[] = [];
-  for (const match of text.matchAll(referencePattern)) {
-    if (match[0].startsWith(prefix)) {
-      spans.push({ start: match.index, value: trimReference(match[0]) });
-    }
-  }
-  return spans;
-}
-
-/**
- * Drops what trails a reference in prose: sentence punctuation, the `*`, `_` and `~` that close
- * emphasis and strikethrough around it (GFM's autolinks drop the same characters, keeping them
- * inside a link), and a closing parenthesis that opens nowhere in the reference. It counts the
- * parentheses once and walks back from the end, so a run of closers costs one pass.
- */
-function trimReference(value: string): string {
-  let opened = 0;
-  let closed = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value.charAt(index);
-    if (char === "(") opened += 1;
-    else if (char === ")") closed += 1;
-  }
-  let end = value.length;
-  for (; end > 0; end -= 1) {
-    const char = value.charAt(end - 1);
-    if (char === ")") {
-      if (opened >= closed) break;
-      closed -= 1;
-    } else if (!".,;:!?*_~".includes(char)) {
-      break;
-    }
-  }
-  return value.slice(0, end);
+  const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
+  return { block: id === undefined ? undefined : withBlock(page, id), page };
 }
 
 /** A reference a text cites: the `dispatch://` form and the dashboard path it opens. */
@@ -535,17 +539,22 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
       route.version === undefined ? "" : `@v${route.version}`
     }`;
   }
+  const target = "block" in route ? route.block : undefined;
+  const block =
+    target === undefined
+      ? ""
+      : `${blockFragment(target.id)}${target.pin === undefined ? "" : `@v${target.pin}`}`;
   if ("project" in route) {
     return `dispatch://${route.project}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
-    }${route.item === undefined ? "" : `/${route.item.kind}/${encodeURIComponent(route.item.id)}`}`;
+    }${route.item === undefined ? "" : `/${route.item.kind}/${encodeURIComponent(route.item.id)}`}${block}`;
   }
   const issue = `dispatch://${route.key}`;
   if (route.kind === "issue") {
     return issue;
   }
   if (route.kind === "spec") {
-    return `${issue}/spec`;
+    return `${issue}/spec${block}`;
   }
   // The conversation keeps the `log` spelling every reference written before the Activity tab
   // existed used; activity, newer, is spelled as its own path is.
@@ -564,7 +573,7 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
-    }`;
+    }${block}`;
   }
   return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
 }
@@ -576,6 +585,12 @@ export function isAgentArtifact<T extends Pick<Artifact, "session_id">>(
   artifact: T
 ): artifact is T & { readonly session_id: string } {
   return artifact.session_id !== undefined && artifact.session_id !== null;
+}
+
+/** The session id a `session:<id>` delivery address names, or undefined for any other address
+ *  (a `role:` address). */
+export function sessionOfAddress(address: string): string | undefined {
+  return address.startsWith("session:") ? address.slice("session:".length) : undefined;
 }
 
 /** The route a document is referenced and linked by: an issue's primary document is its `spec`,
@@ -614,9 +629,12 @@ export interface ReferencedArtifact {
 }
 
 /** The artifact a reference names, as its owner, its slug and the version it pins: an issue's
- *  artifact, a project document (not an ask or comment on one), or an agent conversation's
- *  artifact. Undefined for a reference to anything else. */
+ *  artifact, a project document (not an ask, a comment or a block of one), or an agent
+ *  conversation's artifact. Undefined for a reference to anything else. */
 export function referencedArtifact(route: DispatchReferenceRoute): ReferencedArtifact | undefined {
+  if ("block" in route && route.block !== undefined) {
+    return undefined;
+  }
   switch (route.kind) {
     case "artifact":
       return { owner: { issue: route.key }, slug: route.slug, version: route.version };
@@ -646,14 +664,16 @@ export interface PictureReference {
  *  (`doc/picture-view.ts`) so a picture in a comment and the same picture in a spec are read by
  *  one rule. The source is `src` as a string (`""` when absent); it is a reference only when it
  *  starts with `dispatch://` and the grammar reads it, else undefined and the picture is whatever
- *  the caller draws for any other address. The caption is the trimmed `alt`, or the slug of the
+ *  the caller draws for any other address. An author names the picture's node explicitly, and
+ *  drawing it is a read, so the source is read as a node's reference (`parseNodeReference`),
+ *  whatever the length of its name. The caption is the trimmed `alt`, or the slug of the
  *  artifact the reference names when the `alt` is blank (`""` when it names no artifact). */
 export function pictureReference(attrs: {
   readonly alt?: unknown;
   readonly src?: unknown;
 }): PictureReference | undefined {
   const source = String(attrs.src ?? "");
-  const route = source.startsWith("dispatch://") ? parseDispatchReference(source) : undefined;
+  const route = source.startsWith("dispatch://") ? parseNodeReference(source) : undefined;
   if (route === undefined) {
     return undefined;
   }
@@ -693,32 +713,9 @@ export function documentItemPath(
 ): string {
   const path = buildReferencePath(documentRoute(artifact));
   if (item.blockID !== undefined) {
-    return `${path}#b-${encodeURIComponent(item.blockID)}`;
+    return `${path}${blockFragment(item.blockID)}`;
   }
   return `${path}?${item.kind}=${encodeURIComponent(item.id)}`;
-}
-
-/** What a reference resolves to for display: the record whose title, excerpt, or author the
- * reader is shown. An issue's spec/log/activity/children/artifacts tabs all resolve to the issue
- * itself; an ask or comment nested under a project document resolves to that item, not the
- * document. */
-export type ReferenceTargetKind = "issue" | "document" | "ask" | "comment" | "message";
-
-export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTargetKind {
-  if (route.kind === "document") {
-    return route.item?.kind ?? "document";
-  }
-  switch (route.kind) {
-    case "ask":
-    case "comment":
-    case "message":
-      return route.kind;
-    case "artifact":
-    case "agent-artifact":
-      return "document";
-    default:
-      return "issue";
-  }
 }
 
 /** A reference's compact plain-text form: what its link shows until the target's title
@@ -729,15 +726,18 @@ export function shortForm(route: DispatchReferenceRoute): string {
   if (route.kind === "agent-artifact") {
     return `agent/${shortSessionId(route.session)}/${route.slug}`;
   }
+  const target = "block" in route ? route.block : undefined;
+  const block =
+    target === undefined ? "" : ` block${target.pin === undefined ? "" : ` v${target.pin}`}`;
   if (isProjectRoute(route)) {
     const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? base : `${base} ${route.item.kind}`;
+    return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}`;
   }
   switch (route.kind) {
     case "issue":
       return route.key;
     case "spec":
-      return `${route.key} spec`;
+      return `${route.key} spec${block}`;
     case "conversation":
       return `${route.key} log`;
     case "activity":
@@ -747,7 +747,7 @@ export function shortForm(route: DispatchReferenceRoute): string {
     case "artifacts":
       return `${route.key} artifacts`;
     case "artifact":
-      return `${route.key} ${route.slug}`;
+      return `${route.key} ${route.slug}${block}`;
     case "ask":
       return `${route.key} ask`;
     case "comment":
@@ -757,13 +757,38 @@ export function shortForm(route: DispatchReferenceRoute): string {
   }
 }
 
-/** The SPA path a reference navigates to, whichever side of the issue/project split it is on. */
-export function buildReferencePath(route: DispatchReferenceRoute): string {
+/** The SPA path a reference navigates to, whichever side of the issue/project split it is on. A
+ *  block opens its document at the block (`#b-`); a pinned block opens the version of its document
+ *  it pins, since a version's stored text holds no block ids to land on, the pin's digits written
+ *  as the reference holds them. An issue's spec keeps its versions under its own slug, which a
+ *  spec route does not carry: `specSlug` names it once the issue is read (`useReferencePath`), and
+ *  until then a pinned block of the spec opens the live spec at the block. */
+export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;
     return route.version === undefined ? artifact : `${artifact}?v=${route.version}`;
   }
-  return isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
+  const path = isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
+  const target = "block" in route ? route.block : undefined;
+  if (target === undefined) {
+    return path;
+  }
+  const live = `${path}${blockFragment(target.id)}`;
+  if (target.pin === undefined) {
+    return live;
+  }
+  if (route.kind === "document") {
+    const document = buildProjectPath({
+      kind: "document",
+      project: route.project,
+      slug: route.slug,
+    });
+    return `${document}?version=${target.pin}`;
+  }
+  const slug = route.kind === "artifact" ? route.slug : specSlug;
+  return slug === undefined
+    ? live
+    : `${buildIssuePath({ key: route.key, kind: "artifact", slug })}?v=${target.pin}`;
 }
 
 export function buildIssuePath(route: IssueRoute): string {

@@ -189,14 +189,14 @@ func TestAResumeUnderSQLStorageWaitsOutAnUnreachableSessionDatabase(t *testing.T
 		time.Sleep(300 * time.Millisecond)
 		writeURL(dsn)
 	}()
-	if _, err := sessionWritten(env, sessionFile, ""); err != nil {
+	if _, err := sessionWritten(context.Background(), env, sessionFile, ""); err != nil {
 		t.Fatalf("a lookup whose database came back during the backoff = %v, want the session found", err)
 	}
 	<-back
 
 	writeURL(unreachable)
 	started := time.Now()
-	_, err = sessionWritten(env, sessionFile, "")
+	_, err = sessionWritten(context.Background(), env, sessionFile, "")
 	if err == nil || !strings.Contains(err.Error(), "resume session "+sessionFile) || !strings.Contains(err.Error(), "attempts in "+resumeLookupTimeout.String()) {
 		t.Fatalf("a lookup whose database never came back = %v, want the refusal naming the session and the attempts", err)
 	}
@@ -343,4 +343,91 @@ func TestAnAgentKeepsWritingPastItsCredentialsExpiry(t *testing.T) {
 		t.Fatalf("generation 2 did not survive the expiry: its descendant %d is gone (%v)", child.descendant, err)
 	}
 	g.stop(2)
+}
+
+// In an issue pod's one container the launcher and the role see a generation's directory at two
+// paths, so the connection file the agent reads names the socket where the agent finds it: under
+// the fixed root its own namespaces bind the role's private directory back at, and never the
+// launcher's path under the roles directory, where the socket is really bound.
+func TestAnIssuePodsSessionURLNamesTheSocketAsTheRoleSeesIt(t *testing.T) {
+	fixed := t.TempDir()
+	saved := roleFixedRoot
+	roleFixedRoot = fixed
+	t.Cleanup(func() { roleFixedRoot = saved })
+	// The role's own view in a deployed pod, which the worker image makes the mount point for.
+	if FixedRoot != "/var/run/legion" {
+		t.Fatalf("the role's fixed root is %q, so a deployed role's view is not /var/run/legion", FixedRoot)
+	}
+	rolesDir := shortTempDir(t)
+	role := "tester"
+	for _, name := range []string{RoleLauncherDir, RolePrivateDir} {
+		if err := os.MkdirAll(filepath.Join(rolesDir, role, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(rolesDir, role, RoleLauncherDir, LauncherTokenFile), []byte("launcher-token\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	managers, err := newManagers(Config{
+		Connect: "tcp://127.0.0.1:1", Sandbox: "legion-legion-legion-208", RolesDir: rolesDir, Roles: []string{role},
+		StopGrace: 2 * time.Second, SessionDatabase: testDatabase, SessionDialer: dialer.build,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := managers[0]
+	if !m.namespaced {
+		t.Fatal("the multi-role form built a manager that is not namespaced")
+	}
+	const generation = 4
+	bound := generationDir(filepath.Join(rolesDir, role, RolePrivateDir), generation)
+	if err := os.MkdirAll(bound, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	proxy, clientURL, err := m.startSession(context.Background(), generation, bound)
+	if err != nil {
+		t.Fatalf("startSession: %v; the launcher's log: %s", err, m.stderr)
+	}
+	t.Cleanup(func() { _ = proxy.Close() })
+
+	body, err := os.ReadFile(filepath.Join(bound, ompsessions.DSNFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := ompsessions.Endpoint{
+		SocketDir: generationDir(filepath.Join(fixed, RolePrivateDir), generation),
+		Database:  testDatabase.Name, User: testDatabase.User,
+	}
+	if string(body) != seen.AgentURL() {
+		t.Fatalf("the connection file holds %q, want the role's own view %q", body, seen.AgentURL())
+	}
+	if strings.Contains(string(body), rolesDir) {
+		t.Fatalf("the connection file names the launcher's own path under the roles directory: %q", body)
+	}
+	// The role's view in a deployed pod, which the test's fixed root stands in for.
+	deployed := generationDir(FixedRoot+"/"+RolePrivateDir, generation)
+	if deployed != "/var/run/legion/private/g4" {
+		t.Fatalf("a deployed role reads its socket under %q, want /var/run/legion/private/g4", deployed)
+	}
+
+	// The socket itself is bound where the launcher is, under the role's directory of the roles
+	// directory, and the URL the launcher's own client uses names that directory.
+	socket := filepath.Join(bound, ompsessions.SocketName)
+	info, err := os.Stat(socket)
+	if err != nil {
+		t.Fatalf("the generation's socket is not bound under the role's own directory: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("%s is %s, not a socket", socket, info.Mode())
+	}
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("dial the generation's socket: %v", err)
+	}
+	_ = conn.Close()
+	want := ompsessions.Endpoint{SocketDir: bound, Database: testDatabase.Name, User: testDatabase.User}.ClientURL()
+	if clientURL != want {
+		t.Fatalf("the launcher's own client URL is %q, want %q", clientURL, want)
+	}
 }

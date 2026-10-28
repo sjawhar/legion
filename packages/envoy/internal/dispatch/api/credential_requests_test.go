@@ -5,7 +5,6 @@
 package api
 
 import (
-	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -290,8 +290,8 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	missing := filepath.Join(t.TempDir(), "missing")
 	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
 	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	logs := &storetest.LockedLog{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
@@ -307,9 +307,15 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	if rig.lastAuth != "" {
 		t.Fatalf("the broker was called with Authorization %q, want no call at all", rig.lastAuth)
 	}
-	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	// The request's own access-log line is not the record this test is about.
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if !strings.Contains(line, `msg="`+accesslog.Message+`"`) {
+			lines = append(lines, line)
+		}
+	}
 	if len(lines) != 1 || !strings.Contains(lines[0], "level=ERROR") || !strings.Contains(lines[0], "path="+missing) {
-		t.Fatalf("logged %q, want one ERROR line naming %s", logs.String(), missing)
+		t.Fatalf("logged %q, want one ERROR line naming %s beside the access line", logs.String(), missing)
 	}
 }
 

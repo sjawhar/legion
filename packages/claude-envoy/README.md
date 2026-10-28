@@ -50,6 +50,22 @@ events and sends them to the current Claude Code session as supported
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe`. It renders every envelope with the shared
   `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+- A message published while those subscriptions were down (NATS restarting, the connection
+  dropped, the session not running) is recovered from Envoy's notification stream, which keeps
+  messages for 72 hours: the server asks its listener (`POST /v1/replay`) for what the stream
+  stored on the session's own subject and on each topic it follows, at start (a resume included),
+  after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
+  once, the same way as a live one, with a line saying when it was published while the connection
+  was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
+  Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
+  is anything older than 72 hours, from before the session followed the topic, or from before it
+  first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
+  session was shown and where it read to are kept in `replay-<session id>.json` in the plugin's
+  data directory, so a resume skips nothing the stream still holds and delivers nothing again (up
+  to 20,000 messages shown in 72 hours); a crash between handing a message over and recording it
+  can deliver it twice, never lose it. A message that fails three times is replaced by one notice
+  naming it. Against a listener without the route, the server says once on stderr that missed
+  messages are not recovered, and live delivery goes on as before.
 - A forwarded role-lane envelope (one that still names its `notifications.role.<role>` topic while
   arriving on the direct subject) receives its empty receipt immediately after the server accepts
   the event into its ordered MCP notification queue. That confirms adapter acceptance, not that
@@ -199,16 +215,16 @@ human approval surface.
 ## Skills
 
 The plugin ships five skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
-`claude-envoy:dispatch-first`, `claude-envoy:dispatch-brainstorming` and `claude-envoy:asd-ste100`.
-The first four teach the Envoy tools and the `dispatch` command; `asd-ste100` gives the
+`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs` and `claude-envoy:asd-ste100`.
+The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
 ASD-STE100 rules for text a person reads. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
 stays their only source; Claude Code copies each target into the plugin cache at install. With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
 on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
-`hooks/hooks.json` bullet above describes; it sends a design conversation or a plan to
-`dispatch-brainstorming`, which the session loads by name.
+`hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
+reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first`, `dispatch-brainstorming` and `asd-ste100` are the five a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `asd-ste100` are the five a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
 skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the

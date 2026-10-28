@@ -78,28 +78,28 @@ have_key_file=
 while [ $# -gt 0 ]; do
   case $1 in
   --profile)
-    profile=$2
-    have_profile=1
+    [ $# -ge 2 ] || refuse "--profile needs a value: the OMP profile to route"
+    profile=$2 have_profile=1
     shift 2
     ;;
   --home)
-    home=$2
-    have_home=1
+    [ $# -ge 2 ] || refuse "--home needs a value: the HOME Oh My Pi runs under for the profile"
+    home=$2 have_home=1
     shift 2
     ;;
   --dest)
-    dest=$2
-    have_dest=1
+    [ $# -ge 2 ] || refuse "--dest needs a value: the directory the key command's call record is written to"
+    dest=$2 have_dest=1
     shift 2
     ;;
   --key-dir)
-    key_dir=$2
-    have_key_dir=1
+    [ $# -ge 2 ] || refuse "--key-dir needs a value: the directory the key command's own script is written to"
+    key_dir=$2 have_key_dir=1
     shift 2
     ;;
   --key-file)
-    key_file=$2
-    have_key_file=1
+    [ $# -ge 2 ] || refuse "--key-file needs a value: the file holding the plaintext Anthropic key"
+    key_file=$2 have_key_file=1
     shift 2
     ;;
   *) refuse "unknown argument $1" ;;

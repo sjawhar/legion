@@ -315,9 +315,9 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner, artifactID, eventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-			))
+			payload := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+			payload.Restored = true
+			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, eventType, actor, payload))
 		}
 
 		reworded := false

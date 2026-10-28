@@ -327,9 +327,10 @@ export interface Issue {
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
- * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
- * per request. It is stored nowhere and is never on an event payload, which is why it is not a
- * field of `Issue`. Both are null when the issue has no route.
+ * Every issue read (the detail, the list, the pinned list) resolves this from the server's copy
+ * of the listener's session list, at most 5 s old. It is stored in no table and is never on an
+ * event payload, which is why it is not a field of `Issue`. Both are null when the issue has no
+ * route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
@@ -580,7 +581,15 @@ export interface ArtifactApproval {
   readonly latest_version: number;
   readonly version?: number;
   readonly by?: Actor;
+  /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
+  /** The latest review's event sequence on the document's owner, which orders the review among
+   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
+   *  on every read the release before that serves (during a rollout or a rollback), so a missing
+   *  `seq` does not prove an older review. It orders; it does not say which versions the review
+   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
+   *  `artifact.version`. */
+  readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
@@ -1018,8 +1027,12 @@ export interface ReferenceChangesPayload {
 export type IssueEventPayload = Issue & ReferenceChangesPayload;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
- *  graph. */
-export type AskEventPayload = Ask & ReferenceChangesPayload;
+ *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
+ *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
+ *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
+ *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
+ *  missing `restored` does not prove an event is a new answer. */
+export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -1216,16 +1229,22 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
  *   key and a same-mode re-send of it reaches the agent.
  *
- * It fails in three places. A host holds its keys in memory, so one that restarts after the first
- * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
- * not rare: `claude --resume` starts a new channel process on the same conversation, and a
- * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
- * session answered with an error no more than any other repeat, so a session the listener pushes
- * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
- * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
- * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
- * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
- * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * It fails in three places. A host's `createDeliveryDedupe` holds its keys in memory, so a host
+ * that keeps nothing else and restarts after the first frame landed has forgotten it, and a Retry
+ * reaches that agent a second time; that is ordinary, not rare: `claude --resume` starts a new
+ * channel process on the same conversation, and a Sandbox pod resumes its session in a new
+ * process. pi-envoy and claude-envoy, from the releases that carry `@legion/envoy-client/replay`,
+ * also keep a ledger of the frames their session was handed (pi-envoy in the session's
+ * transcript, claude-envoy in a file per session id) and drop a repeat it holds after a restart,
+ * for 72 hours and up to 20,000 frames; only a crash between the hand-over and the ledger write
+ * still lets that Retry through. Older plugins still forget, and the dashboard cannot tell which
+ * one a session runs. The stream stores a re-send of an attempt the session answered with an
+ * error no more than any other repeat, so a session the listener pushes to never receives it, and
+ * its attempt reads as a duplicate. The dashboard therefore offers no same-mode Retry for such an
+ * attempt and points at a mode change, which is a new key; sending that Retry under a new key is
+ * LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT` keys, forgetting the oldest
+ * past it, so a re-send of a key it was handed before that many later ones reaches the agent
+ * again. The limit is two and a half times what the whole stream stored in
  * one window when it was set, so a host reaches it only once traffic grows past that or a
  * producer floods a topic it follows.
  *
@@ -1445,7 +1464,7 @@ export interface SearchResultsPage {
 export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
 
 /** `SearchResponse.degraded`'s one value today: meaning search could not run for this request (no
- * Bedrock credentials configured, the query's own embedding timed out, or Bedrock answered an
+ * embedder configured, the query's own embedding timed out, or the model service answered an
  * error) and search fell back to keyword-only ranking. Generated into Go as
  * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
  * `search-answer.ts` compares against cannot drift apart. */
@@ -1460,12 +1479,48 @@ export type SearchResponse = {
   readonly took_ms: number;
   /**
    * Why this search fell back to keyword-only ranking - today only
-   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no Bedrock credentials configured, the
-   * query's own embedding timed out, or Bedrock answered an error) - absent when meaning search
+   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no embedder configured, the query's own
+   * embedding timed out, or the model service answered an error) - absent when meaning search
    * ran normally.
    */
   readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
+
+/** One kind's (or every kind's) counts in `SearchCoverage`. `items` is every searchable item;
+ * `current` those with a vector from the configured embedder's identity at the item's current
+ * text, `failed` those whose row is dead and not current, and `lacking` the rest
+ * (`items - current - failed`). `oldest_lacking_seconds` is how long the longest-waiting lacking
+ * item has waited for its vector, from when its row last became pending or when the item was
+ * written, whichever is later; null when nothing lacks. Mirrors `model.SearchCoverageCounts`. */
+export interface SearchCoverageCounts {
+  readonly items: number;
+  readonly current: number;
+  readonly lacking: number;
+  readonly failed: number;
+  readonly oldest_lacking_seconds: number | null;
+}
+
+/** `SearchCoverage`'s counts for each kind meaning search ranks. Mirrors
+ * `model.SearchCoverageKinds`. */
+export interface SearchCoverageKinds {
+  readonly issue: SearchCoverageCounts;
+  readonly document: SearchCoverageCounts;
+  readonly comment: SearchCoverageCounts;
+  readonly ask: SearchCoverageCounts;
+  readonly message: SearchCoverageCounts;
+}
+
+/** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
+ * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
+ * search compares, `place` and `model` are read from it; all three are null when no embedder is
+ * configured, and then nothing is current. Mirrors `model.SearchCoverage`. */
+export interface SearchCoverage {
+  readonly identity: string | null;
+  readonly place: "bedrock" | "azure" | null;
+  readonly model: string | null;
+  readonly total: SearchCoverageCounts;
+  readonly kinds: SearchCoverageKinds;
+}
 
 export interface DuplicateCandidate {
   readonly key: string;
@@ -1572,6 +1627,10 @@ export interface IssueReferences {
   readonly truncated: boolean;
 }
 
+// OutgoingReference is one Dispatch mention a document writes, by its target's kind and id.
+// `artifact` is the target document when it resolves; a block target (`kind: "block"`, `to_id`
+// `<document ref_key>#<block id>`) carries its document, and is listed only while a current
+// version of that document holds the block.
 export interface OutgoingReference {
   readonly kind: string;
   readonly to_id: string;
@@ -1598,12 +1657,65 @@ export type GraphEdgeKind =
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
+//
+// Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
+// and `changed_at` (who last changed its own text or fields and when; the maker when nothing
+// changed it since), `parent` (the node it belongs to) and `parent_version` (the version of the
+// parent it belongs to). An actor list Dispatch never recorded is `[]`, any other fact `null`.
+// They are optional because a server older than them omits them.
+//
+// A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
+// its document's reference as `document`, and `changed_version`, the document version in which
+// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
+// on the node a reference read names: `text` is the block's whole current text, and `pin`
+// answers a reference pinned to a version.
 export interface GraphNode {
-  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session" | "component";
+  readonly kind:
+    | "issue"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message"
+    | "session"
+    | "component";
   readonly id: string;
+  readonly block_id?: string;
   readonly issue_key?: string;
   readonly project?: string;
   readonly ref?: string;
+  readonly document?: string;
+  readonly changed_version?: number;
+  readonly made_by?: Actor[];
+  readonly made_at?: string | null;
+  readonly changed_by?: Actor[];
+  readonly changed_at?: string | null;
+  readonly parent?: GraphNodeParent | null;
+  readonly parent_version?: number | null;
+  readonly text?: string;
+  readonly pin?: BlockPin;
+}
+
+// GraphNodeParent is the node a graph node belongs to: `id` is the parent node's own `id` (an
+// artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref` its dispatch://
+// reference, absent when it has none (a session).
+export interface GraphNodeParent {
+  readonly kind: GraphNode["kind"];
+  readonly id: string;
+  readonly ref?: string;
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now.
+// `state` is "unchanged" when its current text equals `text`, "changed" when it differs, and
+// "removed" when no current version holds the block; `removed_version` is then the version that
+// deleted it.
+export interface BlockPin {
+  readonly version: number;
+  readonly ref: string;
+  readonly text: string;
+  readonly state: "unchanged" | "changed" | "removed";
+  readonly removed_version?: number;
 }
 
 // GraphExcerpt is the text shown beside an edge: the block containing a document mention
@@ -1616,10 +1728,13 @@ export interface GraphExcerpt {
 // GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
 // end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
 // writes, and `source_seq` is the events.id that introduced a mention (null for structure).
+// `block`, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 export interface GraphEdge {
   readonly kind: GraphEdgeKind;
   readonly direction: "in" | "out";
   readonly node: GraphNode;
+  readonly block?: GraphNode;
   readonly excerpt?: GraphExcerpt;
   readonly created_at: string;
   readonly source_seq: number | null;
@@ -1631,6 +1746,26 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+export interface BlockLink {
+  readonly kind: GraphEdgeKind;
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly created_at: string;
+  readonly created_version: number;
+}
+
+// BlockLinks is GET /api/v1/block-links?from=<document ref>&to=<document ref>: the two documents
+// and the links from blocks of `from` to blocks of `to`, newest first, then by `from.id`, then by
+// `to.id`. A link is listed only while both of its blocks are current blocks of their documents.
+export interface BlockLinks {
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly links: BlockLink[];
+}
+
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }
@@ -1640,6 +1775,23 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
   readonly name: string;
   readonly version: Version;
   readonly diff?: string;
+}
+
+/** `artifact.human_edited`: a person's browser edits of a document, sent once the document has
+ *  been quiet for 30 seconds after the last of them. `from_version` is the version before the
+ *  quiet window's first version by a person, `to_version` the window's last one; `editors` names
+ *  each person who wrote one, and the event's actor is the one who edited last. `diff` is the
+ *  unified diff of the two versions' stored markdown, cut at its last line end within 4,096 bytes,
+ *  `diff_truncated` then true; it is empty when a version is no longer stored. The event reaches
+ *  each session the document credits and the issue's route, never a person. */
+export interface ArtifactHumanEditedEventPayload {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly from_version: number;
+  readonly to_version: number;
+  readonly editors: readonly string[];
+  readonly diff: string;
+  readonly diff_truncated: boolean;
 }
 
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
@@ -1903,6 +2055,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.version";
       readonly payload: ArtifactVersionEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.human_edited";
+      readonly payload: ArtifactHumanEditedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.approved";
@@ -2517,6 +2673,16 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   diff: z.string().optional(),
 });
 
+export const ArtifactHumanEditedEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  name: z.string().optional(),
+  from_version: z.number().int().optional(),
+  to_version: z.number().int().optional(),
+  editors: z.array(z.string()).optional(),
+  diff: z.string().optional(),
+  diff_truncated: z.boolean().optional(),
+});
+
 export const ArtifactReviewEventPayloadSchema = z.object({
   artifact_id: z.string().optional(),
   name: z.string().optional(),
@@ -2545,6 +2711,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  restored: z.boolean().optional(),
   anchor: z
     .object({
       quote: z.string().optional(),

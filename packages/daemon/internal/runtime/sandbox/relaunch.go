@@ -54,7 +54,8 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // authenticated launcher. An existing healthy pod is never suspended or reinitialized when another
 // role starts or one role recovers. A pod is not healthy when it cannot run the role as a pod
 // created now would: it holds, for one of its roles, something fixed for its life that a pod created
-// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): its
+// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): it
+// runs the layout before one container, one launcher container per role (movedLayout), its
 // launchers dial a stream other than the one a pod created now is handed, and they never redial, or
 // it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
 // it runs an image other than the one this runtime launches every container with (imageDrift) —

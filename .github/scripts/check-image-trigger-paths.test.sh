@@ -543,7 +543,10 @@ check "always() is read as ungated" "$(is "$status" 0)"
 
 echo "case: an if: this check does not model is refused, never read as ungated"
 shape_index=0
-for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false"; do
+# The last three are a positive draft test and an == 'closed' test, which would skip every
+# pinnable build (the next case's comment says why).
+for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false" \
+  "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-unmodelled-$shape_index")
   gate_probe "$root" "  docker:
@@ -558,8 +561,15 @@ done
 
 echo "case: the terms that do not narrow by path stay accepted"
 shape_index=0
-# `!cancelled()` needs quoting: bare, YAML reads `!cancelled` as a tag.
-for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img == 'true'" "(needs.changes.result == 'success' || needs.changes.result == 'skipped') && needs.changes.outputs.img == 'true'"; do
+# `!cancelled()` and a bare `!github…` need quoting or ${{ }}: bare, YAML reads them as tags.
+# The draft and closed event terms are true on every event that builds a pinnable image (push,
+# merge_group, workflow_call, workflow_dispatch carry no pull_request and no closed action), and
+# this fixture's trigger is push; the draft term under a pull_request trigger is the next case.
+for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img == 'true'" \
+  "(needs.changes.result == 'success' || needs.changes.result == 'skipped') && needs.changes.outputs.img == 'true'" \
+  '"!github.event.pull_request.draft"' "github.event.action != 'closed'" \
+  "\${{ !github.event.pull_request.draft && needs.changes.outputs.img == 'true' }}" \
+  "github.event.action != 'closed' && needs.changes.outputs.img == 'true'"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-neutral-$shape_index")
   gate_probe "$root" "  docker:
@@ -569,7 +579,139 @@ for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img
 "
   run_check "$root"
   check "if: $shape passes" "$(is "$status" 0)"
+  case $shape in
+    *needs.changes.outputs.img*)
+      check "  and reads the filter beside it" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')" ;;
+  esac
 done
+
+# changes_if <root> <expression>: gates the dorny/paths-filter job itself, as
+# envoy-and-contracts.yaml gates the changes job its envoy-smoke build needs.
+changes_if() {
+  python3 - "$1/.github/workflows/image.yaml" "$2" <<'PYEOF'
+import sys
+path, expression = sys.argv[1], sys.argv[2]
+text = open(path).read()
+marker = "  changes:\n    runs-on: ubuntu-24.04\n"
+assert marker in text, "no changes job to gate"
+open(path, "w").write(text.replace(marker, f"  changes:\n    if: {expression}\n    runs-on: ubuntu-24.04\n"))
+PYEOF
+}
+
+root=$(fixture gate-event-on-changes)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ github.event.action != 'closed' && !github.event.pull_request.draft }}"
+run_check "$root"
+check "both event terms on the needed changes job pass" "$(is "$status" 0)"
+check "  and the build job's filter is still read" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')"
+
+# The control: the changes job's if: is read, so a positive draft test there is refused.
+root=$(fixture gate-event-on-changes-refused)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "github.event.pull_request.draft"
+run_check "$root"
+check "a positive draft test on the needed changes job is refused" "$(is "$status" 1)"
+check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
+
+echo "case: the draft term is admitted only under pull request triggers that list ready_for_review"
+# A draft's head that the draft term skips is built once the draft is marked ready only by a
+# ready_for_review run. A trigger whose types leave it out, or that has none and so GitHub's
+# default (opened, synchronize, reopened), would merge that head with no image built at it.
+# on_pull_request <workflow file> [types]: makes the file's push trigger a pull_request trigger
+# on the same paths, with `types: [<types>]` when given and GitHub's default types when not.
+on_pull_request() {
+  local file=$1 types=${2:-}
+  sed -i 's|^  push:$|  pull_request:|' "$file"
+  if [ -n "$types" ]; then
+    sed -i "s|^    branches: \[main\]$|&\n    types: [$types]|" "$file"
+  fi
+}
+draft_build="  docker:
+    needs: changes
+    if: \${{ !github.event.pull_request.draft && needs.changes.outputs.img == 'true' }}
+    runs-on: ubuntu-24.04
+"
+without_ready="opened, synchronize, reopened, closed"
+with_ready="opened, synchronize, reopened, ready_for_review, closed"
+
+root=$(fixture draft-default-types)
+gate_probe "$root" "$draft_build"
+on_pull_request "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "a draft-gated build under a pull_request trigger with the default types is refused" "$(is "$status" 1)"
+check "  and names the trigger and ready_for_review" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
+
+root=$(fixture draft-types-without-ready)
+gate_probe "$root" "$draft_build"
+on_pull_request "$root/.github/workflows/image.yaml" "$without_ready"
+run_check "$root"
+check "types that leave out ready_for_review are refused" "$(is "$status" 1)"
+check "  and name ready_for_review" "$(contains "$out" 'does not list ready_for_review in its types')"
+
+root=$(fixture draft-types-with-ready)
+gate_probe "$root" "$draft_build"
+on_pull_request "$root/.github/workflows/image.yaml" "$with_ready"
+run_check "$root"
+check "types that list ready_for_review pass" "$(is "$status" 0)"
+
+root=$(fixture draft-step-without-ready)
+sed -i 's|^      - uses: docker/build-push-action@v6$|      - if: "!github.event.pull_request.draft"\n        uses: docker/build-push-action@v6|' \
+  "$root/.github/workflows/image.yaml"
+on_pull_request "$root/.github/workflows/image.yaml" "$without_ready"
+run_check "$root"
+check "the draft term on the build step itself is refused the same way" "$(is "$status" 1)"
+check "  and names the step" "$(contains "$out" "jobs.docker step 'an unnamed step' builds or calls an image and its if: skips a draft")"
+
+# called_draft <name> [types]: a draft-gated build in a called workflow, whose caller runs on
+# pull_request with those types.
+called_draft() {
+  root=$(fixture "$1")
+  callers "$root" "$all_inputs"
+  sed -i 's|^  docker:$|&\n    if: "!github.event.pull_request.draft"|' "$root/.github/workflows/image.yaml"
+  on_pull_request "$root/.github/workflows/release.yaml" "${2:-}"
+  run_check "$root"
+}
+called_draft draft-called-default-types
+check "a called draft-gated build whose caller's pull_request lacks ready_for_review is refused" "$(is "$status" 1)"
+check "  and names the caller's trigger" "$(contains "$out" 'release.yaml on.pull_request, which runs it, does not list ready_for_review')"
+called_draft draft-called-with-ready "$with_ready"
+check "a called draft-gated build whose caller's pull_request lists ready_for_review passes" "$(is "$status" 0)"
+
+root=$(fixture draft-on-changes-without-ready)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ github.event.action != 'closed' && !github.event.pull_request.draft }}"
+on_pull_request "$root/.github/workflows/image.yaml" "$without_ready"
+run_check "$root"
+check "the draft term on the needed changes job is refused the same way" "$(is "$status" 1)"
+check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image and its if: skips a draft')"
+
+root=$(fixture closed-without-ready)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: github.event.action != 'closed' && needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+on_pull_request "$root/.github/workflows/image.yaml" "$without_ready"
+run_check "$root"
+check "github.event.action != 'closed' alone needs no ready_for_review" "$(is "$status" 0)"
+
+root=$(fixture draft-push-only)
+gate_probe "$root" "$draft_build"
+sed -i '/^  workflow_dispatch:$/d' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "a push-only workflow with the draft term passes" "$(is "$status" 0)"
 
 echo "case: needs.<job>.result is neutral only when it admits 'skipped'"
 # The live shape this guards: envoy-smoke tidied up to reuse envoy-go's setup. always() does not
@@ -752,6 +894,37 @@ open(path, "w").write(text.replace(
 PYEOF
 run_check "$root"
 check "an action known to build nothing passes" "$(is "$status" 0)"
+
+# The cache's restore and save halves are separate actions, so the list names each one.
+root=$(fixture uses-cache-halves)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+sha = "0123456789abcdef0123456789abcdef01234567"
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    f"      - uses: actions/cache/restore@{sha}\n        with:\n          path: x\n          key: k\n"
+    f"      - uses: docker/build-push-action@v6\n",
+) + f"      - uses: actions/cache/save@{sha}\n        with:\n          path: x\n          key: k\n")
+PYEOF
+run_check "$root"
+check "actions/cache/restore and actions/cache/save beside a build pass" "$(is "$status" 0)"
+
+root=$(fixture uses-cache-other)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    "      - uses: actions/cache/other@0123456789abcdef0123456789abcdef01234567\n"
+    "      - uses: docker/build-push-action@v6\n",
+))
+PYEOF
+run_check "$root"
+check "another path under actions/cache is still refused" "$(is "$status" 1)"
+check "  and names the list to add it to" "$(contains "$out" 'add this action to NON_BUILDING_ACTIONS')"
 
 root=$(fixture tripwire-not-a-build)
 run_step "$root" 'docker pull debian:trixie-slim'

@@ -16,6 +16,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.1
 	github.com/aws/smithy-go v1.28.1
 	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/docker/docker v28.5.2+incompatible
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/uuid v1.6.0
 	github.com/googleapis/gax-go/v2 v2.23.0
@@ -72,7 +73,6 @@ require (
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/dgraph-io/ristretto v0.2.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/docker v28.5.2+incompatible // indirect
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -130,7 +130,7 @@ require (
 )
 
 // The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #331; the fork
+// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #331, #332; the fork
 // carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested
 // reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
 // transactional GC range search; a whole document state resolves its own dependencies before the
@@ -140,7 +140,9 @@ require (
 // check rather than refusing it past a pending cap; Apply stamps a room with no peer idle when it
 // returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed connection is
 // answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's provider learns
-// which of its edits the room took; and CloseRoom closes a browser that connects while it runs,
-// which it used to leave on the room it removed, where no later edit reached it. A merged update's
-// skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.3
+// which of its edits the room took; CloseRoom closes a browser that connects while it runs,
+// which it used to leave on the room it removed, where no later edit reached it; and a document
+// logs each committed transaction's update in commit order under its own lock (UpdateLog), so the
+// room's update observer measures each update against the room the commit before it left. A merged
+// update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4

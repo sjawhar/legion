@@ -13,7 +13,7 @@ import { threadReplySendKey, usePhoneThread } from "./usePhoneThread";
 const sendKey: MutationKey = ["conversation-composer", "CORE-1"];
 
 const reply: ReplyTarget = {
-  author: "bob",
+  actor: { id: "bob", kind: "user" },
   excerpt: "Earlier comment",
   id: "comment-1",
   parentKind: "comment",

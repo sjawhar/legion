@@ -87,7 +87,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 					}
 				case 1:
 					if req.GrantID != nil {
-						_, _, err := m.Values(ctx, *req.GrantID, enr)
+						_, _, err := m.Values(ctx, *req.GrantID, enr, nil)
 						check("Values", err)
 					}
 				case 2:

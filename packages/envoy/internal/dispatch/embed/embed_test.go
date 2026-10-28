@@ -1,159 +1,23 @@
 package embed
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed/embedtest"
 )
 
-// testClient builds a Client against server, with static fake credentials and a fake region:
-// the AWS SDK still signs every request (SigV4), but nothing on server's side verifies the
-// signature, so a test server only needs to receive a well-formed InvokeModel call and answer
-// Bedrock's documented response shape.
-func testClient(server *httptest.Server) *Client {
-	cfg := aws.Config{
-		Region:      "us-west-2",
-		Credentials: credentials.NewStaticCredentialsProvider("test-access-key", "test-secret-key", ""),
+// longText is exactly maxInputChars (32,000) runes, mixing one-, two-, three- and four-byte
+// UTF-8 runes, so a client that counted bytes, or cut a text at its own limit, would not deliver
+// it whole.
+func longText() string {
+	text := strings.Repeat("aé漢🙂", maxInputChars/4)
+	if n := len([]rune(text)); n != maxInputChars {
+		panic(fmt.Sprintf("longText has %d runes, want %d", n, maxInputChars))
 	}
-	return NewWithConfig(cfg, WithBaseEndpoint(server.URL))
-}
-
-func TestEmbedSendsBedrockInvokeModelRequestShapeAndParsesTheResponse(t *testing.T) {
-	var gotPath, gotModel, gotContentType string
-	var gotBody embedRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotContentType = r.Header.Get("Content-Type")
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode request body: %v", err)
-		}
-		// Bedrock's InvokeModel carries the model id in the request path, not the JSON body.
-		gotModel = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"test","response_type":"embeddings_by_type","embeddings":{"float":[[0.1,0.2,0.3]]}}`))
-	}))
-	defer server.Close()
-
-	client := testClient(server)
-	vectors, err := client.Embed(context.Background(), []string{"hello world"}, InputQuery)
-	if err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if !strings.Contains(gotPath, Model) {
-		t.Errorf("request path = %q, want it to name the model %q", gotModel, Model)
-	}
-	if !strings.HasPrefix(gotPath, "/model/") || !strings.HasSuffix(gotPath, "/invoke") {
-		t.Errorf("path = %q, want Bedrock's /model/<id>/invoke shape", gotPath)
-	}
-	if gotContentType != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", gotContentType)
-	}
-	if gotBody.InputType != InputQuery || gotBody.OutputDimension != Dimension {
-		t.Errorf("request body = %+v, want input_type=%s output_dimension=%d", gotBody, InputQuery, Dimension)
-	}
-	if len(gotBody.EmbeddingTypes) != 1 || gotBody.EmbeddingTypes[0] != "float" {
-		t.Errorf("embedding_types = %v, want [float]", gotBody.EmbeddingTypes)
-	}
-	if len(gotBody.Texts) != 1 || gotBody.Texts[0] != "hello world" {
-		t.Errorf("request texts = %v, want [hello world]", gotBody.Texts)
-	}
-	if len(vectors) != 1 || len(vectors[0]) != 3 || vectors[0][0] != 0.1 {
-		t.Errorf("vectors = %v, want one 3-float vector starting 0.1", vectors)
-	}
-}
-
-func TestEmbedOfZeroTextsAnswersNilWithoutACall(t *testing.T) {
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	}))
-	defer server.Close()
-	client := testClient(server)
-	vectors, err := client.Embed(context.Background(), nil, InputDocument)
-	if err != nil || vectors != nil {
-		t.Fatalf("Embed(nil) = %v, %v, want nil, nil", vectors, err)
-	}
-	if called {
-		t.Error("Embed(nil) made an HTTP call; it should return before building one")
-	}
-}
-
-func TestEmbedRefusesMoreThanTheBatchLimit(t *testing.T) {
-	client := NewWithConfig(aws.Config{Region: "us-west-2", Credentials: credentials.NewStaticCredentialsProvider("k", "s", "")})
-	texts := make([]string, MaxBatchTexts+1)
-	for i := range texts {
-		texts[i] = "x"
-	}
-	if _, err := client.Embed(context.Background(), texts, InputDocument); err == nil {
-		t.Fatal("Embed with MaxBatchTexts+1 texts: want an error, got nil")
-	}
-}
-
-func TestEmbedReturnsBedrockErrorBody(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
-	}))
-	defer server.Close()
-	client := testClient(server)
-	_, err := client.Embed(context.Background(), []string{"x"}, InputDocument)
-	if err == nil || !strings.Contains(err.Error(), "bedrock invoke model") {
-		t.Fatalf("Embed error = %v, want it to mention the Bedrock call failing", err)
-	}
-}
-
-func TestEmbedRefusesAMismatchedEmbeddingCount(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"response_type":"embeddings_by_type","embeddings":{"float":[[0.1]]}}`))
-	}))
-	defer server.Close()
-	client := testClient(server)
-	_, err := client.Embed(context.Background(), []string{"a", "b"}, InputDocument)
-	if err == nil || !strings.Contains(err.Error(), "1 embeddings for 2 texts") {
-		t.Fatalf("Embed error = %v, want it to name the count mismatch", err)
-	}
-}
-
-func TestEmbedTruncatesAnOverlongTextByRunesNotBytes(t *testing.T) {
-	var gotText string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body embedRequest
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotText = body.Texts[0]
-		_, _ = w.Write([]byte(`{"response_type":"embeddings_by_type","embeddings":{"float":[[0.1]]}}`))
-	}))
-	defer server.Close()
-	// A multi-byte rune ("é", 2 bytes in UTF-8) repeated past the char cap: truncating by byte
-	// count would split a rune and produce invalid UTF-8; this must not panic or corrupt it.
-	overlong := strings.Repeat("é", maxInputChars+100)
-	client := testClient(server)
-	if _, err := client.Embed(context.Background(), []string{overlong}, InputDocument); err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if count := len([]rune(gotText)); count != maxInputChars {
-		t.Errorf("truncated text has %d runes, want %d", count, maxInputChars)
-	}
-}
-
-func TestNewRefusesAnEmptyRegion(t *testing.T) {
-	t.Setenv("AWS_REGION", "")
-	t.Setenv("AWS_DEFAULT_REGION", "")
-	t.Setenv("AWS_PROFILE", "does-not-exist-so-nothing-else-supplies-a-region")
-	t.Setenv("AWS_CONFIG_FILE", "/dev/null")
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
-	if _, err := New(context.Background()); err == nil {
-		t.Fatal("New with no region configured anywhere: want an error, got nil")
-	}
+	return text
 }
 
 func TestLiteralRendersAPgvectorTextForm(t *testing.T) {
@@ -164,29 +28,47 @@ func TestLiteralRendersAPgvectorTextForm(t *testing.T) {
 	}
 }
 
-func TestIsThrottledRecognizesBedrockThrottleCodesThroughAWrappedError(t *testing.T) {
-	for _, code := range []string{
-		"ThrottlingException", "ServiceUnavailableException", "SlowDown", "ModelNotReadyException",
-	} {
-		wrapped := fmt.Errorf("embed: bedrock invoke model: %w", embedtest.FakeThrottleError{Code: code})
-		if !IsThrottled(wrapped) {
-			t.Errorf("IsThrottled(%q wrapped) = false, want true", code)
-		}
+// markedError carries the throttle marker with a chosen answer, so IsThrottled is tested on the
+// marker alone.
+type markedError struct{ throttled bool }
+
+func (e markedError) Error() string   { return "simulated marked error" }
+func (e markedError) Throttled() bool { return e.throttled }
+
+func TestIsThrottledReadsTheMarkerThroughAWrappedError(t *testing.T) {
+	if !IsThrottled(fmt.Errorf("embed: some call: %w", markedError{throttled: true})) {
+		t.Error("IsThrottled(a wrapped marked throttle) = false, want true")
+	}
+	if !IsThrottled(fmt.Errorf("embed: some call: %w", embedtest.FakeThrottleError{Code: "ThrottlingException"})) {
+		t.Error("IsThrottled(a wrapped embedtest.FakeThrottleError) = false, want true")
+	}
+	cause := errors.New("simulated cause")
+	marked := &throttleError{err: cause}
+	if !IsThrottled(marked) || !errors.Is(marked, cause) || marked.Error() != cause.Error() {
+		t.Errorf("throttleError = %v: want it marked, unwrapping to its cause, with the cause's text", marked)
 	}
 }
 
-func TestIsThrottledDoesNotMisclassifyAnOrdinaryError(t *testing.T) {
-	if IsThrottled(errors.New("embed: bedrock invoke model: connection refused")) {
-		t.Error("IsThrottled(a plain connection error) = true, want false")
+func TestIsThrottledIgnoresAnUnmarkedOrFalseError(t *testing.T) {
+	if IsThrottled(errors.New("embed: connection refused")) {
+		t.Error("IsThrottled(a plain error) = true, want false")
 	}
-	if IsThrottled(embedtest.FakeThrottleError{Code: "ValidationException"}) {
-		t.Error("IsThrottled(ValidationException) = true, want false - a bad request is not a throttle")
+	if IsThrottled(markedError{throttled: false}) {
+		t.Error("IsThrottled(a marker answering false) = true, want false")
+	}
+	// A Bedrock-style throttle code alone is not the marker: only the client that recognizes its
+	// own codes marks them.
+	if IsThrottled(codedError{code: "ThrottlingException"}) {
+		t.Error("IsThrottled(an unmarked coded error) = true, want false")
+	}
+	if IsThrottled(nil) {
+		t.Error("IsThrottled(nil) = true, want false")
 	}
 }
 
 // TestEstimateTokensTruncatesAndDividesByFourCharsPerToken proves EstimateTokens matches the
 // same truncation Embed itself applies (maxInputChars, by rune count) and the 4-chars/token
-// ratio this PR's own "Bedrock capacity" measurement used - the basis for embedqueue's shared
+// ratio the original "Bedrock capacity" measurement used - the basis for embedqueue's shared
 // token-rate budget (reserveTokens).
 func TestEstimateTokensTruncatesAndDividesByFourCharsPerToken(t *testing.T) {
 	short := strings.Repeat("x", 40)
@@ -199,5 +81,48 @@ func TestEstimateTokensTruncatesAndDividesByFourCharsPerToken(t *testing.T) {
 	}
 	if got, want := EstimateTokens([]string{short, short}), 20; got != want {
 		t.Errorf("EstimateTokens(two short texts) = %d, want %d (summed across the batch)", got, want)
+	}
+}
+
+// BoundedBytes counts the bytes a text is sent as: every byte up to maxInputChars runes, the cut
+// boundBatch makes, never more and never a rune split.
+func TestBoundedBytesCountsTheBytesOfTheTruncatedText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"empty", ""},
+		{"short ASCII", "hello"},
+		{"short CJK, more bytes than maxInputChars runes", strings.Repeat("漢", maxInputChars/2)},
+		{"exactly maxInputChars mixed runes", longText()},
+		{"overlong CJK", strings.Repeat("漢", maxInputChars+100)},
+		{"overlong mixed", longText() + "🙂é"},
+	} {
+		bounded, err := boundBatch([]string{tc.text}, 1)
+		if err != nil {
+			t.Fatalf("%s: boundBatch: %v", tc.name, err)
+		}
+		want := 0
+		if bounded != nil {
+			want = len(bounded[0])
+		}
+		if got := BoundedBytes(tc.text); got != want {
+			t.Errorf("%s: BoundedBytes = %d, want %d (the bytes boundBatch sends)", tc.name, got, want)
+		}
+	}
+	if got, want := BoundedBytes(strings.Repeat("漢", maxInputChars+100)), 3*maxInputChars; got != want {
+		t.Errorf("BoundedBytes(overlong CJK) = %d, want %d", got, want)
+	}
+}
+
+func TestIdentityPlace(t *testing.T) {
+	for identity, want := range map[string][2]string{
+		"azure:example.services.ai.azure.com/embed-v-4-0":        {"azure", "embed-v-4-0"},
+		"azure:example.services.ai.azure.com/models/embed-v-4-0": {"azure", "embed-v-4-0"},
+		"us.cohere.embed-v4:0":                                   {"bedrock", "us.cohere.embed-v4:0"},
+	} {
+		if place, model := IdentityPlace(identity); place != want[0] || model != want[1] {
+			t.Errorf("IdentityPlace(%q) = %q, %q, want %q, %q", identity, place, model, want[0], want[1])
+		}
 	}
 }

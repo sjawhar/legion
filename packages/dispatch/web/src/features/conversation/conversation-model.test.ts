@@ -9,6 +9,7 @@ import type {
   MessageRead,
 } from "../../api/types";
 import { activityDescription } from "../activity/activity-model";
+import type { AgentPart } from "../refs/AgentName";
 import { buildConversations, focusConversation, matchesFilter } from "./conversation-model";
 
 const session: Actor = { id: "session-1", kind: "session" };
@@ -341,9 +342,9 @@ test("describes a malformed decision block", () => {
     type: "block.invalid",
   };
 
-  expect(activityDescription(event)).toBe(
-    'marked decision ask-block malformed: ask block "ask-block" has an option without a label'
-  );
+  expect(activityDescription(event)).toEqual([
+    'marked decision ask-block malformed: ask block "ask-block" has an option without a label',
+  ]);
 });
 
 test("describes a status change out of Done as reopening the issue", () => {
@@ -358,7 +359,7 @@ test("describes a status change out of Done as reopening the issue", () => {
     type: "issue.updated",
   } as Event;
 
-  expect(activityDescription(reopened, "done")).toBe("reopened the issue into backlog");
+  expect(activityDescription(reopened, "done")).toEqual(["reopened the issue into backlog"]);
 });
 
 // Five ways a claim moves, each of which must read as a distinct, true line: a session
@@ -389,14 +390,15 @@ function claimEvent(
   } as ClaimEvent;
 }
 
-const releaseCases: Array<[string, Event, string]> = [
+// A line that names another holder keeps that holder's actor as a part, for `AgentName` to draw.
+const releaseCases: Array<[string, Event, AgentPart[]]> = [
   [
     "a session releasing its own claim",
     claimEvent("issue.released", claimOf("session-one", "Implementer").actor, {
       previous_claim: claimOf("session-one", "Implementer"),
       reason: "released",
     }),
-    "released the claim",
+    ["released the claim"],
   ],
   [
     "another session's release",
@@ -404,7 +406,7 @@ const releaseCases: Array<[string, Event, string]> = [
       previous_claim: claimOf("session-one", "Implementer"),
       reason: "released",
     }),
-    "released Implementer's claim",
+    ["released ", { actor: claimOf("session-one", "Implementer").actor }, "'s claim"],
   ],
   [
     "a human releasing an agent's claim",
@@ -416,7 +418,7 @@ const releaseCases: Array<[string, Event, string]> = [
         reason: "released",
       }
     ),
-    "released Implementer's claim",
+    ["released ", { actor: claimOf("session-one", "Implementer").actor }, "'s claim"],
   ],
   [
     "a close",
@@ -428,12 +430,12 @@ const releaseCases: Array<[string, Event, string]> = [
         reason: "closed",
       }
     ),
-    "released the claim with the close",
+    ["released the claim with the close"],
   ],
 ];
 
 test.each(releaseCases)("the activity line for %s", (_name, event, expected) => {
-  expect(activityDescription(event)).toBe(expected);
+  expect(activityDescription(event)).toEqual(expected);
 });
 
 test("a first claim and a takeover read differently in the activity line", () => {
@@ -444,7 +446,7 @@ test("a first claim and a takeover read differently in the activity line", () =>
         reason: "claimed",
       })
     )
-  ).toBe("claimed the issue");
+  ).toEqual(["claimed the issue"]);
   expect(
     activityDescription(
       claimEvent("issue.claimed", claimOf("session-two", "Second agent").actor, {
@@ -453,7 +455,7 @@ test("a first claim and a takeover read differently in the activity line", () =>
         reason: "takeover",
       })
     )
-  ).toBe("took the claim from Implementer");
+  ).toEqual(["took the claim from ", { actor: claimOf("session-one", "Implementer").actor }]);
 });
 
 test("an answer that replaced an earlier one reads as a change in the activity line", () => {
@@ -468,7 +470,7 @@ test("an answer that replaced an earlier one reads as a change in the activity l
     seq: 5,
     type: "ask.answered",
   } as Event;
-  expect(activityDescription(answered)).toBe("answered “Ship it?”");
+  expect(activityDescription(answered)).toEqual(["answered “Ship it?”"]);
   expect(
     activityDescription({
       ...answered,
@@ -479,5 +481,5 @@ test("an answer that replaced an earlier one reads as a change in the activity l
         state: "answered",
       },
     } as Event)
-  ).toBe("changed the answer to “Ship it?”");
+  ).toEqual(["changed the answer to “Ship it?”"]);
 });

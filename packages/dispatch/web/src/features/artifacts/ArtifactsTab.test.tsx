@@ -280,3 +280,47 @@ test("References lists closure members with chip, via, and depth, names truncati
     getIssueReferences.mockRestore();
   }
 });
+
+// A conversation's picture is owned by the agent whose conversation holds it: the References row
+// names that agent through `AgentName`, a link to its live conversation.
+test("References names the agent that owns a conversation's artifact", async () => {
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([
+    {
+      capabilities: [],
+      dir: "/w",
+      host: "host",
+      last_activity: null,
+      last_seen: 1,
+      machine_id: "host",
+      open_asks: 0,
+      roles: [],
+      session_id: "planner-session",
+      title: "Planner",
+    },
+  ]);
+  const picture: Artifact = {
+    ...artifact,
+    id: "artifact-shot",
+    issue_key: null,
+    name: "shot.png",
+    project: "",
+    session_id: "planner-session",
+    slug: "shot-png",
+  };
+  const { getIssueReferences, listArtifacts, view } = renderTab([artifact], {
+    members: [{ artifact: picture, depth: 1, via: { id: "comment-1", kind: "comment" } }],
+    truncated: false,
+  });
+
+  try {
+    const references = await screen.findByRole("region", { name: "References", hidden: true });
+    const owner = await within(references).findByRole("link", { hidden: true, name: "Planner" });
+    expect(owner.getAttribute("href")).toBe("/agents/planner-session/live");
+    expect(references.textContent).toContain("agent Planner · via comment · depth 1");
+  } finally {
+    view.unmount();
+    listArtifacts.mockRestore();
+    getIssueReferences.mockRestore();
+    listAgents.mockRestore();
+  }
+});

@@ -5,7 +5,6 @@ package api
 // with architecture_source_test.go.
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,6 +12,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // The WARN lines the singular routes log, one per call, so an operator can find the callers that
@@ -22,19 +23,25 @@ const (
 	singularSyncWarning = "dispatch: POST /api/v1/projects/{key}/architecture-source/sync called by a dispatch client older than this release; upgrade it, the route will be removed"
 )
 
-// captureSourceWarnings sends the default logger to a buffer until the test ends. The function it
+// captureSourceWarnings sends the default logger to a log until the test ends. The function it
 // answers takes the WARN records about an architecture-source route logged since its last call,
-// each as "<message> project=<project>", in order.
+// each as "<message> project=<project>", in order. The server's background goroutines (a
+// document settlement among them) write that log while the test reads it, so it is a locked log
+// read from an offset, never a buffer the test resets.
 func captureSourceWarnings(t *testing.T) func() []string {
 	t.Helper()
 	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	logs := &storetest.LockedLog{}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
+	read := 0
 	return func() []string {
 		t.Helper()
+		logged := logs.String()
+		since := logged[read:]
+		read = len(logged)
 		warnings := []string{}
-		decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+		decoder := json.NewDecoder(strings.NewReader(since))
 		for decoder.More() {
 			var record struct {
 				Level   string `json:"level"`
@@ -42,13 +49,12 @@ func captureSourceWarnings(t *testing.T) func() []string {
 				Project string `json:"project"`
 			}
 			if err := decoder.Decode(&record); err != nil {
-				t.Fatalf("decode log record: %v\n%s", err, logs.String())
+				t.Fatalf("decode log record: %v\n%s", err, since)
 			}
 			if record.Level == slog.LevelWarn.String() && strings.Contains(record.Msg, "architecture-source") {
 				warnings = append(warnings, record.Msg+" project="+record.Project)
 			}
 		}
-		logs.Reset()
 		return warnings
 	}
 }

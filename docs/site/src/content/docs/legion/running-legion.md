@@ -44,7 +44,10 @@ mapped repository both the implement and the review App are installed on, and le
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
 the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed.
+every repository lacks an App boots serving none and admits nothing until an App is installed. A
+Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
+the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
+stays unreachable, logs each wait, and serves nothing until the read passes.
 
 ## The GitHub Apps
 
@@ -62,7 +65,9 @@ The implement App cannot create a check run, and a review never comes from the A
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
 and the checks that branch requires (its rulesets and its branch protection), since only those
-decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+decide whether CI is red at a head, and so where Legion sends the issue. The same read follows a
+pull request's head when its push webhook is lost or late, and the daemon looks up the open pull
+request of an issue whose implementer completed with none recorded. Whether the merge happens
 is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
@@ -103,43 +108,52 @@ Dispatch read them, delete the files, then install every App from
 - **A node pool for Legion.** Every pod selects nodes labelled `legion.dev/pool=legion` and
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
-- **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod carries a
-  cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
-  node's disk its root filesystem writes to: `$HOME`, with the image's own content under it, and
-  whatever a recipe writes elsewhere under the home directory, the issue's temporary directory,
-  cache and data homes and bun install cache being one set its roles share on the pod's own disk
-  instead, each role's state home its own directory there, and the two Go caches one pair on that
-  disk shared by the issue's roles —
-  with a per-role limit over a smaller request. A role's reservation is
-  `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
-  `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
-  `ephemeral_storage_request` what the scheduler reserves of it, each optional, each request at most
-  its limit), and the daemon's defaults fill the rest — 750m and 6Gi for the implementer and
-  tester; 750m and 4Gi for the reviewer; 250m and 1Gi for the architect, planner and merger; 1 CPU
-  and 4Gi for the controller (`controller: daemon` only), each both request and limit; 20Gi of disk
-  for the implementer and tester and 10Gi for every other role, over a 1Gi request each. A cpu or
-  memory request the file leaves out equals the role's limit, so a deployment that sets none runs
-  only `Guaranteed` pods. A lower request — `implementer: {memory: 32Gi, memory_request: 8Gi}` for
-  an agent whose memory comes in bursts — makes every pod holding that role `Burstable`: more pods
-  fit a node and a cluster that bills by requests bills less, but under node memory pressure the
-  kubelet evicts a `Burstable` pod using more than its request before any `Guaranteed` one, or the
-  kernel OOM-kills it, which stalls the tree until the pod is relaunched and its roles resume. The
+- **One reservation per pod, no affinity set by Legion.** An issue pod runs every role of the
+  issue in one container, `roles`, each role's process in Linux namespaces of its own that keep
+  its tokens out of its siblings' reads; the roles share the pod's own disk and network, so code
+  one of them plants there can run in another with that one's credentials. Every container of a
+  Legion pod carries a cpu and memory limit with a
+  request no greater than it, and bounds its ephemeral storage — the node's disk: the image's own
+  content and each role's home and `/tmp`, the issue's temporary directory, cache and data homes
+  and bun install cache being one set its roles share on the pod's own disk instead, each role's
+  state home a separate directory there, and the two Go caches one pair on that disk shared by the
+  issue's roles — with a limit over a smaller request. `runtime.kubernetes.resources` takes two
+  keys: `issue`, the one reservation of every issue pod (its `roles` container and both init
+  containers), and `controller`, the daemon-launched controller's pod's (`controller: daemon`
+  only). Each takes `cpu` and `memory` (the limits), `cpu_request` and `memory_request` (what the
+  scheduler reserves of them), `ephemeral_storage` (the disk limit) and
+  `ephemeral_storage_request` (what the scheduler reserves of it), each optional, each request at
+  most its limit, and the daemon's defaults fill the rest: `issue` 3 CPU and 19Gi, request and
+  limit alike, 80Gi of disk over a 6Gi request; `controller` 1 CPU and 4Gi, 10Gi of disk over 1Gi.
+  A workflow role's key is refused (`runtime.kubernetes.resources.<role> is gone: an issue pod has
+  one reservation, runtime.kubernetes.resources.issue`). Under gVisor every process of a pod already
+  used whatever the pod had free, so the pod's peak must fit its reservation: an issue pod measured
+  at 1-minute resolution used its whole 19Gi for minutes while its reviewer ran a review
+  (2026-10-21). A cpu or memory request the file leaves out equals the limit, so a deployment that
+  sets none runs only `Guaranteed` pods. A lower request — `issue: {memory: 32Gi, memory_request:
+  8Gi}` for issues whose memory comes in bursts — makes the issue pod `Burstable`: more pods fit a
+  node and a cluster that bills by requests bills less, but under node memory pressure the kubelet
+  evicts a `Burstable` pod using more than its request before any `Guaranteed` one, or the kernel
+  OOM-kills it, which stalls the tree until the pod is relaunched and its roles resume. The
   `resource-limits` row of `legion state --json` and `legion start --check-config` both name the
-  roles that make a pod `Burstable`. On GKE Autopilot's general-purpose, `Balanced` and `Scale-Out`
-  pods, a request below the limit is honoured only in a cluster that supports bursting
+  `Burstable` pods (`resources: Burstable (a request below the limit): the issue pod; every other
+  pod is Guaranteed`). On GKE Autopilot's general-purpose, `Balanced` and `Scale-Out` pods, a
+  request below the limit is honoured only in a cluster that supports bursting
   (1.30.2-gke.1394000 or later on cgroup v2, with the `efficiency-daemon` DaemonSet running), and
   otherwise each limit is set to the request; even then such a pod, alone on its node, bursts only
-  to about its own summed requests (21Gi for the implementer example above, never its 32Gi limit).
+  to about its own requests (8Gi for the example above, never its 32Gi limit).
   A `Performance`-class pod bursts into its node's allocatable, but GKE sizes that node from the
   summed requests of its pods and DaemonSets, rounded up to a machine type, and bills that VM, so
-  every Autopilot class sets the burst ceiling from the requests. To give a role real headroom on
-  Autopilot, raise the pod's summed requests (the role's own request, or an idle sibling's) rather
-  than its limit alone. See
+  every Autopilot class sets the burst ceiling from the requests. To give an issue real headroom on
+  Autopilot, raise its request rather than its limit alone. GKE Autopilot also caps ephemeral
+  storage at 10Gi for a pod's main containers and 10Gi for each init container, and clamps a
+  container's limit to its request, so a GKE deployment sets
+  `issue: {ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi}`. See
   [Issue sizing](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
   for the sources. The image probe pod, which every
-  boot runs before anything is served, carries a fixed reservation of its own and no role's share:
+  boot runs before anything is served, carries a fixed reservation of its own:
   250m and 1Gi over 5Gi of disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi
-  at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from
+  at a time and runs no lane or browser, and a larger probe could keep the daemon from
   booting on a full pool. A pool with no room even for that does not stop the daemon: its probe pod
   stays Pending Unschedulable, it logs `boot probe is waiting on capacity` with the scheduler's
   reason and tries again every 5 minutes, serving nothing until the probe passes, and the
@@ -149,7 +163,7 @@ Dispatch read them, delete the files, then install every App from
   past its disk limit has its own pod evicted, the offending issue's alone, rather than the node
   reaching `DiskPressure` where another tree's pod can go; the 1Gi request reserves almost no disk,
   so a node's root volume can be oversubscribed by the pods' limits — an operator who knows the
-  root volume raises `ephemeral_storage_request` toward a role's expected use so the scheduler
+  root volume raises `ephemeral_storage_request` toward the issue pod's expected use so the scheduler
   reserves disk and places no pod a full node could not hold. Legion sets no affinity on a pod (GKE
   Autopilot adds its own to an issue or controller pod): an issue pod carries a disk of its own and
   shares none, so the
@@ -296,7 +310,8 @@ What each part is for:
   projected ServiceAccount token for the broker's audience is mounted. The daemon logs in with that
   token at every start and keeps logging in; no person approves it, provided the broker's
   `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
-- **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role's container
+- **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role, in its own
+  namespaces,
   runs before each start of its Oh My Pi, such as installing an Oh My Pi plugin from a marketplace
   repository. It runs in the role's working directory with the role's environment, and its `git`
   answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
@@ -319,6 +334,37 @@ What each part is for:
   `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
   `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
   `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
+- **`role_config_files`** (optional) gives one role Oh My Pi settings overlays no other role gets,
+  for example a model fallback chain for the roles whose output a machine checks:
+
+  ```yaml
+  role_config_files:
+    implementer: [/etc/legion-operator-roles/fallback.yml]
+    tester: [/etc/legion-operator-roles/fallback.yml]
+    merger: [/etc/legion-operator-roles/fallback.yml]
+  ```
+
+  Each key is a role (`architect`, `planner`, `implementer`, `tester`, `reviewer`, `merger`, or
+  `controller` under `controller: daemon`), each value a list of absolute paths. The role's
+  `PI_CONFIG_FILES` names them after the overlays every role names (`PI_CONFIG_FILES` in
+  `runtime.kubernetes.pod.env`, or `runtime.tmux.pi_config_files`), so each outranks those; a role
+  you leave out is told exactly what it is told without the key. The loader refuses an unknown
+  role, an empty list, a relative path, a path named twice or one every role already names, and a
+  role `worker_backends` puts on `claude`. Under Kubernetes each file must be in a mount of
+  `runtime.kubernetes.pod.volume_mounts` (`legion start --check-config` refuses one that is not),
+  and the image probe reads each named role's overlays in the pod's mounts at boot, so a file the
+  ConfigMap lacks, or one Oh My Pi cannot parse, stops the boot naming the role and the file, never
+  that role's start. Under tmux boot and `--check-config` refuse a file the host does not have, and
+  boot refuses one Oh My Pi cannot parse. The capability report's `model-fallback` row reads only
+  the overlays every role names, so a deployment that turns fallback on for some roles alone
+  records `capabilities.decided.model-fallback`. Only loading is per role: every role of a pod, and every pane
+  under tmux, can read every role's overlay file, so never put a secret in one. Adding the mount
+  to a running deployment replaces every affected issue pod at the restart: each of its running
+  roles, named or not, loses its turn and resumes its session uncharged in a new pod, and the old
+  pod's disk goes with it, unpushed work included (a pod with no role running is replaced at the
+  first launch into it). Add it when no role of an affected issue is mid-turn and every role has
+  pushed. The repository's `docs/kubernetes.md` ("Operator
+  configuration") shows the overlay and its mount.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
@@ -432,7 +478,9 @@ pod the daemon launches and keeps running (`controller: daemon`).
 
 ### In the cluster
 
-Set `controller: daemon` in `legion.yaml` (it needs `runtime: kubernetes`) and restart the daemon.
+Set `controller: daemon` in `legion.yaml` (it needs `dispatch_url`) and restart the daemon. Under
+`runtime: tmux` the daemon launches the controller as a pane in a window of its own, `controller`,
+and supervises it the same way; the rest of this section is the Kubernetes runtime's.
 It launches the controller at boot as an Agent Sandbox pod, `legion-<project>-controller`, with the
 same model access as the workers and a volume of its own, which its Sandbox owns, relaunches it when it
 dies, and resumes the same session. You start nothing, and `legion controller start` against this
@@ -587,8 +635,9 @@ Closing the terminal leaves the project without one, and the daemon logs
    the new daemon is up: that records the suspension as yours. Act only on the claims the state
    names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
    `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
-   architect, retry a failed one (`legion claims retry`, which relaunches its session with fresh
-   budgets), and bring a suspended phase worker back as
+   architect, retry a failed one (`legion claims retry --claim <token>`, which relaunches its
+   session with fresh budgets; `legion claims retry --failed` retries every failed claim, and a
+   failed phase worker whose issue is held for its own role retries that phase), and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
    shows for its `suspendedBy`. Never resume or retry by hand a claim of a lingering tree or of an
    issue parked out of the workflow: re-admission or the issue's return to `todo` starts it.
@@ -622,11 +671,18 @@ Closing the terminal leaves the project without one, and the daemon logs
   ```text
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 active, 1 waiting, cap 4; 9 issues
+  roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
   open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
   ```
+
+  The `roots waiting on a person` line counts the roots that gave their admission slot back to
+  wait on a person (phase `awaiting_person`), how many have been answered — each first in line for
+  the next free slot — and each by key with what it waits on (`none` when no root waits). An
+  unanswered one is in neither admission list, so without this line the capacity it freed looks
+  idle.
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
@@ -636,7 +692,10 @@ Closing the terminal leaves the project without one, and the daemon logs
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
   `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) and, for a closed issue whose
+  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
+  `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
+  `answeredAt` with `answeredBy` once it was answered) and, for a closed
+  issue whose
   production check is open, `check` (`repo`, `pullRequest`, `mergeCommit`, `openedAt`, `looks`,
   `lookOpen`, `lastWake` with its `kind`, `detail` and `at`, `nextWakeAt`, `last`), the
   `controllerLocator`, `pendingStatusWrites`,
@@ -660,11 +719,11 @@ Closing the terminal leaves the project without one, and the daemon logs
 - **The controller's terminal** is where the controller says what it did each turn. You can type to
   it at any time; a message from you is always handled first.
 - **The cluster** shows each issue as a Sandbox and a pod labelled with its tree and issue, with one
-  container per role:
+  container, `roles`, whose log prefixes every line with its role:
 
   ```sh
   kubectl -n legion get sandboxes,pods -l legion.dev/tree=WIDGETS-12
-  kubectl -n legion logs <pod> -c implementer       # that role's launcher, its shim and Oh My Pi
+  kubectl -n legion logs <pod> -c roles | grep '^implementer: '   # that role's launcher, its shim and Oh My Pi
   kubectl -n legion logs <pod> -c workspace-init    # the workspace provisioning
   ```
 

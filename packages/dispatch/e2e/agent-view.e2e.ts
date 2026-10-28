@@ -379,7 +379,10 @@ test("the conversation view replays what the session held, streams its next turn
     // A session Dispatch has never heard from sits in a collapsed fold, its row mounted and
     // hidden until the fold opens.
     await page.getByRole("button", { name: /No Dispatch activity/ }).click();
-    await agentRow(page, planner.session_id).getByRole("link", { name: "Open" }).click();
+    // The row's live link, which `AgentName` draws beside the row's toggle.
+    await agentRow(page, planner.session_id)
+      .getByRole("link", { name: "Open live conversation with Planner" })
+      .click();
     await expect(page).toHaveURL(new RegExp(`/agents/${planner.session_id}/live$`));
 
     // What the session replayed: the human's prompt, the reply, and the tool call with its

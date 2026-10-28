@@ -13,6 +13,39 @@ There is no Monitor and no native Claude messaging socket path. The server's too
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
 
+What those subscriptions missed while they were down, the server reads back from Envoy's
+notification stream through its listener (`POST /v1/replay`) with the shared engine
+`@legion/envoy-client/replay`, which pi-envoy uses too (its rules are "Missed messages" in
+`packages/pi-envoy/AGENTS.md`). A sweep runs at channel start (a resume included), on each nats.js
+`reconnect` status, on every heartbeat and after a new follow, and shows each stored frame the
+session was not shown, once, through the same path a live frame takes (the channel notification,
+or the Legion bridge's inbox), with a last line saying when it was published while the
+connection was down (`replayedText`, worded by the engine, as are the notices, which its
+`envoyNoticeText` renders in TOON as every live card is); a frame there runs nothing. Role
+messages and team or other ad-hoc topics stay live only. The live path records each frame
+Claude Code was handed in the engine's ledger before its claim settles, and drops a frame the
+ledger holds (a repeat after a restart). The state is one file per session id,
+`replay-<url-encoded session id>.json` in the
+plugin's state directory (`src/replay-state.ts`, mode 0600, written by rename): the cursors, the
+followed subjects, which the server follows again at start even after the listener reaped its
+interests, and at most 72 hours of ledger, at most 20,000 entries; no sweep prunes these files,
+since Claude Code can resume a session at any later time. A `/clear` handoff to a new id starts a
+fresh file, as a new session does, so nothing from before it comes back. A frame that fails three
+times, or a live frame that fails and no sweep will show (one that arrived before its subject's
+cursor started included, stamped when its subscription yielded it, `readArrivals`, not when the
+frames queued before it finished delivering), is replaced by a notice naming it on
+the same path; a notice that cannot be shown, and a listener that does not replay (404,
+`REPLAY_UNAVAILABLE`, 401 or 403), go to stderr. A crash between the hand-off and the ledger
+write can show a frame twice, never lose it. The host policy pi-envoy shares is the engine's too:
+which subjects are followed for replay (`replayFollowedSubjects`: the agent subject and every
+topic but a role's or one reaching a private stream subject, which registration leaves out too:
+`reachesPrivateStreamSubject`, the listener's rule, another session's agent subject, a
+failed-delivery lane, the Legion controller lane, or a wildcard reaching one), which remembered
+topics come back at start
+(`rememberedTopics`), when a replayed `subscription.removed` closes a topic and takes it out of
+the registry (`closeReplayedRemoval`), and which one-time notices are a card rather than a warning
+(`routeReplayNotice`); this server keeps only how it shows a card, where it warns, and its file.
+
 A session advertises the delivery modes its deliveries' path can honour, never `btw`, and none at
 all when its deliveries are channel notifications Claude Code did not load (`src/claude-channel.ts`;
 a Legion pane's go to the bridge's inbox instead, so the gate does not apply to it). One whose
@@ -32,7 +65,7 @@ Dispatch asks stay on Dispatch.
 | --- | --- | --- |
 | Claude plugin manifest | `.claude-plugin/plugin.json` | Declares the MCP configuration only; it must not declare a Monitor. `hooks/hooks.json` is auto-discovered. It declares no `version`, and neither does the plugin's entry in the root `.claude-plugin/marketplace.json` (tested), so Claude Code versions the plugin by its commit: `claude plugin marketplace update legion-plugins`, then `claude plugin update claude-envoy@legion-plugins`, installs main's current tree (README "Updates"); a declared `version` holds every install until someone changes it. |
 | Oh My Pi plugin manifest | `.omp-plugin/plugin.json` | Empty `mcpServers`, which is how omp is told this plugin has no MCP server: the channel server exits without Claude Code's session identity, and omp gets Envoy and Dispatch from `@sjawhar/pi-envoy`. omp reads this file before `.claude-plugin/plugin.json` and a manifest `mcpServers` replaces `.mcp.json` rather than merging; omitting the key falls through to `.mcp.json` and relaunches the server. Claude Code never reads it. Its `version` equals `package.json`'s (tested); omp reads only the file's `mcpServers` and that it exists, never its `version`. |
-| Skills | `skills/asd-ste100`, `skills/envoy`, `skills/dispatch`, `skills/dispatch-first`, `skills/dispatch-brainstorming` | Relative symlinks into the root `skills/`; the plugin ships only these five, the ones a standalone Claude Code session uses (the rest belong to Legion roles on Oh My Pi; README "Skills"). Claude Code copies the targets into its cache at install. |
+| Skills | `skills/asd-ste100`, `skills/envoy`, `skills/dispatch`, `skills/dispatch-first`, `skills/dispatch-writing-specs` | Relative symlinks into the root `skills/`; the plugin ships only these five, the ones a standalone Claude Code session uses (the rest belong to Legion roles on Oh My Pi; README "Skills"). Claude Code copies the targets into its cache at install. |
 | Committed bundle | `dist/`, `scripts/build.ts` | `bun run build` / `bun run check-dist`. The plugin cache has no `node_modules`, so the four executables (the channel server, the session hook, the title hook and the `dispatch` CLI, `BUNDLE_ENTRYPOINTS`) ship bundled, with `dist/THIRD_PARTY_NOTICES` (the inlined packages' licenses, from Bun's metafile through the root `scripts/third-party-notices.ts`); CI compares a fresh build on the pinned Bun (`.bun-version`). A mode folded into an existing bundle is paid for by that bundle's every other mode: an ESM entrypoint evaluates its whole module graph before it reads `argv`, which is why the title hook has an entrypoint of its own and why a hook on a blocking event is weighed by what its bundle imports, not by what its mode runs. |
 | The `dispatch` CLI | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (built from `../envoy-client/bin/dispatch.ts`), `hooks/session-hook.ts` | Claude Code puts the plugin's `bin/` on the Bash tool's `PATH`. The `open-asks` hook writes `export DISPATCH_HOST=claude` and `export ENVOY_CONFIG_FILE='<path>'` (the envoy.json Claude Code's rule picks, `$CLAUDE_CONFIG_DIR/envoy.json` when that is set; single-quoted, the form Claude Code's PowerShell bridge also reads) to `CLAUDE_ENV_FILE`, each unless the file already holds that line, since every `SessionStart` of a session runs it; with no workable file location (a relative `CLAUDE_CONFIG_DIR`, `ENVOY_CONFIG_FILE` or `XDG_CONFIG_HOME`) it writes no `ENVOY_CONFIG_FILE` line. The command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A Bash that takes nothing from that file, as a subagent's can (anthropics/claude-code#46696), has `DISPATCH_HOST` unset and the `CLAUDE_CODE_CHILD_SESSION=1` Claude Code sets in every Bash, so its `dispatch` command takes host `claude` and reads `CLAUDE_CONFIG_DIR` itself, by the plugin's own rule. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which Claude Code sets fresh in every Bash command and moves on `/clear`. The command prints the follow notice itself, once per ask. |
 | Channel configuration | `.mcp.json`, `bin/envoy-channel.ts` | Launch is `bun ${CLAUDE_PLUGIN_ROOT}/dist/envoy-channel.js`; stdout remains pure MCP protocol. The `env` block passes through `CLAUDE_PROJECT_DIR` only — an unset `${VAR}` is substituted literally, so optional inputs are inherited, never listed. |

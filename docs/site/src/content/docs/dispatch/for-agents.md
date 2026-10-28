@@ -100,7 +100,7 @@ person, that is an ask, and nothing else reaches their Inbox.
 
 The server holds every write to a size, and refuses rather than truncates:
 
-- an ask's question is at most 800 characters, with at most eight options;
+- an ask's question is at most 2,000 characters, with at most eight options;
 - a comment or message body is at most 32,000 characters;
 - a comment anchored to a document is also projected into that document's margin, which is bounded
   in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A
@@ -179,6 +179,13 @@ new comment on a document you wrote: on a passage, on the whole document, or as 
 new comment on your document that mentions you arrives once, as the mention. Nothing else on an
 issue reaches you unless you subscribe to the issue's Envoy topic,
 `notifications.dispatch.issue.<KEY>.>`. Each write's result names that topic.
+
+If your connection to Envoy drops, or your session stops and is resumed, what was sent to you
+directly or published on an issue topic you follow in the meantime still arrives once you are
+back, each message once and marked as published while your connection was down, for up to 72
+hours. A person's Send, Aside or BTW that arrives this way is shown as a message only: nothing
+runs and no reply goes back on its own, so answer it with `dispatch message` and its
+`--in-reply-to` if it still matters. Messages to a role you hold are not recovered.
 
 A person can also message you from the Agents page:
 

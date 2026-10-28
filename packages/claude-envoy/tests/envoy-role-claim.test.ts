@@ -2,8 +2,9 @@ import { expect, jest, test } from "bun:test"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
+import type { Interest } from "@legion/envoy-client/transport"
 import type {
+  ChannelConnectionStatus,
   ChannelForwarderConnection,
   ChannelInboundMessage,
   ChannelTopicSubscription,
@@ -16,6 +17,7 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
+import { emptyReplay, type FakeClient } from "./channel-session-harness"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -42,6 +44,8 @@ class IdleNats implements ChannelForwarderConnection {
   close(): Promise<void> {
     return Promise.resolve()
   }
+
+  async *status(): AsyncGenerator<ChannelConnectionStatus> {}
 }
 
 const notifier: ChannelNotifier = {
@@ -64,10 +68,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
   const stateDirectory = join(tmpdir(), `claude-envoy-claim-${crypto.randomUUID()}`)
   const reasserted = Promise.withResolvers<void>()
   const setRoles: unknown[] = []
-  const client: Pick<
-    EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
-  > = {
+  const client: FakeClient = {
     subscribe: async () => interest(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
@@ -78,6 +79,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
+    replay: emptyReplay,
   }
   let session: ChannelSession | undefined
 

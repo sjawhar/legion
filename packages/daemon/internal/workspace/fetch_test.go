@@ -1752,7 +1752,7 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 // ready, and the delta from GitHub gets a FetchTimeout of its own, so the fetch's waits, transfers
 // and checks end within FetchBudget however long it waited and however slow the stream was. A
 // cache ready 35 minutes in, whose history takes 25 minutes to check, gives the delta its whole
-// bound, and the fresh feed is filled. So does a cache ready on the wait's last ask, 39 min 50 s
+// bound, and the fresh feed is filled. So does a cache ready on the wait's last ask, 129 min 50 s
 // in, whose history takes that whole first bound: before the delta had a bound of its own, the
 // fetch died there and its replacement streamed the cache again (sjawhar/legion#2235). The
 // fetch still ends inside FetchBudget.

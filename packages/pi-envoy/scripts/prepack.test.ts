@@ -47,8 +47,8 @@ describe("omp.skills / prepack manifest contract", () => {
       expect(readdirSync(staged).sort()).toEqual([
         "asd-ste100",
         "dispatch",
-        "dispatch-brainstorming",
         "dispatch-first",
+        "dispatch-writing-specs",
         "envoy",
       ]);
     });

@@ -37,7 +37,7 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 // Credential is the harness's GitHubCredential: every role's gh bundle renders the implement App's
 // tokens, the one App the harness holds — its full lease for owner (the run's repository's owner
 // when owner is empty, the controller's launch), and its read-only lease for every other owner of
-// the run's repositories. Stage 4a proves the files reach each role's container, follow the lease
+// the run's repositories. Stage 4a proves the files reach each role, follow the lease
 // and pick the owner a command names, not which App a role writes as; Stage 4b's daemon hands each
 // role its own.
 func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner string) (ghconfig.Bundle, error) {
@@ -64,17 +64,17 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 	return bundle, nil
 }
 
-// resolveApp reads the implement App's key from the secret store, handed to one child process
-// through the agent-tier `secrets <KEY> -- …` injection, mints the App's installation token for
+// resolveApp reads the implement App's key from the secrets broker, handed to one child process
+// through the `agent-secrets <KEY> -- …` injection, mints the App's installation token for
 // each of the run's two repositories' owners, and with them reads each repository's default branch
 // as GitHub names it, the base every launch on it provisions at; the key stays in this process's
 // memory.
 func (r *liveRig) resolveApp() error {
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(r.ctx, "secrets", r.env.appKeyName, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
+	cmd := exec.CommandContext(r.ctx, "agent-secrets", r.env.appKeyName, "--reason=legion-live-proof-github-app-key", "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("reading %s from the secret store: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("reading %s from the secrets broker: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))
 	}
 	pem, err := config.DecodePrivateKey(stdout.String())
 	if err != nil {

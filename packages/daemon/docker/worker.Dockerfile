@@ -38,9 +38,9 @@
 # runs every toolchain command, the language servers', Python's and the browser's included; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
-# loads with the Envoy plugin, checks every image-site row of the capability table against this image,
-# and prints the table, then the OK line the daemon's probe Sandbox reads. A broken
-# image never publishes.
+# loads with the Envoy plugin, checks every image-site capability and TLS client against this image,
+# and prints their results before the OK line the daemon's probe Sandbox reads. A broken image never
+# publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -49,7 +49,7 @@
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is the one line of
 # the repository's .omp-pin, its only home, which the tools stage copies.
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.4
 ARG MISE_VERSION=v2026.8.12
 # SHA-256 of the tools stage's linux-x64 archive (the image builds linux/amd64 only; `install-jj`'s
 # mise step reads this pair from here too). Take the hash from the output of
@@ -74,16 +74,21 @@ ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
 # stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
 # or installing anything.
-ARG UV_VERSION=0.12.21
-ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
+ARG UV_VERSION=0.13.5
+ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 # Node 24 LTS.
-ARG NODE_VERSION=24.21.0
-ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
-ARG AWS_CLI_VERSION=2.37.6
+ARG NODE_VERSION=24.22.1
+ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+# Chromium for Testing is pinned separately from Debian's chromium package because it carries the
+# Chrome Root Store revision that distrusts the compromised emSign root. Its SHA-256 is for
+# chrome-linux64.zip from Chrome for Testing's public release archive.
+ARG CHROMIUM_VERSION=158.0.8117.2
+ARG CHROMIUM_SHA256=80d11972d4c483716685fed17ca95cf69eb9c849b1146c0da55c07a58617f627
+ARG AWS_CLI_VERSION=2.38.4
 # AWS publishes no SHA-256 for the CLI, only a PGP signature. This pin is the SHA-256 of the zip whose
 # `.sig` gpg verified as a good signature from the AWS CLI Team key
 # FB5DB77FD5C118B80511ADA8A6310ACC4672475C. A version bump repeats that check before taking its hash.
-ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6fbb2
+ARG AWS_CLI_SHA256=10ab32a95b27138d7cc1c1ac4ebb4d3acab60cd0a0df2fc37c4e2c440ed40bce
 # kubectl, pinned to the minor version of the API server of the production cluster the Legion workers
 # run on (v1.35.7 when this pin was set): Kubernetes' version skew policy supports kubectl one minor
 # version either side of its server, so a bump follows that server's minor. A deployment whose cluster
@@ -219,9 +224,10 @@ RUN --mount=type=secret,id=github_token \
 
 # ------------------------------------------------------------------------------------------------
 # go: the Go coordinator's `legion`, built as the repository builds it — `go build ./cmd/legion` in
-# packages/daemon under go.work, whose other module (packages/envoy) contributes only its go.mod and
-# go.sum to dependency selection — static, so it runs on any base. LEGION_REVISION is the commit the
-# workflow builds; it is linked in so `legion version` names it, and the build refuses without it.
+# packages/daemon under go.work, whose other module (packages/envoy) contributes its go.mod and go.sum
+# to dependency selection and its listenfd package to `legion start` — static, so it runs on any
+# base. LEGION_REVISION is the commit the workflow builds; it is linked in so `legion version` names
+# it, and the build refuses without it.
 # The same toolchain builds gopls (static too) for the runtime stage's /usr/local/bin/gopls.
 FROM mirror.gcr.io/library/golang:${GO_VERSION}-alpine AS go
 WORKDIR /src
@@ -298,6 +304,8 @@ ARG NODE_VERSION
 ARG NODE_SHA256
 ARG AWS_CLI_VERSION
 ARG AWS_CLI_SHA256
+ARG CHROMIUM_VERSION
+ARG CHROMIUM_SHA256
 ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ARG GO_VERSION
@@ -314,9 +322,11 @@ RUN set -eu; \
     curl -fsSLo "$t/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"; \
     curl -fsSLo "$t/go.tar.gz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
     curl -fsSLo "$t/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    curl -fsSLo "$t/chromium.zip" \
+      "https://storage.googleapis.com/chrome-for-testing-public/${CHROMIUM_VERSION}/linux64/chrome-linux64.zip"; \
     printf '%s  %s\n' "$UV_SHA256" "$t/uv.tar.gz" "$NODE_SHA256" "$t/node.tar.xz" \
       "$AWS_CLI_SHA256" "$t/awscli.zip" "$GO_SHA256" "$t/go.tar.gz" \
-      "$KUBECTL_SHA256" "$t/kubectl" > "$t/SHA256SUMS"; \
+      "$KUBECTL_SHA256" "$t/kubectl" "$CHROMIUM_SHA256" "$t/chromium.zip" > "$t/SHA256SUMS"; \
     sha256sum --check --strict "$t/SHA256SUMS"; \
     tar -xzf "$t/uv.tar.gz" -C /out/bin --strip-components=1 --no-same-owner \
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
@@ -337,6 +347,8 @@ RUN set -eu; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
     mkdir -p /out/licenses; \
     cp "$t/aws/THIRD_PARTY_LICENSES" /out/licenses/aws-cli-THIRD_PARTY_LICENSES; \
+    unzip -q "$t/chromium.zip" -d "$t"; \
+    mv "$t/chrome-linux64" /out/chromium; \
     rm -rf "$t"
 
 # ------------------------------------------------------------------------------------------------
@@ -382,7 +394,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
 # util-linux (flock): the install Legion renders for an installing launch serialises on the issue's
 # shared bun install cache with /usr/bin/flock (installBlock,
-# packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
+# packages/daemon/internal/runtime/sandbox/plugins.go), so a pod whose image lacks it
 # fails every installing launch. The entry buys nothing today — Debian's priority:required set
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
 # failure the day a base drops it. Do not delete it as redundant.
@@ -416,9 +428,15 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
 # say how).
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
-# creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
+# creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
+# /var/run/legion/{gh,private,state,agent-secrets} are the empty, root-owned mount points an issue
+# pod's role-init binds each role's own directories back at (packages/daemon/internal/launcher,
+# roleinit_linux.go): inside a role's namespaces the role is the runtime user, which can create
+# nothing under the root-owned /var/run, so the image makes them. The controller's pod mounts its
+# volumes over the same paths, as it always has. The final step refuses an image where any is not
+# root's or is not empty.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
@@ -426,7 +444,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils 
     && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
-    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
+    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin \
+    && install -d -m 0755 -o root -g root /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets
 
 # ------------------------------------------------------------------------------------------------
 # debian-packages (build only): trixie's own dpkg-query over runtime-base's own database, one
@@ -569,8 +589,14 @@ RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-COPY --from=plugin --chown=legion:legion /out/pi-envoy /opt/legion/pi-envoy
-COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
+# The two plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
+# install the plugins loads them from here, one container's filesystem, so a role that could write
+# them could change the plugin code its siblings load. A launch that installs the plugins loads them
+# from the role's state home on the issue volume instead, which every role of the issue can write;
+# nothing here covers that copy. The final step refuses an image where anything under them is not
+# root's or is writable by anyone else.
+COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
+COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
@@ -621,9 +647,9 @@ WORKDIR /home/legion
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
 #    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
-#    variant extracts nothing, while a node that selects the other has each role container write
-#    that one into its writable layer at its first OMP run. The probes in the final step never
-#    wait on it.
+#    variant extracts nothing, while a node that selects the other has each role write that one into
+#    its own home overlay's upper layer, on the pod's role-homes volume, at its first OMP run: up to
+#    six copies in an issue pod. The probes in the final step never wait on it.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -646,9 +672,21 @@ COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
 COPY --from=go /out/gopls /usr/local/bin/gopls
+USER root
+COPY --from=toolchain /out/chromium /opt/chromium
+COPY packages/daemon/docker/tls-roots /usr/share/legion/tls-roots
+# Keep Debian's chromium package for its shared-library dependency closure, but make its vulnerable
+# executable unreachable and expose the pinned Chrome for Testing binary under the usual name.
+RUN rm -f /opt/codegraph/node /usr/bin/chromium /usr/lib/chromium/chromium \
+    && ln -s /opt/node/bin/node /opt/codegraph/node \
+    && ln -s /opt/chromium/chrome /usr/local/bin/chromium
+USER 1000:1000
 # Corepack resolves a project with no `packageManager` to the pnpm and yarn it ships as defaults,
 # never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
 # gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.
+# AWS_CA_BUNDLE makes the AWS CLI use Debian's current system roots. Its vendored bundle has no
+# trust path for example.com's current chain after the compromised AAA root is removed, while the
+# system bundle validates that control and rejects both compromised test chains.
 # CGO_ENABLED=0 keeps cgo off by default now that gcc is on PATH (the apt line above says why gcc is
 # there), for every process that inherits the image's environment: the bash tool, subagents, and go
 # test's test binaries. The toolchain stage's go.env line alone would not reach two of them: a go/build
@@ -659,7 +697,7 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # `go env -w CGO_ENABLED=1` does not override it, since Go ranks the environment above its go env file;
 # and as image ENV a deployment's runtime.kubernetes.pod.env may not set it (sandbox/operatorpod.go
 # imageEnv).
-ENV COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
+ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR, COREPACK_HOME and
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and
@@ -726,7 +764,12 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # directory holds (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
+# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the image's copy
+# of the plugin code (a launch that installs the plugins loads them instead from the role's state
+# home on the issue volume, which every role of the issue can write); the role mount points under
+# /var/run/legion are root's, mode 0755 and empty;
+# and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
 # ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
@@ -754,20 +797,23 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
 # plugins' dist/skills directories). It leaves those agents' models unresolved
 # (--skip-agent-models): the build has none of the operator's model configuration, which the pod
-# brings. Then it checks every image-site row of the capability table against this image, as a
-# worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
-# PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
-# CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, gcc, curl, wget, python3,
-# node, bun, uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with
-# `go version` running (packages/daemon/internal/capabilities/image.go).
-# It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
-# `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
-# capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
-# since the build runs under no operator overlay; a probe pod reads the operator's value — and a build
-# whose image lacks a capability fails here, the
-# probe naming every missing one. The daemon's probe Sandbox runs it again with its own contract, on
-# the pod baseline and under the operator's pod, resolving every agent's model, and refuses a skipped
-# result, before any claim runs on the image (packages/daemon/internal/runtime/sandbox/probe.go).
+# brings. It then checks every image-site capability as a worker's Oh My Pi would find each:
+# `omp setup python --check`; the chromium on PATH (or the browser a PUPPETEER_EXECUTABLE_PATH names)
+# with --version; gopls, typescript-language-server and pyright-langserver on PATH; the CodeGraph CLI
+# on PATH with its plugin enabled in the profile's lock; and go, gcc, curl, wget, python3, node, bun,
+# uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with `go version`
+# running (packages/daemon/internal/capabilities/image.go). It then has node, bun, omp's embedded bun,
+# CodeGraph's Node, uv, the AWS CLI, curl, Python, gh and Chromium refuse each compromised chain while
+# reaching the control. It
+# prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, every TLS
+# decision, then `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered
+# agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is
+# Oh My Pi's own default for retry.modelFallback, since the build runs under no operator overlay; a
+# probe pod reads the operator's value — and a build whose image lacks a capability or trusts a
+# compromised chain fails here, the probe naming every failure. The daemon's probe Sandbox runs it
+# again with its own contract, on the pod baseline and under the operator's pod, resolving every
+# agent's model, and refuses a skipped result, before any claim runs on the image
+# (packages/daemon/internal/runtime/sandbox/probe.go).
 # It needs the natives step 3 extracted, which the cached probe layer above carries. The step leaves no
 # residue: Oh My Pi's logs, and the Go telemetry counters the capability check's `go version` writes
 # under HOME (the toolchain step's XDG_CONFIG_HOME does not reach a probe that runs as a pod would).
@@ -775,9 +821,15 @@ ARG LEGION_REVISION
 ARG PI_LEGION_VERSION
 ARG PI_ENVOY_VERSION
 RUN set -eu; \
-    for dir in /opt/legion /opt/legion/bin; do \
+    for dir in /opt/legion /opt/legion/bin /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    for dir in /var/run/legion/gh /var/run/legion/private /var/run/legion/state /var/run/legion/agent-secrets; do \
+      test -z "$(ls -A "$dir")"; \
+    done; \
+    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
+    echo "plugin files not root's alone: ${plugins:-none}"; test -z "$plugins"; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \

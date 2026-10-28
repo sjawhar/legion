@@ -934,12 +934,21 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Errorf("a release with no locator ran %q", ran)
 	}
 
-	// Resuming from a session file that is gone is a refusal, never a fresh agent.
+	// Resuming from a session file found nowhere over a pane's previous incarnation starts nothing
+	// and is a refusal, never runtime.ErrSessionFileMissing: this runtime takes no claim over,
+	// since `runtime.tmux.take_over` is unset here, and only while that key is set does a session
+	// found nowhere get a fresh agent.
 	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
-	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
-		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
-		t.Errorf("Resume from a missing session file = %v", err)
+	before = len(r.recorded())
+	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil || errors.Is(err, runtime.ErrSessionFileMissing) ||
+		!strings.HasPrefix(err.Error(), "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile) {
+		t.Errorf("Resume from a missing session file = %v, want the refusal to start fresh", err)
+	}
+	for _, argv := range r.recorded()[before:] {
+		if v := verb(argv); v == "new-window" || v == "split-window" {
+			t.Errorf("a resume of a missing session opened a pane: %q", argv)
+		}
 	}
 }
 
@@ -1615,6 +1624,10 @@ func (m markedLauncher) Launch(runtime.SpawnSpec, Host) (string, []string, error
 }
 
 func (m markedLauncher) Marker() string { return string(m) }
+
+func (m markedLauncher) SessionsDir(runtime.SpawnSpec, Host, map[string]string, string) (string, error) {
+	return "", errors.New("markedLauncher keeps no sessions")
+}
 
 // A provider key reaches a pane's OMP as the daemon resolved it at boot — the secretsd key's value
 // under the variable OMP reads, through the daemon-held file the real shim is pointed at — and

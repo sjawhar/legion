@@ -4,6 +4,80 @@
 
 ### Added
 
+- A session shows once each Envoy message it missed while its NATS connection or a subscription
+  was down, NATS was restarting or the session was not running. It asks its listener's new
+  `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
+  and on every topic it follows after where it last read, when a pass opens its agent subject (a
+  start, a switch, a resume), after a subscription is reopened, on each NATS reconnect, on every
+  heartbeat and after `envoy_subscribe`, and shows each message neither the live path nor an
+  earlier sweep showed as a card saying it was published while the connection was down. A
+  replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
+  user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
+  only, and nothing from before the session followed a topic, or older than 72 hours, comes back.
+  A message counts as shown once Oh My Pi wrote its card, or the person's turn it became, to the
+  session file (the message's `message_end`): a card or turn handed over while a turn streams,
+  which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that
+  ends first (a SIGKILL, a pod stopped mid-turn) shows it after the restart instead of losing it.
+  A card Oh My Pi drops unwritten while the process lives on is shown again: one an interrupt
+  (Escape, RPC `abort_and_restore_queue`) withdrew is handed again at the next heartbeat, once
+  the host is idle and holds no message (`ctx.isIdle()`, `ctx.hasPendingMessages()`), and one a
+  switch away dropped is released, so that session's sweep shows it once the host is back on it
+  or resumes it, never recorded before its card is written. A person's Send run as typed input
+  that an interrupt withdrew unwritten (Oh My Pi hands it back to whoever interrupted) is
+  released at that heartbeat, so the next sweep shows it as a card that runs nothing. A BTW is
+  recorded by its event id the moment it arrives, before its side turn and before any reply is
+  posted, in the session's file even while it shuts down, so no sweep shows it as a card again,
+  whether its answer or refusal fails, is still in flight, or the process ends mid-turn or
+  mid-reply and the session is resumed; a Retry of it still runs. Whatever the record, a BTW that
+  reaches replay is shown as one notice that starts no turn, saying it runs nothing, and so is a
+  failure notice naming a BTW: it is handed only once the host is idle with nothing queued, since a
+  streaming turn would run another model turn for it, and waits for the first such heartbeat while
+  a turn runs. The replay's one-time notices (the stream was recreated, older messages may be
+  missing) wait for an idle host the same way. A held notice is recorded in the session file
+  and shown after a restart, or a switch away and back, that cut the hold short. A replayed
+  subscription removal takes the topic out of the listener's registry too, so a later restart
+  does not follow it again.
+  The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
+  cards themselves, read back by the event they name) and where it read to
+  (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
+  live repeat of a frame shown before the restart is dropped too — and a session stopped past the
+  listener's grace follows its topics again; a person's turn written just before the process
+  ended, its record not, can come back once as a card, never lost. A frame that fails to show is
+  retried, and its third failure, or a live failure no sweep will retry (a frame received before
+  its subject's cursor started included, stamped when it arrived even behind a slow delivery),
+  shows one card naming it and how to read it, where a
+  failed injection was only logged before. A recreated stream (its `stream.id` changed, or, from a
+  listener that answers no id, its creation time; a restore moves the creation time under the same
+  id, as can a leader election after a clustered restore, and that is no recreation) or a cursor
+  older than the stream's
+  oldest message is said once as a card, also after a restart that came before it was said; a
+  listener without the route (404) or unable to read the
+  stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
+  on as before. The session registers and replays no followed topic reaching a private stream
+  subject, by the listener's own rule: another session's agent subject (a fork parent's until a
+  pass closes it), a failed-delivery lane, a `notifications.legion.` controller lane, or a
+  wildcard reaching one such as `notifications.agent.*`, which the listener refuses to store; it
+  still follows it live.
+  `scripts/smoke-replay.sh` proves it against a real session, listener and JetStream (INFRA-439).
+
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
+- The `dispatch` command this plugin ships reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it. `dispatch read --help` lists the block forms
+  and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
+  `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
+  node.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line.
+- The `dispatch` skill never claims an issue with the `legion` label unless the session is a
+  Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
+  root's architect while the root waits on a person, and taking that claim takes the tree out of
+  the workflow.
+- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
   every model the session lists as available, the configured thinking level `/effort` reports
@@ -134,6 +208,62 @@
 
 ### Changed
 
+- `dispatch-writing-specs`, `dispatch` and `dispatch-first` tell a session to name the concrete
+  case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
+  choice in those terms, never "Which option?". The ask block template shows that shape. To stay
+  under the 2,000-word guard, lines another of the three skills already says are cut.
+
+- `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
+  own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
+  the session's own tree touches is fixed in that tree's pull request, any other goes to the
+  Legion controller, and a finding that needs a decision is an ask.
+
+- `dispatch request-approval --help`, and `dispatch-writing-specs`, "Each version", name both
+  reviewers a Legion architect runs before an approval request, `plan-gap-analyst` and
+  `plan-reviewer`. `--summary` says that a Legion architect ends it with one sentence giving the
+  two reviews' results.
+
+- Three Dispatch skills ship, under 2,000 words together, from four skills and the
+  dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
+  `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
+  spec's seven parts (Summary, Problem, Goals and non-goals, Requirements, Design, Decisions,
+  Acceptance), the rules for text a person reads, which questions go to a person, the check before
+  each version, where the agent records its own decisions, and the plan as the issue's `plan.md`
+  written with superpowers' `writing-plans`. `dispatch-first` says which of the three to read
+  before which step, and that a person sees an agent's need only through an ask or an approval
+  request. `dispatch` keeps only what `dispatch <command> --help` does not say: its `references/`
+  directory goes, and the rules about one command moved into that command's help. These rules
+  are gone: keep a person's words in the spec, write a decision quoted and dated, a first version
+  holds only what the person settled, ask in stages, "density is the problem, not length", and
+  "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
+  reach 2,000 words.
+- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages: the
+  Design gives a value for each limit, size and time; a choice the person's messages favour is
+  settled; each design choice no source states is a decision entry; the fresh reader gets the whole
+  spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
+  acceptance checks never delay approval; and text is about the design, never the person.
+- `dispatch-writing-specs`, "The outline": a spec's length scales with the change (a small change gets
+  a few sentences per part, no matrix), and the Summary names the change in the reader's own terms,
+  never in a category the writer coined.
+- `dispatch-first`, which every session holds, says: the moment a person blocks your work, open a
+  `dispatch ask` for it, and run `dispatch open-asks` before you say you wait on a person; and record
+  every request you accept in Dispatch before you start it, read that record before a turn ends, and
+  drop no item. `src/skills-guard.test.ts` holds both rules to the context a session receives.
+- `dispatch-writing-specs`: name an issue by its `dispatch://` link and say in a clause what it does
+  for the reader, never a bare key; and when a person's answer, comment or edit changes a text, write
+  what is true now and never narrate the edit, since versions and comments hold the history. In
+  `dispatch`, three lines that repeat what the command prints are gone: the meaning of `You've sent N
+  messages`, "never progress or status" (`dispatch message --help`) and the read-back after an
+  inserted block (`dispatch doc-edit --help`).
+- `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
+  only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
+  such changes into one version. Any other fix goes in the plan or a comment, so the person is not
+  asked to approve the spec again for a small change.
+- The `dispatch` command's notice after a primary spec with no ask block says that a person does
+  not watch the session's chat and sees its need only through an open ask or a spec that waits for
+  approval. The notice for a typed-block opening stored as text cites
+  `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`.
 - The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any
   `notifications.` topic the stream does not store, reaches a session on a serve port through its
   machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
