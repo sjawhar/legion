@@ -46,7 +46,7 @@ async function openCommentThread(page: Page, commentId: string): Promise<Locator
   return (await phoneThread.count()) === 0 ? turn : phoneThread;
 }
 
-test("a comment's callout shows the document's header with its kind and title", async ({
+test("a comment's callout shows the document's header with its kind and title @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -91,7 +91,7 @@ test("a comment's callout shows the document's header with its kind and title", 
   }
 });
 
-test("a comment's ask block shows the decision card", async ({ browser }) => {
+test("a comment's ask block shows the decision card @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Decision in a comment" });
   const comment = await createComment(
