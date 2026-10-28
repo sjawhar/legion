@@ -68,6 +68,9 @@
 
 ### Changed
 
+- The linked `dispatch-writing-specs` skill tells a session to cite code by file and symbol, never a
+  line number, and to say, in each sentence that cites a gate passing, what the pass does not show.
+
 - The `dispatch` command (`dist/dispatch.js`) and the bundled tool descriptions take an ask
   question of up to 2,000 characters and ask for its concrete case first; the generated
   `legion/skills/legion-worker/references/findings.md` carries the concrete finding ask.

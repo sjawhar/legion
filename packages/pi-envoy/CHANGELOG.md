@@ -208,6 +208,14 @@
 
 ### Changed
 
+- `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
+  a line number, since a line number is stale at the next edit; a plan's task adds line numbers when
+  it runs. A sentence that cites a gate passing (a test, review, check or proof) also says, in that
+  sentence, what the pass does not show, so a reader does not take it as evidence of more. To stay
+  under the 2,000-word guard, lines the skill already says another way are cut: the narration rule
+  repeated in "Each version", the Legion reviewer names and design-gate pointer that
+  `skill://legion-architect` holds, the approval Dispatch carries, and the length sentence.
+
 - `dispatch-writing-specs`, `dispatch` and `dispatch-first` tell a session to name the concrete
   case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
   choice in those terms, never "Which option?". The ask block template shows that shape. To stay
