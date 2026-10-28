@@ -2,28 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T20:15:22Z",
-  "round": 15,
-  "headReviewed": "the handoff commit this file is pushed in (code head 1f92d90f, merge of main 8b6ea377 onto retro's 3b8fe46d)",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T20:33:42Z",
+  "round": 16,
+  "headReviewed": "the handoff commit this file is pushed in (code head cd9ecf51, merge of main af1ff09c)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "reason": "conflict-only round after READY_HEAD_CONFLICTS; this round reviews the merge only",
+  "reason": "conflict-only round; reviews the merge only and approves under the architect's 16:38Z rule",
   "mergeVerified": [
-    "scripts/semantic-line-breaks.ts and its two test files identical to approved code head e6f60222",
-    "restructure.ts changes only MIGRATION_NOTE.through 0135 -> 0136 and adds 0136_dashboard_assets to MAIN_MIGRATIONS, matching main's packages/envoy/internal/dispatch/store/migrations/0136_dashboard_assets.up.sql",
-    "restructure.ts --strict on main 8b6ea377's two files: exit 0, byte-identical to the head guides",
-    "the diff against main 8b6ea377 holds only this pull request's files, retro's six docs/solutions notes and .legion/INFRA-631/",
+    "scripts/semantic-line-breaks.ts and its two test files identical to approved code head e6f60222; .legion/INFRA-631/restructure.ts unchanged since round 15",
+    "restructure.ts --strict on main af1ff09c's two files: exit 0, byte-identical to the head guides",
+    "the diff against main af1ff09c holds only this pull request's files, retro's docs/solutions notes and .legion/INFRA-631/",
     "bunx biome check (script, tests, docs/solutions) and strict bunx tsc --noEmit: exit 0; bun test: 90 pass; checker exit 0 on both guides; check-private-names.sh exit 0",
-    "required checks at code head 1f92d90f queued at 20:15Z, none red; 23 threads, 0 unresolved"
+    "the PR body's two stale 0135 mentions are fixed (step 4 now says 0136; the recipe's step 6 too)",
+    "required checks at code head cd9ecf51 queued at 20:33Z, none red; compare cd9ecf51...28c556e8 is .legion/ only",
+    "GitHub reports MERGEABLE; main is still af1ff09c; 23 threads, 0 unresolved"
   ],
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/AGENTS.md",
-      "description": "GitHub reports the pull request CONFLICTING: main af1ff09c (#2331, merged 20:15:02Z) changed packages/envoy/AGENTS.md, and git merge-tree conflicts there. Merge main and regenerate; restructure.ts --strict on af1ff09c's files exits 0 today."
-    }
-  ],
+  "keyFindings": [],
   "thermonuclear": "not run: no code of the pull request changed since the approved code head e6f60222"
 }
