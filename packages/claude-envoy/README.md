@@ -50,6 +50,22 @@ events and sends them to the current Claude Code session as supported
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe`. It renders every envelope with the shared
   `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+- A message published while those subscriptions were down (NATS restarting, the connection
+  dropped, the session not running) is recovered from Envoy's notification stream, which keeps
+  messages for 72 hours: the server asks its listener (`POST /v1/replay`) for what the stream
+  stored on the session's own subject and on each topic it follows, at start (a resume included),
+  after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
+  once, the same way as a live one, with a line saying when it was published while the connection
+  was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
+  Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
+  is anything older than 72 hours, from before the session followed the topic, or from before it
+  first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
+  session was shown and where it read to are kept in `replay-<session id>.json` in the plugin's
+  data directory, so a resume skips nothing the stream still holds and delivers nothing again (up
+  to 20,000 messages shown in 72 hours); a crash between handing a message over and recording it
+  can deliver it twice, never lose it. A message that fails three times is replaced by one notice
+  naming it. Against a listener without the route, the server says once on stderr that missed
+  messages are not recovered, and live delivery goes on as before.
 - A forwarded role-lane envelope (one that still names its `notifications.role.<role>` topic while
   arriving on the direct subject) receives its empty receipt immediately after the server accepts
   the event into its ordered MCP notification queue. That confirms adapter acceptance, not that
