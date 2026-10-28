@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-177",
+  "completed": "2026-10-28T20:19:00Z",
+  "round": 12,
+  "headTested": "0de262d4859c700203ed30145d9bf22522c80858 (code head c0ee85bdd9f4, forward merge with main 8b6ea377)",
+  "fingerprint": "changed, by the Dispatch migration renumber alone. I compared this PR's own diff (fork_point(main@origin | head)..head, '~(.legion | docs/solutions)', --context 0, hunk headers and index lines dropped) at my last verified head 8f4e9993 and at 0de262d4: 17,119 lines each, and they differ only in the renumber 0136 -> 0137 (the two migration file names, the migration file's and census's first comment lines, handoffs.go's comment, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, the envoy changelog fragment) and the routes-table count, '-142 +146' where it was '-141 +145' (main added one route; this PR still adds four). No logic changed. Retro's learnings (cbadd134) and its .legion/ removal (b1dbc6bf) are outside the fileset, as merge-gate.md exempts them.",
+  "dispatchMigration0137": "Dispatch built from main af1ff09c (whose newest migration is 0136_dashboard_assets) migrates a fresh database to 136 and answers the handoff route 404; the head's Dispatch migrates it to 137, keeps the existing issue, and records plan v1; 0137's census answers 0; handoffs and dashboard_assets both exist; main's Dispatch then serves the 137 database (GET UPG-1 200).",
+  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main af1ff09c with 0de262d4 -> no conflict; contract 42, daemon 0062, Dispatch 0137 free on main (41, 0061, 0136).",
+  "ci": "Read 20:18Z at code head c0ee85bd: every lane queued (build x2, changes, lint, pr-title, test, typecheck, the Daemon Go suite on Postgres 16). Read as running, not waited for.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "`source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t12?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s."
+  },
+  "failures": [],
+  "failed": 0,
+  "notes": [
+    "Retro removed .legion/INFRA-177/ (b1dbc6bf) before this merge sent the issue back; the implementer's and this testing round's handoff files are committed there again because the running daemon is the release before this change, which still reads them. Retro's removal is needed again before READY."
+  ],
+  "proof": [
+    {
+      "criterion": "The merge changed this PR's own lines only by renumbering Dispatch migration 0136 to 0137",
+      "surface": "the PR's own diff against its fork point, at the last verified head and at the new head",
+      "command": "jj diff --from 'fork_point(main@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d', for 8f4e9993 and 0de262d4, then diff of the two",
+      "observed": "17,119 lines each; the differences are 0136 -> 0137 in two file names, three comments and three doc lines, and the route count 141/145 -> 142/146",
+      "headSha": "0de262d4859c700203ed30145d9bf22522c80858",
+      "negativeControl": "the same comparison between round 9's verified head 46727fbe and round 11's 8f4e9993 differs in 115 lines, 30 of them naming the daemon API contract (41 -> 42) and 12 the handoff.recorded/event-refresh move: the logic changes round 11 checked"
+    },
+    {
+      "criterion": "Dispatch migration 0137 applies on main's 0136, and the release before runs over it",
+      "surface": "Dispatch built from main af1ff09c and from the head on one database",
+      "command": "upg.sh: ./dispatch-main, create UPG-1, POST …/handoffs/plan; ./dispatch-srv on the same database, POST again; ./dispatch-main again; 0137_handoffs.census.sql",
+      "observed": "main at 136; head at 137 with UPG-1 kept and plan v1 recorded; census 0; main serves the 137 database (200)",
+      "headSha": "0de262d4859c700203ed30145d9bf22522c80858",
+      "negativeControl": "main's Dispatch answers POST /api/v1/issues/UPG-1/handoffs/plan 404"
+    },
+    {
+      "criterion": "Smoke: A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon",
+      "surface": "scripts/e2e/handoff-records.sh",
+      "command": "LEGION_TEST_PG_DSN=…/legion_t12 … bash scripts/e2e/handoff-records.sh",
+      "observed": "9 checks ok, PASS in 41s",
+      "headSha": "0de262d4859c700203ed30145d9bf22522c80858",
+      "negativeControl": "a 262,145-byte body -> 413 CAP_EXCEEDED (a6-control); another session's record -> 403 HANDOFF_SESSION_MISMATCH (a3)"
+    }
+  ]
+}
