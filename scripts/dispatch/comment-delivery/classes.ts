@@ -121,8 +121,10 @@ export interface CauseEntry {
   readonly fix: string;
 }
 
-const FAN_OUT_TEST = "packages/envoy/internal/dispatch/outbox/publisher_comment_recipients_test.go";
-const FAN_OUT_FIX = `The Dispatch outbox fan-out fix in this pull request. Its test is ${FAN_OUT_TEST}.`;
+const CLAIMANT_TEST = "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go";
+const CLAIMANT_FIX =
+  "#2225, on main: a person's comment on a claimed issue goes to the session holding the claim, " +
+  `routed or not. Its test is ${CLAIMANT_TEST}.`;
 const LAST_HOP_FIX =
   "The last-hop fix, outside this pull request: sessions take every event addressed to them, " +
   "also when it was published while they were down.";
@@ -138,7 +140,7 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   "no-target": {
     meaning: "No session was owed the comment, and Dispatch sent it to no session or role.",
     fix:
-      "In this pull request: a reply in a thread on a document goes to every session in the " +
+      "#2366: a reply in a thread on a document goes to every session in the " +
       "thread and to the document's session authors, and a comment on an issue with no route " +
       "and no session claim goes to the session authors of the issue's primary document. A " +
       "Legion issue before admission, and an issue that nobody routes or claims and whose " +
@@ -147,7 +149,7 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   },
   "not-addressed:claimant": {
     meaning: "Dispatch did not send the comment to the issue's claimant session.",
-    fix: FAN_OUT_FIX,
+    fix: CLAIMANT_FIX,
   },
   "not-addressed:route": {
     meaning:
