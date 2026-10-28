@@ -62,6 +62,13 @@ case "$*" in
   fi
   echo '{"available": true}' ;;
 "config get retry.modelFallback --json")
+  IFS=:
+  for overlay in $PI_CONFIG_FILES; do
+    case "$overlay" in *malformed*)
+      printf '%s\n          ^\nerror: Failed to parse config overlay %s: SyntaxError: YAML Parse error\n' "` + strings.Repeat("x", 400) + `" "$overlay" >&2; exit 1 ;;
+    esac
+  done
+  unset IFS
   if [ -n "${LEGION_TEST_FALLBACK_FAIL:-}" ]; then
     echo "fake omp: config get retry.modelFallback failed" >&2; exit 1
   fi
@@ -144,6 +151,12 @@ func inImage(t *testing.T, contract, omp string) image {
 const capabilityMarks = " capabilities=checked model-fallback=off daemon-api-version="
 
 func probeImage(args ...string) (int, string, string) {
+	previousClients, previousControls := newImageTLSClients, newTLSPositiveControls
+	newImageTLSClients = passingImageTLSClients
+	newTLSPositiveControls = func(context.Context, []string, string) error { return nil }
+	defer func() {
+		newImageTLSClients, newTLSPositiveControls = previousClients, previousControls
+	}()
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), append([]string{"legion", "probe-image"}, args...), &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
@@ -180,8 +193,8 @@ func tableLines(stdout string) []string {
 // As the worker image's build runs it, with no contract named, the command holds the image's plugin
 // to the contract this binary speaks, prints the capability table — one line per row of the
 // declared list, in its order, every image row present, codegraph with the CLI on PATH and the
-// plugin enabled in the profile's lock — and then the OK line the daemon's probe Sandbox reads,
-// carrying the capabilities and model-fallback marks.
+// plugin enabled in profile's lock — then prints every TLS client and site decision before the OK
+// line the daemon's probe Sandbox reads, carrying the capabilities and model-fallback marks.
 func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
@@ -208,8 +221,11 @@ func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.
 		t.Errorf("table = %q, want the codegraph line %q", table, codegraph)
 	}
 	okLine := "probe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
-	if want := strings.Join(table, "\n") + "\n" + okLine; stdout != want {
-		t.Fatalf("stdout = %q, want the table then the OK line %q", stdout, okLine)
+	if !strings.HasPrefix(stdout, strings.Join(table, "\n")+"\n") || !strings.HasSuffix(stdout, okLine) {
+		t.Fatalf("stdout = %q, want the table, TLS decisions, then the OK line %q", stdout, okLine)
+	}
+	if got, want := strings.Count(stdout, "probe-image: TLS client "), len(tlsSites)*len(workerTLSClients); got != want {
+		t.Fatalf("stdout carries %d TLS decisions, want one for each client and site (%d):\n%s", got, want, stdout)
 	}
 }
 
@@ -574,6 +590,101 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 				t.Errorf("the probes ran Oh My Pi with OMP_SESSION_STORAGE %v, want %v: the session-storage probe's own value once, %q otherwise", sessions, want, tc.sessions)
 			}
 		})
+	}
+}
+
+// With --role-config-files, as the daemon's probe Sandbox passes it for each role role_config_files
+// names, the probe reads that role's PI_CONFIG_FILES as the role's Oh My Pi starts on it — the pod
+// baseline's turn-scoping overlay, the operator's, then the role's own — and runs Oh My Pi on each
+// of the role's files alone and then on the whole list, once each; an empty entry of the operator's
+// value is skipped, as Oh My Pi skips it. A file it names that the probe cannot read, or Oh My Pi
+// exiting non-zero on it, exits 1 after the capability table with the line the daemon refuses its
+// boot on, naming the role, the file and Oh My Pi's own error line, and prints no OK line.
+func TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	dir := t.TempDir()
+	operator, fallback, missing, malformed := filepath.Join(dir, "operator.yml"), filepath.Join(dir, "fallback.yml"), filepath.Join(dir, "missing.yml"), filepath.Join(dir, "malformed.yml")
+	for _, file := range []string{operator, fallback, malformed} {
+		if err := os.WriteFile(file, []byte("retry:\n  modelFallback: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, value := range map[string]string{"the operator's overlay": operator, "with a trailing empty entry": operator + ":"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PI_CONFIG_FILES", value)
+			seen := filepath.Join(t.TempDir(), "seen")
+			t.Setenv("LEGION_TEST_SEEN", seen)
+			code, stdout, stderr := probeImage(img.flags("--pod-safety", "--role-config-files", "implementer="+fallback)...)
+			if code != 0 || !strings.Contains(stdout, "\nprobe-image: OK (") {
+				t.Fatalf("probe-image with the implementer's overlay = %d %q %q, want the OK line", code, stdout, stderr)
+			}
+			raw, err := os.ReadFile(seen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for what, run := range map[string]*regexp.Regexp{
+				"the implementer's PI_CONFIG_FILES": regexp.MustCompile(`(?m)^/\S+/` + regexp.QuoteMeta(podsafety.TurnScopeFile+":"+operator+":"+fallback) + ` written file$`),
+				"the implementer's file alone":      regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(fallback) + ` written file$`),
+			} {
+				if got := len(run.FindAllString(string(raw), -1)); got != 1 {
+					t.Errorf("Oh My Pi ran %d times on %s, want once: %q", got, what, raw)
+				}
+			}
+		})
+	}
+
+	t.Setenv("PI_CONFIG_FILES", operator)
+	for _, tc := range []struct {
+		name, file, why string
+		env             string
+	}{
+		{name: "a file the probe cannot read", file: missing, why: missing + " cannot be read: stat " + missing + ": no such file or directory"},
+		{name: "a directory", file: dir, why: dir + " cannot be read: " + dir + " is not a regular file"},
+		{name: "a file Oh My Pi cannot parse", file: malformed,
+			why: "Oh My Pi refuses " + malformed + ": error: Failed to parse config overlay " + malformed + ": SyntaxError: YAML Parse error"},
+		{name: "Oh My Pi exiting non-zero with no error line", file: fallback, env: "LEGION_TEST_FALLBACK_FAIL",
+			why: "Oh My Pi refuses " + fallback + ": exited 1: fake omp: config get retry.modelFallback failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv(tc.env, "1")
+			}
+			code, stdout, stderr := probeImage(img.flags("--pod-safety", "--role-config-files", "merger="+tc.file)...)
+			want := bootprobe.RoleOverlaysRefusedLine("merger", tc.why)
+			if code != 1 || strings.Contains(stdout, bootprobe.OKPrefix) || !strings.Contains(stderr, want+"\n") {
+				t.Fatalf("probe-image with the merger's %s = %d %q %q, want exit 1, no OK line, and %q", tc.name, code, stdout, stderr, want)
+			}
+			if role, why, ok := bootprobe.RoleOverlaysRefused(stderr); !ok || role != "merger" || why != tc.why {
+				t.Errorf("the daemon reads the refusal as %q %q %v, want the merger and %q", role, why, ok, tc.why)
+			}
+		})
+	}
+}
+
+// A --role-config-files value no role could carry is refused as the flags are read, before any
+// probe runs.
+func TestProbeImageRefusesARoleConfigFilesValueNoRoleCarries(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--role-config-files", "coder=/etc/a.yml"}, `"coder" is not a Legion role`},
+		{[]string{"--role-config-files", "tester=a.yml"}, `tester's overlay "a.yml" is not an absolute path`},
+		{[]string{"--role-config-files", "tester"}, `--role-config-files "tester" is not <role>=<file>[:<file>…]`},
+		{[]string{"--role-config-files", "tester=/a.yml", "--role-config-files", "tester=/b.yml"}, "tester is given twice"},
+	} {
+		seen := filepath.Join(t.TempDir(), "seen")
+		t.Setenv("LEGION_TEST_SEEN", seen)
+		code, stdout, stderr := probeImage(img.flags(tc.args...)...)
+		if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+			t.Errorf("probe-image %q = %d %q %q, want exit 2 saying %q", tc.args, code, stdout, stderr, tc.want)
+		}
+		if _, err := os.Stat(seen); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Oh My Pi ran (%s: %v), want no probe", seen, err)
+		}
 	}
 }
 

@@ -353,11 +353,11 @@ test("rebuilding reproduces the committed bundle byte for byte", async () => {
 // exact Bun build. buildBundles refuses before it ever calls Bun.build(); these check the pure
 // comparison a real mismatch would hit, without needing a second real Bun installed to prove it.
 test("buildBundles refuses a Bun other than .bun-version pins", () => {
-  expect(() => assertPinnedBun("1.4.2", "1.3.14")).toThrow(
-    /refusing to build under Bun 1\.4\.2.*\.bun-version pins 1\.3\.14/s,
+  expect(() => assertPinnedBun("1.4.2", "1.4.4")).toThrow(
+    /refusing to build under Bun 1\.4\.2.*\.bun-version pins 1\.4\.4/s,
   )
 })
 
 test("a Bun matching .bun-version proceeds", () => {
-  expect(() => assertPinnedBun("1.3.14", "1.3.14")).not.toThrow()
+  expect(() => assertPinnedBun("1.4.4", "1.4.4")).not.toThrow()
 })
