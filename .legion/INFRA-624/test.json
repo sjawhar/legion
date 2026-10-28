@@ -2,31 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T15:55:00Z",
-  "round": 4,
-  "headSha": "94b6cd88e70db56ff416002e2845f430fccef509",
+  "completed": "2026-10-28T16:08:52Z",
+  "round": 5,
+  "headSha": "f1fd64518ef0b6190bfa181ecbd970e66d0eab17",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its browser rows at 94b6cd88: `bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone --grep-invert execCommand` gave 13 passed. Drove each guarded input myself in real Chromium, with different selections and drags as well. Drove its ask-edit refusal through the real dispatch CLI."
+    "how": "Re-ran the browser specs at f1fd6451: `bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone` gave 15 passed, my round 4 red execCommand rows included, unchanged. Probed its keepUnselectedAskBlocks filter myself in real Chromium."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Inside a decision two editors broke, no input a person can reach loses a word they did not select (architect, round 4: document.execCommand as a grammar or writing extension issues it)",
-      "evidence": "Real Chromium against the real Go server and Postgres. The break: `Which one?` / `- Option B` + `- Option C` / `* Option A`. Select from 'one?' into 'Opt' of the first list. `document.execCommand('insertText', false, 'x')` stores 'Which xion B\\n\\n- Option C': the unselected second list (Option A) is gone, and settlement rewrites the row ('Reworded by document-settlement', answer options Option C). `document.execCommand('delete')` stores 'Which ion A\\n\\n- Option C' (Option B gone). No page error. Red rows in commit a26d87b0: packages/dispatch/e2e/ask-concurrent-edit.e2e.ts, 'document.execCommand(\"insertText\"|\"delete\") over a selection from the question into the first list of an ask holding two lists keeps the words outside it'. Command: `cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts --project chromium -g execCommand`. Both fail at the head: toContainText \"Option A\" -> received '…Which xion BOption C…Reworded by document-settlement…Answer options Option C…'."
+      "criterion": "Round 4 failure: document.execCommand('insertText'|'delete') over a selection from a broken decision's question into its first list keeps every unselected word",
+      "surface": "Dispatch document editor in headless Chromium, real Go server and Postgres 17 in the issue pod",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts --project chromium -g execCommand --repeat-each 3",
+      "observed": "6 passed. Throwaway probe: after the refused execCommand, alice's DOM shows the kept state ('Which one? / Option A / Option C / Option B'), and a later keypress applies with DOM and storage equal. Bob's page matches storage. Record: https://github.com/sjawhar/legion/pull/2433#issuecomment-6474158368",
+      "headSha": "f1fd64518ef0b6190bfa181ecbd970e66d0eab17",
+      "negativeControl": "At 94b6cd88 (before the filter) both rows failed: toContainText \"Option A\" -> received '…Which xion BOption C…', with the unselected list gone"
+    },
+    {
+      "criterion": "The filter refuses only a read-back that drops an unselected block: edits inside one block, deletions of selected text, and keyboard repairs still apply",
+      "surface": "Dispatch document editor in headless Chromium, real Go server and Postgres 17",
+      "command": "Throwaway Playwright probes (chromium): execCommand insertText over one word in the question and over the second list's option; execCommand delete from Option C into the second list and from the question through the second list; paragraph-after-list execCommand delete and insertText; refused execCommand then Ctrl+Z; the round 2 keyboard repair matrix (L1-L10, P1-P6)",
+      "observed": "Single-block execCommand applies ('Which two?', '* Option Q'). Deletions remove only the selected text ('- Option B\\n- ', 'Which '). Paragraph-after-list keeps the unselected paragraph ('Which xion A\\n\\nContext'). Ctrl+Z after a refusal undoes the previous edit, with DOM and storage equal. Every row of the repair matrix gives its round 2 stored result (P5 timed out once while retrying the break, then passed). No page error.",
+      "headSha": "f1fd64518ef0b6190bfa181ecbd970e66d0eab17",
+      "negativeControl": "execCommand('insertText','x') over a selection from the question into a two-item first list is refused: the DOM is redrawn and storage is unchanged ('Which one?\\n\\n- Option A\\n- Option C\\n\\n* Option B')"
     }
   ],
-  "failed": 1,
-  "agentRepair": {
-    "how": "The real dispatch entry (packages/envoy-client/bin/dispatch.ts), spawned with DISPATCH_URL set to the harness, on an ask the CLI's session authored. Two real editors broke the decision into 'Which one?' / '- Option A' / 'Context'. Record: https://github.com/sjawhar/legion/pull/2433#issuecomment-6472793457",
-    "observed": "`dispatch edit-ask --ask <id> --option 'Option A'` exits 1 quoting \"Context\" and naming dispatch doc-edit; nothing written. Delete path: `dispatch doc-edit --ops-json '[{\"op\":\"delete\",\"find\":\"Context\"}]'` applies, the decision becomes valid (both pages unmarked, row takes Option A), and `dispatch edit-ask --question 'Which one now?' --option 'Option A' --option 'Option Z'` applies. Move path: `dispatch doc-read --blocks` gives the ids, and `doc-edit [{op:move, block:<paragraph>, before:block:<list>}]` applies. The paragraph lands before the decision rather than above its options inside it; the decision is valid, every word is kept, and edit-ask then applies.",
-    "verdict": "an agent with no editor can follow the refusal to a valid decision with every word it did not delete"
-  },
-  "inputGuards": {
-    "how": "Throwaway Playwright probes in real Chromium. Two-list break with Option C added to the first list. Selection from 'one?' in the question to 'Opt' in the first list, unless noted.",
-    "observed": "Keypress typing: declined. Ctrl+X: declined. CDP Input.insertText (no keypress): declined. IME composition then commit: collapsed to the start ('Which かone?'), nothing deleted. Drag 'After.' into the second list: declined. Drag 'Option' out of the second list: moved, nothing lost. Typing over a selection from Option C into the second list: applied, valid. Every word kept and no page error, except document.execCommand (see failures)."
-  },
-  "ci": "Read on GitHub at 94b6cd88 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
+  "ci": "Read on GitHub at f1fd6451 during testing: build x2, changes, lint, pr-title, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
   "notes": [
-    "Throwaway probe specs were moved out of the workspace. The working copy holds only the red test commit and this handoff."
+    "The round 4 agent CLI repair and the input-guard results still apply: since round 4, only ask-content.ts (a new filterTransaction plugin), lib.ts and proof-editor tests changed.",
+    "Throwaway probe specs were moved out of the workspace. The working copy holds only this handoff."
   ]
 }
