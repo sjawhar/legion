@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -289,6 +290,62 @@ func (l *Ledger) PendingVersionMarkdown(artifactID string, number int) (string, 
 		return "", false
 	}
 	return pending.markdown, true
+}
+
+// queuedVersion records pending as the latest version of artifactID, which this transaction has
+// queued and not yet written (latestVersion, PendingVersionMarkdown).
+func (l *Ledger) queuedVersion(artifactID string, pending pendingVersion) {
+	if l.latest == nil {
+		l.latest = make(map[string]pendingVersion)
+	}
+	l.latest[artifactID] = pending
+}
+
+// QueueVersion queues the insert of a document version the caller writes itself, outside the
+// document service - an upload's, which lists its uploader alone, and a new issue's first version
+// of its seeded spec - and returns the row as the insert will leave it. It is named when it has a
+// summary. Its number and time are NextVersion's; the update cursor it records is the head this
+// transaction's queued writes leave the document's stored history at (the seed's or the
+// replacement's append, made under the document's lock), else the stored head, which is what the
+// row's old subquery, max(doc_updates.version), read once that append had run. The ledger records
+// it as the document's latest version, so the reads that follow in this transaction
+// (latestVersion, PendingVersionMarkdown) take it from here rather than from a table that holds it
+// only once Commit has run the queue.
+func (l *Ledger) QueueVersion(ctx context.Context, artifactID, markdown string, authors []model.Actor, summary *string) (model.Version, error) {
+	encodedAuthors, err := json.Marshal(authors)
+	if err != nil {
+		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
+	}
+	number, createdAt, err := l.NextVersion(ctx, artifactID)
+	if err != nil {
+		return model.Version{}, err
+	}
+	var docUpdateVersion int64
+	if pending := l.rooms[artifactID]; pending != nil {
+		docUpdateVersion = pending.head
+	} else if docUpdateVersion, err = currentUpdateCursor(ctx, l.writer, artifactID); err != nil {
+		return model.Version{}, err
+	}
+	// The row as the insert leaves it: its size is its markdown's (model.VersionSize), its authors
+	// what they decode to.
+	size := len(markdown)
+	version := model.Version{Number: number, Named: summary != nil, Summary: summary, CreatedAt: createdAt, Size: &size}
+	if err := json.Unmarshal(encodedAuthors, &version.Authors); err != nil {
+		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
+	}
+	if err := l.Queue(func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version, created_at)
+			values ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, artifactID, number, markdown, encodedAuthors, version.Named, summary, docUpdateVersion, createdAt); err != nil {
+			return fmt.Errorf("write document version: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return model.Version{}, err
+	}
+	l.queuedVersion(artifactID, pendingVersion{version: version, markdown: markdown, docUpdateVersion: docUpdateVersion})
+	return version, nil
 }
 
 // pendingRoom is a document's stored history (doc_updates) as the writes this transaction has

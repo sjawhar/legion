@@ -63,23 +63,34 @@ func queueStamp(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, fromKind, f
 }
 
 // queueReferences is replaceReferences split in two: it plans the reconciliation of
-// fromKind/fromID's references with body against the edges the source holds and resolves the
-// counted targets it moves, here, and queues the delete and insert that write it. The resolution
-// reads issues and asks, which the reconciliation does not write, so it reads what it read after
-// the write. No document operation reconciles a comment's, an ask's or a message's references, so
-// the source's held edges are the stored ones.
+// fromKind/fromID's references with body (planReferences), here, and queues the delete and insert
+// that write it.
 func (s *server) queueReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, fromKind, fromID, body string) (model.ReferenceChanges, error) {
-	replacement, err := refs.PlanReplace(ctx, tx, fromKind, fromID, text.Extract(body, s.deps.ServerURL), nil)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	changes, err := refs.CountedChanges(ctx, tx, replacement.Changed())
+	replacement, changes, err := s.planReferences(ctx, tx, fromKind, fromID, body)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
 	return changes, queueWrite(ctx, tx, ledger, func(ctx context.Context, tx pgx.Tx) error {
 		return replacement.Apply(ctx, tx)
 	})
+}
+
+// planReferences is replaceReferences' read half: the reconciliation of fromKind/fromID's
+// references with body, planned against the edges the source holds, and the counted targets it
+// moves, for the caller to write (Replacement.Apply) in its write phase. The resolution reads
+// issues and asks, which the reconciliation does not write, so it reads what it read after the
+// write. No document operation reconciles a comment's, an ask's or a message's references, so the
+// source's held edges are the stored ones.
+func (s *server) planReferences(ctx context.Context, tx pgx.Tx, fromKind, fromID, body string) (refs.Replacement, model.ReferenceChanges, error) {
+	replacement, err := refs.PlanReplace(ctx, tx, fromKind, fromID, text.Extract(body, s.deps.ServerURL), nil)
+	if err != nil {
+		return refs.Replacement{}, model.ReferenceChanges{}, err
+	}
+	changes, err := refs.CountedChanges(ctx, tx, replacement.Changed())
+	if err != nil {
+		return refs.Replacement{}, model.ReferenceChanges{}, err
+	}
+	return replacement, changes, nil
 }
 
 // appendedEvents is the events queueEvent appended, read once Commit has run their steps, in the

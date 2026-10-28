@@ -1560,10 +1560,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 		return versionWriteResult{}, err
 	}
 	if ledger := queueFor(ctx, tx); ledger != nil {
-		if ledger.latest == nil {
-			ledger.latest = make(map[string]pendingVersion)
-		}
-		ledger.latest[artifactID] = pendingVersion{version: version, markdown: markdown, docUpdateVersion: docUpdateVersion}
+		ledger.queuedVersion(artifactID, pendingVersion{version: version, markdown: markdown, docUpdateVersion: docUpdateVersion})
 	}
 	// The version's tree is the one the issue's task counts are read from, so they are written
 	// with it (LEGION-542).

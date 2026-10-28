@@ -152,39 +152,51 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
-	message, err := scanMessage(tx.QueryRow(ctx, `
-		insert into messages (issue_key, author, body, target, in_reply_to)
-		values ($1, $2, $3, $4, $5)
-		returning `+messageColumns+`
-	`, issueKey, author, input.Body, input.Target, input.InReplyTo))
-	if err != nil {
+	// The message's references and the advice are read here, before its first write, so neither
+	// holds a transaction id (INFRA-636). Its id, which the references are planned for, is taken
+	// before the insert (gen_random_uuid assigns none), and the advice counts the message.created
+	// this write appends after it (writeAdvice).
+	var messageID string
+	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text`).Scan(&messageID); err != nil {
 		return model.Message{}, nil, err
 	}
+	eventType := "message.created"
+	if input.InReplyTo != nil {
+		eventType = "message.answered"
+	}
+	var references refs.Replacement
 	var referenceChanges model.ReferenceChanges
-	if message.IssueKey != nil {
-		referenceChanges, err = s.replaceReferences(ctx, tx, "message", message.ID, message.Body)
+	var advice *writeAdvice
+	if issueKey != nil {
+		references, referenceChanges, err = s.planReferences(ctx, tx, "message", messageID, input.Body)
 		if err != nil {
 			return model.Message{}, nil, err
 		}
+		advice = s.writeAdvice(
+			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status, eventType,
+		)
 	}
-	eventType := "message.created"
-	if message.InReplyTo != nil {
-		eventType = "message.answered"
+	message, err := scanMessage(tx.QueryRow(ctx, `
+		insert into messages (id, issue_key, author, body, target, in_reply_to)
+		values ($1, $2, $3, $4, $5, $6)
+		returning `+messageColumns+`
+	`, messageID, issueKey, author, input.Body, input.Target, input.InReplyTo))
+	if err != nil {
+		return model.Message{}, nil, err
+	}
+	if issueKey != nil {
+		if err := references.Apply(ctx, tx); err != nil {
+			return model.Message{}, nil, err
+		}
 	}
 	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)))
 	if err != nil {
 		return model.Message{}, nil, err
 	}
-	if message.IssueKey != nil {
+	if issueKey != nil {
 		if err := refs.Stamp(ctx, tx, "message", message.ID, event.ID); err != nil {
 			return model.Message{}, nil, err
 		}
-	}
-	var advice *writeAdvice
-	if issueKey != nil {
-		advice = s.writeAdvice(
-			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status, "",
-		)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.Message{}, nil, err

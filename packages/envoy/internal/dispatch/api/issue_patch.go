@@ -289,6 +289,21 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		set("repo", repo)
 	}
 	changed := len(sets) > 0 || componentsProvided || input.BlockedBy != nil
+	// The advice is read here, before the patch's first write, so its queries hold no transaction
+	// id (INFRA-636), and it is read for the row as the patch leaves it: its status, its labels and
+	// its parent (writeAdviceBefore). Nothing the patch writes after this changes what it reads.
+	afterRow := adviceIssueRow{parent: before.Parent, labels: before.Labels}
+	afterStatus := before.Status
+	if input.Status != nil {
+		afterStatus = status
+	}
+	if parentProvided {
+		afterRow.parent = parent
+	}
+	if input.Labels != nil || input.LabelsAdd != nil {
+		afterRow.labels = labels
+	}
+	advice := s.writeAdviceBefore(r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, afterStatus, afterRow)
 	if changed {
 		sets = append(sets, "updated_at = now()")
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
@@ -361,9 +376,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 	if !changed {
-		advice := s.writeAdvice(
-			r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", before.Status, "",
-		)
+		// Nothing was written, so the row the advice read is the stored one.
 		if err := tx.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -458,9 +471,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			events = append(events, addedEvent)
 		}
 	}
-	advice := s.writeAdvice(
-		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status, "",
-	)
+	// The advice read before the first write describes after: its status, labels and parent.
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return

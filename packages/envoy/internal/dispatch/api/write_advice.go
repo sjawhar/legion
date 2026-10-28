@@ -73,7 +73,8 @@ var sessionWriteTypes = []string{"message.created", "comment.created", "ask.open
 // issue's status as the write committed it, the same value writeAdvice reports. route names the
 // caller for the one query whose failure is logged rather than returned
 // (legionManagedStatusAdvice). appending is the event the write appends after the advice is read
-// (writeAdvice).
+// (writeAdvice). row is the issue row as the write leaves it when the write reads its advice
+// before it writes that row (writeAdviceBefore), nil to read the stored one.
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -83,6 +84,7 @@ func (s *server) computeWriteAdvice(
 	excludeAskID string,
 	status string,
 	appending string,
+	row *adviceIssueRow,
 ) (*writeAdvice, error) {
 	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
@@ -132,7 +134,7 @@ func (s *server) computeWriteAdvice(
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
 	if status == model.IssueStatusTriage {
-		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey)
+		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey, row)
 	}
 	return advice, nil
 }
@@ -154,7 +156,7 @@ func (s *server) computeWriteAdvice(
 // would be dropped anyway. The failure is logged once, in the shape every omitted advice query
 // takes. The 500 ms bound writeAdvice set still covers it: SET LOCAL holds across a savepoint
 // opened under it.
-func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route, issueKey string) *bool {
+func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route, issueKey string, row *adviceIssueRow) *bool {
 	walk, err := tx.Begin(ctx)
 	if err != nil {
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
@@ -165,7 +167,12 @@ func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
 		return nil
 	}
-	managed, err := legionManagedStatus(ctx, walk, issueKey)
+	var managed bool
+	if row != nil {
+		managed, err = legionManagedStatusOfRow(ctx, walk, issueKey, row.parent, row.labels)
+	} else {
+		managed, err = legionManagedStatus(ctx, walk, issueKey)
+	}
 	if err != nil {
 		_ = walk.Rollback(ctx)
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
@@ -201,6 +208,47 @@ func (s *server) writeAdvice(
 	status string,
 	appending string,
 ) *writeAdvice {
+	return s.adviseWrite(ctx, tx, route, issueKey, actor, excludeAskID, status, appending, nil)
+}
+
+// adviceIssueRow is the part of an issue row a write's advice reads - its parent and its labels,
+// which the walk for who owns the issue's status starts from (legionManagedStatusOfRow) - as the
+// write leaves the row.
+type adviceIssueRow struct {
+	parent *string
+	labels []string
+}
+
+// writeAdviceBefore is writeAdvice for a write that reads its advice before it writes the issue
+// row the advice describes, so that the advice runs before the write's first statement and holds
+// no transaction id (INFRA-636): a create, whose row does not exist yet, and a patch, which may
+// change the row's labels, its parent or its status. status and row are the row as the write
+// leaves it, so the answer is the one the same read gave after the write; the write appends no
+// counted event, and a new issue has neither events nor asks.
+func (s *server) writeAdviceBefore(
+	ctx context.Context,
+	tx pgx.Tx,
+	route string,
+	issueKey string,
+	actor model.Actor,
+	status string,
+	row adviceIssueRow,
+) *writeAdvice {
+	return s.adviseWrite(ctx, tx, route, issueKey, actor, "", status, "", &row)
+}
+
+// adviseWrite is writeAdvice and writeAdviceBefore: row nil reads the stored issue row.
+func (s *server) adviseWrite(
+	ctx context.Context,
+	tx pgx.Tx,
+	route string,
+	issueKey string,
+	actor model.Actor,
+	excludeAskID string,
+	status string,
+	appending string,
+	row *adviceIssueRow,
+) *writeAdvice {
 	// A human write has no advice query to run - every one of them is about the calling session,
 	// and the triage line this answers is about what a session is told - so it is answered here,
 	// outside the savepoint and the two statement_timeout statements that would otherwise run
@@ -226,7 +274,7 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "statement_timeout", err)
 		return nil
 	}
-	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status, appending)
+	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status, appending, row)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
 		query := "unknown"

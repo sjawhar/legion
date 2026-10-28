@@ -64,10 +64,19 @@ const legionLabel = "legion"
 // runs - but a write's advice does (computeWriteAdvice, write_advice.go), and there it means the
 // issue is treated as one Legion does not run: the "still in triage" line prints. A chain that
 // deep needs a reparent that refuseParentTooDeep would have refused.
-var legionManagedStatusSQL = `
+var legionManagedStatusSQL = legionWalkSQL(`select i.parent_key, i.labels, 0 as depth from issues i where i.key = $1`)
+
+// legionManagedStatusOfRowSQL is legionManagedStatusSQL walking from an issue row given rather
+// than read - $1 its parent_key, $2 its labels - for a write that reads its advice before it
+// writes that row (writeAdviceBefore). The walk above it, and the depth cap, are the same.
+var legionManagedStatusOfRowSQL = legionWalkSQL(`select $1::text as parent_key, $2::text[] as labels, 0 as depth`)
+
+// legionWalkSQL is the legion-label walk up the parent chain from the row start selects: its
+// parent_key, its labels and depth 0.
+func legionWalkSQL(start string) string {
+	return `
 	with recursive chain as (
-		select i.parent_key, i.labels, 0 as depth
-		from issues i where i.key = $1
+		` + start + `
 		union
 		select p.parent_key, p.labels, c.depth + 1
 		from issues p join chain c on p.key = c.parent_key
@@ -76,6 +85,7 @@ var legionManagedStatusSQL = `
 	select exists (
 		select 1 from chain c, unnest(c.labels) as label where lower(label) = '` + legionLabel + `'
 	)`
+}
 
 // legionManagedStatus runs legionManagedStatusSQL inside the caller's transaction. That keeps the
 // issue's own row as the caller locked it, and nothing more: an ancestor's labels, and a reparent
@@ -86,6 +96,16 @@ var legionManagedStatusSQL = `
 func legionManagedStatus(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
 	var managed bool
 	if err := tx.QueryRow(ctx, legionManagedStatusSQL, key).Scan(&managed); err != nil {
+		return false, fmt.Errorf("resolve whether Legion manages the status of %s: %w", key, err)
+	}
+	return managed, nil
+}
+
+// legionManagedStatusOfRow is legionManagedStatus for key's row as a write leaves it, parent and
+// labels, which the write has not written yet (legionManagedStatusOfRowSQL).
+func legionManagedStatusOfRow(ctx context.Context, tx pgx.Tx, key string, parent *string, labels []string) (bool, error) {
+	var managed bool
+	if err := tx.QueryRow(ctx, legionManagedStatusOfRowSQL, parent, labels).Scan(&managed); err != nil {
 		return false, fmt.Errorf("resolve whether Legion manages the status of %s: %w", key, err)
 	}
 	return managed, nil
