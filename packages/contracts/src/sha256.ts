@@ -47,7 +47,16 @@ export function sha256Hex(bytes: Uint8Array): string {
       const sigma1 = rotateRight(late, 17) ^ rotateRight(late, 19) ^ (late >>> 10);
       schedule[i] = (schedule[i - 16] as number) + sigma0 + (schedule[i - 7] as number) + sigma1;
     }
-    let [a, b, c, d, e, f, g, h] = hash as unknown as number[];
+    let [a, b, c, d, e, f, g, h] = hash as unknown as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
     for (let i = 0; i < 64; i++) {
       const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
       const choose = (e & f) ^ (~e & g);

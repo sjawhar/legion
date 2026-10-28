@@ -129,7 +129,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 		// The reads below start their bound only now: following a head waits on the fact lock,
 		// which the GitHub consumer's backlog can hold for a while.
 		prCtx, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		base, mergeable := pull.Base.Ref, pull.mergeability()
+		base, mergeable := pull.Base.Ref, mergeability(pull)
 		if pr.Mergeability != mergeable || mergeable == record.MergeabilityConflicting {
 			eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
 			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable}
@@ -185,31 +185,12 @@ func (w *workflowRuntime) logPassFailure(pr record.PullRequest, action string, e
 	return false
 }
 
-// githubPullRequest is one pull request as GitHub answers GET /pulls/{number} and lists it in
-// GET /pulls: its number, state (open or closed), page, body, base branch, head branch and commit,
-// when it last changed, and its nullable, lazily computed `mergeable`, which the list leaves out.
-type githubPullRequest struct {
-	Number  int    `json:"number"`
-	State   string `json:"state"`
-	HTMLURL string `json:"html_url"`
-	Body    string `json:"body"`
-	Base    struct {
-		Ref string `json:"ref"`
-	} `json:"base"`
-	Head struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
-	} `json:"head"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Mergeable *bool     `json:"mergeable"`
-}
-
 // mergeability is the pull request's `mergeable` as the mergeability fact decides a READY by: null
 // is record.MergeabilityUnknown, GitHub not having computed it yet; true is
 // record.MergeabilityMergeable; false is record.MergeabilityConflicting, the state that, in
 // awaiting_merge, withdraws a READY GitHub can run no checks on and merge (workflow's
 // mergeability).
-func (p githubPullRequest) mergeability() record.Mergeability {
+func mergeability(p githubrest.PullRequest) record.Mergeability {
 	switch {
 	case p.Mergeable == nil:
 		return record.MergeabilityUnknown
@@ -224,18 +205,18 @@ func (p githubPullRequest) mergeability() record.Mergeability {
 // requires, the mergeability, and the head and its clock followHead compares with the record, in
 // the single read they share. It also returns the githubrest.Client its own token mint built, so
 // the pass's further reads of the same pull request reuse it rather than minting a second token.
-func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullRequest) (githubrest.Client, githubPullRequest, error) {
+func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullRequest) (githubrest.Client, githubrest.PullRequest, error) {
 	repository, err := ghrepo.Parse("the pull request's repository", pr.Repo)
 	if err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubrest.PullRequest{}, err
 	}
 	github, err := w.implementClient(ctx, repository)
 	if err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubrest.PullRequest{}, err
 	}
-	var pull githubPullRequest
+	var pull githubrest.PullRequest
 	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", pr.Number), &pull); err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubrest.PullRequest{}, err
 	}
 	return github, pull, nil
 }

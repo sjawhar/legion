@@ -654,6 +654,19 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   it reaches `awaiting_merge` — or, for a root whose tree still runs, once the last other issue of
   that tree is done or parked. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
   for a pull request that deletes it.
+- **An implementer's completion refused `HANDOFF_NO_PULL_REQUEST`.** The implementer's completion
+  of implementing reads GitHub, as the implement App, for the open pull request on the issue's
+  branch, `legion/<KEY>`: the issue moves to testing only on an open pull request. One the daemon
+  has not recorded yet (its opened webhook lost or still waiting) is recorded there and the issue
+  moves on. With none, the completion is refused and nothing is recorded: `no open pull request on
+  <owner>/<repo> legion/<KEY>; nothing was recorded. Open the pull request and complete again.`
+  The implementer opens it and completes again at the same commit. When the record holds the
+  issue's pull request closed or merged, the refusal adds `pull request #<n> is <closed|merged>;
+  your architect was told and decides this issue's phase.`: the close or merge already told the
+  architect, and a recorded closed or merged pull request never moves an issue to testing. When
+  GitHub cannot be read (the token mint or the read fails), the completion is applied unread and
+  the daemon logs a warning, `api: read the open pull request on a completing implementer's
+  branch; …`; the issue moves on once a pull request is recorded open.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
 on the head: the daemon sent it back to the implementer and told the architect which checks. From

@@ -600,14 +600,14 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is known (TriggerImplementationReady), and
-// then applies the CI rule to the head it hands on (standingRed). A red in implementing sends
-// nothing back, since the implementer is at work there, so a required check that settled red after
-// the implementer's push and before its completion stands for the head with nothing acted on it:
-// the implementer pushes and completes without waiting for CI, and the settlement does not come
-// again. The completion is the fact that lets that red stand in testing, so the work goes back to
-// implementing at once, as a settlement arriving in testing would send it, rather than through a
-// tester round on code CI has already found broken.
+// the round that row records, once the pull request pr is recorded open (TriggerImplementationReady:
+// a closed or merged record moves nothing), and then applies the CI rule to the head it hands on
+// (standingRed). A red in implementing sends nothing back, since the implementer is at work there,
+// so a required check that settled red after the implementer's push and before its completion
+// stands for the head with nothing acted on it: the implementer pushes and completes without
+// waiting for CI, and the settlement does not come again. The completion is the fact that lets that
+// red stand in testing, so the work goes back to implementing at once, as a settlement arriving in
+// testing would send it, rather than through a tester round on code CI has already found broken.
 //
 // The rule is applied only when the record's head is the commit the completion reports
 // (row.HandoffCommit). The completion waits on no

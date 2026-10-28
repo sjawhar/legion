@@ -385,6 +385,15 @@ type PullRequestOpened struct {
 
 func (PullRequestOpened) isFact() {}
 
+// OpenedReadEventID is the event id, under source "github", of a PullRequestOpened built from a
+// read of GitHub rather than from its webhook: the project, the repository and number, and what
+// the read observed, the head and GitHub's updated_at. It holds no read time and no boot, so the
+// same observation applied twice is one fact (ApplyFact answers the second Duplicate), and a pull
+// request that changed since is a new one.
+func OpenedReadEventID(project, repo string, number int, head string, updatedAt time.Time) string {
+	return fmt.Sprintf("opened-read:%s:%s#%d:%s:%s", project, repo, number, head, updatedAt.UTC().Format(time.RFC3339Nano))
+}
+
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer
 // reads to fence stale observations and find its issue.
 type PullRequestSynchronized struct {

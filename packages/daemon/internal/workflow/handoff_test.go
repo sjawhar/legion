@@ -196,3 +196,35 @@ func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
 	}
 	assertPhase(t, pool, phase.Testing)
 }
+
+// The implementer's completion moves its issue to testing only on an open pull request: a recorded
+// pull request that was closed or merged while the issue was in implementing is no pull request a
+// tester can test, and the completion records the handoff and leaves the issue where it is, with
+// no worker started and the status unchanged.
+func TestAnImplementerHandoffOnAClosedOrMergedPullRequestLeavesTheIssueInImplementing(t *testing.T) {
+	for _, state := range []record.PullRequestState{record.PullRequestClosed, record.PullRequestMerged} {
+		t.Run(string(state), func(t *testing.T) {
+			pool := migratedPool(t)
+			ctx := context.Background()
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: state, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "handoff-0", Failing: []string{}})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}, engine, admissionStub{})
+			if err != nil {
+				t.Fatalf("ApplyFact handoff: %v", err)
+			}
+			if result.Refusal != nil {
+				t.Fatalf("handoff refused: %+v", *result.Refusal)
+			}
+			assertPhase(t, pool, phase.Implementing)
+			assertOutboxKinds(t, pool, []string{})
+			var commit string
+			if err := pool.QueryRow(ctx, "select handoff_commit from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&commit); err != nil {
+				t.Fatalf("read the implementer's handoff: %v", err)
+			}
+			if commit != "handoff-0" {
+				t.Fatalf("implementer handoff commit = %q, want handoff-0 recorded", commit)
+			}
+		})
+	}
+}

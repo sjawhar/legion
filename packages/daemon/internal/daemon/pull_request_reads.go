@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -48,7 +47,7 @@ import (
 // otherwise as the synchronize left it, so the mergeability, review and required-check reads after
 // it judge the head GitHub shows. On an error, or a record no longer open, it returns the record as
 // it last read it, and the pass reads the pull request at that head; the next pass follows it.
-func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Client, pr record.PullRequest, pull githubPullRequest) (record.PullRequest, error) {
+func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Client, pr record.PullRequest, pull githubrest.PullRequest) (record.PullRequest, error) {
 	if pull.State != "open" || pull.Head.SHA == "" || pull.Head.SHA == pr.HeadSHA {
 		return pr, nil
 	}
@@ -204,7 +203,7 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 	for _, issue := range waiting {
 		branch := claim.IssueBranch(issue.Key)
 		read, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		pull, found, err := w.openPullRequestOn(read, issue.GitHubRepo, branch)
+		pull, found, err := w.branchPullRequest(read, issue.GitHubRepo, branch)
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -282,30 +281,16 @@ func (w *workflowRuntime) heardSpelling(repo string) string {
 	return repo
 }
 
-// openPullRequestOn is the open pull request of repo on branch (GET
-// /pulls?head=<owner>:<branch>&state=open), and whether there is one. The list's filter is not
-// taken on trust: a listed pull request counts only when its head.ref is branch, the same identity
-// the webhook path reads (intake's decodePullRequest takes head_ref alone), whichever repository
-// the head lives in. The workflow keeps one pull request per branch and assumes one is open at a
-// time, so of two it takes the first GitHub lists.
-func (w *workflowRuntime) openPullRequestOn(ctx context.Context, repo, branch string) (githubPullRequest, bool, error) {
+// branchPullRequest is the open pull request of repo on branch as the implement App reads it
+// (githubrest.Client.OpenPullRequestOn), and whether there is one.
+func (w *workflowRuntime) branchPullRequest(ctx context.Context, repo, branch string) (githubrest.PullRequest, bool, error) {
 	repository, err := ghrepo.Parse("the issue's repository", repo)
 	if err != nil {
-		return githubPullRequest{}, false, err
+		return githubrest.PullRequest{}, false, err
 	}
 	github, err := w.implementClient(ctx, repository)
 	if err != nil {
-		return githubPullRequest{}, false, err
+		return githubrest.PullRequest{}, false, err
 	}
-	var pulls []githubPullRequest
-	query := url.Values{"head": {repository.Owner() + ":" + branch}, "state": {"open"}}
-	if err := github.Get(ctx, "/pulls?"+query.Encode(), &pulls); err != nil {
-		return githubPullRequest{}, false, err
-	}
-	for _, pull := range pulls {
-		if pull.Head.Ref == branch {
-			return pull, true, nil
-		}
-	}
-	return githubPullRequest{}, false, nil
+	return github.OpenPullRequestOn(ctx, repository.Owner(), branch)
 }
