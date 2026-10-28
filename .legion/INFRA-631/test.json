@@ -2,43 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T15:40:00Z",
-  "round": 16,
-  "headTested": "4cef6709438543cfd1bc84e4b94f0eb4d118ce44",
+  "completed": "2026-10-28T16:08:00Z",
+  "round": 17,
+  "headTested": "7f815cffd4b99c7061876827024d8c347eb0b661",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 4cef6709 (code head 838af5ad, a merge of main 690c0136, which is main@origin): checker exit 0 on both guides; `restructure.ts --strict` on 690c0136's files byte-identical to head and --structural-only folded-equal to head for both files; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 85 pass, my tests unchanged."
+    "how": "Re-ran at 7f815cff (code head 4e67dd97; main@origin 80cc97a6, the guides unchanged on main since 690c0136): checker exit 0 on both guides; `restructure.ts --strict` on 80cc97a6's files byte-identical to head; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 87 pass, my tests unchanged."
   },
   "reviewFindings": {
-    "cmark-gfm's spacechar after a block tag name": "fixed: 'Some words here\\n<source\\fsrc=x> more words.', the bare-CR variant, a `<div\\v` and a `<pre\\f` line are refused (exit 2, 'line 2 holds a vertical tab, a form feed or a carriage return with no line feed after it'), file unchanged; HTML_BLOCK_TAG and kind 1 also accept [ \\t\\v\\f\\r]. The round-15 checker (bbcf3e77) joins the first into one line, exit 0.",
-    "GFM_ONLY_HTML_BLOCK_LINE never fires": "removed; the `<source` repros of round 15 are still left as they are",
-    "conflict with main": "fixed: merged main 690c0136 and regenerated; mergeable"
+    "CRLF file left with a bare CR": "fixed: any carriage return is refused; 'Some text. More text\\r\\nhere.\\r\\n' exits 2 ('line 1 holds a vertical tab, a form feed or a carriage return'), file unchanged (my round-16 note closed)",
+    "invalid UTF-8 replaced by U+FFFD": "fixed: 'Caf\\xe9 words here. More words follow.' exits 2 ('the file is not valid UTF-8'), byte e9 kept; the round-16 checker (838af5ad) writes it with ef bf bd, exit 0. Valid multi-byte text and a leading BOM are written with the bytes kept",
+    "refusal tests used inputs the re-layout leaves alone": "fixed: the refusal inputs now start with a line the re-layout would change (e.g. 'Some words. More words.\\n<source\\fsrc=x> more words.' refused, file unchanged)"
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
-      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, plus an independent paragraph-level scanner",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?  (and the Python scanner: fences removed; code spans, inline HTML and link destinations masked per paragraph)",
-      "observed": "exit 0, no output; the scanner finds 0 two-sentence lines in either guide; --write on copies changes nothing; over all 1,249 tracked .md files no file has fewer findings than under the round-10 checker",
-      "headSha": "4cef6709438543cfd1bc84e4b94f0eb4d118ce44",
-      "negativeControl": "the same command on main 690c0136's old-layout files exits 1 with 2,256 R1 findings"
+      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?",
+      "observed": "exit 0, no output; --write on copies changes nothing; the guides are the bytes the independent scanner found free of two-sentence lines in round 16; over all 1,249 tracked .md files no file has fewer findings than under the round-10 checker (37,467 both)",
+      "headSha": "7f815cffd4b99c7061876827024d8c347eb0b661",
+      "negativeControl": "the same command on main 80cc97a6's old-layout files exits 1 with 2,256 R1 findings"
     },
     {
       "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
       "surface": "restructure.ts as the reviewer re-runs it, compared with the guides at head",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <690c0136 AGENTS.md> <out> <690c0136 README.md> <out>; cmp with head; --strict --structural-only on the same files, folded-compared with head",
-      "observed": "byte-identical; the structural output (named edits only) is folded-equal to head for both files; the named edits were classified hunk by hunk in round 2",
-      "headSha": "4cef6709438543cfd1bc84e4b94f0eb4d118ce44",
+      "command": "bun .legion/INFRA-631/restructure.ts --strict <80cc97a6 AGENTS.md> <out> <80cc97a6 README.md> <out>; cmp with head",
+      "observed": "byte-identical; the structural output was folded-equal to head in round 16 (same guides), and the named edits were classified hunk by hunk in round 2",
+      "headSha": "7f815cffd4b99c7061876827024d8c347eb0b661",
       "negativeControl": "restructure.ts --strict exits 1 and writes nothing when an anchor is missing (round 2)"
     },
     {
       "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
       "surface": "git merge-tree --write-tree on branches made from the new-layout files with the committed patches",
-      "command": "TMPDIR=$TMPDIR/infra631-test16/own/rp bash .legion/INFRA-631/replay/run.sh",
+      "command": "TMPDIR=$TMPDIR/infra631-test17/own/rp bash .legion/INFRA-631/replay/run.sh",
       "observed": "exit 0, 11/11 PASS; round 1's own ports 6112adc201ea, e26a66480011, 26a15dcf333e clean",
-      "headSha": "4cef6709438543cfd1bc84e4b94f0eb4d118ce44",
+      "headSha": "7f815cffd4b99c7061876827024d8c347eb0b661",
       "negativeControl": "append(c), two items at one point of Routes, conflicts; same-sentence controls 728b5e297fb5 and 4440fc7b57a2 conflict; every clean pair conflicts on the old layout"
     },
     {
@@ -46,23 +46,22 @@
       "surface": "the recipe driven literally (rounds 3 and 7)",
       "command": "recipe steps 1-8 on 73 open-PR file runs (round 3); step 4's refusal branch (round 7)",
       "observed": "66 of 73 runs merge with no conflict, none loses a line; the refusal branch writes ours.new and names its block's line",
-      "headSha": "4cef6709438543cfd1bc84e4b94f0eb4d118ce44",
+      "headSha": "7f815cffd4b99c7061876827024d8c347eb0b661",
       "negativeControl": "--write with no node_modules prints 'run `bun install`', exit 2, file unchanged"
     },
     {
       "criterion": "Tool contract: --write changes only whitespace, never front matter, never how GitHub renders a file, a second run changes nothing, and the check covers the whole file.",
       "surface": "scripts/semantic-line-breaks.ts on copies of every tracked .md file, compared with cmark-gfm and PyYAML, run twice; check mode compared with the round-10 checker",
-      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,249 files, none holding a CR) copied to $TMPDIR/infra631-test16/work; xargs bun <checkout>/scripts/semantic-line-breaks.ts --write; fm.py; cm.py; copy to work2, --write again, diff -rq; per-file finding counts against 6cbc88e3's checker",
-      "observed": "1,177 written, 4 refused (pmdoc corpus hazards); 0 of 886 front matter blocks changed; cmark-gfm rendering equal for all but docs/kubernetes.md's loose-list </p> before the <dir> block main already has; first vs second run: 0 files differ; 0 files with fewer findings than under the round-10 checker; 106 crafted inputs (rounds 4-16) left as they are, refused, or rendering the same",
-      "headSha": "4cef6709438543cfd1bc84e4b94f0eb4d118ce44",
-      "negativeControl": "the round-15 checker (bbcf3e77) joins 'Some words here\\n<source\\fsrc=x> more words.' into one line, exit 0; the head refuses it, exit 2, file unchanged"
+      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,249 files) copied to $TMPDIR/infra631-test17/work; xargs bun <checkout>/scripts/semantic-line-breaks.ts --write; fm.py; cm.py; copy to work2, --write again, diff -rq; per-file finding counts against 6cbc88e3's checker",
+      "observed": "1,177 written, 4 refused (pmdoc corpus hazards); 0 of 886 front matter blocks changed; cmark-gfm rendering equal for all but docs/kubernetes.md's loose-list </p> before the <dir> block main already has; first vs second run: 0 files differ; 0 files with fewer findings than under the round-10 checker; 111 crafted inputs (rounds 4-17) left as they are, refused, or rendering the same",
+      "headSha": "7f815cffd4b99c7061876827024d8c347eb0b661",
+      "negativeControl": "the round-16 checker (838af5ad) writes 'Caf\\xe9 words here. More words follow.' with the byte e9 replaced by ef bf bd, exit 0; the head refuses it, exit 2, file unchanged"
     }
   ],
   "verified": [
-    "CI read at 15:32Z: the code head 838af5ad has lint, test, typecheck, build x2, changes, pr-title and the daemon Postgres 16 suite queued; the handoff head carries skip-checks. Mergeable against main 690c0136. Per the controller's 13:57Z note, a red in recipients-claim.e2e.ts or TestDispatchConnectionsPerPodIsTheServers is main's (#2233)."
+    "CI read at 16:02Z: the code head 4e67dd97 has lint, test, typecheck, build x2, changes, pr-title and the daemon Postgres 16 suite queued; the handoff head carries skip-checks. Mergeable against main 80cc97a6. Per the controller's notes, reds in recipients-claim.e2e.ts, TestDispatchConnectionsPerPodIsTheServers or mermaid.e2e.ts:194 are main's."
   ],
   "notes": [
-    "Minor, not counted (no tracked .md holds a CR): on a CRLF file, --write joins 'Para two.\\r' with the next line and leaves a bare CR mid-line ('Para one. Para two.\\r\\nNext line.\\r\\n' -> 'Para one.\\nPara two.\\r Next line.\\r\\n'), mixed line endings that the tool's own ODD_WHITESPACE rule then refuses on every later --write. cmark-gfm renders it the same. Refusing CRLF input, or keeping each line's ending, would close it.",
     "Not counted, as before: README Identity list split halves read as identity modes (disclosed deviation)."
   ]
 }
