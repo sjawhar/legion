@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-640",
-  "completed": "2026-10-28T14:05:52Z",
+  "completed": "2026-10-28T17:35:20Z",
   "proof": [
+    {
+      "criterion": "Review round 1: one production implementation of the mark-quote and position rules, equivalence and AC3 unchanged",
+      "surface": "pmdoc suite with the opt-in corpus of 30 real LINUX specs against frozen base oracles (FindMark, MarkAttrs, walk, yTextRanges); BenchmarkAnchoredWrite on Postgres 17 + pgvector",
+      "command": "cd packages/envoy && PMDOC_ANCHOR_CORPUS=$TMPDIR/i640/linux-specs go test ./internal/dispatch/pmdoc/ -run 'FindMarks|Reanchor|YTextRanges|Walk' -count=1 -v; go test ./internal/dispatch/docs/ -run '^$' -bench BenchmarkAnchoredWrite -benchmem -count=5 -benchtime=3x; go test ./internal/dispatch/pmdoc/ -run '^$' -bench 'BenchmarkFindMarks/.*/.*/FindMarks$' -benchmem -count=5",
+      "observed": "pmdoc real-spec run ok 999.797s, every test PASS incl. TestWalkMatchesFrozenWalk; AC3 N80/N10 medians (ns, B/op, allocs) doc-edit 0.98/0.99/1.02, anchored comment 0.92/1.01/1.02, upload 0.93/1.02/1.03; FindMarks ns 1.05 (150 KB), 1.15 (400 KB); docs anchor/mark/upload/edit tests ok 98.0s",
+      "headSha": "a9727ac8fbc2",
+      "negativeControl": "FindMarks writing a trailing empty run's separator fails the frozen-FindMark oracle; boundaryTokens(\"blockquote\")=0 fails TestWalkMatchesFrozenWalk and TestYTextRangesMatchesFrozenOnDocuments; an uncloned MarkAttrs fails 'MarkAttrs returns a copy'"
+    },
     {
       "criterion": "Conflict round: the forward merge of main@origin 5fbd8391 keeps equivalence (AC2a/AC2b) at the merged head",
       "surface": "pmdoc test suite with the opt-in corpus of 30 real LINUX specs, and the docs suite on Postgres 17 + pgvector, at the merged head",
@@ -72,7 +80,9 @@
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/docs/anchored_write_bench_test.go",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/.changes/unreleased/pr2447-Changed-20261028-134448.yaml"
+    "packages/envoy/.changes/unreleased/pr2447-Changed-20261028-134448.yaml",
+    "packages/envoy/internal/dispatch/pmdoc/walk.go",
+    "packages/envoy/internal/dispatch/pmdoc/splice.go"
   ],
   "trickyParts": [
     "FindMarks reproduces FindMark's quote walk exactly, including empty marked runs: one is written only when a later run of the same span carries the span past it.",
@@ -83,7 +93,8 @@
     "MarkQuote's 'written mark is missing' ErrDocSchema refusal now fires after applyLive's append and version write instead of inside the callback (plan decision 3); the caller's transaction rolls back on it, and it is reachable only on a pmdoc position bug.",
     "openAnchoredMarks gained ORDER BY created_at, id at the INFRA-512 architect's request (defect found by INFRA-642's implementer), so refresh event order is now stable rather than unchanged.",
     "AC2c used a serial copy of the replay tool, because the tool's shared random generator makes two concurrent base runs differ.",
-    "Conflict round: main@origin (5fbd8391) merged forward as f67fcb42; the CHANGELOG.md entry moved to a changie fragment (Issue=pr2447, per the architect). The replay CPU measurement ran at 8279d988, before the merge; main's applyLive change (#2416, forkHeld) drops only writes that leave the fork unchanged and does not touch refreshAnchors."
+    "Conflict round: main@origin (5fbd8391) merged forward as f67fcb42; the CHANGELOG.md entry moved to a changie fragment (Issue=pr2447, per the architect). The replay CPU measurement ran at 8279d988, before the merge; main's applyLive change (#2416, forkHeld) drops only writes that leave the fork unchanged and does not touch refreshAnchors.",
+    "Review round 1: splice.go childBoundary, a third copy of walk's position rule the review did not name, now uses the same walk.go helpers."
   ],
   "openQuestions": []
 }
