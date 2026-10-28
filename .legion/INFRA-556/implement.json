@@ -2,58 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-28T13:25:00Z",
-  "round": "review round 1 (changes requested at d8613619): eight items",
+  "completed": "2026-10-28T21:35:00Z",
+  "round": "tester round 2 failed on the conflict with main; forward-merged main four times (7cb3df8b, 988a35d4, 79bb46e2, ff5c1919) and fixed one more close-time loss path (7f00b65b)",
   "proof": [
     {
-      "criterion": "Items 1-6 and D10 across two processes, at the head after the review fixes and the forward merge of main",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc websockets with the test hooks (go test -tags multiprocess ./cmd/dispatch)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 544.938s, every test passed: TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive (14.81s), TestClosingAndReopeningAnIssueChangesEveryProcessesRooms (8.14s), TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt (67.05s), TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess (15.09s), TestAReadOnTheOtherProcessIsNeverOlderThanTheStore (12.09s), TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses (104.79s), TestEachDocumentSocketNamesItsServingProcess (8.09s). Also at this head: docs ok 836.196s, api ok 1108.777s, plain cmd/dispatch ok 156.979s, store ok 248.103s, pglisten ok, duty ok; infra/gcp TestDispatchConnectionsPerPodIsTheServers passes (85 == store.ConnectionsPerProcess).",
-      "headSha": "9788cdedf0f3",
-      "negativeControl": "The same seven tests at the test-support commit aa50b68c (no fix) all FAIL (252.571s), each on its bug, e.g. 'finding 7: 200 alternating keystrokes ... on A 34 room failures and 34 lock-waiting compactions' and 'closing the issue through B left alice's tab on A connected ... the socket stayed open 1s later'."
+      "criterion": "Items 1-6 and D10 across two processes, at the merged head",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 40m ./cmd/dispatch/",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 831.432s on the merged tree (seven spec tests, the new close/ask test and main's two-builds rows included); also at this tree: docs ok 933.631s, store ok 204.243s, cmd/dispatch ok 213.804s, api (-run 'Rebuild|Issue|Clos|Ask|Conditional|Hook|Routes') ok 304.831s, infra/gcp TestDispatchConnectionsPerPodIsTheServers passes (88 == store.ConnectionsPerProcess)",
+      "headSha": "ff5c1919ec34",
+      "negativeControl": "the seven spec tests at the test-support commit aa50b68c all FAIL on their bugs (https://github.com/sjawhar/legion/pull/2414#issuecomment-6466612269)"
     },
     {
-      "criterion": "Review item 3: closing an issue keeps the edits its rooms took while it was open; finding 1 still holds",
-      "surface": "docs package against Postgres: two Services with room sync on their listener hubs, a real browser socket (docstest peer) on A, the issue closed through B by SQL and B's trigger handler",
-      "command": "cd packages/envoy && go test -count=3 -run 'TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter|TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification' -v ./internal/dispatch/docs/",
-      "observed": "both pass 3 of 3: A's persistence held 3 s, alice types, the issue closes through B, her socket ends with the keystroke unstored, then the keystroke is stored and she reconnects read-only seeing it; a keystroke taken closeMargin + 30 s after the close is refused and not stored, the room closed rather than failed",
-      "headSha": "0feef4966704",
-      "negativeControl": "at the review head (before the fix) the first test fails 4 of 4: 'the keystroke alice typed while the issue was open was dropped by its close: the store holds \"before\\n\"'"
+      "criterion": "A close freezes every process's rooms and withdraws the issue's open asks (#2233), neither undoing the other; a reopen restores both",
+      "surface": "two real envoy-dispatch binaries: bob's room on B, the issue closed through A's PATCH and reopened through B's",
+      "command": "go test -tags multiprocess -count=5 -run TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoomUntilItsReopen ./cmd/dispatch",
+      "observed": "passes 5 of 5 and in two full tagged runs: bob reconnects read-only, the ask reads withdrawn and its block resolved in B's room and the store, still withdrawn after B's settlement was due with no version written; after the reopen the ask is open, bob reconnects writable and his edit is stored",
+      "headSha": "988a35d4d44e",
+      "negativeControl": "main's own TestTheRepairSweepResolvesADecisionBlockWrittenOnTheOtherProcessAfterTheClose assumed B's room keeps taking edits after a close; it fails on this tree by design and is deleted (TestRepairSweepsAClosedIssuesDocumentWrittenByAnotherProcess still covers the repair path)"
     },
     {
-      "criterion": "Review item 4: a document's conditional-edit admissions hold at most one shared connection while they wait on the queue lock",
-      "surface": "docs package against Postgres: a Service on its own pool, another connection holding the document's queue advisory lock, 20 concurrent AcquireConditionalEdit calls",
-      "command": "cd packages/envoy && go test -count=1 -run 'Conditional' -v ./internal/dispatch/docs/ && go test -count=2 -run TestConditionalEditFloodDoesNotStarveSmallPool ./internal/dispatch/api/",
-      "observed": "1 waiter on the lock and Pool.Stat().AcquiredConns() == 1; a cancelled admission returns context.Canceled; all 20 complete after the lock is released; the api flood test on a pool of 2 passes twice",
-      "headSha": "b34ba080d230",
-      "negativeControl": "with mutation.go reverted and the test kept: '20 of the service's connections wait on the document's queue lock, want 1'"
+      "criterion": "A keystroke a room took before its issue closed is stored even when a compaction folded the history under the room while its append waited",
+      "surface": "docs package against Postgres: a transaction holds the document lock while alice types, the issue closes, and the transaction writes and folds the history before releasing the lock",
+      "command": "go test -count=2 -run 'TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHistoryItsRoomHeld|TestAKeystrokeTaken|TestABrowserAppendOnAClosedIssue' ./internal/dispatch/docs/",
+      "observed": "ok; the gate stores a browser update refused as behind when the stored history still holds everything it depends on (storedHistoryHolds); a rebuild still refuses it",
+      "headSha": "7f00b65b3178",
+      "negativeControl": "before the fix: 'the keystroke alice typed while the issue was open was dropped: the store holds \"before\\n\"'"
     },
     {
-      "criterion": "Browser suite against two server processes: two readers see each other's edits, cursors and presence within one second, no reconnect",
-      "surface": "Chromium on the two-process harness of #2323, on a throwaway merge of this branch (ef1efb43) with that branch (a0f877c5)",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e_after?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess (runs at https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)",
-      "observed": "1 passed twice. Not re-run this round: this round's code changes touch the close gate, the edit queue, test hooks and docs, none of which the spec drives; the tester re-ran it at 9952be5a with --repeat-each=3 (3 passed).",
-      "headSha": "ef1efb435dfe",
-      "negativeControl": "on a0f877c5 (harness without the fix) the spec fails after setup: alice's socket reads open:false, and neither page shows the other's typing or cursor within 1 s"
+      "criterion": "Browser suite against two server processes on main's harness",
+      "surface": "Chromium, two envoy-dispatch processes behind the round-robin proxy of #2323, at the merged tree",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e_merged?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess (https://github.com/sjawhar/legion/pull/2414#issuecomment-6481131711)",
+      "observed": "1 passed (11.6s) and 1 passed (8.7s); all multiprocess specs 6 passed (1.2m); the oidc sign-in multiprocess spec 1 passed",
+      "headSha": "ff5c1919ec34",
+      "negativeControl": "on the harness without this change (a0f877c5) the spec fails after setup: a document socket closed and neither page shows the other's typing or cursor within 1 s (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
     }
   ],
   "filesChanged": [
-    "merge of main aeeee6c0: packages/envoy/CHANGELOG.md taken from main; store/pool.go permanentListeners 4; infra/gcp/dispatch.go dispatchConnectionsPerPod 85",
-    "docs/pending_authors.go, persistence.go, websocket.go, roomstate.go, service.go, issue_open_test.go: closeMargin rule for closed-issue browser appends (gate takes the observed time)",
-    "docs/mutation.go, conditional_edit_queue_test.go: per-document in-memory admit lock before Pool.Begin; gate.write taken before the member and sum queries",
-    "docs/testhooks_rooms.go, room_server.go, service.go, resume.go, testhooks_rooms_test.go, api/document_test_hooks.go, api/routes_table.go, cmd/dispatch/multiprocess_test.go: room_closes and settlement_resumptions counters replace log-text checks",
-    "packages/envoy/.changes/unreleased/pr2414-*.yaml (ten fragments); README, AGENTS.md, cmd/dispatch/AGENTS.md, running-dispatch.md corrected; Dispatch keys removed from added lines in code, tests and migrations"
-  ],
-  "trickyParts": [
-    "closeMargin compares two durations on two clocks (the issue's close age from now() - closed_at, the update's age from the process's monotonic clock), so no clock sync is needed.",
-    "The admission fix exposed a lock-order deadlock: a release held gate.write and waited on the queue row an admission had deleted; gate.write now comes right after the advisory lock."
+    "merges of main: migrations renumbered 0137_issue_open_notify, 0138_doc_ask_block_authors, 0139_doc_conditional_edit_queue; store/pool.go leasePoolSize 13, permanentListeners 4; infra/gcp dispatchConnectionsPerPod 88; docs, README, AGENTS.md and pr2414 fragments renumbered and recounted; main's pr2453 fragment wording made true",
+    "docs/service.go, ask_lifecycle.go, api/issue_patch.go and tests: close settles, withdraws asks, then the trigger closes rooms; reopen restores asks then rooms reload",
+    "docs/pending_authors.go (storedHistoryHolds), issue_open_test.go: the compaction-folded close loss",
+    "livewrite.go, websocket.go, pending_authors.go, render_reuse_test.go: #2453's render reuse kept beside catch-up and stored-ahead copies",
+    "packages/dispatch/e2e/coedit.multiprocess.e2e.ts: skip guard removed, main's harness types used",
+    "cmd/dispatch/multiprocess_test.go: new close/ask test; main's repair-sweep-after-close two-process test deleted"
   ],
   "deviations": [
-    "The gate signature gained an observed time.Time parameter; #2445's implementer accepted it (Envoy, 2026-10-28T11:27Z).",
-    "The PR body keeps the 'Dispatch: INFRA-556' line the worker skill requires for the daemon's link; every other key is gone from the body."
+    "Room-sync membership stays the listener connection's application_name in pg_stat_activity, beside #2390's registry: the registry counts a process live for 15 s after its last heartbeat and while its listener is down or redialing, so a room question would wait 500 ms on a process that cannot hear it; README says so."
   ],
-  "openQuestions": [
-    "The browser spec's run in dispatch-browser-multiprocess waits on #2323 reaching main; whichever of #2323 and #2414 merges second renumbers migrations, sets leasePoolSize 12 and dispatchConnectionsPerPod to match, and quotes that run."
-  ]
+  "openQuestions": []
 }
