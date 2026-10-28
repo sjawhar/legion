@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -117,13 +121,15 @@ type bootConfig struct {
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
-	// fence; the signing key is then per process.
+	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
+	// DevSignInSharedKey is DISPATCH_DEV_SIGNIN_SHARED_KEY: under dev sign-in, the secret every
+	// process of one local harness derives its cookie key from (sessionSigningKey), so they
+	// accept each other's cookies. resolveBootConfig refuses it without dev sign-in.
+	DevSignInSharedKey string
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
-	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
-	AssetStoreBucket string
 	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie keys, the current one first, or the
 	// empty set to keep one key in the data dir (sessionSigningKey).
 	SigningKey auth.SigningKeys
@@ -179,7 +185,11 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; cookies are valid on this process only", "origin", serverURL)
+		cookies := "cookies are valid on this process only"
+		if boot.DevSignInSharedKey != "" {
+			cookies = "cookies are valid on every process given this DISPATCH_DEV_SIGNIN_SHARED_KEY"
+		}
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; "+cookies, "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -249,6 +259,18 @@ func main() {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
+	// The build's assets are in the database before the process serves, before it binds its port
+	// or adopts the socket DISPATCH_LISTEN_FD names, so a page of this build that another process
+	// serves, during a rolling update or a rollback, finds its chunks here, and this process
+	// answers another build's from there (dashboard.Store below). A process that cannot publish
+	// exits before it is ready, and a rolling update keeps the processes it would have replaced.
+	// The build is what the process registers below as the build it serves, and its entry chunk
+	// what GET /api/v1/dashboard/builds answers as this process's.
+	dashboardBuild, err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout)
+	if err != nil {
+		slog.Error("dispatch: publish dashboard assets", "error", err)
+		os.Exit(1)
+	}
 
 	// The store's construction reads no network: credentials come with the first request.
 	fileStore, err := openFileStore(ctx, boot)
@@ -258,14 +280,6 @@ func main() {
 	}
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
-	}
-	var assetStore routes.AssetStore
-	if boot.AssetStoreBucket != "" {
-		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
-		if err != nil {
-			slog.Error("dispatch: configure retained asset store", "error", err)
-			os.Exit(1)
-		}
 	}
 
 	// INFRA-555: neither issuer is read at boot. The sign-in issuer's code flow and the
@@ -329,22 +343,23 @@ func main() {
 	}
 
 	built := routes.AppContextOptions{
-		SigningKey:  signingKey,
-		WebDistDir:  webDistDir,
-		AssetStore:  assetStore,
-		People:      people,
-		Sessions:    sessions,
-		Identity:    requestIdentity,
-		SignIn:      signIn,
-		Store:       database,
-		ServerURL:   serverURL,
-		Docs:        documentService,
-		Embedder:    embedder,
-		Events:      broker,
-		App:         appCfg,
-		AgentStream: agentStream,
-		Files:       fileStore,
-		Lifetime:    ctx,
+		SigningKey:     signingKey,
+		WebDistDir:     webDistDir,
+		AssetStore:     dashboard.NewStore(database.Pool),
+		DashboardEntry: dashboardBuild.Entry,
+		People:         people,
+		Sessions:       sessions,
+		Identity:       requestIdentity,
+		SignIn:         signIn,
+		Store:          database,
+		ServerURL:      serverURL,
+		Docs:           documentService,
+		Embedder:       embedder,
+		Events:         broker,
+		App:            appCfg,
+		AgentStream:    agentStream,
+		Files:          fileStore,
+		Lifetime:       ctx,
 	}
 	// Set only when configured: a nil *oidc.LazyVerifier in the interface field would read as a
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
@@ -536,7 +551,7 @@ func main() {
 	}
 	registration, err := joinRegistry(ctx, database, processes.Instance{
 		Commit:         buildCommit,
-		DashboardBuild: routes.DashboardBuild(webDistDir),
+		DashboardBuild: dashboardBuild.Build,
 		SigningKeys:    signingKey.Fingerprints(),
 	}, leases, announcer)
 	if err != nil {
@@ -666,7 +681,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
+		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
@@ -734,6 +749,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
+	// The shared key only ever replaces dev sign-in's per-process key; a server without the flag
+	// would ignore it, and a value an operator sets expecting it to sign their deployment's cookies
+	// would sign nothing.
+	if !devSignIn && boot.DevSignInSharedKey != "" {
+		return bootConfig{}, errors.New("DISPATCH_DEV_SIGNIN_SHARED_KEY is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_SIGNING_KEY to give a deployment's processes one key")
+	}
 
 	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
@@ -800,7 +821,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 // main loads after it. With the flag any loopback client signs in as any person it names, so the
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
-// this machine alone, and sign its cookies with a key no other process holds.
+// this machine alone, and sign its cookies with a key no production server holds: one of its own,
+// or one derived from DISPATCH_DEV_SIGNIN_SHARED_KEY under a dev-only label (sessionSigningKey),
+// which the other processes of its harness derive too and a production server never signs with.
 func devSignInFence(boot bootConfig, env settingValues) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
@@ -818,7 +841,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return err
 	}
 	if !boot.SigningKey.Empty() {
-		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process, or derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when the processes of one local harness share their cookies; unset DISPATCH_SIGNING_KEY")
 	}
 	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
@@ -914,15 +937,20 @@ func explainMigrateError(err error) error {
 	)
 }
 
-// sessionSigningKey is the key set session cookies are signed with: one key generated for this
-// process under dev sign-in, otherwise DISPATCH_SIGNING_KEY's keys when it is set (a deployment's,
-// from its secrets manager), otherwise the data dir's signing-key file, created on first start (a
-// local run's). Outside dev sign-in the keys must stay the same across deploys, or every dsession
-// cookie is invalidated whenever a container rolls; a rotation adds the new key second first. An
-// empty signing-key file is refused by name: the empty set signs nothing, and the people store
-// would refuse it only by panicking.
+// sessionSigningKey is the key set session cookies are signed with. Under dev sign-in it holds one
+// key: the key derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when it is set
+// (devSignInSharedSigningKey), otherwise one generated for this process. Outside it, it is
+// DISPATCH_SIGNING_KEY's keys when that is set (a deployment's, from its secrets manager),
+// otherwise the data dir's signing-key file, created on first start (a local run's). Outside dev
+// sign-in the keys must stay the same across deploys, or every dsession cookie is invalidated
+// whenever a container rolls; a rotation adds the new key second first. An empty signing-key file
+// is refused by name: the empty set signs nothing, and the people store would refuse it only by
+// panicking.
 func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
+		if boot.DevSignInSharedKey != "" {
+			return auth.SingleSigningKey(devSignInSharedSigningKey(boot.DevSignInSharedKey)), nil
+		}
 		key, err := auth.NewSigningKey()
 		if err != nil {
 			return auth.SigningKeys{}, err
@@ -943,6 +971,20 @@ func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error
 	return keys, nil
 }
 
+// devSignInSharedSigningKeyLabel separates the cookie key dev sign-in derives from every key a
+// production server signs with.
+const devSignInSharedSigningKeyLabel = "dispatch dev sign-in"
+
+// devSignInSharedSigningKey is the cookie key every dev-sign-in process given shared derives, the
+// base64url of HMAC-SHA256 keyed by shared over a fixed dev-only label. It is never shared itself,
+// so a production DISPATCH_SIGNING_KEY pasted into DISPATCH_DEV_SIGNIN_SHARED_KEY signs no cookie,
+// and seals no refresh token, that the production server it came from accepts.
+func devSignInSharedSigningKey(shared string) string {
+	mac := hmac.New(sha256.New, []byte(shared))
+	mac.Write([]byte(devSignInSharedSigningKeyLabel))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
 // newDocumentService is the document service main serves the document websocket and the API's
 // documents from: built, what main made from the rest of the configuration, with every setting the
 // service takes from boot filled in. The settings tests build it through here, as they build the
@@ -951,6 +993,50 @@ func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
 	built.TestHooks = boot.TestHooksEnabled
 	return docs.New(built)
+}
+
+// dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
+// A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
+// restart on a stored build writes nothing.
+const dashboardPublishTimeout = 60 * time.Second
+
+// publishDashboard stores the dashboard build at webDistDir in the database
+// (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
+// more (dashboard.Prune), both within timeout, and returns what it published: the build's id
+// (routes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
+// rigs serve an empty directory) publishes nothing, logs that it did not, and returns the zero
+// Published, whose empty build and entry say this process serves no dashboard. A failed publish
+// is the error returned, and refuses the boot; a failed prune is logged and the start goes on,
+// since it leaves only builds the next boot's prune deletes.
+func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, timeout time.Duration) (dashboard.Published, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	published, err := dashboard.Publish(ctx, pool, webDistDir, buildCommit)
+	switch {
+	case errors.Is(err, dashboard.ErrNoBuild):
+		slog.Info("dispatch: no dashboard build to publish: the web dist holds no index.html", "dir", webDistDir)
+	case err != nil:
+		return dashboard.Published{}, err
+	default:
+		slog.Info("dispatch: published dashboard assets", "build", published.Build, "entry", published.Entry,
+			"assets", published.Assets, "written", published.Written)
+	}
+	// The prune keeps every build a live server process serves (processes.Live, read here at boot)
+	// beside the newest dashboard.KeepNewest. This process registers only once it listens, after
+	// this, so it is not among them yet; the publish above has just renewed its build's
+	// last_started_at, which puts it among the newest.
+	liveBuilds, err := api.LiveDashboardBuilds(ctx, pool)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
+	}
+	pruned, err := dashboard.Prune(ctx, pool, liveBuilds)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
+	}
+	slog.Info("dispatch: pruned dashboard builds", "builds", pruned.Builds, "assets", pruned.Assets)
+	return published, nil
 }
 
 // decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the

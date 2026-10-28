@@ -9,6 +9,8 @@ import {
   placeCaret,
   typeAtEnd,
 } from "./editor";
+import { type DispatchProcess, processPinCookie } from "./harness-processes";
+import type { ProxiedSocket } from "./round-robin-proxy";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
@@ -19,29 +21,10 @@ import { signIn } from "./users";
  * document socket is closed or replaced on the way: one `/ws/doc/` socket per page, open from
  * start to end, and a connection dot that never leaves "connected".
  *
- * It needs the two-process harness (`bun run e2e:multiprocess`, DISPATCH_E2E_PROCESSES=2): the
- * round-robin proxy's pin cookie and its socket log (`GET /_proxy/sockets`). With one server it
- * skips. It imports none of that harness's modules and names the cookie and the log's row itself,
- * so a tree without the two-process harness still loads it, and skips it.
+ * It runs in two-process mode (`bun run e2e:multiprocess`, DISPATCH_E2E_PROCESSES=2) alone, as
+ * every `*.multiprocess.e2e.ts` does (e2e/playwright.config.ts): it reads the round-robin proxy's
+ * socket log (`GET /_proxy/sockets`) and pins each page with the proxy's cookie.
  */
-test.skip(
-  process.env.DISPATCH_E2E_PROCESSES !== "2",
-  "needs two Dispatch processes behind the round-robin proxy: run `bun run e2e:multiprocess` " +
-    "(DISPATCH_E2E_PROCESSES=2)"
-);
-
-/** The proxy's cookie that sends every request of a browser context to one process, websocket
- *  upgrades included (e2e/round-robin-proxy.ts). */
-const processPinCookie = "dispatch-e2e-process";
-
-/** One websocket the proxy relayed, as `GET /_proxy/sockets` lists it. */
-interface ProxiedSocket {
-  readonly id: number;
-  readonly path: string;
-  readonly upstream: "a" | "b";
-  readonly open: boolean;
-  readonly openedAt: number;
-}
 
 /** What a page must show within this long of the keystroke that caused it. */
 const liveWithin = 1000;
@@ -66,7 +49,7 @@ test.beforeEach(async () => {
 async function pinnedUser(
   browser: Browser,
   login: string,
-  process: "a" | "b"
+  process: DispatchProcess
 ): Promise<BrowserContext> {
   const context = await browser.newContext();
   await context.addCookies([{ name: processPinCookie, url: baseUrl, value: process }]);

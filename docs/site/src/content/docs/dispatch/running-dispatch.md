@@ -381,6 +381,15 @@ What a reader sees while two servers are serving:
   It still closes a session that falls behind, and its browsers reconnect. It sends no cursors to
   the other servers and shows none of theirs. It does not act when an issue is closed or reopened
   through a server of this version: its open sessions of that issue keep the access they had.
+- A page of either version keeps loading. Each server stores its version of the dashboard's files
+  in the database when it starts, before it takes traffic, and serves the other version's files
+  from there, so a page one server sent finds its files whichever server answers next. A server
+  that cannot store them does not start, and the roll keeps the servers it would have replaced. A
+  version older than the first that stores them stores nothing, so a roll away from one of those
+  versions can still leave a page asking for files no server has.
+- The dashboard's **A new version is available** notice waits until every server runs one
+  version: while two versions are serving, nobody is told to reload. A page that fails to load one
+  of its files reloads itself, at most three times in five minutes.
 - Signing in works whichever server each step reaches, and a sign-in made on one server is good on
   the other.
 
