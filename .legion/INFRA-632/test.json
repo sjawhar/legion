@@ -2,56 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T18:50:00Z",
-  "round": 2,
-  "testedHead": "c353929367fca3efc894bbbb6cd8246f0b17d62b",
+  "completed": "2026-10-28T19:15:00Z",
+  "round": 3,
+  "testedHead": "362ba0e923e969ca2294835e54b405baed217e4e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands at c3539293: the checker on the three guides (exit 0, 0 B stdout, 0 B stderr) and on main a409c128's files (exit 1: 2,411 R1, 295 R2, 7 R3); the Commands awk check (exit 0); restructure.ts --strict --report on main a409c128's three files (exit 0, all three outputs cmp-identical to head); check-differences.ts (78/265/40 entries, 0 unexplained hunks) and check-rendered.ts (exit 0, 0 missing) per file; replay/run.sh (exit 0, 36 PASS, pinned to 6b75da30, whose guides equal the head's); the reclaim, census and config Go tests and skills-guard (pass). Every figure reproduced."
+    "how": "Re-ran its commands at 362ba0e9: the checker on the three guides (exit 0, nothing printed) and on #2422's two guides (exit 0); restructure.ts --strict --report on main a409c128's three files (exit 0, all three outputs cmp-identical to head); replay/run.sh (36 PASS); the guides test (3 pass); the reviewer's repro (a 50-row nested item followed by a sibling) passes at head and gives 'R3: 51 screen rows' on the checker of c3539293, as its negative control says."
   },
   "failed": 0,
   "failures": [],
-  "roundOneFindings": [
-    "1 (conflicting, no CI): GitHub reports #2474 MERGEABLE at b31fed6a (18:48Z); CI at the code head c3539293 is queued (lint, typecheck, test, build, changes, Postgres 16 suite, pr-title), read as queued, not awaited.",
-    "2 (`<dir>` raw HTML blocks): no line of the three guides starts with a block-level HTML tag; red test 706f07f3 is unmodified at head and passes (bun test scripts/semantic-line-breaks.guides.test.ts: 3 pass, 0 fail); docs/kubernetes.md:2239 and :2317 now hold `<dir>` inside their code spans.",
-    "3 (a parenthesised second sentence): red test e1a9bee1 is unmodified at head; the independent sentence scan finds 0 lines with two sentences across the three guides (round 1: 11)."
-  ],
+  "scope": "Since round 2 (c3539293) the only code change is 362ba0e9: R3's line ownership in scripts/semantic-line-breaks.ts and its tests. The three guides, restructure.ts and the replay are byte-identical to c3539293 (git diff --quiet), so round 2's guide, difference and replay evidence holds; I re-ran the regeneration, scan, replay and guides test because the regeneration and replay run the checker.",
   "proof": [
     {
-      "criterion": "Acceptance 1: outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, no item or table row is longer than one screen; no fence left under ## Commands",
-      "surface": "the checker as a contributor runs it, an independent sentence scan of every non-fence line (blockquotes, HTML and table rows included), and the on-demand guides test that parses each guide as GitHub's Markdown does",
-      "command": "bun scripts/semantic-line-breaks.ts AGENTS.md scripts/e2e/README.md docs/kubernetes.md; awk Commands-fence check on AGENTS.md; bun $TMPDIR/infra632/scan.ts <three guides>; grep for any line starting with a block-level HTML tag; bun test scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0 with 0 B stdout and 0 B stderr; awk exit 0; scan hits=0; grep prints nothing; guides test 3 pass, 0 fail",
-      "headSha": "c353929367fca3efc894bbbb6cd8246f0b17d62b",
-      "negativeControl": "the checker on main a409c128's three files exits 1 with 2,411 R1, 295 R2 and 7 R3 findings; at round 1's head 464377da the same scan found 11 hits and the guides test failed on docs/kubernetes.md:2239 and :2325"
+      "criterion": "Review round 1's finding: R3 gives a nested item the same count whatever follows it, and still checks a parent's own lines",
+      "surface": "bun scripts/semantic-line-breaks.ts on scratch files, as a contributor runs it",
+      "command": "11 scratch files: a nested item of 50 and 51 rows followed by a sibling, a nested item of 50 rows as the last child, a top-level item of 50 and 51 rows followed by a sibling, a third-level item of 50 and 51 rows between siblings, an ordered item holding a fence of 50 and 51 rows, a parent whose own lines after a nested list total 50 and 51",
+      "observed": "every 50-row case exits 0 and every 51-row case exits 1 with 'R3: 51 screen rows' at that item's first line (line 3 for the nested item, line 5 for the third-level one, line 1 for the parent and the ordered step), whatever follows it",
+      "headSha": "362ba0e923e969ca2294835e54b405baed217e4e",
+      "negativeControl": "the reviewer's repro (a 50-row nested item followed by a sibling) on scripts/semantic-line-breaks.ts as of c3539293: 'R3: 51 screen rows: - First nested.', exit 1; at head exit 0"
     },
     {
-      "criterion": "Acceptance 2: nothing lost; the head regenerates byte for byte; headings, anchors and pinned phrases unchanged",
-      "surface": "restructure.ts and the difference checks on main a409c128's files, plus an independent word-count comparison",
-      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main a409c128 files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; words.ts (words lost per token, base vs head)",
-      "observed": "restructure exit 0, all three outputs identical to head; 0 unexplained hunks; check-rendered 0 missing (kubernetes 23 allowed: the 7 new ones are the link destination the old raw HTML block showed as text, now a rendered link); words lost only header-row, fence and named-reword words (AGENTS: bash 2, Task, Location, Notes, row 2; e2e: meaning 6, when, passes, rows; kubernetes: and 5, row 3, this)",
-      "headSha": "c353929367fca3efc894bbbb6cd8246f0b17d62b",
-      "negativeControl": "round 1: the reclaim Go tests with the 'Delete list' line indented fail ('yields no path'); this round the same tests pass on the head's re-laid-out paragraph"
+      "criterion": "Acceptance 1 and 2 still hold under the changed checker: the guides keep the layout and regenerate byte for byte",
+      "surface": "the checker, the independent sentence scan, restructure.ts --strict and the guides test",
+      "command": "bun scripts/semantic-line-breaks.ts <three guides> packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun $TMPDIR/infra632/scan.ts <three guides>; bun .legion/INFRA-632/restructure.ts --strict --report r.json <main a409c128 files> <outs>; cmp outs head; bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "checker exit 0 on all five guides; scan hits=0; restructure exit 0 and all three outputs identical to head; guides test 3 pass, 0 fail",
+      "headSha": "362ba0e923e969ca2294835e54b405baed217e4e",
+      "negativeControl": "the checker on main a409c128's three guides exits 1 (2,411 R1, 295 R2, 7 R3; round 2)"
     },
     {
-      "criterion": "Acceptance 3: edits to different sentences or different items merge clean; two items added at different places of one list merge clean",
-      "surface": "git merge-tree --write-tree on throwaway repositories seeded with the head's guides, with my own edits as well as the implementer's patches",
-      "command": "bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE (8 pairs); one more pair on two sentences of the workspace-init paragraph that was a raw HTML block in round 1; TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh",
-      "observed": "my 8 pairs PASS (6 clean, the same-sentence and same-point controls conflict); the workspace-init pair merges clean (rc 0); run.sh exit 0, 36 PASS; b1d8a21b1e8f conflicts, which the architect ruled does not count (18:27Z)",
-      "headSha": "c353929367fca3efc894bbbb6cd8246f0b17d62b",
-      "negativeControl": "the same 8 pairs on main a409c128's guides: the first pair (two sentences of the Production check paragraph) conflicts"
-    },
-    {
-      "criterion": "The checker's `(` rule and its other two changes: no false split, idempotent --write; #2422's other paths untouched",
-      "surface": "bun scripts/semantic-line-breaks.ts [--write] on scratch files; git diff against sjawhar/legion#2422's carried head",
-      "command": "10 scratch inputs (i.e. (Memory), etc. (See, a list item, (1), (**Note**, a blockquote, (`x`, after ?, after a closing quote, Fig. (A)), each checked, written twice and compared; git diff --stat 1feb1dc4 c3539293 excluding the three guides and .legion",
-      "observed": "splits only after a sentence end before ( and a capital or backtick (list item, code start, after ?, after a closing quote); i.e., etc., (1), (**Note**, Fig. (A) and blockquotes are left; every second --write changes nothing; the diff from #2422's head touches only scripts/semantic-line-breaks.ts and its two test files, and #2422's byte-order-mark handling is kept; #2422's newer head 3b8fe46d changes only its retro docs and ledger",
-      "headSha": "c353929367fca3efc894bbbb6cd8246f0b17d62b",
-      "negativeControl": "round 1's head 464377da: the parenthesised second sentence gives no R1 finding (red test e1a9bee1 failed with empty stdout)"
+      "criterion": "Acceptance 3 still holds: different sentences and different items merge clean",
+      "surface": "git merge-tree --write-tree in throwaway repositories",
+      "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE (guides unchanged since round 2)",
+      "observed": "run.sh 36 PASS; my 8 pairs pass at round 2 on byte-identical guides",
+      "headSha": "362ba0e923e969ca2294835e54b405baed217e4e",
+      "negativeControl": "my first pair conflicts on main a409c128's guides (round 2)"
     }
   ],
   "notes": [
-    "CI at c3539293 was queued at 18:48Z; a required red that settles sends the work back on its own.",
-    "The checker misses a parenthesised second sentence that opens with a digit or with bold (`. (1)`, `. (**Note**`), and does not read blockquotes. No guide holds either today (independent scan: 0 hits). Recorded, not a failure."
+    "CI at 362ba0e9 was queued at 19:13Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at c3539293 was cancelled by the new push, never completed.",
+    "The reviewer's minor finding (the file-head comment of scripts/semantic-line-breaks.ts at :5-6 still names only the two Envoy guides as keeping the layout) is unchanged at head and not on the Fast-follow line, which names the three other tidy-ups. It is a comment and changes no behaviour; the reviewer decides."
   ]
 }
