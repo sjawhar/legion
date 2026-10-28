@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-652",
-  "completed": "2026-10-28T09:34:05Z",
+  "completed": "2026-10-28T10:21:51Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2429",
   "proof": [
+    {
+      "criterion": "Acceptance round: the changelog entry carries no Dispatch key (controller ruling), and the doc comments and the silence-window test match the code; no runtime path changes.",
+      "surface": "the branch's diff and the Go package's tests in the workspace",
+      "command": "jj diff --git -r 'fe9a2487..4a4837b3' | grep '^+' | grep INFRA- (outside .legion/); cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=… go test -race -count=1 ./internal/dispatch/api/ -run 'Agent|Roster|Route|Listener|TTL|Silence|Fetch|Shutdown|Concurrent'; go vet ./internal/dispatch/api/",
+      "observed": "No Dispatch key in any added line outside .legion/; packages/envoy/CHANGELOG.md is back to its base text and the entry lives in packages/envoy/.changes/unreleased/pr2429-Changed-20261028-101708.yaml (changie v1.26.0, main's .changie.yaml, custom Issue=pr2429); the focused api suite passes under -race in 99.5 s; go vet clean. Since e66f2b32 only comments, one test and the changelog changed, so the runtime proofs at e66f2b32 and the load test at 76dbf910 stand.",
+      "headSha": "4a4837b3dbb49aa307c29e40bd6d306dd9c57679",
+      "negativeControl": "Before this round the CHANGELOG.md hunk read '(INFRA-652)'; the trimmed TestAgentsAnswer503ThroughTheSilenceWindow still requires one listener call for two failed lists, so a cache that dropped the silence would fail it."
+    },
     {
       "criterion": "Review finding 1: during a shutdown drain an agents list answers a healthy listener's sessions, not 503 (no new failure path beyond the two the INFRA-512 architect accepted).",
       "surface": "Dispatch server binary over HTTP: one GET /api/v1/agents in flight when the process receives SIGTERM (http.Server.Shutdown drains it), healthy fake listener answering in 1 s, roster copy expired",
@@ -82,7 +90,7 @@
     "packages/dispatch/e2e/run-server.sh",
     "packages/dispatch/web/src/features/refs/agent-registry.ts",
     "packages/envoy-client/src/dispatch-http.ts",
-    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/.changes/unreleased/pr2429-Changed-20261028-101708.yaml",
     "packages/envoy/cmd/dispatch/AGENTS.md",
     "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/cmd/dispatch/main.go",
@@ -108,8 +116,9 @@
     "Simplify pass applied 2 findings (writeEnvoyError reuse; rosterCache.uncached field dropped in favour of Deps.ListenerRosterUncached); the load-test head series and binary proofs were re-run at the applied head 76dbf910. Skipped: sort-once-per-fetch.",
     "The local browser run covers the 24 agent/route_status specs in chromium, not all 1,674 tests: the whole suite takes hours on this 2-vCPU pod and WebKit lacks host libraries here; CI's dispatch job runs the whole suite on the head.",
     "Round 2 removed TestAnAgentsListAfterTheTTLListsTheListenersNewAnswer and TestAnUncachedListenerRosterAsksTheListenerOnEveryAgentsList (coverage repeated by issue_route_status_cache_test.go and settings_test.go's router subtest), the reviewer's named fast-follow, rather than leaving it.",
-    "The merge-rule load test was not re-run at e66f2b32: the only code change since 76dbf910 is a branch taken once the process lifetime is cancelled, which steady-state load never takes; the scratch volume (and its load-test stack) was also recreated."
+    "The merge-rule load test was not re-run at e66f2b32: the only code change since 76dbf910 is a branch taken once the process lifetime is cancelled, which steady-state load never takes; the scratch volume (and its load-test stack) was also recreated.",
+    "The changie fragment was written by changie v1.26.0 run with main's packages/envoy/.changie.yaml copied in for the one command and removed after: the branch's base predates changie, and the merge result carries main's config."
   ],
   "openQuestions": [],
-  "round": 2
+  "round": 3
 }
