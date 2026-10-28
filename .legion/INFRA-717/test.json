@@ -2,35 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T22:35:00Z",
-  "round": 5,
-  "testedHead": "59377f8f148db07a88d650683a44aba9b2429762",
+  "completed": "2026-10-28T22:45:00Z",
+  "round": 6,
+  "testedHead": "ba09bc0cd28a16b3811ccd730b02098d898979d4",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same sibling surface independently at 59377f8f. The README block was extracted with awk. Role A ran it twice: both exit 0, and the second printed only the socket path. Then a sibling ran it under unshare --user --map-current-user --pid --ipc --fork --mount-proc: it printed only the socket path, sibling-exit=0. There was one postmaster afterwards. pg_postmaster_start_time was 2026-10-28 22:27:50.728533+00 before and after the sibling's run, and psql gave 180006|'add':1."
+    "how": "Drove the round-5 failure's surface independently at ba09bc0c: the README block extracted with awk, run with PATH holding only bash, curl, python3, flock, mkdir, rm, mv, echo, cat, env and sh. command -v pg_isready printed none. Run 1: server started, exit 0. Run 2 with the server up: only the socket path, exit 0. One postmaster."
   },
-  "failures": [
-    {
-      "criterion": "scripts/dispatch/README.md's Lexeme database block, which says it 'prints the socket path and starts nothing when a server answers on the socket': on a machine without pg_isready it must not report a running server as dead or give advice that starts a second server.",
-      "evidence": "The block now decides liveness with `pg_isready -q -h \"$pg\" -U postgres`. Nothing in the README names pg_isready, and the block used no PostgreSQL client before this round (curl, python3 and flock are its other tools). pg_isready comes from postgresql-client. Here it is /usr/bin/pg_isready from postgresql-client-common, but the lexeme check itself (bun) needs no PostgreSQL client. I ran the block with PATH holding bash, curl, python3, flock, mkdir, rm, mv, echo, cat, env and sh, and no pg_isready. Run 1: exit 0, 'server started', and psql reached it (180006). Run 2, with that server up: 'line 5: pg_isready: command not found', then 'no server answers on .../t717n/pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove .../t717n/pg', exit 1. A missing command takes the same branch as a dead server. Following the advice (rm -rf $TMPDIR/pg, run again): exit 0, 'server started', and ps listed two postmasters from that directory (PIDs 16608 and 16652). The first was still running with its data directory deleted. A fix that adds no dependency: test the socket with python3, which the block already requires, for example `python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' \"$pg/.s.PGSQL.5432\" 2>/dev/null`. Or refuse up front when `command -v pg_isready` fails. No red test: the defect is in README prose, and a source-text test is forbidden here. The steps above reproduce it."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "A sibling role's run of the README block (own PID and IPC namespace, shared $TMPDIR) leaves role A's server as the one server, still answering.",
-      "surface": "The README's bash block at the code head, run by role A in this pod and by a sibling under unshare --user --map-current-user --pid --ipc --fork --mount-proc.",
-      "command": "TMPDIR=<dir> bash -c 'source <block>' (twice); TMPDIR=<dir> unshare --user --map-current-user --pid --ipc --fork --mount-proc bash -c 'source <block>'; psql -h <dir>/pg -U postgres -Atc \"select current_setting('server_version_num'), to_tsvector('english','added'), pg_postmaster_start_time()\" before and after the sibling's run",
-      "observed": "Role A: exit 0 twice. Sibling: printed only the socket path, exit 0. One postmaster. The same start time before and after: 180006|'add':1|2026-10-28 22:27:50.728533+00.",
-      "headSha": "59377f8f148db07a88d650683a44aba9b2429762",
-      "negativeControl": "The implementer's round-4 control: the same sibling run against the 75e39fdb block printed 'another server might be running; trying to start server anyway' and broke role A's server."
+      "criterion": "The README's lexeme-database block, with the socket test in python3: no extra tool needed, sibling roles share one server, a crashed server is refused with advice that leaves one server, and the lexeme check reads the PostgreSQL 18.6 server.",
+      "surface": "The README's bash block at the code head, run as written in this pod on a PATH without pg_isready, by role A and by a sibling under unshare --user --map-current-user --pid --ipc --fork --mount-proc; then bun scripts/dispatch/meaning-search-check.ts against the Dispatch this pod is configured for (read-only GETs).",
+      "command": "PATH=<dir>/bin TMPDIR=<dir> bash -c 'source <block>' (twice); TMPDIR=<dir> unshare --user --map-current-user --pid --ipc --fork --mount-proc env PATH=<dir>/bin bash -c 'source <block>'; psql pg_postmaster_start_time before and after; kill -KILL <postmaster>, run, rm -rf <dir>/pg, run; bun scripts/dispatch/meaning-search-check.ts --pair '<key>=adding production jobs' --lexeme-database <dir>/pg/.s.PGSQL.5432",
+      "observed": "Restricted PATH, run 2: only the socket path, exit 0. Sibling (no pg_isready): only the socket path, sibling-exit=0. One postmaster, the same start time before and after (22:37:31.389793+00), 180006|'add':1. Postmaster SIGKILLed: the socket file and postmaster.pid were left, 0 postmasters. Run: 'no server answers on .../pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove .../pg', exit 1. After rm -rf and a rerun: exit 0, exactly one postmaster, 180006|'add':1. The check: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true', 'A2 <key> shared=2 position=none fail': the lexer read the server. The query repeats two title words, so a fail is expected. The lock, server.new and data.new paths are unchanged since round 4, where I verified concurrent first runs and the interrupted-run recoveries.",
+      "headSha": "ba09bc0cd28a16b3811ccd730b02098d898979d4",
+      "negativeControl": "The same check after pg_ctl -D data stop: 'A2 <key> shared=unchecked position=none unavailable: lexeme-database', 'result unavailable exit=2'. The round-5 block (59377f8f) on the same restricted PATH: run 2 printed 'pg_isready: command not found' and refused while the server answered (round 5)."
     },
     {
       "criterion": "No workflow names the Postgres 16 jobs (workflows unchanged since 839a67cb).",
-      "surface": "The job graph at the round-5 code head.",
-      "command": "gh run view 40779548448 -R sjawhar/legion --json jobs",
-      "observed": "Tests 40779548448 (queued, jobs created): typecheck, lint, test. Legion Envoy and Contracts 40779548483 lists only 'changes' (queued). The required checks at this head are not read yet. The reviewer's handoff records envoy-go at 75e39fdb printing 180006|0.8.7.",
-      "headSha": "59377f8f148db07a88d650683a44aba9b2429762",
+      "surface": "The job graph at the round-6 code head.",
+      "command": "gh run view 40781066170 -R sjawhar/legion --json jobs",
+      "observed": "Tests 40781066170 (queued, jobs created): test, lint, typecheck. Legion Envoy and Contracts 40781066176 lists only 'changes' (pending). The required checks at this head are not read yet. The reviewer's handoff records envoy-go at 75e39fdb printing 180006|0.8.7.",
+      "headSha": "ba09bc0cd28a16b3811ccd730b02098d898979d4",
       "negativeControl": "Main's Tests run 40741954129 at a409c128 lists the Postgres 16 job (round 1)."
     }
   ]
