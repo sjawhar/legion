@@ -2,28 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-522",
-  "completed": "2026-10-28T09:34:00Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "99da66ef96ec62dad048bb47aee0bf7597b4c353",
+  "completed": "2026-10-28T12:59:00Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedCodeHead": "a26b7e98253779c8c69ace6e0653d2aee35dd7ab",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "docs/solutions/envoy/ghcr-docker-multiarch-ci.md:131-136; PR body Outcome and 'Does the Go build stage hit?'",
-      "description": "The text implies that a main run gets the 2-minute cache hit when its inputs did not change. But packages/envoy/docker/Dockerfile:76-84 takes LEGION_COMMIT (github.sha, passed by both builds) into the build stage's Go build ldflags. So every commit misses at that step, and with mode=min (no intermediate records) the whole build stage and the web stage it copies from run again. A push run on main gets about the miss time (4.2-6.9 min, still under 8). The 2.00/1.60 hit was a re-run at the same sha. Correct the doc bullet and the PR body: name LEGION_COMMIT, and give the miss figures as the expected time on main."
+      "severity": "minor",
+      "file": ".github/workflows/release-envoy-listener.yaml:249-255; packages/envoy/AGENTS.md:3941-3942",
+      "description": "Fast-follow wording: say 'with mode=min' where the text says a cache would only serve a re-run at the same commit (mode=max would reuse the web stage and the early build-stage layers, at about 1.6 GB per main run). The uncached range is 4.2-5.3 min; the 6.9 came from a run that wrote the cache."
     },
     {
       "severity": "minor",
-      "file": "PR body Size line",
-      "description": "'+266/-70' does not match the diff at 99da66ef; restate it."
+      "file": "docs/solutions/envoy/ghcr-docker-multiarch-ci.md:103,133-136",
+      "description": "The text relies on the provenance-add-gha=false driver option, which the YAML example does not show."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "My round-2 'Look at first' and 'Not proven / risk' lines still described the removed cache. I rewrote them for round 3."
     }
   ],
-  "roundOneThreads": "All 5 round-1 threads (PRRT_kwDORFy7ds6wucBM, ...BT, ...BY, ...Bf, ...Bh) were fixed at 98a88768/99da66ef. I replied 'Accepted' on each; the implementer had already resolved them.",
-  "forArchitect": "Whether to keep cache-to on main: each main run writes new mode=min blobs that only a same-sha re-run reads, and the repository's Actions cache is already over the 10 GB limit (12.06 GB on 2026-10-28).",
-  "ci": "At code head 99da66ef (newest pull_request run's head): lint, typecheck, test and pr-title succeeded; compare 99da66ef...a8d23130 is .legion/ only (2 files).",
-  "thermonuclear": "Pair at 99da66ef: deep review Verdict CHANGES (Medium: the LEGION_COMMIT cache miss on main is not stated; Minor: stale PR body), code quality Verdict APPROVE (round-1 BUILD_CACHE suggestion applied correctly).",
-  "reviewerBodyLines": "I rewrote 'Look at first' and 'Not proven / risk' for round 2."
+  "threads": "All 6 threads answered by me and resolved by the implementer: PRRT_kwDORFy7ds6wucBM, PRRT_kwDORFy7ds6wucBT, PRRT_kwDORFy7ds6wucBY, PRRT_kwDORFy7ds6wucBf, PRRT_kwDORFy7ds6wucBh, PRRT_kwDORFy7ds6xDv6_.",
+  "ci": "At code head a26b7e98 (newest pull_request run's head): the required lint, typecheck, test and pr-title succeeded; compare a26b7e98...ad7238fe is .legion/ only (2 files). Worker Image build (not required) failed on a curl HTTP/2 stream error downloading uv in worker.Dockerfile, which this PR does not touch; I re-ran the failed job.",
+  "thermonuclear": "Pair at a26b7e98: deep review Verdict APPROVE (two Minor findings: stale PR body, too-broad cache wording); code quality Verdict CHANGES on comment wording, the copies of the reason and the body. I judged these Minor: they change no behaviour, hide no error and break no gate.",
+  "e2e": "Both E2E lines name a26b7e98 (run 40666030478); the tester verified the implementer's proof."
 }
