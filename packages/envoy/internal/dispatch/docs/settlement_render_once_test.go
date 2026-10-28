@@ -59,6 +59,7 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 			return tree
 		})
 	}
+	invariant := requireReadUnchangedWhenReused(t, service)
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
 		t.Fatal("settlement never reached the window between its reconciliation and its repair")
@@ -66,6 +67,10 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	release()
 	service.afterSettleReconcile = nil
 	requireNoSuppressedSlots(t, service, artifactID, "after the repair")
+	// The repair changed the tree the settlement read, so its version renders that tree again.
+	if reuses, renders := invariant.reuses(artifactID), invariant.renders(artifactID); reuses != 0 || renders != 1 {
+		t.Fatalf("the settlement reused the rendering of its read %d times and rendered again %d times, want no reuse and one render", reuses, renders)
+	}
 
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the edited document", versions, versionsBefore+1)
@@ -118,6 +123,7 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 			return tree
 		})
 	}
+	invariant := requireReadUnchangedWhenReused(t, service)
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
 		t.Fatal("settlement never reached the window between its read and its stamp")
@@ -125,6 +131,10 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	release()
 	service.afterSettleRead = nil
 	requireNoSuppressedSlots(t, service, artifactID, "after the stamp")
+	// The stamp's tree replaced the read, so the version renders the stamp's tree.
+	if reuses, renders := invariant.reuses(artifactID), invariant.renders(artifactID); reuses != 0 || renders != 1 {
+		t.Fatalf("the settlement reused the rendering of its read %d times and rendered again %d times, want no reuse and one render", reuses, renders)
+	}
 
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the appended blocks", versions, versionsBefore+1)
