@@ -489,6 +489,13 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes names namespace twice",
 		},
 		{
+			// A file on the daemon's disk reaches no pod: under kubernetes a provider key is a key of
+			// the providers Secret every pod mounts.
+			name: "a provider key naming a file",
+			body: kubernetesFile + "provider_keys: {GEMINI_API_KEY: \"file:/etc/legion/providers/gemini\"}\n",
+			want: "provider_keys.GEMINI_API_KEY names the file /etc/legion/providers/gemini, which only runtime tmux reads: under runtime kubernetes a provider key is a key of the providers Secret",
+		},
+		{
 			name: "namespace absent",
 			body: kubernetesWith("    namespace: legion\n", ""),
 			want: "runtime.kubernetes.namespace is required",
@@ -1378,11 +1385,11 @@ linger_hours: 0.3
 instructions: /tmp/stage4b/instructions.md
 github_apps:
   implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "5341240"
+    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
   review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "5341243"
+    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
 runtime:
   kubernetes:
     namespace: legion
@@ -1471,6 +1478,27 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestAgentSecretsURLRefusalNamesNoCredential: a url carrying a user, a password, a query or a
+// fragment is refused without echoing it.
+func TestAgentSecretsURLRefusalNamesNoCredential(t *testing.T) {
+	for _, raw := range []string{
+		"https://tokuser9f3:hunter2pw@secrets.example",
+		"https://secrets.example/?token=qtok77",
+		"https://secrets.example/#qtok77",
+		"https://tokuser9f3:hunter2pw%zz@secrets.example",
+	} {
+		_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: \""+raw+"\"\n"+agentSecretsTokenFile), noEnv)
+		if err == nil || !strings.Contains(err.Error(), "agent_secrets.url must be an absolute URL") {
+			t.Fatalf("url %q: err %v, want the url refused", raw, err)
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("url %q: refusal %q names %q", raw, err, secret)
+			}
+		}
 	}
 }
 

@@ -173,6 +173,49 @@ func TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead(t *testing.T) {
 	}
 }
 
+// The record can trust a head GitHub has already left: a late push whose move the record made
+// before is spent, so a branch re-pushed to the same next commit is not seen on its way until its
+// synchronize arrives (classify.unspentPushes). No merge lands that commit meanwhile: the READY merge
+// row submits only READY's head, read from GitHub first (ghautomerge.Submit), and every mutation
+// carries it as GitHub's expected head. A read that shows GitHub's head re-pushed submits nothing;
+// a re-push between the read and the mutation is refused by GitHub ("Head branch was modified").
+// Either way the issue stays in awaiting_merge and no merge is recorded.
+func TestAREADYMergeNeverLandsAHeadReplacedAfterTheREADY(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		read   func(int) string
+		merges int
+	}{
+		{"GitHub's read shows the head re-pushed", func(int) string { return pullJSON("OPEN", "re-pushed", "CLEAN") }, 0},
+		{"the head is re-pushed between the read and the merge", func(n int) string {
+			if n == 1 {
+				return pullJSON("OPEN", "ready-head", "CLEAN")
+			}
+			return pullJSON("OPEN", "re-pushed", "CLEAN")
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newMergeGitHub(t, tc.read, refusedAnswer("Head branch was modified. Review and try the merge again."))
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+			runner := mergeRunner(pool, records, github.url, quietLogger(), time.Now)
+			_ = runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now()))
+			if merges, _ := github.merged(); merges != tc.merges {
+				t.Fatalf("merge mutations %d, want %d", merges, tc.merges)
+			}
+			var at string
+			var state record.PullRequestState
+			if err := pool.QueryRow(context.Background(), `select i.phase, p.state from issues i join pull_requests p on p.issue = i.key where i.key = 'LEGION-208'`).Scan(&at, &state); err != nil {
+				t.Fatal(err)
+			}
+			if at != string(phase.AwaitingMerge) || state == record.PullRequestMerged {
+				t.Fatalf("after the READY merge row the issue is in %s and its pull request %s, want awaiting_merge and not merged", at, state)
+			}
+		})
+	}
+}
+
 // GitHub refusing a ready_merge row's submission where a retry would meet the same refusal (squash
 // merges disabled, a permission the App lacks) fails loudly: the issue's architect is told once,
 // with GitHub's message, and the row ends rather than retrying forever. A transient failure

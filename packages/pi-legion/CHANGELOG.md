@@ -7,6 +7,23 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 40: a root whose architect asked a person a question and handed the turn
+  back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
+  its session kept, and the person's answer, or the spec's design gate standing open, puts it at
+  the front of the waiting line, where the next free slot resumes the same session. `legion state`
+  and the controller's `read_state` carry the phase and the issue's `waitingOn`: the question
+  (`kind: "ask"`, `ask`) or, for the gate waits of a later release, the spec version (`kind:
+  "gate"`, `gateVersion`, `artifactId`), when the wait began (`since`, Dispatch's time of the
+  hand-back), and, once the wait was answered, `answeredAt` and `answeredBy` (how it was
+  answered, not always by a person). The controller receives the new `awaiting-person` notice. A
+  39 plugin's strict state reader refuses this state, so install this release with a `legion`
+  built from the same commit. The `legion-architect` skill opens a question on the root and ends
+  its turn after handing it back; it takes a resume task that says "this resume is your
+  design-approved wake" as its `design-approved` wake, since a waiting root gets no
+  `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
+  task, not a notice, names the changes request. The `legion-controller` skill reads the
+  `awaiting-person` wake and a waiting root as no reason to label or admit anything.
+
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
@@ -36,9 +53,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
   is a spec, for each factual claim. The architect verifies with a command, or removes, each claim
   either review marks unverified, and the request's `--summary` ends with one sentence that gives
-  both reviews' results. The root and sub-architect role prompts say the same. Self-review alone
-  did not stop false claims: an architect requested approval, then again minutes later because a
-  claim was false.
+  both reviews' results. The root and sub-architect role prompts say the same. `legion-architect`'s
+  template and example of that sentence also say what the reviews do not show, as
+  `dispatch-writing-specs` requires of a sentence that cites a gate: no open gap, every claim
+  verified, and neither shows that the design works once built. Self-review alone did not stop
+  false claims: an architect requested approval, then again minutes later because a claim was
+  false.
 - `plan-reviewer` reviews a spec as well as a plan. In its spec mode it checks each factual claim
   against the code, the docs or a read-only command, and marks each claim verified, false or
   unverified, with the file and line or the command and its output. It also checks that the spec
@@ -61,7 +81,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or needs what only that person can provide. A finding outside the tree is always an ask. A cost
   or risk the person would weigh is now also a reason for a new version of an approved spec. The
   deployment's owner said Legion's architects asked him too many questions that did not need him.
-
 - Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
   shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
   and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
@@ -124,6 +143,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   takes its own next issue, but it changes no admission; the reference used to have the controller
   set priority and rank together so that "highest priority, then board rank" produced the plan's
   order (INFRA-188).
+
+- The skill-scenario rig has an `askgate` scenario. It seeds an issue whose one
+  comment is the person's and gives a plain session one of three prompts, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names (`facts`, `link` or `upload`). An askgate run's directory is
+  `askgate-<case>-<label>-<n>`, so the batches of the three cases keep their own runs, and
+  `rig.sh score askgate` counts each case and label on its own. `score.ts` reads AskGate's
+  verdicts from the transcript. `rig.sh profile` takes `--envoy-json <file>` and merges that object
+  into the envoy.json the label's sessions read, so a label can turn AskGate off. A `dispatch`
+  call with `--help` or `--dry-run` sends nothing, and AskGate does not review it. A call that
+  AskGate refused as unreadable got no model review. The score reads neither of these calls as a
+  verdict of the gate. A `link` run passes only when AskGate allowed its ask on a verdict: a
+  timeout, an error, a skip, an override or no entry is no review, so it fails. A `facts` run reads
+  the refused call's own gate entry, and its reason must name failure 12 (`Content 12`) and both
+  facts. The refusal text is not read for them, because it quotes the question for every failure.
+  The `link` prompt asks a choice that the person's comment leaves open, with a
+  link to that comment, because an ask whether to do what the person asked fails AskGate's rule
+  authority 6. The seeded issue's title, "Release and nightly job settings", fits the write of
+  each case.
 - Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
   container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
   generation in Linux namespaces of its own (`legion launcher role-init`), and
@@ -191,6 +228,23 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- `legion-worker/references/findings.md`: a finding ask names what went wrong, where and to whom,
+  with the numbers, and what each option does to whom, in up to 2,000 characters; only evidence
+  the decision does not need goes to the cited comment.
+
+- `legion-architect/references/decomposition.md`: a child issue's spec is written as
+  `dispatch-writing-specs` says, scaled to the child (its outline, a proposed answer to each point,
+  terms explained, no item number from another document, no root text that does not apply to the
+  child), in place of the bare `<acceptance criteria, scope, and context>` placeholder, which never
+  pointed to that skill. Before `dispatch issue` creates each child, the architect has a fresh
+  `plan-gap-analyst` check its spec against `dispatch-writing-specs` and fixes what it flags.
+
+- The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
+  accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
+  order at the root's close instead, where a root whose pull request merged waits in
+  `awaiting_merge` for the rest of its tree. The architect skill accepts a root's own pull request
+  on its own evidence; the integration child still runs last, and the root closes after it.
 
 - A finding outside a role's own issue takes the first of three steps that fits. A
   defect with a clear fix in code the role's own tree touches or depends on is fixed in that
@@ -829,10 +883,30 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
+- The `legion` tool's `handoff_complete`, `sign_off` and `register_gate` wait out a daemon restart
+  instead of failing on the first refused connection: a connection refused, reset or closed before
+  a response, or a 502 or 503 from a proxy (a body that is not the daemon's refusal), is retried
+  with backoff from 0.5 s to 30 s for up to 10 minutes or until the agent aborts, each attempt with
+  a fresh grant; an abort during a wait sends no further attempt. The retry notice goes out once as
+  a partial result, which Oh My Pi shows in its TUI and RPC event stream; the model sees only the
+  final result. The daemon applies each of the three at most once however often it arrives. Every
+  answer the daemon gives, a 4xx or 409 or its own coded 502/503, is passed on at once; after an
+  attempt whose connection dropped, that refusal says the dropped attempt may have been applied.
 - The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
+- Each skill-scenario run has a Dispatch of its own: a database named after the run in the batch's
+  Postgres, and a Dispatch server on it, which the run seeds, captures from and stops when it
+  ends. Before, the runs of a batch shared one Dispatch server. `dispatch search` searches every
+  project of its server, so in one askgate `facts`/`off` batch a run found the four other runs'
+  identical asks and did not post its own. Each run records its Dispatch in `dispatch.json`, and
+  `rig.sh score` does not score a run that records none or that names one database in one Postgres
+  with another run. A brainstorm batch now takes any number of runs.
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It

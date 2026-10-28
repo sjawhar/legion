@@ -139,10 +139,18 @@ const agentModelsMark = "agent-models="
 // into its profile, which a pod of this daemon would load twice.
 const extensionsMark = "extensions=discovered"
 
-// capabilitiesMark is on the OK line once the probe has checked the capability list
-// (internal/capabilities, CheckImage) and found every image-site capability present: a CLI that
-// predates the check prints no such token, having checked none of them.
-const capabilitiesMark = "capabilities=checked"
+// The capabilities mark's states: the probe checked the capability list (internal/capabilities,
+// CheckImage) and found every image-site capability present, or found every one present but the
+// browser, whose row it left unchecked (`probe-image --skip-browser`: the build of an image for a
+// deployment that turns Oh My Pi's browser off, which carries no Chromium). A CLI that predates the
+// check prints no mark, having checked none of them.
+const (
+	CapabilitiesAll            = "checked"
+	CapabilitiesBrowserSkipped = "browser-skipped"
+)
+
+// capabilitiesMark carries one of those states on the OK line.
+const capabilitiesMark = "capabilities="
 
 // modelFallbackMark carries, on the OK line, whether the image's Oh My Pi falls back to another
 // model under the operator's configuration (capabilities.ReadModelFallback): ModelFallbackOn,
@@ -161,16 +169,16 @@ const (
 )
 
 // OKLine is that line: the OMP invocation probed, the session-storage mark, the extensions mark,
-// the agent-models mark (AgentModelsResolved or AgentModelsSkipped), the capabilities mark, the
-// model-fallback mark (ModelFallbackOn, ModelFallbackOff, or ModelFallbackUnread), and the daemon
-// API contract the image's plugin declared, last. The daemon's probe Sandbox passes the image
-// only on a line that confirms the daemon's own contract (ConfirmedContract) with the extensions
-// mark (ExtensionsDiscovered), the agents' models resolved (AgentModels) and the capability list
-// checked (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its
-// ImageReport.
-func OKLine(omp string, contract int, agentModels, modelFallback string) string {
-	return fmt.Sprintf("%s (%s) %s %s %s%s %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels,
-		capabilitiesMark, modelFallbackMark, modelFallback, contract)
+// the agent-models mark (AgentModelsResolved or AgentModelsSkipped), the capabilities mark
+// (CapabilitiesAll or CapabilitiesBrowserSkipped), the model-fallback mark (ModelFallbackOn,
+// ModelFallbackOff, or ModelFallbackUnread), and the daemon API contract the image's plugin
+// declared, last. The daemon's probe Sandbox passes the image only on a line that confirms the
+// daemon's own contract (ConfirmedContract) with the extensions mark (ExtensionsDiscovered), the
+// agents' models resolved (AgentModels) and the whole capability list checked (Capabilities:
+// CapabilitiesAll), and keeps the model-fallback mark (ModelFallback) in its ImageReport.
+func OKLine(omp string, contract int, agentModels, capabilities, modelFallback string) string {
+	return fmt.Sprintf("%s (%s) %s %s %s%s %s%s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels,
+		capabilitiesMark, capabilities, modelFallbackMark, modelFallback, contract)
 }
 
 // ImageReport is what the daemon keeps of a passed probe: what its OK line said of the image, and
@@ -224,12 +232,13 @@ var agentModelsState = markPattern(agentModelsMark)
 // none: no OK line, or one from a CLI that predates the agent-model check.
 func AgentModels(output string) string { return markValue(agentModelsState, output) }
 
-// capabilitiesChecked is the capabilities mark on an OK line.
-var capabilitiesChecked = markPattern(capabilitiesMark)
+// capabilitiesState is the capabilities mark on an OK line.
+var capabilitiesState = markPattern(capabilitiesMark)
 
-// CapabilitiesChecked is whether an OK line in output carries the capabilities mark; false when
-// output holds none: no OK line, or one from a CLI that predates the capability check.
-func CapabilitiesChecked(output string) bool { return capabilitiesChecked.MatchString(output) }
+// Capabilities is the capabilities state an OK line in output carries (CapabilitiesAll, or
+// CapabilitiesBrowserSkipped from a probe run with --skip-browser), and "" when output holds none:
+// no OK line, or one from a CLI that predates the capability check.
+func Capabilities(output string) string { return markValue(capabilitiesState, output) }
 
 // extensionsDiscovered is the extensions mark on an OK line.
 var extensionsDiscovered = markPattern(extensionsMark)
@@ -281,4 +290,58 @@ func NATSUser(output string) string {
 		return ""
 	}
 	return match[1]
+}
+
+// RoleConfigFilesFlag is the `legion probe-image` flag the daemon's probe Sandbox passes once per
+// role `role_config_files` names, its value RoleConfigFilesValue: the probe reads that role's
+// PI_CONFIG_FILES as the role's Oh My Pi will start with it, the probe pod's own overlays then the
+// role's, and refuses with a RoleOverlaysRefusedLine when one is missing or Oh My Pi refuses them.
+// Passed only for a role that names overlays, so a deployment that names none probes with the
+// command it always had.
+const RoleConfigFilesFlag = "--role-config-files"
+
+// RoleConfigFilesValue is one RoleConfigFilesFlag's value: `<role>=<file>:<file>…`, the role's
+// overlays in the order its PI_CONFIG_FILES names them.
+func RoleConfigFilesValue(role string, files []string) string {
+	return role + "=" + strings.Join(files, ":")
+}
+
+// ParseRoleConfigFiles reads a RoleConfigFilesValue back into the role and its overlays, refusing
+// a value with no role, no file, or an empty entry.
+func ParseRoleConfigFiles(value string) (string, []string, error) {
+	role, joined, ok := strings.Cut(value, "=")
+	if !ok || role == "" || joined == "" {
+		return "", nil, fmt.Errorf("%s %q is not <role>=<file>[:<file>…]", RoleConfigFilesFlag, value)
+	}
+	files := strings.Split(joined, ":")
+	for _, file := range files {
+		if file == "" {
+			return "", nil, fmt.Errorf("%s %q names an empty file", RoleConfigFilesFlag, value)
+		}
+	}
+	return role, files, nil
+}
+
+// roleOverlaysRefusedPrefix begins the line `legion probe-image` prints, and exits 1 after, when a
+// role's PI_CONFIG_FILES (RoleConfigFilesFlag) names an overlay the probe pod cannot read or Oh My
+// Pi refuses the role's overlays.
+const roleOverlaysRefusedPrefix = "probe-image: role-overlays-refused role="
+
+// RoleOverlaysRefusedLine is that line for role, why naming the overlay or Oh My Pi's answer, its
+// line breaks turned to spaces so the line carries the whole of it.
+func RoleOverlaysRefusedLine(role, why string) string {
+	return roleOverlaysRefusedPrefix + role + ": " + strings.Join(strings.Fields(why), " ")
+}
+
+// roleOverlaysRefused is a RoleOverlaysRefusedLine.
+var roleOverlaysRefused = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(roleOverlaysRefusedPrefix) + `(\S+): (.*)$`)
+
+// RoleOverlaysRefused is the role and the reason of the first RoleOverlaysRefusedLine in output,
+// and false when output holds none.
+func RoleOverlaysRefused(output string) (role, why string, ok bool) {
+	match := roleOverlaysRefused.FindStringSubmatch(output)
+	if match == nil {
+		return "", "", false
+	}
+	return match[1], match[2], true
 }
