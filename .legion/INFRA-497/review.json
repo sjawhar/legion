@@ -2,19 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-497",
-  "completed": "2026-10-28T19:56:52Z",
-  "round": 6,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "5ce792cd0d15",
+  "completed": "2026-10-28T22:41:30Z",
+  "round": 7,
+  "decision": "approved",
+  "reviewedCodeHead": "d7184ba26791",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "A3 regression from the start-turn hold: an owed startup card's wake fires right after the start turn is interrupted (Esc or RPC abort). #check's pending filter (500) keeps every startup card whatever #interrupted says, and unreadCards counts an owed card read only after a reply that follows a turn-ending reply, which an aborted start turn never has; the wake (nextTurn+triggerTurn) starts a turn with no latch check (agent-session.ts:9299-9308). Before this round the startup card's turn ran before the start turn, so no interrupt could come between. Reproduced by a scratch CardWake test (1 wake in tui and rpc mode) and by both thermonuclear passes; no test covers an interrupted start turn. The reason at 117-118 does not hold for an owed card."},
-    {"severity": "minor", "file": "packages/pi-legion/extensions/controller-start-omp.test.ts", "description": "The unsent-mark real-binary cases (around 1402) assert only that the first request contains the card, which a plain immediate steer (no pending mark) also satisfies; assert the request ends with the wake."}
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundFindings": "Narrowed round (architect): the round-6 finding is fixed (an owed startup card gets no wake while an interrupt that stopped the start turn is in effect: card-wake.ts #check, unit tests for an aborted reply, an aborted auto-compaction and a cancelled retry in tui and rpc mode, real-binary RPC abort case); the unsent-mark real-binary cases assert the wake and wait with session.until(..., 90_000), which fails when omp exits; pi-legion AGENTS.md says interface 5; pi-shared AGENTS.md states the 30 s cap. Mutations (code-quality pass): reverting the filter fails the 6 unit cases and the abort case; removing markStartupTurnPending fails both unsent-mark cases at the WAKE_ONE assertion.",
+  "risks": [
+    "An auto_compaction_end aborted that is not the person's act (an extension cancelling session_before_compact, an internal abort) during the start turn leaves the owed card folded until the next turn; no extension in this repo cancels compaction (Fast-follow wording at card-wake.ts:146-147).",
+    "Unchanged since 5ce792cd and inside the invisible-setup-interrupt limit: an RPC abort while the daemon's start prompt is still being set up, before agent_start, shows nothing to extensions, so the owed card wakes at the sent mark's 30 s cap."
   ],
-  "merge": "88cf80bc (main 53f39ba0): every PR-only file is byte-identical to 5741f678; the ten files both sides changed keep both, and envoy.ts joins main's replay-ledger frame with CardWake's marker (`{...frame, ...details}`, disjoint keys; the inert path is main's unchanged).",
-  "verification": "Reviewer at 5ce792cd with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: pi-envoy `bun run test` 1474 pass 0 fail then 9 pass 0 fail; pi-legion controller-start-omp.test.ts 15 pass 0 fail; pi-shared 76 pass 0 fail.",
-  "ci": "At 5ce792cd: Tests, Legion Envoy and Contracts, Docs, Worker Image queued at review time.",
-  "thermonuclear": "Both run once at 5ce792cd: deep review CHANGES (interrupt finding confirmed; interface v5 readers, mark lifetime, sessionOpen and the merge checked, no other defect); code quality CHANGES (same finding; real-binary assertion gap; Fast-follow docs and structure)."
+  "verification": "Reviewer at d7184ba2 with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: pi-envoy `bun run test` 1480 pass 0 fail then 9 pass 0 fail; pi-legion controller-start-omp.test.ts 16 pass 0 fail.",
+  "ci": "At code head d7184ba2 (the newest pull_request run's head; only .legion/ above it): required lint, typecheck, test and pr-title success; pi-envoy and pi-legion success. Two non-required jobs failed on timeouts in Go packages this PR does not touch: the Daemon Go suite on Postgres 16 (TestAReportThatIsNotAFailedNoticeForwardChangesNothing, 20m timeout) and the Dispatch Go suite on Postgres 16 (internal/dispatch/api, 10m timeout).",
+  "thermonuclear": "Both run once at d7184ba2: deep review APPROVE, no findings; code quality APPROVE, mutations confirm each new test catches its bug."
 }
