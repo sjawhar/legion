@@ -10,11 +10,11 @@ import (
 )
 
 // The test hooks let a test of several server processes (cmd/dispatch's multiprocess suite) see
-// and steer what one process's rooms do: which rooms it holds, how often a room failed or
-// compacted waiting for the document lock, a room's persistence held back, and an agent's open
-// write parked at a named point. A service built without Deps.TestHooks holds none of this:
-// s.hooks is nil, every seam below is a nil check, and every exported hook answers
-// ErrTestHooksOff.
+// and steer what one process's rooms do: which rooms it holds, how often a room failed, compacted
+// waiting for the document lock or was closed by the service, when the settlement resumption armed
+// a document's settlement, a room's persistence held back, and an agent's open write parked at a
+// named point. A service built without Deps.TestHooks holds none of this: s.hooks is nil, every
+// seam below is a nil check, and every exported hook answers ErrTestHooksOff.
 
 var (
 	// ErrTestHooksOff refuses a test hook on a service built without Deps.TestHooks.
@@ -39,7 +39,8 @@ const (
 	PauseAfterCommit LiveWritePausePoint = "after-commit"
 )
 
-// RoomCounters is what one process's rooms of one document did since the process started.
+// RoomCounters is what one process did with one document's rooms and owed settlement since the
+// process started.
 type RoomCounters struct {
 	// RoomFailures counts the times a room of the document failed (failRoomLocked).
 	RoomFailures int64 `json:"room_failures"`
@@ -47,6 +48,14 @@ type RoomCounters struct {
 	// waits for the document's lock rather than leaving a busy room for later
 	// (servicePersistenceAdapter.Compact).
 	LockWaitingCompactions int64 `json:"lock_waiting_compactions"`
+	// RoomCloses counts the rooms of the document the service closed (roomServer.closeHeld): a
+	// room whose stored history was replaced, a room of an issue that closed or reopened, a failed
+	// room's eviction, a room live at shutdown. ygo's retirement of an idle room is not the
+	// service's close and is not counted.
+	RoomCloses int64 `json:"room_closes"`
+	// SettlementResumptions holds the time of each settlement-resumption pass of this process that
+	// armed the document's owed settlement (resumeOwedSettlements), oldest first.
+	SettlementResumptions []time.Time `json:"settlement_resumptions"`
 }
 
 // testHooks is the test hooks' state, on a service built with Deps.TestHooks.
@@ -86,7 +95,8 @@ func (s *Service) ResidentRooms() []string {
 	return rooms
 }
 
-// RoomCounters reads what this process's rooms of artifactID did since it started.
+// RoomCounters reads what this process did with artifactID's rooms and owed settlement since it
+// started. Its SettlementResumptions is a copy, empty rather than nil when none was armed.
 func (s *Service) RoomCounters(artifactID string) (RoomCounters, error) {
 	h := s.hooks
 	if h == nil {
@@ -94,10 +104,12 @@ func (s *Service) RoomCounters(artifactID string) (RoomCounters, error) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	var counted RoomCounters
 	if counters := h.counters[artifactID]; counters != nil {
-		return *counters, nil
+		counted = *counters
 	}
-	return RoomCounters{}, nil
+	counted.SettlementResumptions = append([]time.Time{}, counted.SettlementResumptions...)
+	return counted, nil
 }
 
 // HoldRoomPersistence makes every append of a browser update from this process's rooms of
@@ -193,6 +205,30 @@ func (h *testHooks) countLockWaitingCompaction(artifactID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.countersLocked(artifactID).LockWaitingCompactions++
+}
+
+// countRoomClose counts a close of a room of artifactID the service made.
+func (h *testHooks) countRoomClose(artifactID string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.countersLocked(artifactID).RoomCloses++
+}
+
+// countSettlementResumption records that a settlement-resumption pass armed the owed settlement
+// of each of artifactIDs at at.
+func (h *testHooks) countSettlementResumption(artifactIDs []string, at time.Time) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, artifactID := range artifactIDs {
+		counters := h.countersLocked(artifactID)
+		counters.SettlementResumptions = append(counters.SettlementResumptions, at)
+	}
 }
 
 func (h *testHooks) countersLocked(artifactID string) *RoomCounters {

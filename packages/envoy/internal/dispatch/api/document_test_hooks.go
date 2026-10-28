@@ -68,8 +68,9 @@ func (s *server) listResidentRooms(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string][]string{"rooms": hooks.ResidentRooms()})
 }
 
-// getRoomCounters answers {"room_failures": n, "lock_waiting_compactions": n} for the document's
-// rooms on this process since it started.
+// getRoomCounters answers {"room_failures": n, "lock_waiting_compactions": n, "room_closes": n,
+// "settlement_resumptions": [time, ...]}: what this process did with the document's rooms and
+// owed settlement since it started.
 func (s *server) getRoomCounters(w http.ResponseWriter, r *http.Request) {
 	hooks, ok := s.requireDocumentTestHooks(w, r)
 	if !ok {

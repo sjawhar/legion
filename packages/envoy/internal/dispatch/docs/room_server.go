@@ -29,6 +29,9 @@ type roomServer struct {
 	// gate, once the close knows the room is the one it closes (Service.removeLocalAwareness). It
 	// must not block. Nil runs nothing.
 	beforeClose func(room string)
+	// afterClose runs after every close of a room the service makes that closed it, still holding
+	// the room's close gate (the test hooks' close count). It must not block. Nil runs nothing.
+	afterClose func(room string)
 	// gatesMu guards gates and every gate's holders.
 	gatesMu sync.Mutex
 	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
@@ -59,12 +62,17 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.closeHeld(room, force)
 }
 
-// closeHeld is ygo's CloseRoom for a close that holds room's gate, after beforeClose.
+// closeHeld is ygo's CloseRoom for a close that holds room's gate, after beforeClose and, once it
+// has closed the room, before afterClose.
 func (r *roomServer) closeHeld(room string, force bool) error {
 	if r.beforeClose != nil {
 		r.beforeClose(room)
 	}
-	return r.Server.CloseRoom(room, force)
+	err := r.Server.CloseRoom(room, force)
+	if err == nil && r.afterClose != nil {
+		r.afterClose(room)
+	}
+	return err
 }
 
 // closeInstance closes room through ygo's CloseRoom only while room holds doc, answering whether it

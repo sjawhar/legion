@@ -694,6 +694,9 @@ func New(deps Deps) *Service {
 	// Every close the service makes removes the room's local awareness first, so the other
 	// processes hear the removal before the close tears the room's relay down.
 	service.srv.beforeClose = service.removeLocalAwareness
+	// The test hooks count every room the service closes; s.hooks is read at each close, nil when
+	// they are off.
+	service.srv.afterClose = func(room string) { service.hooks.countRoomClose(room) }
 	// Awareness crosses processes through the relay; document updates do not (awareness_relay.go).
 	// Attaching it after the server's hooks are set but before any room loads registers its
 	// observers on every room; the relay's Start cannot fail, so neither can this.

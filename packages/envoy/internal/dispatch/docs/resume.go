@@ -82,6 +82,7 @@ func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) 
 		s.scheduleSettle(room)
 	}
 	if len(rooms) > 0 {
+		s.hooks.countSettlementResumption(rooms, time.Now())
 		slog.Info("dispatch: resumed owed document settlements", "documents", len(rooms))
 	}
 	return nil

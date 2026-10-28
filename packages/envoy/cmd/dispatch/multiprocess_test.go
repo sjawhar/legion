@@ -353,8 +353,9 @@ func (p *dispatchProcess) residentRooms(t *testing.T) []string {
 	return listed.Rooms
 }
 
-// roomCounters is how often the process's rooms of the document failed and compacted waiting for
-// the document lock since it started (GET /api/v1/artifacts/{id}/_test/room-counters).
+// roomCounters is what the process did with the document's rooms and owed settlement since it
+// started: its room failures, lock-waiting compactions, room closes and settlement resumptions
+// (GET /api/v1/artifacts/{id}/_test/room-counters).
 func (p *dispatchProcess) roomCounters(t *testing.T, artifactID string) docs.RoomCounters {
 	t.Helper()
 	answer := p.call(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/_test/room-counters", "", http.StatusOK)
@@ -1213,12 +1214,6 @@ const liveWithin = time.Second
 // come through the agent token (dispatchAgentToken).
 const multiprocessAgentSession = "multiprocess-agent"
 
-// roomClosedLine begins what a process logs when it closes a document room itself because its
-// stored history was replaced under it (docs/room_sync.go); before INFRA-556 the stale-room
-// evictor logged it for every room another process's write left behind. A process that keeps its
-// rooms live writes it only after a rebuild, a prune or a compaction under a room.
-const roomClosedLine = "closed a document room"
-
 // asUser is the header a signed-in person's request carries (X-Dispatch-User, which these
 // processes trust).
 func asUser(login string) http.Header {
@@ -1329,21 +1324,25 @@ func (p *dispatchProcess) holdsRoom(t *testing.T, artifactID string) bool {
 	return slices.Contains(p.residentRooms(t), artifactID)
 }
 
-// roomCloses names what closed rooms of the document on either process so far - the logged closes
-// of a replaced history and the room failures the hook counted - for a failure to show beside what
-// it saw. A close's line is written once the room has closed, so one a moment old may be missing.
+// roomCloses names what the room-counters hook counted for the document on either process so far
+// - the rooms the service closed and the room failures - for a failure to show beside what it saw.
 func (p *dispatchPair) roomCloses(t *testing.T, artifactID string) string {
 	t.Helper()
-	return fmt.Sprintf("rooms of the document failed %d times on A and %d on B; room closes logged on A: %q; on B: %q",
-		p.a.roomCounters(t, artifactID).RoomFailures, p.b.roomCounters(t, artifactID).RoomFailures,
-		p.a.logLines(roomClosedLine, "room="+artifactID), p.b.logLines(roomClosedLine, "room="+artifactID))
+	countersA, countersB := p.a.roomCounters(t, artifactID), p.b.roomCounters(t, artifactID)
+	return fmt.Sprintf("the service closed rooms of the document %d times on A and %d on B; rooms of it failed %d times on A and %d on B",
+		countersA.RoomCloses, countersB.RoomCloses, countersA.RoomFailures, countersB.RoomFailures)
 }
 
-// requireNoRoomCloses fails the test when either process logged closing a room of the document.
+// requireNoRoomCloses fails the test when either process's service closed a room of the document
+// (the room-counters hook's room_closes): a process that keeps its rooms live closes none for a
+// write, a cursor or a departure, on its own process or the other. The count rises once the close
+// has returned, so a close still under way when this reads is missed.
 func (p *dispatchPair) requireNoRoomCloses(t *testing.T, artifactID string) {
 	t.Helper()
-	if len(p.a.logLines(roomClosedLine, "room="+artifactID))+len(p.b.logLines(roomClosedLine, "room="+artifactID)) > 0 {
-		t.Errorf("a process closed a room of the document another process's write left behind: %s", p.roomCloses(t, artifactID))
+	countersA, countersB := p.a.roomCounters(t, artifactID), p.b.roomCounters(t, artifactID)
+	if countersA.RoomCloses+countersB.RoomCloses > 0 {
+		t.Errorf("the service closed a room of the document %d times on A and %d on B, want none on either: a process closed a room it should have kept live (rooms of the document failed %d times on A and %d on B)",
+			countersA.RoomCloses, countersB.RoomCloses, countersA.RoomFailures, countersB.RoomFailures)
 	}
 }
 
@@ -1834,7 +1833,7 @@ func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) 
 		}
 		countersA, countersB := pair.a.roomCounters(t, artifactID), pair.b.roomCounters(t, artifactID)
 		t.Logf("after %d keystrokes: A %+v, B %+v", typed, countersA, countersB)
-		if countersA != (docs.RoomCounters{}) || countersB != (docs.RoomCounters{}) {
+		if countersA.RoomFailures+countersA.LockWaitingCompactions+countersB.RoomFailures+countersB.LockWaitingCompactions != 0 {
 			t.Errorf("finding 7: %d alternating keystrokes failed rooms of the document and ran lock-waiting compactions: on A %d room failures and %d lock-waiting compactions, on B %d and %d; want none on either",
 				typed, countersA.RoomFailures, countersA.LockWaitingCompactions, countersB.RoomFailures, countersB.LockWaitingCompactions)
 		}
@@ -2085,8 +2084,8 @@ func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 		ask, found := pair.a.askOfBlock(t, issueKey, blockID)
 		if found {
 			if ask.Author.Kind != "user" || ask.Author.ID != "bob" {
-				t.Fatalf("A's resumed settlement made the ask of bob's block with author %+v, want bob (user), who wrote it on B; A's resumption lines: %q",
-					ask.Author, pair.a.logLines("resumed owed document settlements"))
+				t.Fatalf("A's resumed settlement made the ask of bob's block with author %+v, want bob (user), who wrote it on B; A's resumptions armed the document's settlement at %v",
+					ask.Author, pair.a.roomCounters(t, artifactID).SettlementResumptions)
 			}
 			return
 		}
@@ -2426,31 +2425,20 @@ func rebuildPath(artifactID string) string {
 	return "/api/v1/artifacts/" + artifactID + "/rebuild"
 }
 
-// resumedLine is what a settlement-resumption pass logs when it armed owed settlements.
-const resumedLine = `msg="dispatch: resumed owed document settlements"`
-
-// loggedAt is the time a slog text line was written (its time= field).
-func loggedAt(line string) (time.Time, bool) {
-	field, _, _ := strings.Cut(line, " ")
-	stamp, found := strings.CutPrefix(field, "time=")
-	if !found {
-		return time.Time{}, false
-	}
-	at, err := time.Parse(time.RFC3339Nano, stamp)
-	return at, err == nil
-}
-
-// resumedBetween is every resumption line either process logged at a time in [from, to).
-func (p *dispatchPair) resumedBetween(from, to time.Time) []string {
-	var lines []string
+// resumedBetween is every time in [from, to) at which either process's settlement resumption armed
+// the document's owed settlement (the room-counters hook's settlement_resumptions), each named by
+// its process.
+func (p *dispatchPair) resumedBetween(t *testing.T, artifactID string, from, to time.Time) []string {
+	t.Helper()
+	var resumed []string
 	for _, process := range []*dispatchProcess{p.a, p.b} {
-		for _, line := range process.logLines(resumedLine) {
-			if at, ok := loggedAt(line); ok && !at.Before(from) && at.Before(to) {
-				lines = append(lines, p.name(process)+": "+line)
+		for _, at := range process.roomCounters(t, artifactID).SettlementResumptions {
+			if !at.Before(from) && at.Before(to) {
+				resumed = append(resumed, p.name(process)+" at "+at.Format(time.RFC3339Nano))
 			}
 		}
 	}
-	return lines
+	return resumed
 }
 
 // Spec item 6: a rebuild, the settlement resumption, the conditional-edit queue and a write to a
@@ -2521,11 +2509,11 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 		period := docs.SettlementResumeInterval
 		start := time.Now().Truncate(period).Add(period)
 		end := start.Add(period)
-		t.Logf("counting the resumptions logged in the period from %s to %s", start.Format(time.TimeOnly), end.Format(time.TimeOnly))
+		t.Logf("counting the resumptions of the document in the period from %s to %s", start.Format(time.TimeOnly), end.Format(time.TimeOnly))
 		time.Sleep(time.Until(end) + 2*time.Second)
-		resumed := pair.resumedBetween(start, end)
+		resumed := pair.resumedBetween(t, artifactID, start, end)
 		if len(resumed) != 1 {
-			t.Fatalf("the owed settlement was resumed %d times in one %v period, want once across both processes:\n%s",
+			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in one %v period, want once across both processes:\n%s",
 				len(resumed), period, strings.Join(resumed, "\n"))
 		}
 	})
