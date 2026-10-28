@@ -182,15 +182,21 @@ func pushedMoves(moves []record.Move, push record.ClassifiedPush) ([]record.Move
 }
 
 // arrivalPushes is the pushes the arrival of head, by the move from before (empty when its
-// synchronize names none), is judged with: the oldest recorded push of each two heads
-// (oldestOfEachMove), which a move takes before a later one; and, when no chain of them leads to
-// head from pr's head and before is named, a chain that also takes the oldest repeat of each move
-// (record.Move.Repeats) and passes through before: from pr's head to before - moves whose
-// synchronizes the record missed - and on from before to head. An arrival that names no move, or
-// whose move no such chain reaches, takes no repeat and is judged as before repeats existed.
+// synchronize names none), is judged with. An arrival that names its move takes the oldest
+// recorded push of each two heads (oldestOfEachMove), which a move takes before a later one; and,
+// when no chain of them leads to head from pr's head, a chain that also takes the oldest repeat of
+// each move (record.Move.Repeats) and passes through before: from pr's head to before - moves
+// whose synchronizes the record missed - and on from before to head. An arrival that names no move
+// takes no repeat and the newest recorded push of each two heads (newestOfEachMove), as the
+// release before this one did, which kept the newest push of each two heads alone: a daemon behind
+// a listener that does not send a synchronize's before judges a history as that release did (see
+// unspentPushes for the one change).
 func arrivalPushes(pr record.PullRequest, before, head string) []record.ClassifiedPush {
+	if before == "" {
+		return newestOfEachMove(pr.Pushes)
+	}
 	pushes := oldestOfEachMove(pr.Pushes)
-	if pr.HeadSHA == "" || before == "" || chainOf(pushes, pr.HeadSHA, head) != nil {
+	if pr.HeadSHA == "" || chainOf(pushes, pr.HeadSHA, head) != nil {
 		return pushes
 	}
 	with := clone(pushes)
@@ -223,6 +229,23 @@ func oldestOfEachMove(pushes []record.ClassifiedPush) []record.ClassifiedPush {
 	for _, p := range pushes {
 		if !seen[pushKey(p)] {
 			seen[pushKey(p)] = true
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// newestOfEachMove is pushes with only the last, in delivery order, of the pushes of each two
+// heads, each where it was delivered: what the release before this one recorded, which replaced a
+// push with a later one of the same two heads.
+func newestOfEachMove(pushes []record.ClassifiedPush) []record.ClassifiedPush {
+	last := map[[2]string]int{}
+	for i, p := range pushes {
+		last[pushKey(p)] = i
+	}
+	kept := make([]record.ClassifiedPush, 0, len(last))
+	for i, p := range pushes {
+		if last[pushKey(p)] == i {
 			kept = append(kept, p)
 		}
 	}
@@ -364,13 +387,27 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // through hx, takes no repeat and opens a head run, which the other path's pushes replay when they
 // arrive (TestARepeatStandsOnlyForTheMoveItsSynchronizeNames). An arrival that names no move - a
 // reopen, a close at another head, READY, the daemon's own read of the head, a listener or a run
-// step from before the field - takes no repeat either, and is judged as if its push were lost.
+// step from before the field - takes no repeat and the newest push of each two heads, and is
+// judged as the release before judged it (TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore),
+// a head run that a lost push opened closing at its bound the one change; so this daemon may deploy
+// before a listener that sends before.
 //
 // R1 is the floor: two pushes of the same two heads that differ - in who pushed them, whether they
 // were forced, what they changed - delivered in the reverse of the order they were made. Nothing a
 // push or a synchronize carries orders them, so the move takes the one made second, and the
 // judgement is that push's: wrong in that order, right in the other. No rule over the webhooks
 // alone is right in every order there; only the repository's activity API orders the two.
+//
+// The replay's shortest chain is a limit this shares with the release before: chainOf takes the
+// shortest chain of recorded pushes to a head, so pushes of another path delivered early - a later
+// move's, or a stale one between the same two heads - can stand for a path the branch did not
+// take, and spend a push the real move still needs. In the fuzz of moves made again with forced
+// returns to any earlier head (40,000 histories each in random and bounded orders, seed 11), it
+// leaves 8 histories outside R1 (7 random, 1 bounded) judged worse than by the release before,
+// which takes the same wrong chain and is right only because its head run then never closes; in 2
+// of them the real push the wrong chain left over was queued as a repeat and completed a second
+// wrong chain. Keeping a repeat out of chains of several pushes fixes those 2 but misjudges 4
+// others and leaves 32 more runs open, so it is not done.
 //
 // A head whose push is lost for good is judged unchained and holds its head run open, and every
 // head after it joins the run. The run drops exactly the pushes the record's own bound lets go and

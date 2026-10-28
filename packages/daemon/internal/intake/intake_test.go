@@ -435,6 +435,29 @@ func TestIssueEventIgnoresFieldsTheDaemonDoesNotConsume(t *testing.T) {
 	}
 }
 
+// A listener released before it forwarded a synchronize's before sends the synchronize without it:
+// the daemon decodes it as an arrival that names no move (PullRequestSynchronized.Before empty),
+// which classify judges as the release before this one did, and every other field as before.
+func TestASynchronizeFromAListenerWithoutBeforeNamesNoMove(t *testing.T) {
+	data, err := os.ReadFile("testdata/github/pr-synchronized.json")
+	if err != nil {
+		t.Fatalf("read captured envelope: %v", err)
+	}
+	older := strings.Replace(string(data), `\"before\":\"head-before\",`, "", 1)
+	if older == string(data) {
+		t.Fatal("captured synchronize fixture carries no before to take out")
+	}
+	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, []byte(older))
+	if err != nil {
+		t.Fatalf("decode a synchronize without before: %v", err)
+	}
+	want := PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208",
+		UpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)}
+	if !reflect.DeepEqual(got.Fact, want) {
+		t.Fatalf("fact = %#v, want %#v", got.Fact, want)
+	}
+}
+
 // Dispatch sends an issue's blocked_by keys on every issue event, already ordered: the decoder
 // carries that order onto the fact, and an event retained from a Dispatch that sent no such field
 // decodes as an issue waiting on nothing does.
