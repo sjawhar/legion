@@ -26,9 +26,6 @@ const workerChunk = /\/assets\/mermaid-render\.worker-[^/]+\.js$/;
 /** The same-origin path the held worker requests once it has taken a diagram's source. */
 const workerHeldPath = "/e2e/mermaid-worker-held";
 
-/** Matches a request for `workerHeldPath`. */
-const workerHeldRoute = /\/e2e\/mermaid-worker-held$/;
-
 /** Prepended to the worker chunk, so it registers before the worker's own listener: it stops that
  *  listener, reports through `workerHeldPath` that it holds the source, and never returns. */
 const holdingListener = [
@@ -234,24 +231,24 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    let loads = 0;
     let holds = 0;
     await page.route(workerChunk, async (route) => {
-      loads += 1;
       const response = await route.fetch();
       await route.fulfill({ response, body: `${holdingListener}\n${await response.text()}` });
     });
-    await page.route(workerHeldRoute, async (route) => {
-      holds += 1;
-      await route.fulfill({ status: 204 });
-    });
+    await page.route(
+      (url) => url.pathname === workerHeldPath,
+      async (route) => {
+        holds += 1;
+        await route.fulfill({ status: 204 });
+      }
+    );
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id);
     await expect(card).toContainText("Large:");
     await expect
       .poll(() => holds, { message: "the Mermaid worker took the diagram's source and holds it" })
       .toBeGreaterThanOrEqual(1);
-    expect(loads).toBeGreaterThanOrEqual(1);
     const refusal = card
       .getByRole("status")
       .filter({ hasText: "Unable to render Mermaid diagram" });
