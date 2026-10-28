@@ -13,6 +13,7 @@ import {
   getIssue,
   getIssueEvents,
   patchIssue,
+  putIssueState,
   putProjectDefaultAssignee,
   replyToCommentDelivery,
 } from "./api";
@@ -42,7 +43,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
+test("ask cards show urgency accents and copy their session ID, title, and tmux target @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -264,7 +265,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   }
 });
 
-test("a later Inbox response clears a hidden ask's pending refresh", async ({ browser }) => {
+test("a later Inbox response clears a hidden ask's pending refresh @phone", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
   const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
@@ -309,23 +312,34 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
     // reaches the page, no pending marker is ever set, and everything below passes without
     // testing anything. Wait for the stream as the sibling above does.
     await Promise.all([listRequested.promise, streamResponse]);
+    const pinnedRead = (request: { method(): string; url(): string }) =>
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === "/api/v1/issues" &&
+      new URL(request.url()).searchParams.get("pinned") === "true";
+    const isPhone = testInfo.project.name === "iphone";
+    if (isPhone) {
+      // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
+      const firstPinnedRead = page.waitForRequest(pinnedRead);
+      await page.getByRole("button", { name: "Open navigation" }).click();
+      await firstPinnedRead;
+    }
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
     // The held Inbox response must not land until the browser has handled the hidden ask's
-    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
-    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
-    // the marker appearing proves the frame before it was processed.
-    await createComment(
-      visibleIssue.key,
-      { ask_id: visibleAsk.id, body: "Ordering marker." },
-      session
-    );
-    await expect(
-      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
-    ).toBeVisible();
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on.
+    // Nor can an Inbox card or the sidebar's rows, which wait for the held first load: it is
+    // never cancelled. alice's own pin, written after the reply, makes the page read the pinned
+    // list again, which the sidebar reads beside the held Inbox. Event ids are delivered in
+    // order, so that read proves the frame before it was processed.
+    const pinnedReadAgain = page.waitForRequest(pinnedRead);
+    await putIssueState(visibleIssue.key, { pinned: true });
+    await pinnedReadAgain;
+    if (isPhone) {
+      await page.getByRole("button", { name: "Close navigation" }).click();
+    }
     releaseList.resolve();
     await reloaded;
 
@@ -377,10 +391,9 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
     const document = card.getByRole("link", { name: "spec.md" });
     await expect(document).toHaveAttribute("href", documentHref);
     await expect(card).toContainText("quoted passage");
-    const width = testInfo.project.name === "iphone" ? "390" : "1280";
-    const screenshot = testInfo.outputPath(`inbox-quote-anchor-${width}.png`);
+    const screenshot = testInfo.outputPath("inbox-quote-anchor-1280.png");
     await page.screenshot({ path: screenshot, fullPage: true });
-    await testInfo.attach(`quote-anchored Inbox card (${width}px)`, {
+    await testInfo.attach("quote-anchored Inbox card (1280px)", {
       contentType: "image/png",
       path: screenshot,
     });
@@ -391,7 +404,7 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
   }
 });
 
-test("inbox shows current asks and answers issue asks in the margin", async ({
+test("inbox shows current asks and answers issue asks in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1061,13 +1074,15 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
 });
 
 // With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale and reopens the event stream, whose reconnect refreshes every query, and
-// through leaving the Inbox and coming back. Every credential-list call after the page's first is
-// held, so a refetch of that list, had one put it back to loading, would take the empty state off
-// the screen for as long as the hold lasts. A Dispatch with no secrets broker answers the list
-// `null` and is asked again only when the stream reconnects, over the held answer, so the held
-// second call leaves the empty state on screen; with the fake broker the list keeps its empty
-// answer on screen while a refetch runs. Neither page may log a failed request.
+// what has gone stale and reopens the event stream, whose reconnect refreshes every query (the page
+// has received no event, so it reopens with no `since`, which the server never answers
+// `X-Dispatch-Event-Replay: complete`), and through leaving the Inbox and coming back. Every
+// credential-list call after the page's first is held, so a refetch of that list, had one put it
+// back to loading, would take the empty state off the screen for as long as the hold lasts. A
+// Dispatch with no secrets broker answers the list `null` and is asked again only when the stream
+// reconnects, over the held answer, so the held second call leaves the empty state on screen; with
+// the fake broker the list keeps its empty answer on screen while a refetch runs. Neither page may
+// log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {
@@ -1133,7 +1148,7 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
   }
 });
 
-test("an unanchored issue-level comment reaches Conversation, not document review", async ({
+test("an unanchored issue-level comment reaches Conversation, not document review @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1435,7 +1450,7 @@ test("clearing the filter lists every question, and Assign to me takes one under
 // `features/inbox/BlockedOnYou.tsx`): open questions whose next move is a person's, on issues
 // assigned to them. Widening the list they are looking at is not more work waiting on them, so
 // no count moves with it; another issue assigned to them is, so they all move together.
-test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists", async ({
+test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists @phone", async ({
   browser,
 }) => {
   await setLiveSessions([{ session_id: session.actor.id, title: "e2e-session-title" }]);
@@ -1521,10 +1536,10 @@ test("a mentioned session's callback reply reaches the open ask card", async ({ 
 });
 
 // The window #1207's freshness marker covers: a pre-event Inbox body that lands inside the
-// 100 ms debounce is committed and stamped fresh, so there is no request left for
-// `cancelRefetch` to restart, the flush's `["ask-thread", id]` invalidation matches a query that
-// does not exist yet, and a card mounting in the gap seeds its thread from the pre-event row
-// under `staleTime: Infinity` and never refetches.
+// 100 ms batch is committed and stamped fresh before the flush, the flush's
+// `["ask-thread", id]` refresh matches a query that does not exist yet, the Inbox's own fetch
+// after the flush is held here as a slow server's would be, and a card mounting in the gap seeds
+// its thread from the pre-event row under `staleTime: Infinity` and never refetches.
 test("a stale Inbox body landing inside the debounce seeds a later card's thread", async ({
   browser,
 }) => {
@@ -1576,8 +1591,8 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    // ... and the pre-event body lands before the 100ms flush, so cancelRefetch never restarts
-    // it. This hold is shorter than INVALIDATION_DEBOUNCE_MS by design and has no client-visible
+    // ... and the pre-event body lands before the 100 ms flush. This hold is shorter than the
+    // batch window (`BATCH_WINDOW_MS` in `web/src/api/sse.ts`) by design and has no client-visible
     // signal to wait on: a failure here means the window slipped, not that the marker regressed.
     await page.waitForTimeout(30);
     releaseSecond.resolve();
@@ -1611,7 +1626,7 @@ for (const refusal of [
       "snoozed_until must be in the future, and this deployment refuses a moment more than one year ahead of the request it arrived on",
   },
 ]) {
-  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label}`, async ({
+  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label} @phone`, async ({
     browser,
   }) => {
     await createProject({ key: "CORE", name: "Core" });
@@ -1666,7 +1681,7 @@ for (const refusal of [
   });
 }
 
-test("an ask card's time stays with its author, never opening a line of its own", async ({
+test("an ask card's time stays with its author, never opening a line of its own @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the provenance line only wraps where it must");

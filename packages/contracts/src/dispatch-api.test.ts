@@ -14,6 +14,7 @@ import {
   type AskRead,
   type AskThread,
   type BlockTypeSchema,
+  type ChangedReference,
   type Comment,
   CommentEventPayloadSchema,
   type CreateCommentInput,
@@ -34,7 +35,9 @@ import {
   MessageEventPayloadSchema,
   type MyAnswersResponse,
   type MyRepliesResponse,
+  type ReferenceChangesPayload,
   serviceSubjectLabel,
+  type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
 
@@ -98,6 +101,31 @@ test("preserves a coarse priority on an issue update event payload", () => {
   expect(IssueEventPayloadSchema.parse({ priority: null })).toEqual({ priority: null });
 });
 
+test("keeps what an issue write changed, its ancestors and its thread logins, and accepts an event without them", () => {
+  const payload = {
+    status: "done",
+    changed: ["status"],
+    ancestors: ["CORE-2", "CORE-1"],
+    thread_logins: ["alice@example.com"],
+  };
+  expect(IssueEventPayloadSchema.parse(payload)).toEqual(payload);
+  expect(IssueEventPayloadSchema.parse({ title: "Older event" })).toEqual({ title: "Older event" });
+});
+
+test("keeps the thread logins on comment, message and ask event payloads", () => {
+  const thread_logins = ["alice@example.com", "bob@example.com"];
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", thread_logins })).toMatchObject({
+    thread_logins,
+  });
+  expect(MessageEventPayloadSchema.parse({ id: "message-1", thread_logins })).toMatchObject({
+    thread_logins,
+  });
+  expect(AskEventPayloadSchema.parse({ opened_event_id: 3, thread_logins })).toMatchObject({
+    thread_logins,
+  });
+  expect(MessageEventPayloadSchema.parse({ id: "message-2" }).thread_logins).toBeUndefined();
+});
+
 test("models the deployed event exactly as the delivery timeline writes it", () => {
   const payload = {
     completed_at: "2024-01-01T02:10:00Z",
@@ -131,14 +159,15 @@ test("models the deployed event exactly as the delivery timeline writes it", () 
   expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, number: 0 }).success).toBe(false);
 });
 
-test("models Dispatch's own start and the subject it is published on", () => {
+test("models Dispatch's announcement of its fleet's build and the subject it is published on", () => {
   expect(DISPATCH_SERVER_STARTED_SUBJECT).toBe("notifications.dispatch.server.started");
   const payload = {
     commit: "0123456789abcdef0123456789abcdef01234567",
     started_at: "2026-10-19T12:00:00Z",
   };
   expect(DispatchServerStartedPayloadSchema.parse(payload)).toEqual(payload);
-  // A start names a commit: an unstamped Dispatch publishes none, so an empty commit is no start.
+  // An announcement names a commit: a fleet with an unstamped build is never announced, so an
+  // empty commit is no announcement.
   expect(DispatchServerStartedPayloadSchema.safeParse({ ...payload, commit: "" }).success).toBe(
     false
   );
@@ -148,6 +177,21 @@ test("models Dispatch's own start and the subject it is published on", () => {
   expect(
     DispatchServerStartedPayloadSchema.safeParse({ ...payload, started_at: "noon" }).success
   ).toBe(false);
+});
+
+test("the envelope Dispatch publishes for an announcement carries a payload this schema reads", async () => {
+  // The fixture is shared with the Go writer (`packages/envoy/internal/dispatch/startup`, whose
+  // test requires the envelope it builds to equal it) and the Legion daemon's intake test.
+  const path = new URL(
+    "../../daemon/internal/intake/testdata/dispatch/server-started.json",
+    import.meta.url
+  );
+  const envelope = JSON.parse(await Bun.file(path).text());
+  expect(envelope.topic).toBe(DISPATCH_SERVER_STARTED_SUBJECT);
+  expect(DispatchServerStartedPayloadSchema.parse(JSON.parse(envelope.payload))).toEqual({
+    commit: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+    started_at: "2026-10-27T12:00:00Z",
+  });
 });
 
 test("models every supported typed-block content rule", () => {
@@ -199,6 +243,21 @@ test("keeps the replaced answer on a changed ask answer event", () => {
   });
 });
 
+test("parses an ask the close of its issue withdrew", () => {
+  const parsed = AskEventPayloadSchema.parse({
+    opened_event_id: 12,
+    question: "Ship it?",
+    resolution: {
+      kind: "withdrawn",
+      reason: "Withdrawn by the close of DSP-1.",
+      actor: { kind: "session", id: "legion-daemon:DSP" },
+      at: "2026-10-25T00:00:00Z",
+    },
+  });
+
+  expect(parsed.resolution?.kind).toBe("withdrawn");
+});
+
 test("models answer changes, ask answer history, and the answers page", () => {
   const answer = {
     user: "alice@example.com",
@@ -237,8 +296,21 @@ test("models answer changes, ask answer history, and the answers page", () => {
     edits: [],
     answers: [answer],
     followers: [],
+    claimant: "session-claimant",
+    route: "role:reviewer",
+    route_status: "live",
+    route_holder: "session-reviewer",
   } satisfies AskRead;
-  const thread = { replies: [], edits: [], answers: [], followers: [] } satisfies AskThread;
+  const thread = {
+    replies: [],
+    edits: [],
+    answers: [],
+    followers: [],
+    claimant: null,
+    route: null,
+    route_status: null,
+    route_holder: null,
+  } satisfies AskThread;
   const page = {
     rows: [
       {
@@ -339,6 +411,53 @@ test("models the Replies page and the read mark's event", () => {
     page.rows.map((row) => `${row.kind}:${row.reply.kind}`),
     event.payload.thread_id,
   ]).toEqual([["comment:reply", "ask:answer", "comment:reply"], "comment-1"]);
+});
+
+test("models a snooze's state event and a document named in references_changed", () => {
+  // A snooze's event reaches every signed-in stream, so it carries the writer and the field alone.
+  const snoozed = {
+    login: "alice",
+    changed: ["snoozed"],
+  } satisfies UserStateUpdatedEventPayload;
+  const event = {
+    id: 2,
+    issue_key: null,
+    project: "CORE",
+    seq: 4,
+    actor: { kind: "user", id: "alice" },
+    notify: false,
+    created_at: "2026-10-12T00:03:00Z",
+    type: "user_state.updated",
+    payload: snoozed,
+  } satisfies DispatchEvent;
+  const references_changed = [
+    { kind: "issue", id: "CORE-1" },
+    {
+      kind: "artifact",
+      id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      ref: "dispatch://CORE/artifact/runbook",
+    },
+  ] satisfies ChangedReference[];
+
+  expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
+  // A reader that declares no references_changed still reads the comment around a document entry.
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", references_changed })).toMatchObject({
+    id: "comment-1",
+  });
+  expect([event.payload.changed, references_changed[1]?.ref]).toEqual([
+    ["snoozed"],
+    "dispatch://CORE/artifact/runbook",
+  ]);
+});
+
+test("a truncated write names the kinds it cut beside the targets of the others", () => {
+  const changes = {
+    references_changed: [{ kind: "issue", id: "CORE-1" }],
+    references_changed_truncated: true,
+    references_changed_truncated_kinds: ["artifact"],
+  } satisfies ReferenceChangesPayload;
+  // A reader validating a comment's payload still sees which kinds were cut and what was named.
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", ...changes })).toMatchObject(changes);
 });
 
 test("preserves block-pinned and legacy anchors in ask event payloads", () => {
