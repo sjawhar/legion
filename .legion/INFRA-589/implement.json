@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-589",
+  "completed": "2026-10-28T18:32:00Z",
+  "round": 13,
+  "answersReview": "No review or test failure: the daemon returned the issue to implementing because the retro rename push (6c3742b2, the architect's request) moved READY's head. No code change; the code head stays a75717b5, which the reviewer approved at 3c2da778 and the tester passed at 99a73379.",
+  "filesChanged": [],
+  "proof": [
+    {
+      "criterion": "The only change since the approved head 3c2da778 is under docs/solutions/ and .legion/",
+      "surface": "jj on the issue branch as pushed to origin (the head GitHub reports for #2369)",
+      "command": "jj -R $LEGION_WORKSPACE diff --from 3c2da7785c5d83b1aa99cf283dc3349f11676377 --to legion/INFRA-589@origin --summary",
+      "observed": "D .legion/INFRA-589/implement.json, D .legion/INFRA-589/plan.json, D .legion/INFRA-589/review.json, D .legion/INFRA-589/test.json, A docs/solutions/testing/a-failed-measurement-read-is-unknown-never-zero-pr2369.md, A docs/solutions/testing/measure-what-a-probe-costs-on-the-box-it-measures-before-trusting-its-numbers-pr2369.md, A docs/solutions/testing/redact-a-connection-string-through-the-parser-that-consumes-it-and-record-only-the-fields-you-name-pr2369.md; nothing else. Their front matter carries related_issues 'sjawhar/legion#2369' only, no issue key.",
+      "headSha": "6c3742b2bafc2b9ce4fbf26e64aee05125de3fbe",
+      "negativeControl": "The same command from the previous code head 6eeea895 to 6c3742b2 lists packages/envoy/loadtest/{README.md,guard.go,guard_test.go,run.go,run_test.go} (round 6's code change), so a code change above 3c2da778 would show; from 3c2da778 it lists none."
+    }
+  ],
+  "deviations": [
+    "This handoff puts .legion/INFRA-589/ back on the head; the next retro removes it again before READY."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": []
+}
