@@ -1076,9 +1076,22 @@ and 0123-0125's triggers put each comment, ask and issue message (one with an `i
 `cmd/dispatch` runs `docs.Service.RunBlockIndexReconciliation` under the lease `block-index`:
 each tick indexes up to 20 owed documents, by a keyset cursor, and up to 200 owed items, oldest first, every 2 s while a batch is full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`, `owed_documents=`, `owed_items=` and `live_ahead=`.
 It reads a document (`TextWithBlocks`) with no transaction held, then, under the document's owner lock, indexes it only while its latest version and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the event that recorded the version (`stampVersionEvent`).
-A document that owes a settlement and whose live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed;
-on a closed issue that lasts until the issue reopens.
-The loop remembers such a document and counts it again without reading it while its latest version and its pending settlement's `marked_at` (which every update append moves) stay as they were and this server holds no room for it.
+A document that owes a settlement and whose live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed, except on a closed issue, which no settlement runs on:
+its latest version's own rendering is indexed, with only the blocks the index's stored rows or the live document also hold, each under its stored row's id or its live id (`closedVersionBlocks`), while its pending settlement's `marked_at` is still the one the tick listed.
+A typed block matches the live block of its id (the version's markdown names only typed blocks' ids;
+the close, its sweep and the repair write ask states with no version).
+Every stored `document_blocks` row whose type and `text_sha256` the version holds claims its block before any live text is compared, so the block keeps its row, changed version and text under its own id:
+first the untyped blocks are aligned in document order (go-difflib, no junk heuristic) with the live blocks that have a row, by that row's type and `text_sha256`, so a block an unsettled edit changed keeps its place and each of several identical blocks its own row;
+then each version block still unmatched (moved across a first-step match, or deleted by an unsettled edit) takes the stored row of its type and text whose id no other block took, a live id first, else by id.
+Only then are the version blocks no row claimed aligned by type and live text with the live blocks whose id no row claimed, within the gaps between first-step matches (every block of a document the index holds none of yet), so a paragraph an edit deleted and retyped with the same text keeps the deleted block's row and the retyped one gets none.
+A text either side still holds more than once takes no part in that alignment.
+Last, the version blocks and live blocks of each text both still unmatched are paired in order wherever the two sides hold equally many:
+a text held more than once is matched only so, and otherwise not until a settlement, so a copy typed after the close is never dated to the version (an original left unmatched is dated to the reopen's version), and a text held once on each side keeps the version of a block an edit moved in a document with no row yet.
+A live block that repeats an earlier block's id (a paste keeps its source's id until a settlement stamps a new one) takes part in no step, since `refs.IndexBlocks` indexes only the first holder of an id, and no step gives an id a block has taken.
+A stored row whose text the version does not hold (indexed at an older version this one changed) and whose live text it does not hold either is still recorded deleted at it.
+A live block only an unsettled edit made is not indexed until the reopen's settlement writes the version that holds it, so block history names only versions that hold a block's text.
+The loop remembers a skipped document only when its listing read the issue open, and counts it again without reading it while its latest version and its pending settlement's `marked_at` (which every update append moves) stay as they were, the listing still reads the issue open, and this server holds no room for it:
+the listing reads the issue with no lock while the skip is decided under the owner lock, a close can leave the version, the mark and the room as they were, and a closed issue's document is indexed, not skipped.
 An item is re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a new edge taking the time its text was written and no `source_seq`;
 its owed row is deleted only while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item owed.
 `rebuild-refs` marks every document owed and prints `blocks_owed=`; it leaves `block_grammar_owed` alone, since it has just re-read every item itself.
@@ -1374,6 +1387,29 @@ Where only the asks' tables have spent the budget of span cells (100,000) before
 a span-free table with a short body row, or a span table left with one once that budget ran out, such as a body cell spanning columns under a wider header, a rowspan, or rows the budget ran out partway through.
 Where a table outside the asks spent some of it first, the check can write span cells the document did not, and the ask is refused unless padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied from and that ask's document.
+
+An issue's close withdraws its open asks.
+Every close - a person's Close or board drag, `dispatch issue-update --status done`, the Legion daemon's close when a pull request merges, all through `PATCH /api/v1/issues/{key}` - first runs the settlement each document of the issue owes (`settleIssueBeforeClose`), so a decision block written seconds before is an ask credited to its author, then in the close's own transaction withdraws every open ask of the issue, whoever's turn it is (`withdrawIssueAsksTx`):
+decision blocks, plain asks and approval requests.
+Each is recorded `resolved` with resolution `{kind: "withdrawn", actor: <the closer>, reason: "Withdrawn
+by the close of <KEY>.", at}` and gets one `ask.resolved` (actor the closer) before `issue.closed`;
+its block, and each copy of it in another document of the issue, is written `state="resolved"` into the live document, and no version is written while the issue is closed.
+An ask block that still has no ask row is written `state="resolved"` with no record, logged, and settlement indexes it as a new open ask when the issue reopens.
+A document of the issue whose stored history does not load (`docs.ErrDocumentUnloadable`), like one outside the schema, is left as it is and logged at WARN naming the issue and the document:
+nothing can read or open it, so the close, the reopen and the repair go on without it rather than answer `409 DOCUMENT_UNLOADABLE` for good;
+a failed room's `503` and a database error still fail them.
+Asks already answered or resolved are left as they were, and the close records no answer, review or approval.
+A reopen opens again exactly the asks whose resolution kind is `withdrawn`, with `state: open`, no answer and no resolution and everything else kept, each with one `ask.opened` (actor the reopener) before `issue.updated`, and their blocks read `state="open"` again.
+The close's and the reopen's block writes (`docs.Service.WriteIssueAskStates`) are no edit:
+they credit no pending author and leave each document's latest edit source as it was, so the settlement a reopen leaves owed names the person who last edited the document, never the closer or the reopener.
+Only the server writes `withdrawn`: the resolve route accepts `retracted` and `resolved` alone, and an answer, resolution or retraction on a closed issue is still `409 ISSUE_CLOSED`.
+What a release older than this one closed or reopened is converged by `api.RepairIssueAsks`, at boot (bounded at 30 s) and then every `api.IssueAskRepairInterval` (10 minutes) under the lease `issue-ask-repair`, each interval pass bounded at 5 minutes.
+Per issue, under its row, a closed issue's open asks are withdrawn in the name of its latest `issue.closed` actor, an open issue's `withdrawn` asks are restored in the name of the event that reopened it, and a closed issue that has open asks, or whose documents owe a settlement marked since the last pass, gets the close's final sweep in the same write of each document, which writes block `state` attributes only.
+Each interval pass moves that bound to one interval before its own start whenever it listed its candidates, and carries every issue it did not repair - one that failed or one it ran out of time before - into the next pass, so one issue failing every pass does not make every pass sweep every closed issue.
+The bound and the carried issues live in the memory of the process that ran the pass:
+a pass on another process, once the lease moves, starts from that process's own and never sees them.
+A pass logs its `withdrawn`, `restored` and `swept` counts, `swept` counting every unindexed block it marked.
+Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 
 ## Critical conventions
 
@@ -1842,8 +1878,9 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
   The table has no foreign key to the thread it names:
   nothing deletes a comment, ask, message, issue or document, so a row's thread exists, and a harness that empties those tables empties `user_threads` with them (`packages/dispatch/e2e/seed.ts`).
 
-- `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (human-only, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply;
-  an open ask on a closed issue stays, since the Inbox hides it.
+- `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (human-only, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply.
+  A close withdraws its issue's open asks, so an open ask on a closed issue is one a close by an older release left during a roll;
+  its row stays, since the Inbox hides it.
   A row's `reply` is the thread's newest write by someone else:
   `kind: "reply"` for a comment or a message, `kind: "answer"` for an answer, whose `id` is the ask's, whose `author` is the answerer and whose `first_line` is the chosen options and the answer's text (`<selected> - <text>`, as the outbox's `payload_summary` renders it).
   `issue` and `artifact` together are `400 INVALID_QUERY`, and `limit` is 1-200 (default 50), as `GET /api/v1/me/answers` reads it.

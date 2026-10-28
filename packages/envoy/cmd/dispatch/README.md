@@ -398,7 +398,7 @@ What the two processes share, and what each keeps to itself:
 - The two delivery durables keep their shape.
   NATS admits one binder; the second process stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 
-- Eight periodic maintenance loops run once per period across the processes, not once per process.
+- Nine periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose tick lands inside another's pass logs a skip;
   and, under that lease, each pass is recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
@@ -553,6 +553,23 @@ the one other document holding one of those 5 blocks has an ask of its own under
 each whose block still asks the rewording gets the decided wording written back and logs `dispatch: wrote a decided ask's wording back into its
 block`.
 Each document's settlement runs the same statement over its own decided asks before it reconciles them, and marks the restored asks' copies owed the same way, so a rewording a task of the earlier release writes during the roll is undone by that document's next settlement on this release, which also writes the decided wording back into the block and settles its copies again.
+
+A close by a release before the withdrawal left its issue's asks open, and a reopen by one left the asks a close withdrew resolved.
+No migration writes the withdrawals, since the census refuses one that rewrites rows (Pre-deploy census, below);
+code repairs them instead (`api.RepairIssueAsks`).
+Every boot runs a pass, bounded at 30 s, and then every 10 minutes (`api.IssueAskRepairInterval`) one process runs another under the lease `issue-ask-repair`, bounded at 5 minutes, for the life of the process.
+Each issue is repaired in its own transaction holding the issue's row:
+a closed issue holding open asks gets them withdrawn exactly as a close withdraws them, attributed to the actor of its latest `issue.closed` (an issue with no such event is logged and skipped), so the asks left open on issues closed before the release are withdrawn naming each issue's earlier closer;
+an open issue holding `withdrawn` asks gets them restored, attributed to the actor of the event that reopened it;
+and a closed issue that holds open asks, or whose documents owe a settlement marked since the last pass (at boot, the last 10 minutes;
+on the first interval pass, any), gets the close's final sweep in the same write of each document, which writes block `state` attributes only, never an ask row or a record.
+A document whose stored history does not load is logged and left as it is, as the close leaves it.
+Each record is dated when the pass writes it.
+A pass logs `dispatch: repaired the asks of closed and reopened issues` with `withdrawn=<n> restored=<n>
+swept=<n>`; one that fails or runs out of time is logged, and the next pass repairs what it left:
+each interval pass that listed its candidates moves the bound to one interval before its own start, and carries every issue it did not repair, failed or not reached, into the next pass.
+The bound and the carried issues live in the memory of the process that ran the pass, not in the database:
+when the lease moves to another process, that process's pass starts from its own bound and its own carried issues (on its first interval pass, no bound, so it sweeps every closed issue whose documents owe a settlement), and never sees the issues the other process carried.
 
 Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default (`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row, and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null:
 the stored excerpt `GET /api/v1/references` answers a document mention with, which every version write fills and the reference-excerpt reconciliation fills for every row stored before it (`packages/envoy/AGENTS.md`).
@@ -844,6 +861,9 @@ It refuses:
 So a migration that changes values readers already had, whose census counts the rows it rewrites, cannot pass the census wherever such a row exists, and a release that must repair existing rows does so in code instead:
 an idempotent pass at boot, and on the path that reads the rows, so a task of the earlier release still running during the roll cannot undo it.
 The restoration of decided asks' wordings (`docs.Service.RestoreDecidedWordings`, Database migrations above) is one.
+The repair of closed and reopened issues' asks (`api.RepairIssueAsks`, Database migrations above) is the exception:
+it repairs at boot and then every 10 minutes (`api.IssueAskRepairInterval`), never on a read, because those rows are read by every issue, ask, Inbox and count route, and a read that repaired them would put a close's document writes on all of them.
+During a roll a close or reopen by a process of the earlier release stays unconverged for at most one interval and one pass, and the Inbox, `GET /api/v1/asks/open` and the counts keep leaving out the open asks of a closed issue to cover that window.
 
 A migration declares its census in `<version>_<name>.census.sql` beside it:
 one `select` (or `with … select`) answering one integer, how many existing rows the migration would refuse (a validating constraint's violators) or rewrite.
@@ -1371,6 +1391,12 @@ Each item below names a path with its method and identity, then its purpose.
   not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee`, `components` or `repo` (`null` clears it); `AGENTS.md` gives each field's rules.
   A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation.
   `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence.
+  A close (`status: done`) withdraws every open ask of the issue, whoever's turn it is:
+  decision blocks in its documents, plain asks and requests to approve one of its documents.
+  Each is recorded `resolved` with resolution kind `withdrawn`, naming the closer as the request's actor, with the reason `Withdrawn by the close of <KEY>.`, and gets one `ask.resolved` before `issue.closed`;
+  its block is written `state="resolved"` in the live document, and no version is written.
+  An ask answered or resolved before the close is left as it was, and the close records no answer and no approval.
+  A reopening `status` (any but `done`) opens again exactly the asks the close withdrew, each with one `ask.opened` before `issue.updated`, and they return to the Inbox.
 
 - `/api/v1/issues/{key}/asks` (POST; cookie, trusted header, or bearer)
 
@@ -1425,6 +1451,8 @@ Each item below names a path with its method and identity, then its purpose.
   Retract or self-resolve an open ask with a recorded reason.
   On a block ask the block's `state` is written with it, and that is not weighed, so an ask on a document past what one upload may hold can still be resolved.
   A reason beginning `removed from the document in version`, which marks a retraction settlement wrote and would have the retract undone when the block returns, is `400 INVALID_RESOLUTION`.
+  The kind is `retracted` or `resolved`, and any other is `400 INVALID_RESOLUTION`: `withdrawn` is written only by an issue's close.
+  An ask on a closed issue is `409 ISSUE_CLOSED`; reopen the issue first.
 
 - `/api/v1/issues/{key}/comments?artifact=` (GET; cookie, trusted header, or bearer)
 
