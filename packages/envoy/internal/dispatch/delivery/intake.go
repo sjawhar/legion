@@ -60,6 +60,9 @@ type Intake struct {
 	mu sync.Mutex
 	// delivering is the latest subscription subscribe made, which StopDelivering stops.
 	delivering *intakeDelivery
+	// boundHook, when not nil, runs once a bind has subscribed, before the bind returns. It is nil
+	// outside tests: a test sets it to hold a bind that has subscribed until past Run's ctx's end.
+	boundHook func()
 }
 
 // newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone,
@@ -69,8 +72,8 @@ func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, git
 }
 
 // Run binds the durable consumer and processes GitHub events until ctx is cancelled, then stops
-// delivering (StopDelivering) under intakeStopBudget before it returns. Idle until the settings
-// cache holds settings.
+// delivering (StopDelivering) under intakeStopBudget from ctx's end before it returns. Idle until
+// the settings cache holds settings.
 //
 // The durable carries one filter subject, githubIntakeSubject, which no setting changes, so it is
 // bound once and never rebound. Each message is routed by the settings the cache holds when its
@@ -92,6 +95,10 @@ func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, git
 // them. Routed rather than ignored because it is the only live-update path for the fork case,
 // which does reach it.
 func (in *Intake) Run(ctx context.Context) {
+	// Armed before the first bind, so a bind under way as ctx ends -- a standby's poll, whose
+	// JetStream calls take their own time -- spends the stop's budget rather than starting it late.
+	stopping, release := stopContext(ctx)
+	defer release()
 	binds := time.NewTicker(durableBindInterval)
 	defer binds.Stop()
 	// changed is taken before each Load, so settings stored after that Load wake the loop.
@@ -100,7 +107,7 @@ func (in *Intake) Run(ctx context.Context) {
 		// nothing to bind by, and the cache's Changed signal wakes the first bind.
 		var poll <-chan time.Time
 		if in.settings.Load() != nil {
-			if in.bind(ctx) == bindBound {
+			if in.bind(ctx, stopping) == bindBound {
 				break
 			}
 			poll = binds.C
@@ -117,9 +124,7 @@ func (in *Intake) Run(ctx context.Context) {
 	// for the life of the process.
 	binds.Stop()
 	<-ctx.Done()
-	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), intakeStopBudget)
-	defer cancel()
-	in.StopDelivering(stopCtx)
+	in.StopDelivering(stopping)
 }
 
 // route dispatches one envelope payload by its kind field: a pull request to
@@ -340,8 +345,9 @@ type bindOutcome int
 
 const (
 	// bindFailed is an attempt that got nowhere and says nothing about who holds the durable: the
-	// lookup, the create, the update or the subscribe failed, and the failure is logged at ERROR.
-	// The zero value, so an outcome nothing set is never read as a bind.
+	// lookup, the create, the update or the subscribe failed, and the failure is logged at ERROR;
+	// or ctx ended before the subscribe, which a stopping process does not make, and which says
+	// nothing. The zero value, so an outcome nothing set is never read as a bind.
 	bindFailed bindOutcome = iota
 	// bindBound is this process holding the durable's push binding, with its subscription live.
 	bindBound
@@ -424,10 +430,15 @@ func (t *bindThrottle) reportStandby(name, message string) {
 
 // bind creates (on first run) or resumes (on a restart) the delivery durable and subscribes to it
 // (subscribe, at the deliver subject the durable carries), throttling its own reconciliation and
-// standby line on this intake's own bindThrottle.
-func (in *Intake) bind(ctx context.Context) bindOutcome {
-	_, outcome := bindDurableConsumer(ctx, in.nats, in.leases, in.throttle, deliveryConsumerConfig(), func() (*natsgo.Subscription, error) {
-		return in.subscribe("")
+// standby line on this intake's own bindThrottle. stopping is Run's stop deadline
+// (bindDurableConsumer).
+func (in *Intake) bind(ctx, stopping context.Context) bindOutcome {
+	_, outcome := bindDurableConsumer(ctx, stopping, in.nats, in.leases, in.throttle, deliveryConsumerConfig(), func() (*natsgo.Subscription, error) {
+		sub, err := in.subscribe("")
+		if err == nil && in.boundHook != nil {
+			in.boundHook()
+		}
+		return sub, err
 	})
 	return outcome
 }
@@ -459,7 +470,13 @@ func (in *Intake) bind(ctx context.Context) bindOutcome {
 // holder is doing and asks the server for a durable whose creation has not landed yet. That is a
 // "not yet", like the standby above, not a fault in this process -- so it polls on at
 // durableBindInterval and binds the durable as soon as it is there.
-func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Leases, throttle *bindThrottle, wanted natsgo.ConsumerConfig, subscribe func() (*natsgo.Subscription, error)) (*natsgo.Subscription, bindOutcome) {
+//
+// A bind under way when ctx ends -- the caller stopping -- ends by stopping's end, its caller's stop
+// deadline (stopContext): the reconciliation's JetStream calls run under stopping, each within its
+// own request timeout (10 s) until then, and no subscribe starts once ctx has ended. A subscribe
+// already under way waits on its one JetStream lookup of the durable, whose request timeout is well
+// inside intakeStopBudget, so a bind does not hold its caller's stop past that deadline.
+func bindDurableConsumer(ctx, stopping context.Context, client *bus.Client, leases duty.Leases, throttle *bindThrottle, wanted natsgo.ConsumerConfig, subscribe func() (*natsgo.Subscription, error)) (*natsgo.Subscription, bindOutcome) {
 	name, subject := wanted.Durable, wanted.FilterSubject
 	if throttle.reconcileDue() {
 		// reconciled is true when the pass does not run -- the lease is held elsewhere, or could
@@ -472,7 +489,7 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		// asked for mutual exclusion and nothing else.
 		reconciled := true
 		ran := duty.Exclusive(ctx, leases, consumerLease(wanted.Durable), 0, func(context.Context) {
-			reconciled = reconcileDurableConsumer(client.JS(), wanted)
+			reconciled = reconcileDurableConsumer(stopping, client.JS(), wanted)
 		})
 		if !reconciled {
 			return nil, bindFailed
@@ -491,6 +508,11 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		if ran {
 			throttle.recordReconcile()
 		}
+	}
+	// A stopping process binds nothing: the subscription would only take the durable from the
+	// process taking over, be handed messages and give them straight back.
+	if ctx.Err() != nil {
+		return nil, bindFailed
 	}
 	sub, err := subscribe()
 	switch {
@@ -530,12 +552,16 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 // its bind poll as soon as it is bound ("Nothing rebinds a bound intake"), so that process
 // delivers nothing for the life of the process with "dispatch delivery: NATS consumer bound" as
 // its last word, and only its next restart clears it.
-func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.ConsumerConfig) bool {
+//
+// Every JetStream call runs under ctx, each within the JetStream context's own request timeout
+// while ctx carries no deadline: bindDurableConsumer passes its caller's stop deadline.
+func reconcileDurableConsumer(ctx context.Context, js natsgo.JetStreamContext, wanted natsgo.ConsumerConfig) bool {
 	name, subject := wanted.Durable, wanted.FilterSubject
-	info, err := js.ConsumerInfo(bus.Stream, name)
+	bounded := natsgo.Context(ctx)
+	info, err := js.ConsumerInfo(bus.Stream, name, bounded)
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
-		if _, err := js.AddConsumer(bus.Stream, &wanted); err != nil {
+		if _, err := js.AddConsumer(bus.Stream, &wanted, bounded); err != nil {
 			slog.Error("dispatch delivery: create NATS consumer", "name", name, "subject", subject, "error", err)
 			return false
 		}
@@ -561,7 +587,7 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 		// is replaced on this pass rather than left plural for another consumerReconcileInterval,
 		// which is what the second read was added for. The cost is the ConsumerInfo itself, one
 		// per durable per pass the throttle admits (reconcileDue), not one per bind poll.
-		bound, err := js.ConsumerInfo(bus.Stream, name)
+		bound, err := js.ConsumerInfo(bus.Stream, name, bounded)
 		switch {
 		case err != nil:
 			slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
@@ -573,11 +599,11 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 		recreate := wanted
 		recreate.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
 		recreate.OptStartSeq = bound.AckFloor.Stream + 1
-		if err := js.DeleteConsumer(bus.Stream, name); err != nil {
+		if err := js.DeleteConsumer(bus.Stream, name, bounded); err != nil {
 			slog.Error("dispatch delivery: replace multi-subject NATS consumer", "name", name, "error", err)
 			return false
 		}
-		if _, err := js.AddConsumer(bus.Stream, &recreate); err != nil {
+		if _, err := js.AddConsumer(bus.Stream, &recreate, bounded); err != nil {
 			slog.Error("dispatch delivery: create replacement NATS consumer", "name", name, "start_seq", recreate.OptStartSeq, "error", err)
 			return false
 		}
@@ -594,7 +620,7 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 		config.FilterSubject = wanted.FilterSubject
 		config.AckWait = wanted.AckWait
 		config.MaxAckPending = wanted.MaxAckPending
-		if _, err := js.UpdateConsumer(bus.Stream, &config); err != nil {
+		if _, err := js.UpdateConsumer(bus.Stream, &config, bounded); err != nil {
 			slog.Error("dispatch delivery: update NATS consumer policy", "name", name, "configured_subject", info.Config.FilterSubject, "wanted_subject", wanted.FilterSubject, "error", err)
 			return false
 		}

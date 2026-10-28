@@ -33,7 +33,7 @@ func withLatency(latency time.Duration, next http.Handler) http.Handler {
 // startIntakesForBurst calls StartIntakes with the arguments every build's StartIntakes takes
 // first, and the zero value of any it takes after them (the settings wake, which leaves the
 // settings read once), so the file compiles against either signature.
-func startIntakesForBurst(t *testing.T, ctx context.Context, connect func(string) (*bus.Client, error), args ...any) func(context.Context) {
+func startIntakesForBurst(t *testing.T, ctx context.Context, connect func(string) (*bus.Client, error), args ...any) func() {
 	t.Helper()
 	start := reflect.ValueOf(StartIntakes)
 	in := []reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(connect)}
@@ -47,7 +47,7 @@ func startIntakesForBurst(t *testing.T, ctx context.Context, connect func(string
 	if err, _ := out[1].Interface().(error); err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
-	return out[0].Interface().(func(context.Context))
+	return out[0].Interface().(func())
 }
 
 // TestIntakeBurstOfMergedPullRequests publishes 20 merged pull requests, each its own, and logs how
@@ -93,7 +93,7 @@ func TestIntakeBurstOfMergedPullRequests(t *testing.T) {
 	}, pool, github, events.NewBroker())
 	t.Cleanup(func() {
 		cancel()
-		stop(context.Background())
+		stop()
 	})
 	awaitBoundDurable(t, publisher)
 

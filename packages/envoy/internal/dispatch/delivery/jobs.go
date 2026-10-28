@@ -117,15 +117,18 @@ func newJobIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, 
 // Run binds the durable job consumer and handles job events until ctx is cancelled. An attempt
 // that binds nothing -- a failure, or the durable being another process's (bindStandby) -- is
 // made again every durableBindInterval, for the life of the process: a standby that outlives its
-// holder takes the durable over seconds later.
+// holder takes the durable over seconds later. A bind under way as ctx ends ends by the stop
+// deadline armed then (stopContext, bindDurableConsumer), as the delivery intake's does.
 func (j *JobIntake) Run(ctx context.Context) {
 	j.ctx = ctx
 	defer j.stopPending()
+	stopping, release := stopContext(ctx)
+	defer release()
 	var sub *natsgo.Subscription
 	binds := time.NewTicker(durableBindInterval)
 	defer binds.Stop()
 	for sub == nil {
-		bound, outcome := j.bind(ctx)
+		bound, outcome := j.bind(ctx, stopping)
 		if outcome == bindBound {
 			sub = bound
 			break
@@ -156,10 +159,11 @@ func jobConsumerConfig() natsgo.ConsumerConfig {
 }
 
 // bind creates (on first run) or resumes the durable and subscribes to it, throttling its own
-// reconciliation and standby line on this intake's own bindThrottle.
-func (j *JobIntake) bind(ctx context.Context) (*natsgo.Subscription, bindOutcome) {
+// reconciliation and standby line on this intake's own bindThrottle. stopping is Run's stop
+// deadline (bindDurableConsumer).
+func (j *JobIntake) bind(ctx, stopping context.Context) (*natsgo.Subscription, bindOutcome) {
 	wanted := jobConsumerConfig()
-	return bindDurableConsumer(ctx, j.nats, j.leases, j.throttle, wanted, func() (*natsgo.Subscription, error) {
+	return bindDurableConsumer(ctx, stopping, j.nats, j.leases, j.throttle, wanted, func() (*natsgo.Subscription, error) {
 		return subscribeDurable(j.nats, wanted, "", j.deliver)
 	})
 }

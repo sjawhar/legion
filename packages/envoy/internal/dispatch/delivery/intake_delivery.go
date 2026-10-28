@@ -74,24 +74,43 @@ func (in *Intake) subscribe(deliverSubject string) (*natsgo.Subscription, error)
 	return sub, nil
 }
 
-// intakeStopBudget is how long Run's stop waits, from the moment its ctx ends, for the messages in
-// their handlers to finish and be acknowledged before it gives them up (StopDelivering), and the
-// one deadline of the intakes' stop in cmd/dispatch, whose call of StartIntakes' stop adds none.
-// There that ctx is the signal context, so the stop begins at SIGTERM and runs beside the HTTP
-// drain and the document shutdown, which take up to stopGrace (30 s) less a 5 s reserve:
-// httpDrainBeforeDocuments then documentShutdownTimeout (cmd/dispatch/shutdown.go). The shutdown
-// waits for the intakes after the document service and before it closes the database pool, so
-// that a handler's writes never meet a closed pool. 15 s leaves 10 s before the document budget's
-// latest end for what follows the wait -- the handlers given up returning, which they do as soon
-// as their context is cancelled, the negative acknowledgements, the drain's end, which the given-up
-// handlers' cancelled context cuts short, and the clients closing -- so the intakes never hold the
-// shutdown past what that budget already can, and 15 s before the kubelet's kill. It is also well
-// past what a handler GitHub answers needs, a pull request and its commit pages with a page GitHub
-// answered 502 asked again (after 1 s, then 2 s: githubPageRetryWait), so an ordinary handler
-// finishes and is acknowledged rather than redone. A call GitHub does not answer holds one attempt
-// for up to githubapp.RequestTimeout (20 s), and is then asked again, which no budget inside
-// stopGrace could wait out.
-const intakeStopBudget = 15 * time.Second
+// intakeStopBudget is the one deadline of an intake's stop, counted from the moment Run's ctx ends
+// (stopContext): the messages in their handlers have until then to finish and be acknowledged
+// before the stop gives them up (StopDelivering), the drain's wait ends by then, and a bind under
+// way as ctx ended ends by then too (bindDurableConsumer), so one that binds after ctx ended is
+// stopped under the same deadline rather than one of its own. In cmd/dispatch that ctx is the
+// signal context, so the stop begins at SIGTERM and runs beside the HTTP drain and the document
+// shutdown, which take up to stopGrace (30 s) less a 5 s reserve: httpDrainBeforeDocuments then
+// documentShutdownTimeout (cmd/dispatch/shutdown.go); StartIntakes' stop, which the shutdown waits
+// for, adds no deadline of its own. The shutdown waits for the intakes after the document service
+// and before it deregisters this process and closes the database pool, so that a handler's writes
+// never meet a closed pool. 15 s leaves 10 s before the document budget's latest end for what
+// follows the deadline -- the handlers given up returning, which they do as soon as their context
+// is cancelled, the negative acknowledgements, the drain's end, which the given-up handlers'
+// cancelled context cuts short, and the clients closing -- so the intakes never hold the shutdown
+// past what that budget already can, and 15 s before the kubelet's kill. It is also well past what
+// a handler GitHub answers needs, a pull request and its commit pages with a page GitHub answered
+// 502 asked again (after 1 s, then 2 s: githubPageRetryWait), so an ordinary handler finishes and
+// is acknowledged rather than redone. A call GitHub does not answer holds one attempt for up to
+// githubapp.RequestTimeout (20 s), and is then asked again, which no budget inside stopGrace could
+// wait out. A var so a test can shrink it.
+var intakeStopBudget = 15 * time.Second
+
+// stopContext returns the stop deadline of an intake whose Run runs until ctx ends: a context that
+// ends intakeStopBudget after ctx does, armed by ctx's end, so everything of the stop -- a bind
+// under way at that moment, the handler wait, the drain's wait -- runs under one deadline counted
+// from it. release frees it, for Run to defer.
+func stopContext(ctx context.Context) (stopping context.Context, release func()) {
+	// Read now rather than as ctx ends, so a test restoring intakeStopBudget after Run has
+	// returned never races the read.
+	budget := intakeStopBudget
+	stopping, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	disarm := context.AfterFunc(ctx, func() { time.AfterFunc(budget, cancel) })
+	return stopping, func() {
+		disarm()
+		cancel()
+	}
+}
 
 // StopDelivering stops this intake's subscription so that another process can take the durable
 // over with nothing waiting out the ack wait. It drains the subscription, so the server delivers it
@@ -105,15 +124,15 @@ const intakeStopBudget = 15 * time.Second
 // next message while this process still works on the one before it. A message the callback is
 // handed after that is handed back at once. It returns once the drain has ended -- at the latest
 // intakeDrainWait after the last handler returned, or as ctx ends if that is sooner, when it
-// unsubscribes instead -- having given up the subscription's registration on the client
-// (bus.Client.Release), so that no reconnect binds it again and a later subscribe on the same
-// client starts afresh.
+// unsubscribes instead. The drain gives up the subscription's registration on the client
+// (bus.Client.DrainSubscription), so that no reconnect binds it again and a later subscribe on the
+// same client starts afresh.
 //
-// Run calls it as its ctx ends, under intakeStopBudget. It is safe from any goroutine and
-// idempotent: a second call returns once the first has stopped, and a call with nothing subscribed
-// returns at once. Every call's ctx bounds the handler wait of the stop under way, so a caller with
-// a nearer deadline than the first (StartIntakes' stop) has the handlers given up when its own ctx
-// ends.
+// Run calls it as its ctx ends, under its stop deadline (stopContext). It is safe from any
+// goroutine and idempotent: a second call returns once the first has stopped, and a call with
+// nothing subscribed returns at once. Every call's ctx bounds the handler wait of the stop under
+// way, so a caller with a nearer deadline than the first has the handlers given up when its own
+// ctx ends.
 func (in *Intake) StopDelivering(ctx context.Context) {
 	in.mu.Lock()
 	delivery := in.delivering
@@ -128,7 +147,8 @@ func (in *Intake) StopDelivering(ctx context.Context) {
 // what this one gives back to the next subscriber rather than straight back here. It drains the
 // subscription the client holds for this one's registration (bus.Client.DrainSubscription): a
 // handle of the client's own once it has replaced its connection, not sub, which went with the
-// replaced connection while the client's handle went on delivering here.
+// replaced connection while the client's handle went on delivering here. The client holds nothing
+// of this stopped callback's from the drain on.
 func (d *intakeDelivery) stop(ctx context.Context) {
 	giveUp := context.AfterFunc(ctx, d.abandon)
 	defer giveUp()
@@ -165,10 +185,6 @@ func (d *intakeDelivery) stop(ctx context.Context) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		// The drain has kept every reconnect since from binding the registration again; giving it
-		// up leaves the client holding nothing of this stopped callback's, so a later subscribe on
-		// the same client starts afresh.
-		d.nats.Release(d.sub)
 		d.abandon()
 	})
 }

@@ -391,6 +391,75 @@ func TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer(t *testing.T)
 	}
 }
 
+// bindReturnsAfterSignal is how long after Run's ctx ends TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal
+// holds the bind that has subscribed.
+const bindReturnsAfterSignal = 2 * time.Second
+
+// A bind that subscribed before Run's ctx ended and returns after it -- a standby's bind poll under
+// way at the signal, whose JetStream calls do not watch ctx -- is stopped under the one stop budget,
+// which runs from ctx's end: the handler of the message the subscription was handed is given up
+// intakeStopBudget after the signal, however late the bind returned, and its message handed back,
+// so the next process to bind the durable redoes it at once. With the budget begun at the bind's
+// return, a late bind pushed the whole stop -- and cmd/dispatch's deregister and pool close behind
+// it -- that much later.
+func TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal(t *testing.T) {
+	budget := intakeStopBudget
+	intakeStopBudget = 3 * time.Second
+	t.Cleanup(func() { intakeStopBudget = budget })
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	fake := newFakeGitHub(t)
+	held := holdPullRequestOneUntilAbandoned(fake)
+	github := fake.newTestClient()
+	t.Cleanup(held.release)
+	natsClient := intakeTestClient(t)
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	subscribed, bindReturns := make(chan struct{}), make(chan struct{})
+	intake.boundHook = func() {
+		close(subscribed)
+		<-bindReturns
+	}
+	stop := runIntake(t, intake)
+	// After runIntake's cleanup, so it runs first: Run waits for the bind it holds.
+	letBindReturn := sync.OnceFunc(func() { close(bindReturns) })
+	t.Cleanup(letBindReturn)
+	select {
+	case <-subscribed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the intake never subscribed to its durable")
+	}
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 1, mergedPullRequest(1))
+	held.awaitEntered(t)
+
+	signalled := time.Now()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	time.Sleep(bindReturnsAfterSignal)
+	letBindReturn()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the stopping intake did not return 20 s after its context ended")
+	}
+	if waited, within := time.Since(signalled), intakeStopBudget+time.Second; waited > within {
+		t.Fatalf("Run returned %s after its ctx ended, its bind %s after it; want within %s: the stop budget ran from the bind's return, not from ctx's end",
+			waited.Round(time.Millisecond), bindReturnsAfterSignal, within)
+	}
+	// The fake records the end once it sees the request cancelled, a moment after the client did.
+	waitFor(t, 5*time.Second, func() bool { return slices.Equal(held.of("1"), []string{"start 1", "end 1"}) }, func() string {
+		return fmt.Sprintf("pull request 1's events once Run returned = %q, want the held fetch given up", held.of("1"))
+	})
+
+	runIntake(t, newIntake(intakeTestClient(t), pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	awaitAcknowledged(t, natsClient)
+	if events, want := held.of("1"), []string{"start 1", "end 1", "start 1", "end 1"}; !slices.Equal(events, want) {
+		t.Fatalf("pull request 1's events = %q, want %q: the next process redoes the message given up", events, want)
+	}
+}
+
 // A message NATS has delivered into the client's buffer, but the subscription's callback has not
 // yet routed when the intake stops, is negatively acknowledged rather than handled, and the next
 // process to bind the durable handles it.

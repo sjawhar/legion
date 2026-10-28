@@ -332,17 +332,7 @@ func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
 	})
 	githubServer := httptest.NewServer(github)
 	t.Cleanup(githubServer.Close)
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate the test App key: %v", err)
-	}
-	app, err := githubapp.New(&auth.AppConfig{
-		ClientID: "Iv1.shutdown",
-		PEM:      string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
-	}, githubServer.URL)
-	if err != nil || app == nil {
-		t.Fatalf("build the GitHub App client: %v", err)
-	}
+	app := testGitHubApp(t, githubServer.URL)
 
 	stopIntakes, err := delivery.StartIntakes(ctx, func(name string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL}, bus.WithName(name))
@@ -350,7 +340,7 @@ func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
-	t.Cleanup(func() { stopIntakes(context.Background()) })
+	t.Cleanup(stopIntakes)
 	consumer := func() *natsgo.ConsumerInfo {
 		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		if err != nil {
@@ -390,7 +380,7 @@ func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
 		// As main does: the stop of the intakes, which begins as ctx is cancelled, is what shutdown
 		// waits for beside the delivery sockets.
 		served <- serveUntilStopped(ctx, cancel, &http.Server{Handler: http.NotFoundHandler()}, listener, documentService,
-			database.Pool, func() {}, func() { stopIntakes(context.Background()) }, func() {}, nil)
+			database.Pool, func() {}, stopIntakes, func() {}, nil)
 	}()
 	cancel()
 	select {
@@ -421,6 +411,70 @@ func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
 	if recorded == nil {
 		t.Fatalf("the message was acknowledged but its handler's writes never landed (last_event_at null): the pool closed "+
 			"under the handler; consumer delivered=%d ack_floor=%d", info.Delivered.Consumer, info.AckFloor.Consumer)
+	}
+}
+
+// testGitHubApp is a GitHub App client signing with a key of the test's own and asking baseURL.
+func testGitHubApp(t *testing.T, baseURL string) *githubapp.Client {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate the test App key: %v", err)
+	}
+	app, err := githubapp.New(&auth.AppConfig{
+		ClientID: "Iv1.shutdown",
+		PEM:      string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
+	}, baseURL)
+	if err != nil || app == nil {
+		t.Fatalf("build the GitHub App client: %v", err)
+	}
+	return app
+}
+
+// A panic in main once the intakes have started runs main's deferred stop of them on its way out
+// (stopIntakesOnExit), and the panic still reaches the runtime, which prints it and ends the
+// process. The intakes' Runs return only once the process context ends, and main's only cancel of
+// it is deferred before the intakes start, so it runs after their stop: a stop that waited for them
+// without cancelling first never returned, and the process hung with the panic unprinted while its
+// intake kept consuming.
+func TestAPanicAfterTheIntakesStartEndsTheProcess(t *testing.T) {
+	database := storetest.Open(t)
+	_, natsURL := testnats.Start(t)
+	// The publisher owns the stream, as the server's does, so the intakes bind their durables.
+	publisher, err := bus.ConnectOwningStream([]string{natsURL})
+	if err != nil {
+		t.Fatalf("connect the publisher: %v", err)
+	}
+	t.Cleanup(publisher.Close)
+	githubServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(githubServer.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopIntakes, err := delivery.StartIntakes(ctx, func(name string) (*bus.Client, error) {
+		return bus.Connect([]string{natsURL}, bus.WithName(name))
+	}, database.Pool, testGitHubApp(t, githubServer.URL), events.NewBroker(), nil)
+	if err != nil {
+		t.Fatalf("start the intakes: %v", err)
+	}
+	t.Cleanup(stopIntakes)
+
+	const boot = "boot failed after the intakes started"
+	recovered := make(chan any, 1)
+	go func() {
+		defer func() { recovered <- recover() }()
+		defer stopIntakesOnExit(cancel, stopIntakes)
+		panic(boot)
+	}()
+	select {
+	case got := <-recovered:
+		if got != boot {
+			t.Fatalf("the panic that reached the top of the stack = %v, want %q", got, boot)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a panic after the intakes started never got past their deferred stop: it waited for intakes nothing had stopped")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the deferred stop returned with the process context still live")
 	}
 }
 

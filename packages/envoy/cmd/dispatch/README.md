@@ -697,18 +697,22 @@ at once an older fetch could be written over a newer one; messages of different 
 once, at most 4, the durable's `MaxAckPending`. Its durable's `AckWait`, `MaxAckPending` and
 filter subject are unchanged. `Intake.StopDelivering` hands the durable over, and `Run` calls it
 when the process stops. It drains the subscription the bus client holds for it — after the client
-has replaced its connection, the one the client bound on the new connection — so the server
-delivers it nothing more and no reconnect binds it again (`bus.Client.DrainSubscription`), and
-holds every message waiting behind its key, and every message the client is handed meanwhile,
-until no handler is running. The messages in their handlers get until the stop's context ends —
-`intakeStopBudget`, 15 s after `Run`'s context ends, or sooner when the caller's own deadline is
-nearer — to finish and be acknowledged; the handlers still running then are given up, their
-GitHub calls cancelled, and their messages negatively acknowledged. Only then does it negatively
-acknowledge the held messages, so NATS redelivers them at once to the next holder, which can then
-not start a pull request's or run's next message while this process still works on the one
-before it. Last it waits for the drain to end and releases the subscription's registration on the
-client (`bus.Client.Release`). The server's shutdown waits for that stop, which begins at the
-signal and whose 15 s is its only deadline, before it closes the database pool: a handler waiting
+has replaced its connection, the one the client bound on the new connection — and gives up the
+subscription's registration on the client, so the server delivers it nothing more, no reconnect
+binds it again and a later subscribe starts afresh (`bus.Client.DrainSubscription`), and holds
+every message waiting behind its key, and every message the client is handed meanwhile, until no
+handler is running. The messages in their handlers get until the stop's deadline —
+`intakeStopBudget`, 15 s after `Run`'s context ends, armed when it ends — to finish and be
+acknowledged; the handlers still running then are given up, their GitHub calls cancelled, and
+their messages negatively acknowledged. Only then does it negatively acknowledge the held
+messages, so NATS redelivers them at once to the next holder, which can then not start a pull
+request's or run's next message while this process still works on the one before it. Last it
+waits for the drain to end, cut short by that deadline. A bind under way when the context ends —
+a standby's poll — spends the same deadline rather than starting one of its own: its
+reconciliation's JetStream calls end with it, no subscribe starts once the context has ended,
+and the subscription of a subscribe already under way is stopped under that deadline. The server's
+shutdown waits for that stop, which begins at the signal and whose 15 s from the signal is its
+only deadline, before it deregisters the process and closes the database pool: a handler waiting
 on GitHub holds no connection, so nothing else would keep the pool open for its writes.
 
 ## Database migrations

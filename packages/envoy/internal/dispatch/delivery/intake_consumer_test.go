@@ -557,7 +557,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	standby := intakeTestClient(t)
 	standbyThrottle := &bindThrottle{}
 
-	held, outcome := bindDurableConsumer(ctx, holder, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(holder))
+	held, outcome := bindDurableConsumer(ctx, ctx, holder, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(holder))
 	if outcome != bindBound || held == nil {
 		t.Fatalf("the first bind = %v (subscription returned: %t), want bindBound", outcome, held != nil)
 	}
@@ -565,7 +565,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	// the server a moment after Subscribe returns, and a second bind made before it lands is
 	// answered as a free durable rather than one another process holds.
 	awaitPushBound(t, holder, "the durable is not bound to the first process")
-	refused, outcome := bindDurableConsumer(ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
+	refused, outcome := bindDurableConsumer(ctx, ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
 	if outcome != bindStandby || refused != nil {
 		t.Fatalf("the second bind = %v (subscription returned: %t), want bindStandby and no subscription", outcome, refused != nil)
 	}
@@ -593,7 +593,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	var taken *natsgo.Subscription
 	var outcomes []bindOutcome
 	waitFor(t, 20*time.Second, func() bool {
-		taken, outcome = bindDurableConsumer(ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
+		taken, outcome = bindDurableConsumer(ctx, ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
 		outcomes = append(outcomes, outcome)
 		return outcome == bindBound
 	}, func() string {
@@ -642,7 +642,7 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	// branch under test is the one a bound durable takes.
 	awaitPushBound(t, holder, "the durable is not bound to the first process")
 
-	sub, outcome := bindDurableConsumer(ctx, other, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(other))
+	sub, outcome := bindDurableConsumer(ctx, ctx, other, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(other))
 	if outcome != bindStandby || sub != nil {
 		t.Fatalf("the bind against a durable another process holds = %v (subscription returned: %t), want bindStandby", outcome, sub != nil)
 	}
@@ -719,7 +719,7 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 		t.Fatalf("the other caller never took the %s lease", consumerLease(bus.DispatchDeliveryDurable))
 	}
 
-	sub, outcome := bindDurableConsumer(ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(natsClient))
+	sub, outcome := bindDurableConsumer(ctx, ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(natsClient))
 	close(release)
 	if held := <-ran; !held {
 		t.Fatalf("the other caller never held the %s lease, so the bind was free to reconcile", consumerLease(bus.DispatchDeliveryDurable))

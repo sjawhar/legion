@@ -66,11 +66,12 @@ func publishReleaseProbe(t *testing.T, client *bus.Client, subject string) {
 	}
 }
 
-// A subscription its caller has drained and released stays unbound across a reconnect, in place or
-// onto a connection the client dials to replace a closed one: without the release the client binds
-// the drained registration again, and its stopped handler takes the durable's deliveries. A later
-// Subscribe on the same client binds the durable afresh and is handed what was published meanwhile.
-func TestAReleasedSubscriptionIsNotBoundAgainByAReconnect(t *testing.T) {
+// A subscription its caller has ended with DrainSubscription stays unbound across a reconnect, in
+// place or onto a connection the client dials to replace a closed one: DrainSubscription gives the
+// registration up, without which the client would bind the drained registration again and its
+// stopped handler take the durable's deliveries. A later Subscribe on the same client binds the
+// durable afresh and is handed what was published meanwhile.
+func TestADrainedSubscriptionIsNotBoundAgainByAReconnect(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		reconnect func(*bus.Client) error
@@ -97,8 +98,14 @@ func TestAReleasedSubscriptionIsNotBoundAgainByAReconnect(t *testing.T) {
 
 			var stopped atomic.Int32
 			sub := bindCounting(t, client, consumer, &stopped)
-			drainSubscription(t, sub)
-			client.Release(sub)
+			drained, err := client.DrainSubscription(sub)
+			if err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			if drained != sub {
+				t.Fatalf("DrainSubscription drained %p, want the handle Subscribe returned (%p)", drained, sub)
+			}
+			waitFor(t, 10*time.Second, "the drain to end", func() bool { return !drained.IsValid() })
 
 			if err := tc.reconnect(client); err != nil {
 				t.Fatalf("reconnect: %v", err)
@@ -109,17 +116,17 @@ func TestAReleasedSubscriptionIsNotBoundAgainByAReconnect(t *testing.T) {
 			// rebind would show as push-bound, and be handed the message, within moments.
 			time.Sleep(time.Second)
 			if client.SubOK() {
-				t.Fatal("SubOK reports a subscription bound after it was released")
+				t.Fatal("SubOK reports a subscription bound after it was drained")
 			}
 			info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
 			if err != nil {
 				t.Fatalf("read the durable: %v", err)
 			}
 			if info.PushBound {
-				t.Fatal("the reconnect bound the released subscription to the durable again")
+				t.Fatal("the reconnect bound the drained subscription to the durable again")
 			}
 			if got := stopped.Load(); got != 0 {
-				t.Fatalf("the released subscription's handler was handed %d message(s) after the reconnect", got)
+				t.Fatalf("the drained subscription's handler was handed %d message(s) after the reconnect", got)
 			}
 
 			var fresh atomic.Int32
@@ -129,16 +136,16 @@ func TestAReleasedSubscriptionIsNotBoundAgainByAReconnect(t *testing.T) {
 				t.Fatal("SubOK reports the fresh subscription unbound")
 			}
 			if got := stopped.Load(); got != 0 {
-				t.Fatalf("the released subscription's handler was handed %d message(s)", got)
+				t.Fatalf("the drained subscription's handler was handed %d message(s)", got)
 			}
 		})
 	}
 }
 
-// A reconnect that lands after a subscription's drain ended and before its caller released it binds
-// the drained registration again; the release then gives up the registration and unsubscribes that
-// rebound handle, so the durable is left free and the stopped handler is handed nothing more.
-func TestReleaseUnsubscribesWhatARestoreBoundAfterTheSubscriptionEnded(t *testing.T) {
+// A subscription that ended otherwise than by DrainSubscription -- its handle drained directly --
+// is bound again by the next reconnect; DrainSubscription then drains that rebound handle and gives
+// the registration up, so the durable is left free and the stopped handler is handed nothing more.
+func TestDrainSubscriptionEndsWhatARestoreBoundAfterTheSubscriptionEnded(t *testing.T) {
 	_, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
@@ -163,9 +170,15 @@ func TestReleaseUnsubscribesWhatARestoreBoundAfterTheSubscriptionEnded(t *testin
 		t.Fatal("the reconnect did not bind the drained registration again; the test proves nothing")
 	}
 
-	client.Release(sub)
+	drained, err := client.DrainSubscription(sub)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if drained == nil || drained == sub {
+		t.Fatalf("DrainSubscription drained %p, want the handle the restore bound, not the one Subscribe returned (%p)", drained, sub)
+	}
 	if client.SubOK() {
-		t.Fatal("SubOK reports a subscription bound after it was released")
+		t.Fatal("SubOK reports a subscription bound after it was drained")
 	}
 	waitFor(t, 10*time.Second, "the durable to lose its subscriber", func() bool {
 		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
@@ -174,13 +187,14 @@ func TestReleaseUnsubscribesWhatARestoreBoundAfterTheSubscriptionEnded(t *testin
 	publishReleaseProbe(t, client, "notifications.github.test.released")
 	time.Sleep(time.Second)
 	if got := stopped.Load(); got != 0 {
-		t.Fatalf("the released subscription's handler was handed %d message(s)", got)
+		t.Fatalf("the drained subscription's handler was handed %d message(s)", got)
 	}
 }
 
-// Release of a handle a later Subscribe replaced gives up nothing: the replacement stays the
-// client's subscription, and a recovery onto a replacement connection binds it again.
-func TestReleaseOfAReplacedSubscriptionKeepsTheReplacement(t *testing.T) {
+// DrainSubscription of a handle a later Subscribe replaced drains and gives up nothing: the
+// replacement stays the client's subscription, and a recovery onto a replacement connection binds
+// it again.
+func TestDrainSubscriptionOfAReplacedSubscriptionKeepsTheReplacement(t *testing.T) {
 	_, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
@@ -195,9 +209,11 @@ func TestReleaseOfAReplacedSubscriptionKeepsTheReplacement(t *testing.T) {
 	var first, second atomic.Int32
 	replaced := bindCounting(t, client, replacedDurable, &first)
 	bindCounting(t, client, replacementDurable, &second)
-	client.Release(replaced)
+	if drained, err := client.DrainSubscription(replaced); drained != nil || err != nil {
+		t.Fatalf("DrainSubscription of a replaced handle = %p, %v; want nothing drained", drained, err)
+	}
 	if !client.SubOK() {
-		t.Fatal("releasing a replaced handle gave up its replacement")
+		t.Fatal("draining a replaced handle gave up its replacement")
 	}
 
 	client.Conn.Close()
@@ -379,8 +395,8 @@ func TestReleaseFailedKeepsASubscriptionThatBound(t *testing.T) {
 // DrainSubscription after the client replaced its connection drains the handle the client bound
 // on the new connection, the one delivering, rather than the handle Subscribe returned, which went
 // with the closed connection: the drain answers no error and the durable loses its subscriber.
-// No recovery binds the drained registration again before its caller releases it, and a later
-// Subscribe binds the durable afresh and is handed what was published meanwhile.
+// No recovery binds the drained registration again, and a later Subscribe binds the durable afresh
+// and is handed what was published meanwhile.
 func TestDrainSubscriptionDrainsTheHandleARestoreBound(t *testing.T) {
 	_, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
@@ -437,7 +453,6 @@ func TestDrainSubscriptionDrainsTheHandleARestoreBound(t *testing.T) {
 		t.Fatalf("the drained subscription's handler was handed %d message(s)", got)
 	}
 
-	client.Release(sub)
 	var fresh atomic.Int32
 	bindCounting(t, client, consumer, &fresh)
 	waitFor(t, 10*time.Second, "the fresh subscription to be handed the message", func() bool { return fresh.Load() == 1 })

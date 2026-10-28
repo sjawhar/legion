@@ -174,17 +174,12 @@ type recoverableSubscription struct {
 	opts      []nats.SubOpt
 	active    *nats.Subscription
 	// subscribed is the handle Subscribe returned: the one its own bind installed, when that bind
-	// succeeded. Release names the registration by it; a later restore's bind replaces active and
-	// leaves it. When Subscribe's own bind failed (the server refused it, or a background client
-	// has not connected yet) it stays nil, and the restore that binds the registration installs
-	// only active, a handle no caller holds: the caller gives such a registration up with
-	// ReleaseFailed, or its next Subscribe replaces it, never a Release.
+	// succeeded. DrainSubscription names the registration by it; a later restore's bind replaces
+	// active and leaves it. When Subscribe's own bind failed (the server refused it, or a background
+	// client has not connected yet) it stays nil, and the restore that binds the registration
+	// installs only active, a handle no caller holds: the caller gives such a registration up with
+	// ReleaseFailed, or its next Subscribe replaces it, never a DrainSubscription.
 	subscribed *nats.Subscription
-	// draining is set once DrainSubscription has drained the registration for its caller, who is
-	// ending it for good: no restore binds it again, so a connection replaced before or during the
-	// drain hands the stopping handler nothing more. Release, or the next Subscribe, clears it with
-	// the registration.
-	draining bool
 	// binding is set while a bind of this registration is in flight, and closed when it ends. A
 	// registration has one bind at a time: a restore leaves one that has a bind in flight, and a
 	// registration that replaces it waits for that bind first.
@@ -436,7 +431,7 @@ func (c *Client) Connected() bool {
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
 // an earlier one returned, a call on another subject is refused with ErrSubscriptionHeld, and a
-// caller that is done with it gives it up with Release. On a client that connects in the
+// caller that is done with it ends it with DrainSubscription. On a client that connects in the
 // background and has not connected yet, the bind fails (nothing reaches the server before then)
 // and the registration stays, so the first connection binds it; a caller that gives up on a
 // subscription whose bind failed gives up the registration with ReleaseFailed.
@@ -525,17 +520,19 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 	return sub, nil
 }
 
-// DrainSubscription drains the subscription the client holds for the JetStream registration the
-// Subscribe that returned sub made, and returns that subscription, for its caller to wait until it
-// is no longer valid, which is how nats.go reports the drain's end. It is sub until the client
-// replaces its connection, and after that the handle the client bound on the new connection: sub
-// went with the old one, and draining it would fail while the rebound handle went on delivering.
-// From this call on no reconnect or recovery binds the registration again, so a caller ending the
-// subscription for good is handed nothing new while it finishes what it had; it gives the
-// registration up with Release once the drain has ended. With no valid handle to drain (the
-// connection was replaced and the registration not bound again yet) it returns nil, as it does for
-// a sub the client no longer holds: a later Subscribe's replacement or a Release ended that one. A
-// bind of the registration in flight is waited for first, as Release does.
+// DrainSubscription ends for good the JetStream registration the Subscribe that returned sub made:
+// it gives the registration up, so that no reconnect or recovery binds it again and a later
+// Subscribe, on any subject, registers anew, and drains the subscription the client held for it.
+// It returns that subscription, for its caller to wait until it is no longer valid, which is how
+// nats.go reports the drain's end; the handler is handed what the client had buffered meanwhile,
+// and nothing new. That subscription is sub until the client replaces its connection, and after
+// that the handle the client bound on the new connection: sub went with the old one, and draining
+// it would fail while the rebound handle went on delivering. With no valid handle to drain (the
+// connection was replaced and the registration not bound again yet) it returns nil, having given
+// the registration up all the same. A sub the client no longer holds -- one a later Subscribe
+// replaced -- gives up and drains nothing, and returns nil. A bind of the registration in flight,
+// a restore's, is waited for first, as registerSubscription does, so what it bound is the handle
+// drained.
 func (c *Client) DrainSubscription(sub *nats.Subscription) (*nats.Subscription, error) {
 	if sub == nil {
 		return nil, nil
@@ -547,8 +544,8 @@ func (c *Client) DrainSubscription(sub *nats.Subscription) (*nats.Subscription, 
 		c.subscriptionsMu.Unlock()
 		return nil, nil
 	}
-	subscription.draining = true
 	active := subscription.active
+	*subscription = recoverableSubscription{transport: jetStreamSubscription}
 	c.subscriptionsMu.Unlock()
 	if active == nil || !active.IsValid() {
 		return nil, nil
@@ -559,39 +556,11 @@ func (c *Client) DrainSubscription(sub *nats.Subscription) (*nats.Subscription, 
 	return active, nil
 }
 
-// Release gives up the JetStream registration the Subscribe that returned sub made, so that no
-// reconnect or recovery binds it again, and a later Subscribe, on any subject, registers anew. A
-// caller that ends a subscription for good while the client runs on calls it once sub has ended
-// (drained or unsubscribed): the client binds again any registration whose subscription is no
-// longer valid, one drained otherwise than by DrainSubscription included, so without it the next
-// reconnect would hand the stopped handler new deliveries. A bind of the registration in flight is
-// waited for first, as registerSubscription does, and a handle a restore bound for it since sub
-// ended is unsubscribed.
-// A sub the client no longer holds -- one a later Subscribe replaced -- releases nothing.
-func (c *Client) Release(sub *nats.Subscription) {
-	if sub == nil {
-		return
-	}
-	c.subscriptionsMu.Lock()
-	subscription := &c.subscriptions[jetStreamSubscription]
-	c.awaitBindLocked(subscription)
-	if subscription.subscribed != sub {
-		c.subscriptionsMu.Unlock()
-		return
-	}
-	rebound := subscription.active
-	*subscription = recoverableSubscription{transport: jetStreamSubscription}
-	c.subscriptionsMu.Unlock()
-	if rebound != nil && rebound != sub {
-		_ = rebound.Unsubscribe()
-	}
-}
-
 // ReleaseFailed gives up the JetStream registration a Subscribe on subject left behind when its own
 // bind failed, so that no reconnect or recovery binds it. A caller that gives up on a subscription
 // it could not bind calls it: the client binds the registration on its next connection otherwise,
 // and hands the handler deliveries its caller no longer takes. A bind of the registration in flight
-// is waited for first, as Release does, and a handle a restore bound for it meanwhile is
+// is waited for first, as DrainSubscription does, and a handle a restore bound for it meanwhile is
 // unsubscribed. It gives up nothing else: not a registration whose Subscribe's own bind succeeded
 // (a later Subscribe's), nor one on another subject, which refused the call (ErrSubscriptionHeld).
 func (c *Client) ReleaseFailed(subject string) {

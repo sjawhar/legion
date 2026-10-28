@@ -550,9 +550,9 @@ func main() {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their Runs return once ctx is cancelled; the intake's
 		// begins stopping then, at the signal, beside the HTTP drain and the document shutdown, and
-		// returns once a message still in its handler has been acknowledged, or given up at its own
-		// stop budget and handed back, so the clients close after it. Each connects in the
-		// background as the publisher does, and its bind poll binds the durable once it has.
+		// returns once a message still in its handler has been acknowledged, or given up at its
+		// stop budget from the signal and handed back, so the clients close after it. Each connects
+		// in the background as the publisher does, and its bind poll binds the durable once it has.
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
@@ -561,11 +561,11 @@ func main() {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
 		}
-		// The intakes' own stop budget is the one deadline: their stop's ctx adds none.
-		waitIntakes = func() { stopIntakes(context.Background()) }
-		// A stop before serving (the admission wait, below) returns without shutdown, so the
-		// intakes are waited for here too; after shutdown has waited for them, this returns at once.
-		defer waitIntakes()
+		waitIntakes = stopIntakes
+		// A stop before serving (the admission wait, below) returns without shutdown, and a panic
+		// before serving unwinds past it, so the intakes are stopped here too; after shutdown has
+		// waited for them, this returns at once.
+		defer stopIntakesOnExit(cancel, waitIntakes)
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
@@ -626,6 +626,17 @@ func defaultDataDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".local", "share", "dispatch"), nil
+}
+
+// stopIntakesOnExit is main's deferred stop of the intakes: it cancels the process context, then
+// waits for them (waitIntakes). The intakes' Runs return only once that context ends, and main's own
+// deferred cancel, made before the intakes start, runs after this one; so a panic between the
+// intakes' start and serveUntilStopped -- in routes.New, newHTTPServer or joinRegistry -- would
+// otherwise wait here forever, with the panic unprinted and the intake still consuming. On every
+// other way out the context has already ended, and the cancel does nothing.
+func stopIntakesOnExit(cancel context.CancelFunc, waitIntakes func()) {
+	cancel()
+	waitIntakes()
 }
 
 // defaultWebDistDir resolves the SPA build directory: configured (DISPATCH_WEB_DIST) when it is
