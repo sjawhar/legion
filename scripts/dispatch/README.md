@@ -91,8 +91,11 @@ above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_
   merge is checked outside the script, with
   `gh api repos/sjawhar/legion/compare/<merge>...<commit> --jq .status` (`ahead` or `identical`).
   An unreadable `/healthz` makes the run unavailable.
-- **A1** (`--a1-query`): `GET /api/v1/search?q=<query>` passes when the answer has no `degraded`
-  field and fails when it has one: `A1 degraded=yes|no results=<n> pass|fail`.
+- **A1** (`--a1-query`): `GET /api/v1/search?q=<query>` fails when the answer has a `degraded`
+  field, and passes when it has none and at least one result:
+  `A1 degraded=yes|no results=<n> pass|fail`. An empty answer without `degraded` prints
+  `A1 degraded=no results=0 unavailable: no-results`. A query with no indexable word gets an empty
+  answer without the embedder being tried, so an empty answer proves nothing.
 - **A2** (`--pair`): the issue's lexemes and the query's lexemes come from Postgres (below), and
   `shared` counts the query's distinct lexemes that the issue's row also holds. Then
   `GET /api/v1/search?q=<query>&limit=5`, with nothing else, gives `position`: where the issue's
@@ -100,8 +103,10 @@ above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_
   comment, ask or message the issue owns never counts. A pair passes when `shared=0` and the row
   is at position 1 to 5, and fails otherwise. Without `--lexeme-database`, or when the database
   fails, it prints `shared=unchecked` and is unavailable. Each pair prints
-  `A2 <KEY> shared=<n|unchecked> position=<1-5|none> <verdict>`. A2 passes when any pair passes,
-  is unavailable when none passes and any is unavailable, and fails otherwise.
+  `A2 <KEY> shared=<n|unchecked> position=<1-5|none> <verdict>`. When the pair's own search is
+  unavailable it prints `A2 <KEY> unavailable: <category>`, with no shared and no position. A2
+  passes when any pair passes, is unavailable when none passes and any is unavailable, and fails
+  otherwise.
 - **A3** (`--coverage`): `GET /api/v1/search/coverage`. A report that departs from its shape is
   malformed: `identity` a string or null, `place` `bedrock`, `azure` or null, at least one kind,
   each kind named `^[a-z][a-z0-9_]{0,31}$`, and `items = current + lacking + failed` for `total`
@@ -115,8 +120,10 @@ above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_
 
 The last line is `result pass|fail|unavailable exit=<code>`. Exit 0: every check asked for passed.
 Exit 1: a check failed and none was unavailable. Exit 2: a check was unavailable, or a usage
-error. An unavailable check (`unavailable: auth|transport|malformed|not-found|lexeme-database`)
-is never a pass.
+error. An unavailable check
+(`unavailable: auth|refused|transport|malformed|not-found|no-results|lexeme-database`) is never a
+pass. `refused` is a 4xx refusal other than 401, 403 or 404, for example a query longer than
+search accepts.
 
 Output is allowlisted on stdout and stderr alike: keys, kind names, positions, counts, the build
 commit, match or mismatch, the place and the failure category. The script never prints a URL, the

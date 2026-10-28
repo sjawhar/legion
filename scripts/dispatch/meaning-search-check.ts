@@ -49,7 +49,7 @@ const Health = z.looseObject({
     .nullable(),
   schema_version: z.int().min(0).nullable(),
 });
-export type Health = z.infer<typeof Health>;
+type Health = z.infer<typeof Health>;
 
 const SearchAnswer = z.looseObject({ results: z.array(z.unknown()) });
 
@@ -72,7 +72,7 @@ const CoverageCounts = z
     oldest_lacking_seconds: z.number().min(0).nullable(),
   })
   .refine((counts) => counts.items === counts.current + counts.lacking + counts.failed);
-export type CoverageCounts = z.infer<typeof CoverageCounts>;
+type CoverageCounts = z.infer<typeof CoverageCounts>;
 
 /** INFRA-393's coverage report, `GET /api/v1/search/coverage`. Its kinds are whatever it lists. */
 const CoverageReport = z.looseObject({
@@ -83,27 +83,29 @@ const CoverageReport = z.looseObject({
     .record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/), CoverageCounts)
     .refine((kinds) => Object.keys(kinds).length > 0),
 });
-export type CoverageReport = z.infer<typeof CoverageReport>;
+type CoverageReport = z.infer<typeof CoverageReport>;
 
 /** One row of the lexer's statement, as Bun's `SQL` answers it. */
 const LexemeRows = z.tuple([z.looseObject({ issue: z.array(z.string()), query: z.string() })]);
 
-export type Verdict = "pass" | "fail" | "unavailable";
+type Verdict = "pass" | "fail" | "unavailable";
 
-export type Category =
+type Category =
   | "auth"
+  | "refused"
   | "transport"
   | "malformed"
   | "not-found"
+  | "no-results"
   | "lexeme-database"
   | "config";
 
-export interface Pair {
+interface Pair {
   readonly key: string;
   readonly query: string;
 }
 
-export interface Options {
+interface Options {
   readonly a1Query?: string;
   readonly pairs: readonly Pair[];
   readonly lexemeDatabase?: string;
@@ -124,11 +126,6 @@ export class HttpStatusError extends Error {
   }
 }
 
-/** A body that is not JSON at all. A JSON body of the wrong shape fails its schema instead. */
-export class MalformedAnswer extends Error {
-  override readonly name = "MalformedAnswer";
-}
-
 /** The reads the checks make of Dispatch, each answering the parsed JSON it received. */
 export interface DispatchReads {
   /** `GET /healthz`, whose body is read on 200 and on 503. */
@@ -140,7 +137,7 @@ export interface DispatchReads {
 }
 
 /** Postgres's `english` lexemes for an issue's own search row and for a query. */
-export interface Lexemes {
+interface Lexemes {
   readonly issue: readonly string[];
   readonly query: readonly string[];
 }
@@ -154,18 +151,17 @@ export interface Clock {
   sleep(ms: number): Promise<void>;
 }
 
-export interface CheckDependencies {
+interface CheckDependencies {
   readonly dispatch: DispatchReads;
   readonly lexer?: Lexer;
   readonly clock?: Clock;
   readonly out: (line: string) => void;
-  readonly err: (line: string) => void;
 }
 
-export interface A1Judgement {
+interface A1Judgement {
   readonly degraded: boolean;
   readonly results: number;
-  readonly verdict: "pass" | "fail";
+  readonly verdict: Verdict;
 }
 
 interface PairFound {
@@ -173,7 +169,7 @@ interface PairFound {
   readonly position: number | null;
 }
 
-export type PairResult =
+type PairResult =
   | {
       readonly key: string;
       readonly verdict: "unavailable";
@@ -187,14 +183,14 @@ export type PairResult =
       readonly found: PairFound & { readonly shared: number };
     };
 
-export interface CoverageJudgement {
+interface CoverageJudgement {
   readonly verdict: "pass" | "fail";
   readonly identityMatch: boolean;
   /** Whether lacking items are all that keeps the snapshot from passing, so a later read may. */
   readonly onlyLacking: boolean;
 }
 
-export type CoverageResult =
+type CoverageResult =
   | { readonly verdict: "unavailable"; readonly category: Category; readonly reads: number }
   | {
       readonly verdict: "pass" | "fail";
@@ -261,13 +257,14 @@ export function parseArguments(argv: readonly string[]): Options {
 }
 
 /** The fixed category an error is reported as; its own text never is. */
-export function errorCategory(error: unknown): Category {
-  if (error instanceof MalformedAnswer || error instanceof z.ZodError) return "malformed";
+function errorCategory(error: unknown): Category {
+  if (error instanceof z.ZodError) return "malformed";
   if (!(error instanceof DispatchServiceError || error instanceof HttpStatusError)) {
     return "transport";
   }
   if (error.status === 401 || error.status === 403) return "auth";
   if (error.status === 404) return "not-found";
+  if (error.status >= 400 && error.status < 500) return "refused";
   return "transport";
 }
 
@@ -282,11 +279,6 @@ const EXIT_CODE = { pass: 0, fail: 1, unavailable: 2 } as const satisfies Record
   Verdict,
   0 | 1 | 2
 >;
-
-/** Any unavailable check → 2; else any failed check → 1; else 0. */
-export function exitCode(verdicts: readonly Verdict[]): 0 | 1 | 2 {
-  return EXIT_CODE[overallVerdict(verdicts)];
-}
 
 /**
  * Each lexeme `querytree` quotes, once each, in order. Inside a quoted lexeme Postgres doubles a
@@ -303,23 +295,29 @@ export function queryTreeLexemes(text: string): string[] {
 }
 
 /** How many distinct query lexemes the issue's own row also holds. */
-export function sharedLexemes(lexemes: Lexemes): number {
+function sharedLexemes(lexemes: Lexemes): number {
   const issue = new Set(lexemes.issue);
   return new Set(lexemes.query.filter((lexeme) => issue.has(lexeme))).size;
 }
 
-/** A1 passes when search answered without `degraded`, so meaning search ran for the request. */
-export function judgeA1(response: unknown): A1Judgement {
+/**
+ * A1 fails when search answered with `degraded`, and passes only on a non-empty answer without it.
+ * A query with no indexable word gets an empty answer without `degraded` before Dispatch tries the
+ * embedder at all, so an empty answer does not show meaning search ran and is unavailable.
+ */
+function judgeA1(response: unknown): A1Judgement {
   const answer = SearchAnswer.parse(response);
   const degraded = Object.hasOwn(answer, "degraded");
-  return { degraded, results: answer.results.length, verdict: degraded ? "fail" : "pass" };
+  const results = answer.results.length;
+  if (degraded) return { degraded, results, verdict: "fail" };
+  return { degraded, results, verdict: results > 0 ? "pass" : "unavailable" };
 }
 
 /**
  * The 1-based position, within the first `A2_DEPTH` results, of the issue's own row: kind
  * `issue`, owned by the issue. A document, comment, ask or message the issue owns never counts.
  */
-export function searchPosition(response: unknown, key: string): number | null {
+function searchPosition(response: unknown, key: string): number | null {
   const hits = z.array(SearchHit).parse(SearchAnswer.parse(response).results.slice(0, A2_DEPTH));
   const index = hits.findIndex(
     (hit) => hit.kind === "issue" && hit.owner.kind === "issue" && hit.owner.key === key
@@ -328,62 +326,70 @@ export function searchPosition(response: unknown, key: string): number | null {
 }
 
 /** A pair passes when its query shares no lexeme with the issue's own row and finds that row. */
-export function judgeA2Pair(shared: number, position: number | null): "pass" | "fail" {
+function judgeA2Pair(shared: number, position: number | null): "pass" | "fail" {
   return shared === 0 && position !== null ? "pass" : "fail";
 }
 
 /**
- * One pair: the lexemes its query shares with the issue's own row (when a lexer is given), and
- * the issue row's position in the query's top five. A failed search or issue read makes the pair
- * unavailable with its category; otherwise a missing or failed lexer does (`lexeme-database`).
+ * The number of the query's lexemes the issue's own row also holds, or why it is unknown: a
+ * failed issue read gives its category; a missing or failed lexer gives `lexeme-database`.
  */
-export async function checkPair(
+async function sharedCount(
+  pair: Pair,
+  dispatch: DispatchReads,
+  lexer: Lexer | undefined
+): Promise<number | Category> {
+  if (lexer === undefined) return "lexeme-database";
+  let issue: z.infer<typeof IssueIdentity>;
+  try {
+    issue = IssueIdentity.parse(await dispatch.issue(pair.key));
+  } catch (error) {
+    return errorCategory(error);
+  }
+  try {
+    return sharedLexemes(await lexer.lexemes(issue.key, issue.title, pair.query));
+  } catch {
+    return "lexeme-database";
+  }
+}
+
+/**
+ * One pair: the lexemes its query shares with the issue's own row (when a lexer is given), and
+ * the issue row's position in the query's top five. A failed search makes the pair unavailable
+ * with its category; otherwise an unknown shared count does, with the category `sharedCount` gave.
+ */
+async function checkPair(
   pair: Pair,
   dispatch: DispatchReads,
   lexer: Lexer | undefined
 ): Promise<PairResult> {
-  let shared: number | null = null;
-  let issueFailure: Category | null = null;
-  if (lexer !== undefined) {
-    let issue: z.infer<typeof IssueIdentity> | null = null;
-    try {
-      issue = IssueIdentity.parse(await dispatch.issue(pair.key));
-    } catch (error) {
-      issueFailure = errorCategory(error);
-    }
-    if (issue !== null) {
-      try {
-        shared = sharedLexemes(await lexer.lexemes(issue.key, issue.title, pair.query));
-      } catch {
-        // Reported as lexeme-database below.
-      }
-    }
-  }
+  const shared = await sharedCount(pair, dispatch, lexer);
   let position: number | null;
   try {
     position = searchPosition(await dispatch.search(pair.query, { limit: A2_DEPTH }), pair.key);
   } catch (error) {
     return { key: pair.key, verdict: "unavailable", found: null, category: errorCategory(error) };
   }
-  const found = { shared, position };
-  if (issueFailure !== null) {
-    return { key: pair.key, verdict: "unavailable", found, category: issueFailure };
-  }
-  if (shared === null) {
-    return { key: pair.key, verdict: "unavailable", found, category: "lexeme-database" };
+  if (typeof shared !== "number") {
+    return {
+      key: pair.key,
+      verdict: "unavailable",
+      found: { shared: null, position },
+      category: shared,
+    };
   }
   return { key: pair.key, verdict: judgeA2Pair(shared, position), found: { shared, position } };
 }
 
 /** A2 passes when any pair passes; else it is unavailable when any pair is; else it fails. */
-export function judgeA2(pairs: readonly Pick<PairResult, "verdict">[]): Verdict {
+function judgeA2(pairs: readonly Pick<PairResult, "verdict">[]): Verdict {
   if (pairs.some((pair) => pair.verdict === "pass")) return "pass";
   if (pairs.some((pair) => pair.verdict === "unavailable")) return "unavailable";
   return "fail";
 }
 
 /** A snapshot passes when its identity is the expected model and every item is current. */
-export function judgeCoverage(report: CoverageReport, expectModel: string): CoverageJudgement {
+function judgeCoverage(report: CoverageReport, expectModel: string): CoverageJudgement {
   const identityMatch = report.identity === expectModel;
   const { items, failed, lacking } = report.total;
   const otherwiseHolds = identityMatch && items > 0 && failed === 0;
@@ -400,7 +406,7 @@ export function judgeCoverage(report: CoverageReport, expectModel: string): Cove
  * falls inside `waitSeconds`; otherwise the last snapshot fails. Any unavailable read ends it as
  * unavailable.
  */
-export async function checkCoverage(
+async function checkCoverage(
   readCoverage: () => Promise<unknown>,
   expectModel: string,
   waitSeconds: number,
@@ -485,8 +491,44 @@ async function checkA1(
     return "unavailable";
   }
   const degraded = judgement.degraded ? "yes" : "no";
-  out(`A1 degraded=${degraded} results=${judgement.results} ${judgement.verdict}`);
+  const verdict =
+    judgement.verdict === "unavailable" ? "unavailable: no-results" : judgement.verdict;
+  out(`A1 degraded=${degraded} results=${judgement.results} ${verdict}`);
   return judgement.verdict;
+}
+
+async function checkA2(
+  pairs: readonly Pair[],
+  dispatch: DispatchReads,
+  lexer: Lexer | undefined,
+  out: (line: string) => void
+): Promise<Verdict> {
+  const results: PairResult[] = [];
+  for (const pair of pairs) {
+    const result = await checkPair(pair, dispatch, lexer);
+    out(formatPair(result));
+    results.push(result);
+  }
+  const verdict = judgeA2(results);
+  const passed = results.filter((result) => result.verdict === "pass").length;
+  out(`A2 ${verdict} (pairs passed ${passed} of ${results.length})`);
+  return verdict;
+}
+
+async function checkA3(
+  coverage: NonNullable<Options["coverage"]>,
+  dispatch: DispatchReads,
+  clock: Clock,
+  out: (line: string) => void
+): Promise<Verdict> {
+  const result = await checkCoverage(
+    () => dispatch.coverage(),
+    coverage.expectModel,
+    coverage.waitSeconds,
+    clock
+  );
+  for (const line of formatCoverage(result)) out(line);
+  return result.verdict;
 }
 
 const realClock: Clock = { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) };
@@ -495,42 +537,22 @@ const realClock: Clock = { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) }
  * exit code. */
 export async function runChecks(options: Options, deps: CheckDependencies): Promise<number> {
   const { dispatch, out } = deps;
-  try {
-    const verdicts: Verdict[] = [await checkBuild(dispatch, out)];
-    if (options.a1Query !== undefined) verdicts.push(await checkA1(options.a1Query, dispatch, out));
-    if (options.pairs.length > 0) {
-      const pairs: PairResult[] = [];
-      for (const pair of options.pairs) {
-        const result = await checkPair(pair, dispatch, deps.lexer);
-        out(formatPair(result));
-        pairs.push(result);
-      }
-      const verdict = judgeA2(pairs);
-      const passed = pairs.filter((pair) => pair.verdict === "pass").length;
-      out(`A2 ${verdict} (pairs passed ${passed} of ${pairs.length})`);
-      verdicts.push(verdict);
-    }
-    if (options.coverage !== undefined) {
-      const result = await checkCoverage(
-        () => dispatch.coverage(),
-        options.coverage.expectModel,
-        options.coverage.waitSeconds,
-        deps.clock ?? realClock
-      );
-      for (const line of formatCoverage(result)) out(line);
-      verdicts.push(result.verdict);
-    }
-    const result = overallVerdict(verdicts);
-    const code = EXIT_CODE[result];
-    out(`result ${result} exit=${code}`);
-    return code;
-  } catch (error) {
-    deps.err(`unavailable: ${errorCategory(error)}`);
-    return 2;
+  const verdicts: Verdict[] = [await checkBuild(dispatch, out)];
+  if (options.a1Query !== undefined) verdicts.push(await checkA1(options.a1Query, dispatch, out));
+  if (options.pairs.length > 0) {
+    verdicts.push(await checkA2(options.pairs, dispatch, deps.lexer, out));
   }
+  if (options.coverage !== undefined) {
+    verdicts.push(await checkA3(options.coverage, dispatch, deps.clock ?? realClock, out));
+  }
+  const result = overallVerdict(verdicts);
+  const code = EXIT_CODE[result];
+  out(`result ${result} exit=${code}`);
+  return code;
 }
 
-/** Parsed JSON from one of the script's own reads, with a status `accept` admits. */
+/** Parsed JSON from one of the script's own reads, with a status `accept` admits. A body that is
+ * not JSON is answered as its text, as `DispatchClient` does, so its schema reports it malformed. */
 async function readJson(
   url: string,
   headers: Record<string, string>,
@@ -545,7 +567,7 @@ async function readJson(
   try {
     return JSON.parse(text);
   } catch {
-    throw new MalformedAnswer();
+    return text;
   }
 }
 
@@ -635,7 +657,6 @@ async function main(argv: readonly string[]): Promise<number> {
       dispatch: liveDispatch(config),
       ...(lexer === undefined ? {} : { lexer }),
       out: (line) => console.log(line),
-      err: (line) => console.error(line),
     });
   } finally {
     await lexer?.close();

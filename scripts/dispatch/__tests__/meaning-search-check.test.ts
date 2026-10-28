@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { DispatchGatewayError } from "../../../packages/envoy-client/src/dispatch-http.ts";
+import {
+  DispatchGatewayError,
+  DispatchServiceError,
+} from "../../../packages/envoy-client/src/dispatch-http.ts";
 import {
   type Clock,
   type DispatchReads,
-  exitCode,
   HttpStatusError,
   type Lexer,
   parseArguments,
@@ -101,15 +103,13 @@ async function run(
   deps: { dispatch?: DispatchReads; lexer?: Lexer; clock?: FakeClock } = {}
 ) {
   const out: string[] = [];
-  const err: string[] = [];
   const code = await runChecks(parseArguments(argv), {
     dispatch: deps.dispatch ?? dispatch(),
     ...(deps.lexer === undefined ? {} : { lexer: deps.lexer }),
     ...(deps.clock === undefined ? {} : { clock: deps.clock }),
     out: (line) => out.push(line),
-    err: (line) => err.push(line),
   });
-  return { code, out, err };
+  return { code, out };
 }
 
 const COVERAGE = ["--coverage", "--expect-model", IDENTITY];
@@ -118,7 +118,10 @@ describe("build", () => {
   test("prints the commit and schema of a 503 body and counts as available", async () => {
     const unhealthy = { ...HEALTH, ok: false, db: false, schema_version: null };
     const result = await run(["--a1-query", QUERY], {
-      dispatch: dispatch({ healthz: async () => unhealthy }),
+      dispatch: dispatch({
+        healthz: async () => unhealthy,
+        search: async () => answer([issueRow("ACME-1")]),
+      }),
     });
     expect(result.out[0]).toBe("build commit=0123abcd schema=null ok=false");
     expect(result.code).toBe(0);
@@ -155,6 +158,26 @@ describe("A1", () => {
     expect(result.out).toContain("A1 degraded=no results=2 pass");
     expect(result.out.at(-1)).toBe("result pass exit=0");
     expect(result.code).toBe(0);
+  });
+
+  test("an empty answer without degraded is unavailable", async () => {
+    const result = await run(["--a1-query", "the"], {
+      dispatch: dispatch({ search: async () => ({ results: [], limit: 20, offset: 0 }) }),
+    });
+    expect(result.out).toEqual([
+      "build commit=0123abcd schema=88 ok=true",
+      "A1 degraded=no results=0 unavailable: no-results",
+      "result unavailable exit=2",
+    ]);
+    expect(result.code).toBe(2);
+  });
+
+  test("an empty degraded answer fails", async () => {
+    const result = await run(["--a1-query", QUERY], {
+      dispatch: dispatch({ search: async () => answer([], { degraded: "embedder_unavailable" }) }),
+    });
+    expect(result.out).toContain("A1 degraded=yes results=0 fail");
+    expect(result.code).toBe(1);
   });
 
   test("a client error is unavailable", async () => {
@@ -315,7 +338,7 @@ describe("A2", () => {
       dispatch: dispatch({
         search: async () => answer([issueRow("ACME-7")]),
         issue: async () => {
-          throw new HttpStatusError(404);
+          throw new DispatchServiceError("not_found", 404, "issue not found");
         },
       }),
       lexer: lexer(),
@@ -328,12 +351,25 @@ describe("A2", () => {
     const result = await run(["--pair", pair], {
       dispatch: dispatch({
         search: async () => {
-          throw new HttpStatusError(403);
+          throw new DispatchServiceError("forbidden", 403, "token lacks access");
         },
       }),
       lexer: lexer(),
     });
     expect(result.out).toContain("A2 ACME-7 unavailable: auth");
+    expect(result.code).toBe(2);
+  });
+
+  test("a search Dispatch refuses as too long is refused", async () => {
+    const result = await run(["--pair", pair], {
+      dispatch: dispatch({
+        search: async () => {
+          throw new DispatchServiceError("query_too_long", 400, "query is too long");
+        },
+      }),
+      lexer: lexer(),
+    });
+    expect(result.out).toContain("A2 ACME-7 unavailable: refused");
     expect(result.code).toBe(2);
   });
 
@@ -452,7 +488,7 @@ describe("A3", () => {
     expect(result.out[1]).toStartWith("A3 identity=mismatch place=bedrock ");
     expect(result.out[1]).toEndWith("reads=1 fail");
     expect(time.sleeps).toEqual([]);
-    expect([...result.out, ...result.err].join("\n")).not.toContain(other);
+    expect(result.out.join("\n")).not.toContain(other);
     expect(result.code).toBe(1);
   });
 
@@ -485,6 +521,12 @@ describe("A3", () => {
     expect(result.code).toBe(2);
   });
 
+  test("a body that is not JSON is malformed", async () => {
+    const result = await coverage(["<html>sign in</html>"]);
+    expect(result.out).toContain("A3 unavailable: malformed reads=1");
+    expect(result.code).toBe(2);
+  });
+
   test("a 404 on the first read is unavailable", async () => {
     const result = await coverage([new HttpStatusError(404)]);
     expect(result.out).toContain("A3 unavailable: not-found reads=1");
@@ -513,21 +555,41 @@ describe("A3", () => {
 
   test("the identity is never printed", async () => {
     const result = await coverage([report()]);
-    expect([...result.out, ...result.err].join("\n")).not.toContain(IDENTITY);
+    expect(result.out.join("\n")).not.toContain(IDENTITY);
   });
 });
 
-describe("exitCode", () => {
-  test("a failure without an unavailable check is 1", () => {
-    expect(exitCode(["pass", "fail"])).toBe(1);
+describe("exit code", () => {
+  const argv = ["--a1-query", QUERY, ...COVERAGE];
+  const passing = async () => answer([issueRow("ACME-1")]);
+
+  test("a failure without an unavailable check is 1", async () => {
+    const result = await run(argv, {
+      dispatch: dispatch({ search: passing, coverage: async () => report(counts(10, 9, 0, 1)) }),
+    });
+    expect(result.out).toContain("A1 degraded=no results=1 pass");
+    expect(result.out.at(-1)).toBe("result fail exit=1");
+    expect(result.code).toBe(1);
   });
 
-  test("an unavailable check outranks a failure", () => {
-    expect(exitCode(["fail", "unavailable"])).toBe(2);
+  test("an unavailable check outranks a failure", async () => {
+    const result = await run(argv, {
+      dispatch: dispatch({
+        search: async () => answer([issueRow("ACME-1")], { degraded: "embedder_unavailable" }),
+        coverage: async () => {
+          throw new HttpStatusError(404);
+        },
+      }),
+    });
+    expect(result.out).toContain("A1 degraded=yes results=1 fail");
+    expect(result.out.at(-1)).toBe("result unavailable exit=2");
+    expect(result.code).toBe(2);
   });
 
-  test("every check passing is 0", () => {
-    expect(exitCode(["pass", "pass", "pass"])).toBe(0);
+  test("every check passing is 0", async () => {
+    const result = await run(argv, { dispatch: dispatch({ search: passing }) });
+    expect(result.out.at(-1)).toBe("result pass exit=0");
+    expect(result.code).toBe(0);
   });
 });
 
@@ -558,7 +620,7 @@ describe("output hygiene", () => {
     [401, "auth"],
   ])("a %i gateway error prints only its category", async (status, category) => {
     const result = await run(argv, { dispatch: failing(status), lexer: lexer() });
-    const printed = [...result.out, ...result.err].join("\n");
+    const printed = result.out.join("\n");
     for (const secret of [HOST, TOKEN, BODY, QUERY, "https://"]) {
       expect(printed).not.toContain(secret);
     }
@@ -578,7 +640,7 @@ describe("output hygiene", () => {
       dispatch: dispatch({ search: async () => answer([issueRow("ACME-7")]) }),
       lexer: lexer(),
     });
-    const printed = [...result.out, ...result.err].join("\n");
+    const printed = result.out.join("\n");
     expect(printed).toContain("A2 ACME-7 shared=0 position=1 pass");
     expect(printed).not.toContain(TITLE);
     expect(printed).not.toContain(QUERY);
