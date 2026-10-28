@@ -242,12 +242,15 @@ func scanComment(row pgx.Row, extra ...any) (model.Comment, error) {
 	return comment, nil
 }
 
-// hydrateCommentSideTables loads mentions and delivery attempts once per comment page, avoiding
-// a per-comment query while keeping all reads of a Comment's visible delivery state consistent.
+// hydrateCommentSideTables loads mentions, delivery attempts and the block each reply answers once
+// per comment page, avoiding a per-comment query while keeping all reads of a Comment's visible
+// delivery state consistent.
 func (s *server) hydrateCommentSideTables(ctx context.Context, q queryer, comments []model.Comment) ([]model.Comment, error) {
 	ids := make([]string, len(comments))
+	replies := make([]*model.Comment, len(comments))
 	for index := range comments {
 		ids[index] = comments[index].ID
+		replies[index] = &comments[index]
 	}
 	mentions, err := s.loadCommentMentions(ctx, q, ids)
 	if err != nil {
@@ -255,6 +258,9 @@ func (s *server) hydrateCommentSideTables(ctx context.Context, q queryer, commen
 	}
 	deliveries, err := s.loadCommentDeliveries(ctx, q, ids)
 	if err != nil {
+		return nil, err
+	}
+	if err := hydrateCommentReplyBlocks(ctx, q, replies...); err != nil {
 		return nil, err
 	}
 	for index := range comments {

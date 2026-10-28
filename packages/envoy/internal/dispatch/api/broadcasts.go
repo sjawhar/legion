@@ -745,6 +745,9 @@ func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string
 	if err != nil {
 		return nil, err
 	}
+	if err := hydrateThreadReplyBlocks(ctx, s.deps.Store.Pool, messages, replies); err != nil {
+		return nil, err
+	}
 	recipients := make([]broadcastRecipient, 0, len(messages))
 	for _, message := range messages {
 		message.Deliveries = deliveries[message.ID]

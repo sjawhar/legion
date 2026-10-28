@@ -1129,6 +1129,20 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+  /** The block of the comment this reply answers (`reply_to_block`); null on every other
+   *  comment, and absent from a Dispatch older than the field. */
+  readonly reply_block?: ReplyBlock | null;
+}
+
+/** The block a reply answers: its node id (`comment/<uuid>#b2`), its reference (absent for a
+ *  block of a direct message, which has no address), its id, its text cut to 480 characters (the
+ *  last text it held once removed), and whether its item's current revision no longer holds it. */
+export interface ReplyBlock {
+  readonly node: string;
+  readonly ref?: string;
+  readonly block_id: string;
+  readonly text: string;
+  readonly removed: boolean;
 }
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
@@ -1338,6 +1352,9 @@ export interface Message {
   readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
+  /** The block of the message this reply answers (`in_reply_to_block`); null on every other
+   *  message, and absent from a Dispatch older than the field. */
+  readonly reply_block?: ReplyBlock | null;
 }
 
 /**
@@ -2350,6 +2367,10 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
+  /** The id of the block of the comment `reply_to` names that the reply answers (`b2`), checked
+   *  against that comment before `reply_to` climbs to its thread's head. `400 INVALID_COMMENT`
+   *  without `reply_to`, for a block that comment does not hold now, and in an ask's thread. */
+  readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;
   readonly delivery?: DeliveryCapability;
@@ -2379,6 +2400,9 @@ export interface EditCommentInput {
 export interface CreateMessageInput {
   readonly body: string;
   readonly in_reply_to?: string;
+  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`).
+   *  `400 INVALID_MESSAGE` without `in_reply_to` and for a block that message does not hold. */
+  readonly in_reply_to_block?: string;
   readonly target?: string;
   readonly delivery?: MessageDeliveryMode;
   readonly urgency?: "low" | "med" | "high" | "blocking";
@@ -2391,6 +2415,8 @@ export interface CreateAgentMessageInput {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
   readonly in_reply_to?: string;
+  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`). */
+  readonly in_reply_to_block?: string;
 }
 
 /** The targeted session's answer to one delivery attempt of a message
@@ -2405,6 +2431,9 @@ export interface MessageReplyInput {
   /** The delivery attempt being answered; attempts count from 1. */
   readonly attempt: number;
   readonly actor: Actor;
+  /** The id of the block of the message answered that the reply answers (`b2`); refused on a
+   *  follow-up, which is filed under the session's first reply. */
+  readonly in_reply_to_block?: string;
 }
 
 /** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
@@ -2793,6 +2822,16 @@ const CommentDeliverySchema = z.object({
   created_at: z.string(),
 });
 
+/** The block a reply answers, as a comment or message event payload carries it (`ReplyBlock`).
+ *  An event recorded before the field, or by a Dispatch older than it, carries none. */
+export const ReplyBlockSchema = z.object({
+  node: z.string(),
+  ref: z.string().optional(),
+  block_id: z.string(),
+  text: z.string(),
+  removed: z.boolean(),
+});
+
 export const CommentEventPayloadSchema = z
   .object({
     id: z.string().optional(),
@@ -2821,6 +2860,7 @@ export const CommentEventPayloadSchema = z
     created_at: z.string().optional(),
     mentions: z.array(CommentMentionSchema).optional(),
     deliveries: z.array(CommentDeliverySchema).optional(),
+    reply_block: ReplyBlockSchema.nullish(),
   })
   // Bus frames are untrusted and this schema declares only the fields Dispatch
   // clients are known to read today, but the wire payload always carries every
@@ -2838,6 +2878,7 @@ export const MessageEventPayloadSchema = z.object({
   reply_body: z.string().optional(),
   thread_target: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
 });
 
 export const DispatchTargetedResourceIDSchema = z.uuid();

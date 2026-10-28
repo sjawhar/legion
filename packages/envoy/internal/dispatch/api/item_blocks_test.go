@@ -637,15 +637,11 @@ func TestABlockOfACommentIsAddressable(t *testing.T) {
 		t.Fatalf("?to= a pinned message block: status=%d body=%s", pinned.Code, pinned.Body.String())
 	}
 
-	// Until a reply names its block through the API, the reply is written as a reply naming a block
-	// is stored: its thread root in reply_to, the block's node id in replies_to_block.
-	var reply string
-	if err := database.Pool.QueryRow(context.Background(), `
-		insert into comments (issue_key, author, body, reply_to, replies_to_block)
-		values ($1, '{"kind":"user","id":"alice"}', 'On beta.', $2, $3) returning id::text
-	`, issue.Key, x.ID, "comment/"+x.ID+"#b2").Scan(&reply); err != nil {
-		t.Fatalf("insert a reply naming b2: %v", err)
-	}
+	// A reply naming a block stores its thread root in reply_to and the block's node id in
+	// replies_to_block.
+	reply := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "On beta.", "reply_to": x.ID, "reply_to_block": "b2",
+	}, "alice").ID
 	replies := readGraph(t, handler, url.Values{"to": {xRef}, "kind": {"replies_to"}}).Edges
 	if len(replies) != 1 || replies[0].Node.ID != reply || replies[0].Block == nil || replies[0].Block.BlockID != "b2" {
 		t.Fatalf("?to= comment X lists the replies %#v, want the reply once, under block b2", replies)
@@ -661,13 +657,9 @@ func TestABlockOfACommentIsAddressable(t *testing.T) {
 	}
 
 	// A message reply naming a block keeps the message it answers in in_reply_to.
-	var messageReply string
-	if err := database.Pool.QueryRow(context.Background(), `
-		insert into messages (issue_key, author, body, in_reply_to, replies_to_block)
-		values ($1, '{"kind":"user","id":"alice"}', 'On two.', $2, $3) returning id::text
-	`, issue.Key, message.ID, "message/"+message.ID+"#b2").Scan(&messageReply); err != nil {
-		t.Fatalf("insert a message reply naming b2: %v", err)
-	}
+	messageReply := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "On two.", "in_reply_to": message.ID, "in_reply_to_block": "b2",
+	}, "alice").ID
 	messageReplies := readGraph(t, handler, url.Values{"to": {mRef}, "kind": {"replies_to"}}).Edges
 	if len(messageReplies) != 1 || messageReplies[0].Node.ID != messageReply || messageReplies[0].Block == nil || messageReplies[0].Block.BlockID != "b2" {
 		t.Fatalf("?to= the message lists the replies %#v, want the reply once, under block b2", messageReplies)

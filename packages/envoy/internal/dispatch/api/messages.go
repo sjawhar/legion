@@ -20,12 +20,14 @@ import (
 const maxMessageReplyPreview16 = 160
 
 type createMessageInput struct {
-	Body      string       `json:"body"`
-	InReplyTo *string      `json:"in_reply_to"`
-	Target    *string      `json:"target"`
-	Delivery  *string      `json:"delivery"`
-	Urgency   *string      `json:"urgency"`
-	Actor     *model.Actor `json:"actor"`
+	Body      string  `json:"body"`
+	InReplyTo *string `json:"in_reply_to"`
+	// InReplyToBlock is the id of the block of message InReplyTo the reply answers ("b2").
+	InReplyToBlock *string      `json:"in_reply_to_block"`
+	Target         *string      `json:"target"`
+	Delivery       *string      `json:"delivery"`
+	Urgency        *string      `json:"urgency"`
+	Actor          *model.Actor `json:"actor"`
 }
 
 type messageRead struct {
@@ -74,9 +76,10 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Body      string  `json:"body"`
-		Delivery  string  `json:"delivery"`
-		InReplyTo *string `json:"in_reply_to"`
+		Body           string  `json:"body"`
+		Delivery       string  `json:"delivery"`
+		InReplyTo      *string `json:"in_reply_to"`
+		InReplyToBlock *string `json:"in_reply_to_block"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -84,7 +87,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	target := "session:" + r.PathValue("session_id")
 	messageInput := createMessageInput{
-		Body: input.Body, InReplyTo: input.InReplyTo, Target: &target, Delivery: &input.Delivery,
+		Body: input.Body, InReplyTo: input.InReplyTo, InReplyToBlock: input.InReplyToBlock, Target: &target, Delivery: &input.Delivery,
 	}
 	delivery, err := validateCreateMessage(&messageInput)
 	if err != nil {
@@ -122,6 +125,16 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
+	var block *namedBlock
+	if input.InReplyToBlock != nil {
+		if err := lockReplyParentMessage(ctx, tx, parent.ID); err != nil {
+			return model.Message{}, nil, err
+		}
+		if block, err = s.replyBlockOf(ctx, tx, refs.ItemMessage, parent.ID, *input.InReplyToBlock, "in_reply_to_block", "INVALID_MESSAGE"); err != nil {
+			return model.Message{}, nil, err
+		}
+		parent.ReplyBody = messageReplyPreview(block.excerpt)
+	}
 	// A reply's conversation is its thread root's, so every reply event names the root's
 	// target. A human's reply that names no target also continues the thread the way it was
 	// last delivered: when the thread's root was targeted at a session, the reply reaches
@@ -153,12 +166,17 @@ func (s *server) createStoredMessage(
 		return model.Message{}, nil, err
 	}
 	message, err := scanMessage(tx.QueryRow(ctx, `
-		insert into messages (issue_key, author, body, target, in_reply_to)
-		values ($1, $2, $3, $4, $5)
+		insert into messages (issue_key, author, body, target, in_reply_to, replies_to_block)
+		values ($1, $2, $3, $4, $5, $6)
 		returning `+messageColumns+`
-	`, issueKey, author, input.Body, input.Target, input.InReplyTo))
+	`, issueKey, author, input.Body, input.Target, input.InReplyTo, block.nodeID()))
 	if err != nil {
 		return model.Message{}, nil, err
+	}
+	if block != nil {
+		if err := hydrateMessageReplyBlocks(ctx, tx, &message); err != nil {
+			return model.Message{}, nil, err
+		}
 	}
 	// A direct message writes no mention, so its blocks hold none either.
 	var referenceChanges model.ReferenceChanges
@@ -222,6 +240,9 @@ func validateCreateMessage(input *createMessageInput) (string, error) {
 		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "%s", err)
 	}
 	input.Target = target
+	if input.InReplyToBlock != nil && input.InReplyTo == nil {
+		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "in_reply_to_block requires in_reply_to, the message whose block it names")
+	}
 	if input.Urgency != nil && !validMessageUrgency(*input.Urgency) {
 		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "urgency must be one of low, med, high, blocking")
 	}
@@ -370,7 +391,8 @@ func (t messageReplyThread) payload(
 }
 
 // loadMessageReplyThread derives that for a stored message, for a caller that did not derive
-// it while writing the message.
+// it while writing the message. A reply naming a block previews that block's text, as its write
+// did, read from the message's ReplyBlock, which the caller hydrates.
 func loadMessageReplyThread(ctx context.Context, tx pgx.Tx, message model.Message) (messageReplyThread, error) {
 	parent, err := loadMessageReplyParent(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
 	if err != nil {
@@ -380,6 +402,9 @@ func loadMessageReplyThread(ctx context.Context, tx pgx.Tx, message model.Messag
 	// the zero value for a nil in_reply_to, so there is nothing to carry forward.
 	if message.InReplyTo == nil {
 		return messageReplyThread{}, nil
+	}
+	if message.ReplyBlock != nil {
+		parent.ReplyBody = messageReplyPreview(message.ReplyBlock.Text)
 	}
 	return parent.thread(ctx, tx)
 }
@@ -536,9 +561,9 @@ func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageR
 	return reads[0], nil
 }
 
-// hydrateMessageThreads is each root as a thread: its own deliveries and every message
-// transitively replying to it. Both side tables are read once over every root, never once per
-// root, so a list of threads costs the same two queries one does.
+// hydrateMessageThreads is each root as a thread: its own deliveries, every message transitively
+// replying to it, and the block each of those messages answers. Each side table is read once over
+// every root, never once per root, so a list of threads costs the same three queries one does.
 func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Message) ([]messageRead, error) {
 	rootIDs := make([]string, len(roots))
 	for index, root := range roots {
@@ -550,6 +575,9 @@ func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Messag
 	}
 	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, rootIDs)
 	if err != nil {
+		return nil, err
+	}
+	if err := hydrateThreadReplyBlocks(ctx, s.deps.Store.Pool, roots, replies); err != nil {
 		return nil, err
 	}
 	reads := make([]messageRead, 0, len(roots))

@@ -107,6 +107,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	comment.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.reopened",
 		actor,
@@ -227,6 +228,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	comment.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.edited",
 		actor,
@@ -438,6 +440,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
+	comment.ReplyBlock = payload.ReplyBlock
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		eventType,
 		actor,

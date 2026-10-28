@@ -1132,6 +1132,21 @@ type Comment struct {
 	CreatedAt  time.Time         `json:"created_at"`
 	Mentions   []Mention         `json:"mentions"`
 	Deliveries []CommentDelivery `json:"deliveries"`
+	// ReplyBlock is the block of the comment this reply answers, when it names one
+	// (reply_to_block); null on every other comment.
+	ReplyBlock *ReplyBlock `json:"reply_block"`
+}
+
+// ReplyBlock is the block a reply answers: its node id ('<item kind>/<item id>#<block id>') and
+// reference (none for a block of a direct message, which has no address), its id, its stored
+// excerpt (its text cut to refs.BlockExcerptRunes, the last text it held once removed), and
+// whether its item's current revision no longer holds it.
+type ReplyBlock struct {
+	Node    string `json:"node"`
+	Ref     string `json:"ref,omitempty"`
+	BlockID string `json:"block_id"`
+	Text    string `json:"text"`
+	Removed bool   `json:"removed"`
 }
 
 // Suggestion carries a proposed document replacement and its resolution.
@@ -1247,6 +1262,9 @@ type Message struct {
 	BroadcastID *string           `json:"broadcast_id"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Deliveries  []MessageDelivery `json:"deliveries"`
+	// ReplyBlock is the block of the message this reply answers, when it names one
+	// (in_reply_to_block); null on every other message.
+	ReplyBlock *ReplyBlock `json:"reply_block"`
 }
 
 // MessageDelivery records one attempt to reach a live agent with a targeted message.
