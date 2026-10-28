@@ -2,22 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-651",
-  "completed": "2026-10-28T16:28:11Z",
-  "round": 1,
-  "reviewedCodeHead": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T19:50:57Z",
+  "round": 2,
+  "reviewedCodeHead": "a3cd6ffc58f617b2577fb5bb7ae27dc2d9e12feb",
+  "decision": "approved",
   "critical": 0,
-  "important": 3,
-  "minor": 2,
+  "important": 0,
+  "minor": 1,
   "keyFindings": [
-    {"severity": "important", "file": "PR #2469 body", "description": "No `## Contract change census`, although the PR adds a refusal at a process boundary (`versions=<other>` now answers 400 INVALID_QUERY where it answered 200). Add one: the search commands for every sender of the references route with a query (packages/*/src, packages/dispatch/web, packages/claude-envoy/dist, scripts/, the production access log of 2026-10-28), every hit with its disposition, and the rollout line (immediate, naming what the refusal closes: a misspelled value silently getting the 2.4 MB full answer)."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/references.go:338", "description": "The lateral subquery copies by hand the raw columns versionColumns (artifacts.go:1267) and model.VersionSize (model.go:740) read, v.markdown included. A column added to versionColumns breaks only the versions=latest statement (500), the path only the CLI takes. Project the row (`select * from artifact_versions v ... limit 1`) or derive the list from the shared constant."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/references_test.go:236", "description": "The file grows from 847 to 1,044 lines, and the trimmed-answer test builds the 160-document, 6,421-version fixture a second time though none of its checks depend on size. Move the fixture, seedReferenceDocumentHistory/referenceAuthorLists and the two tests that use it into their own file, and build the fixture once (subtests) or give the trimmed test a small fixture; name the 2,205 and 1,000,000 thresholds with their reason."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references.go:243", "description": "A repeated versions parameter takes its first value: ?versions=latest&versions=bogus answers 200, while the docs say any other value is 400. asks.go:564 and server.go:430 refuse a repeated parameter; do the same, or document first-value-wins."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/routes_table.go:94", "description": "The rewritten description keeps 'Cross-references to and from an issue', but refs.Closure (refs/closure.go:25) follows references outward only; the route index serves this text to agents. Say 'the eight-hop closure of documents the issue's content references', as the README and AGENTS rows do."}
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/routes_table.go:94", "description": "Fast-follow (wording only): routes_table.go:94, cmd/dispatch/README.md:1408, cmd/dispatch/AGENTS.md:497, references.go:236 and the envoy changelog fragment say 'absent or all is the full answer', but an empty value (?versions=) also gives the full answer (references.go:250); write 'absent, empty or all'."}
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 43b4de3d93f7 (compare to 0cde8b53: 1 file, .legion/ only): every required check queued at 16:27Z; a request for changes does not wait on it.",
-  "thermonuclear": "Run once at 0cde8b53: deep review APPROVE (one Minor: repeated parameter); code quality CHANGES (copied column list, file size/fixture cost, routes_table wording).",
-  "notMet": "A6 (references seed committed into packages/envoy/loadtest) is not on this head: sjawhar/legion#2369 is still open (CHANGES_REQUESTED at 17eb1a97). Per the architect's 12:38Z decision it lands by a forward merge before READY; that merge changes paths outside docs/solutions/ and .legion/, so it needs its own review round.",
-  "threads": "0 threads on the PR; no bot threads to answer."
+  "roundOneFindings": "All five fixed in a3cd6ffc58f6: Contract change census added (search re-run at a3cd6ffc: 82 hits in 28 files, every file listed with a disposition; second search only /api/v1/references, another route; rollout immediate, naming the silent-fallback it closes); lateral is select * (one column list); real-size tests in references_real_size_test.go with the fixture built once; repeated versions refused; routes_table wording fixed. Threads 4403271778, 4403271794, 4403271821, 4403271834 answered and accepted.",
+  "ci": "Required set lint, typecheck, test, pr-title: all completed success at CI head 705df7b5329d (compare to 6318b528: 1 file, .legion/ only). Not required: the Dispatch Go suite timed out at 10m on the api package (TestComputeAndPersistSuggestions... running), as main does (jobs 122955817899 and 122937280573 timed out; passing main runs take 480-568 s), tracked by dispatch://INFRA-523. I ran the changed Postgres tests at a3cd6ffc on Postgres 16.2: TestIssueReferencesAtRealSize PASS in 13.84 s (fixture 160 documents, 6,421 versions, built in 11.7 s), VersionsAll and RejectUnauthenticated PASS.",
+  "thermonuclear": "Run once at 6318b528: deep review APPROVE (one Minor: the empty-value wording); code quality CHANGES on structure (extract the parameter parse; name the trimming in the exported client method) and the same wording. Judged: the parse extraction and client naming change no behaviour and are not defects; the wording is the fast-follow.",
+  "notMet": "A6 (references seed committed into packages/envoy/loadtest) is still not on this head; sjawhar/legion#2369 is open. Its forward merge changes paths outside docs/solutions/ and .legion/, so it needs its own review round before READY."
 }
