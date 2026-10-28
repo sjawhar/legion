@@ -2,32 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-581",
-  "completed": "2026-10-27T14:30:55Z",
+  "completed": "2026-10-28T14:01:38Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2403",
   "proof": [
     {
-      "criterion": "Round 3 (tester failure: conflicting with main): main ae36683e is merged forward with the branch's diff unchanged and GitHub reports the pull request MERGEABLE",
-      "surface": "GitHub pull request #2403 and the branch diff against main",
-      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; gh pr view 2403 -R sjawhar/legion --json mergeable,headRefOid",
-      "observed": "fingerprint 218b7824668f9f8f973d87d214c7c38cbf64a93089b7206a5e430f2452c3c397 at 83b4a7ee and at 8c392590 (unchanged); MERGEABLE 8c392590d7342cf852aa97534522bda00ddf0747",
-      "headSha": "8c392590d7342cf852aa97534522bda00ddf0747",
-      "negativeControl": "At 83b4a7ee before the merge, gh pr view 2403 --json mergeable answered CONFLICTING"
+      "criterion": "Review finding 1 and 2: the list-item fence inputs no longer throw and read as main reads them; indented code and an unclosed fence after a closing fence read as Go reads them",
+      "surface": "the headless engine every Dispatch surface draws with (read-only and default) and pmdoc's fixture contract",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; cd packages/envoy && go test -p 1 -count=1 -skip Linear ./internal/dispatch/pmdoc/",
+      "observed": "fixtures up to date (100 documents, 43 splice cases); pmdoc ok; the six reviewer inputs read identically to main's construct in both modes with no throw; old-vs-new fuzz with fences, HTML flow and indented code in items and quotes: 0 new throws over 3 x 60,000",
+      "headSha": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
+      "negativeControl": "With the previous construct (3d9fd4e9^) bun run check throws `Cannot close directiveContainer ... a different token (codeFenced) is open`, and TestParseMatchesMilkdownForFixtures fails on indented-code-after-a-closed-callout and item-fence-before-a-callout-after-blank-lines"
     },
     {
-      "criterion": "A1 after the merge: nested bodies draw with no main-thread gap of 1,000 ms or more and the document write refuses them; INFRA-526's text-typed-blocks and INFRA-529's unknown-directive rows still pass",
-      "surface": "Dispatch Conversation tab in Chromium (chromium and iphone projects) against the real Go Dispatch server and Postgres 17 + pgvector",
+      "criterion": "Go reads an unclosed fence in a typed block inside a list item, quote or footnote definition, and the list spacing around it, as the browser does",
+      "surface": "pmdoc.ParseForWrite (the API's document write path)",
+      "command": "cd packages/envoy && go test -p 1 -count=1 -run 'TestParseMatchesMilkdownForFixtures|TestFixturesAreWithinSchema' ./internal/dispatch/pmdoc/; bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base main",
+      "observed": "pass; differential every gate 0, PASS (head stores 100 of 100, main 91); 24,192 probe shapes: 3,844 newly match the browser, 0 regressions, stripped of typed blocks byte-identical before and after",
+      "headSha": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
+      "negativeControl": "With fc8278df's code_text.go change stashed, 5 new fixtures fail TestParseMatchesMilkdownForFixtures; with c5984d7e's list-spacing change stashed, 3 new fixtures fail (one refused, two differ from Milkdown)"
+    },
+    {
+      "criterion": "No stored document changes its reading (review finding 3, architect's census)",
+      "surface": "every stored document version in production Dispatch, all 13 projects",
+      "command": "census/crawl.ts (INFRA-172's crawler through GET /api/v1/artifacts/{id}/versions/{n}) then census-cmp/run.sh: Go ParseForWrite/Render at main 2df3353c vs 1642bee9, engine default and read-only",
+      "observed": "6,346 documents, 31,160 versions, 0 failures; 0 versions change Go reading or re-rendered bytes, 0 change browser reading; 0 with a leading --- before a typed block, 0 nested past 32, 0 footnote or link-reference definitions in a ::: block, 0 latest versions with the documented spread-policy shape",
+      "headSha": "1642bee901e2661cfc6955591d70966e8c5d5e29",
+      "negativeControl": "The hand-made `---\\n\\n:::callout{kind=\"note\" title=\"T\"}\\nbody\\n:::\\n` through the same pipeline counts as changed in Go and in both engine modes (front-matter rule), and a footnote definition in a callout counts as a Go change (refused at main, read at head)"
+    },
+    {
+      "criterion": "A1 at the round's head: the nested bodies draw with no main-thread gap of 1,000 ms or more, measured from the first comments request",
+      "surface": "Dispatch Conversation tab in Chromium against the real Go Dispatch server and Postgres 17 + pgvector",
       "command": "LEGION_ROLE=implementer source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts nested-directive.e2e.ts unknown-directive.e2e.ts text-typed-blocks.e2e.ts --project=chromium --project=iphone --reporter=json",
-      "observed": "20 passed, 0 unexpected; nested-directive longest main-thread gap 485 / 496 ms (chromium), 748 / 370 ms (iphone)",
-      "headSha": "8c392590d7342cf852aa97534522bda00ddf0747",
-      "negativeControl": "Round 1, same rows at the base code c9472cff: first input 'Test timeout of 30000ms exceeded' on both projects, second input 'the main thread ran no task for 8049 ms' (chromium) / 7317 ms (iphone)"
-    },
-    {
-      "criterion": "After INFRA-530's email-link change merged in: the corpus still reads as before and Go's email and linkify readings pass",
-      "surface": "the server's and the browser editor's reading of documents",
-      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; cd packages/envoy && go test -p 1 -count=1 -run 'Email|Linkify|Mailto|Autolink' ./internal/dispatch/pmdoc/ && go test -p 1 -count=1 -skip Linear ./internal/dispatch/pmdoc/ ./internal/dispatch/docs/ ./internal/dispatch/api/",
-      "observed": "fixtures up to date (88 documents, 43 splice cases); 7 email/linkify/autolink tests pass; pmdoc, docs, api ok; proof-editor 137 pass; dispatch bun run test 2518 pass",
-      "headSha": "8c392590d7342cf852aa97534522bda00ddf0747",
-      "negativeControl": "Round 1: with the fence line-ending correction disabled, bun run gen also changes browser-list-spacing, callout and quoted-items-holding-a-closed-callout"
+      "observed": "15 passed, 0 unexpected; nested-directive gaps 377 ms and 424 ms; document-write row passed",
+      "headSha": "799b379fcf9e0067ea13bbffdcb6a1ac3df45243",
+      "negativeControl": "Main's lib-remark-directive-plugin.ts (flow construct) swapped in and the SPA rebuilt: first input 'Test timeout of 30000ms exceeded', second 'the main thread ran no task for 10962 ms while the card drew'"
     }
   ],
   "filesChanged": [
@@ -45,7 +53,8 @@
     "packages/envoy/internal/dispatch/pmdoc/testdata/{fixtures.json,corpus/*.md (4 new),corpus-errors/typed-blocks-nested-33-deep.md}",
     "packages/envoy/cmd/dispatch/README.md, packages/envoy/CHANGELOG.md, packages/envoy/AGENTS.md",
     "round 2: packages/envoy/internal/dispatch/pmdoc/refusals.go, parse_test.go, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md; merge 1075e8a3 resolving packages/proof-editor/AGENTS.md and packages/envoy/CHANGELOG.md",
-    "round 3: merge 8c392590 resolving packages/envoy/CHANGELOG.md (both sides kept)"
+    "round 3: merge 8c392590 resolving packages/envoy/CHANGELOG.md (both sides kept)",
+    "round 4: proof-editor directive-container.ts, new directive-factories.ts, AGENTS.md; pmdoc code_text.go, list_spacing.go, source_lines.go, fixtures_test.go, 11 corpus files, fixtures.json; dispatch e2e nested-directive.e2e.ts; packages/envoy/.changes/unreleased/pr2403-*.yaml (CHANGELOG.md restored to main); merges 67fe5f9e and 799b379f"
   ],
   "trickyParts": [
     "The construct keeps the old flow construct's reading through a resolveAll on the document construct: it rewrites the lineEndingBlank after each fence to lineEnding in each child flow's events before subtokenize, and moves container exit events so trailing blank lines and lazy lines attach as they did; a lazyContentEnd construct registered under the null code ends a block on a line that does not reach it, as the old sub-document did.",
@@ -58,7 +67,11 @@
     "The default-mode refusal of a bounded opener checks paragraph lines, like the existing rule: a bounded opener that becomes a setext heading is not refused in the browser (Go refuses that write).",
     "Round 2: the merge's fingerprint changed (e81e7ca5… → 218b7824…), only in the proof-editor AGENTS.md conflict lines (edit-kind count nineteen = main's seventeen + this branch's two); posted on the pull request.",
     "Round 2: main moved the e2e entry point to e2e/run.ts; the round-2 run uses it.",
-    "Round 2: TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock renamed TestParseRefusesAFootnoteDefinitionInsideAnother, since its typed-block rows are gone."
+    "Round 2: TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock renamed TestParseRefusesAFootnoteDefinitionInsideAnother, since its typed-block rows are gone.",
+    "Round 4: no label bound: the copied factoryLabel already refuses a label at its 33rd nested `[`; label_long's cost is micromark's link-label parsing of bracket runs with no `:::` needed (architect agreed; INFRA-625).",
+    "Round 4: Go's spread for a typed block holding a blank line in a list item keeps the documented goldmark-looseness policy (architect agreed); stored latest versions holding it: 0.",
+    "Round 4: main's playwright config runs only @phone-tagged rows on the iphone project, so the nested-directive rows run on chromium only.",
+    "Round 4: the browser engine half of the census ran on the 3,679 versions that can open a `:::name` block; a sample of skipped versions showed no difference."
   ],
   "openQuestions": []
 }
