@@ -76,7 +76,9 @@ too. A settlement that wrote nothing into the room and repaired nothing in the t
 versions the rendering it made of that read, offsets included, and renders no second time; it
 renders again when a stamp's tree replaced the read, when it read the document again after a
 write, or when `reconcileAskBlocks` repaired the read in place (`changedTree`), so nothing but
-`reconcileAskBlocks` may change that read. A document's pending authors are in one of two places:
+`reconcileAskBlocks` may change that read. The settlement tests (`settlement_read_invariant_test.go`,
+`settlement_render_once_test.go`) check, for each settlement they drive that reuses the rendering,
+that the read is unchanged since it was read. A document's pending authors are in one of two places:
 F, the room's local in-flight credits (`roomState.inflight`), or R, the durable
 `doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F. Its append takes the document's
