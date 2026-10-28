@@ -806,17 +806,33 @@ test("an edited document diagram redraws once typing pauses, and its last drawin
     await page.evaluate(() => window.__mermaidSent?.splice(0));
 
     await placeCaret(page, "after", "Start --> Finish");
-    // Typed with no delay, so every key falls well inside the pause the redraw waits for; the
-    // last drawing stays shown between keys, read at once rather than waited for.
-    for (const key of "Line") {
-      await page.keyboard.type(key);
-      expect(await diagram.isVisible()).toBe(true);
-    }
+    // Every frame from now until the redrawn diagram shows, whether a diagram is shown: the last
+    // drawing must stay through the typing and the pause, never leaving the block without one.
+    const shownEachFrame = page.evaluate(
+      () =>
+        new Promise<boolean[]>((resolve) => {
+          const samples: boolean[] = [];
+          const sample = () => {
+            const preview = document.querySelector<HTMLElement>(
+              '[aria-label="Document editor"] .proof-mermaid-preview'
+            );
+            const svg = preview?.shadowRoot?.querySelector("svg");
+            samples.push(preview?.hidden === false && svg !== null && svg !== undefined);
+            if (svg?.textContent?.includes("FinishLine")) resolve(samples);
+            else requestAnimationFrame(sample);
+          };
+          sample();
+        })
+    );
+    // One call types the word with no delay, so every key falls well inside the pause the redraw
+    // waits for.
+    await page.keyboard.type("Line");
     await expect(diagram).toContainText("FinishLine");
     expect(await page.evaluate(() => window.__mermaidSent)).toEqual([
       expect.stringMatching(/Start --> FinishLine$/),
     ]);
     expect(await page.evaluate(() => window.__mermaidWorkers)).toBe(1);
+    expect((await shownEachFrame).every(Boolean)).toBe(true);
   } finally {
     await alice.close();
   }
