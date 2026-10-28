@@ -3,7 +3,7 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -418,36 +418,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   root `AGENTS.md` now carries the standing rule that a skill, a role prompt and an `AGENTS.md`
   name no person and write the role instead. The controller behaves as it did: a ruling still sets
   off the full reconciliation pass and a weekly-plan record.
-
-- A phase worker whose turn ends with its Legion phase still open is now reminded at the end of
-  **every** turn, for as long as that phase stays open (INFRA-220). It used to get one follow-up,
-  and a second only when it answered the first by writing the tool call as text again, after which
-  a stalled worker sat silent: in Stage 3 two trees waited six hours each on a worker that had had
-  its one follow-up. The first reminder of a run is still the `session_stop` continuation, one more
-  turn of the same session; every one after it is a steered `legion-phase-reminder` message sent
-  from a timer, so the run settles first and the daemon sees the turn end and can deliver a queued
-  task. A reply whose line starts WAITING buys a quiet wait and then the same reminder again, and
-  a worker the daemon relaunched into an open phase is reminded from a timer, since nothing else
-  would wake it. The count of reminders the worker did nothing about drops to zero as soon as it
-  runs a tool call — Oh My Pi's `toolCall` block, not only Claude Code's `tool_use` — or anything
-  reaches the session, and a run of unanswered ones tells the issue's
-  architect over Envoy — once, under one idempotency key kept until the count resets, retried while
-  no live session holds that role. Four variables, read from the worker's own environment (the
-  daemon passes on whichever its own holds, to a pane and to a pod alike), tune it:
-  `LEGION_STALL_REMINDER_MS` (300000), `LEGION_STALL_WAITING_MS` (900000), `LEGION_STALL_RESUME_MS`
-  (120000) and `LEGION_STALL_ARCHITECT_AFTER` (3, clamped to 2 or more); a bad value is one `warn`
-  and the default. The state machine, the runner and the numbers now live in `@legion/pi-shared`
-  (`phase-stall.ts`, `phase-reminder.ts`, `stall-limits.ts`), which `@sjawhar/claude-envoy` drives
-  from Claude Code's own hooks, so one machine serves both harnesses and the Go bridge's copy of it
-  is gone. The transcript entry keeps its `legion-phase-stall` name and its `state`, and now also
-  carries the head of the worker's last message, so the notice a relaunched worker's resume
-  reminder earns still says what it last said; an entry an earlier build wrote, without it, still
-  reads. A session resumed on an
-  entry this build does not know — `{"state":"quiet"}` or `{"state":"text-call"}`, what the build
-  now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
-  than left alone. Daemon API contract 41 carries the four variables (and, in a pod, Claude Code's
-  three): install this release's pair with a `legion` built from the same commit.
-
 - Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits
   touch (INFRA-149). Before, the `legion-worker` skill, the `legion-retro` skill and the daemon's
   worker and implementer prompts all decided the line by the paths a push changed, so a retro with
