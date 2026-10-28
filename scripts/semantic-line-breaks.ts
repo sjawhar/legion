@@ -563,8 +563,8 @@ function scanBlocks(source: readonly string[]): Blocks {
 /**
  * Marks the lines that are `verbatim`, reading the blocks in document order from line `from`: a
  * paragraph is one block, and so is a run of lines of one other kind up to the next list item's
- * marker. Tags are counted on a block's raw lines, conservatively (one inside a code span counts
- * too), except in fences and indented code, whose text is no HTML.
+ * marker. Tags are counted only where proseMask reads raw HTML, so a tag named in a code span, an
+ * autolink or escaped text counts for nothing, and never in fences and indented code.
  */
 function markVerbatim(source: readonly string[], lines: LineInfo[], from: number): void {
   const open = new Map<string, number>();
@@ -574,9 +574,16 @@ function markVerbatim(source: readonly string[], lines: LineInfo[], from: number
     if (info?.paragraph === undefined) {
       while (lines[last + 1]?.kind === info?.kind && lines[last + 1]?.itemStart === false) last++;
     }
-    const counted = info?.kind !== "fence" && info?.kind !== "code";
     const wasOpen = open.size > 0;
-    const opens = counted && verbatimCount(`${source.slice(first, last + 1).join("\n")}\n`, open);
+    let opens = false;
+    if (info?.kind !== "fence" && info?.kind !== "code") {
+      const text = source.slice(first, last + 1).join("\n");
+      const html: [number, number][] = [];
+      proseMask(text, html);
+      for (const [start, end] of html) {
+        if (verbatimCount(text.slice(start, end), open)) opens = true;
+      }
+    }
     if (wasOpen || opens) {
       for (const line of lines.slice(first, last + 1)) line.verbatim = true;
     }
@@ -641,8 +648,9 @@ function htmlEnd(text: string, from: number): number {
  * span and inline HTML starts first wins and a `<` inside a code span opens no tag.
  * A backtick run with no equal-length run after it in the text is literal text, and so is a `<`
  * that opens no inline HTML. The text may be a whole paragraph, its lines joined with `\n`.
+ * Each inline HTML construct's start and end are pushed onto `html` when it is given.
  */
-function proseMask(text: string): boolean[] {
+function proseMask(text: string, html?: [number, number][]): boolean[] {
   const prose = new Array<boolean>(text.length).fill(true);
   let at = 0;
   while (at < text.length) {
@@ -661,6 +669,7 @@ function proseMask(text: string): boolean[] {
         at++;
       } else {
         prose.fill(false, at, end);
+        html?.push([at, end]);
         at = end;
       }
     } else if (char === "]" && text[at + 1] === "(") {
