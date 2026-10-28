@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-651",
-  "completed": "2026-10-28T16:00:00Z",
+  "completed": "2026-10-28T16:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
   "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz (sha256 438af536f36c64cdebf5c04555a6b40787ed5ee5d24eeb65f7eeb408119e9633): scripts (identity.sh, negative.sh, cli.sh, runs.sh, verdict.sh, i651tool.go), every tsv, CLI output, run summary, cpu and heap profile",
   "proof": [
@@ -61,6 +61,14 @@
       "observed": "no package-level state, cache or pool in the diff; allocation under the route base 1,265/1,222/1,145 MB, head 106/103/132 MB per run",
       "headSha": "5ec228145b48c362d8d9446148451ace555613e2",
       "negativeControl": "the verdict's contradiction check (head alloc above base) is false; base runs, which build full answers, allocate about 10x more under the route"
+    },
+    {
+      "criterion": "A4 on every shipped client (tester failure 2026-10-28): the Claude Code plugin's committed dispatch CLI bundles ask for the trimmed answer, and CI's claude-envoy freshness check passes",
+      "surface": "packages/claude-envoy built on the pinned Bun 1.4.4 (.bun-version; official release zip, sha256 bf8ccbfb... checked against SHASUMS256.txt), its committed dist/dispatch.js run as `dispatch read` against the load-test stack's head server (refseed seed)",
+      "command": "cd packages/claude-envoy && bun run build && bun scripts/build.ts --check && bun test tests/dist-fresh.test.ts && bun test; then dispatch read --issue <KEY> for the 25 keys of cli-keys.txt with the committed bundle at 3d0225b60a08 (old) and at 3304e7fe1227 (new), diff -r of the outputs, Dispatch access-log bytes of route=/api/v1/issues/{key}/references",
+      "observed": "build.ts --check: 'dist/ and legion/ match a fresh build'; dist-fresh 14 pass 0 fail; claude-envoy suite 216 pass 0 fail; the rebuild changes only getIssueReferences in dispatch.js, envoy-channel.js and session-hook.js (each now passes { versions: \"latest\" }); outputs old vs new diff -r exit 0; access log 68,478,298 bytes for the old bundle's 25 requests vs 8,893,398 for the new (LGA-202 7,145,304 -> 943,392)",
+      "headSha": "3304e7fe12272d2d11fdf41704a4d07efcd59e7e",
+      "negativeControl": "the bundle committed before the rebuild (3d0225b60a08) still fetches the full answer (68,478,298 bytes for the same 25 reads), and the tester ran dist-fresh.test.ts on it: 'dispatch.js: fresh build differs from committed dist/'"
     }
   ],
   "filesChanged": [
@@ -75,7 +83,11 @@
     "packages/envoy/cmd/dispatch/AGENTS.md",
     "packages/envoy/.changes/unreleased/pr2469-Added-20261028-155815.yaml",
     "packages/envoy-client/.changes/unreleased/pr2469-Changed-20261028-155816.yaml",
-    "packages/pi-envoy/.changes/unreleased/pr2469-Changed-20261028-155817.yaml"
+    "packages/pi-envoy/.changes/unreleased/pr2469-Changed-20261028-155817.yaml",
+    "packages/claude-envoy/dist/dispatch.js",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/claude-envoy/dist/session-hook.js",
+    "packages/claude-envoy/.changes/unreleased/pr2469-Changed-20261028-161424.yaml"
   ],
   "trickyParts": [
     "The full answer's SQL text is byte for byte main's: the loader varies only the version join string, so its plan, row order and which decode error a request hits are unchanged (errors.sql check).",
@@ -88,7 +100,8 @@
     "The identity and CLI checks ran on #2369 at 5edd1f88; #2369 moved to 3d988c68 (sampler, guard and doc changes) before the merge-rule runs, so the six runs were repeated at 3d988c68 (both sets pass; the 5edd1f88 set is in runs-5edd1f88/).",
     "The simplify pass ran before the proofs (on 1cc83c8b), so every proof ran at its applied head 5ec22814.",
     "The CLI's 'unavailable' line for a references request that fails names the URL it requested, which now ends in ?versions=latest (dispatch-execute.test.ts updated); every successful read prints the same.",
-    "Full go test ./internal/dispatch/... on this 2-vCPU pod: api package ok but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a database already in byte-order collation (the load test's pgserver Postgres); other packages timed out or need Docker (files) under the concurrent seed. CI's envoy Go job is the record."
+    "Full go test ./internal/dispatch/... on this 2-vCPU pod: api package ok but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a database already in byte-order collation (the load test's pgserver Postgres); other packages timed out or need Docker (files) under the concurrent seed. CI's envoy Go job is the record.",
+    "Round 2 (tester failure): the first round missed that packages/claude-envoy commits its own bundles of the dispatch CLI; rebuilt on Bun 1.4.4 and added its changelog fragment."
   ],
   "openQuestions": [
     "Who restarts implementing for Task 8 once #2369 merges: the architect's send-back, or a task to this session?"
