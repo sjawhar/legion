@@ -6,8 +6,8 @@ import { join, resolve } from "node:path"
 import type { SessionAnswer } from "@legion/contracts"
 import { renderSessionAnswers } from "@legion/envoy-client/session-answers"
 
-// What people wrote to a session, on the real Claude Code (hooks/session-hook.ts `answers`,
-// dispatch://INFRA-148): Claude Code keeps a hook's additionalContext where only the requests it
+// What people wrote to a session, on the real Claude Code (hooks/session-hook.ts
+// `answers`): Claude Code keeps a hook's additionalContext where only the requests it
 // sends to the model show it, so each moment is read off those. Claude Code runs with this package
 // as `--plugin-dir`, an isolated HOME and CLAUDE_CONFIG_DIR, and one stand-in as both its Messages
 // endpoint (`ANTHROPIC_BASE_URL`, streaming as the API does) and Dispatch (`DISPATCH_URL`), whose

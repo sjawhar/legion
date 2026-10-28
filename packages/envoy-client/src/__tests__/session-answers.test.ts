@@ -53,9 +53,9 @@ const answer: SessionAnswer = {
   text: "Use JSON lines, one per item.",
   selected: ["JSON", "Newest first"],
   ask: { id: "ask-1", question: "Which format should the list use?" },
-  owner: { issue: { key: "INFRA-148", title: "People's answers on every request" } },
-  ref: "dispatch://INFRA-148/ask/ask-1",
-  href: "/issues/INFRA-148/asks/ask-1",
+  owner: { issue: { key: "CORE-7", title: "People's answers on every request" } },
+  ref: "dispatch://CORE-7/ask/ask-1",
+  href: "/issues/CORE-7/asks/ask-1",
 };
 
 const comment: SessionAnswer = {
@@ -92,7 +92,7 @@ describe("renderSessionAnswers", () => {
         SESSION_ANSWERS_MARKER,
         "",
         "2026-10-27T11:00:00Z · user ana@example.com · answered your ask",
-        "dispatch://INFRA-148/ask/ask-1 · INFRA-148: People's answers on every request",
+        "dispatch://CORE-7/ask/ask-1 · CORE-7: People's answers on every request",
         "Question: Which format should the list use?",
         "Selected: JSON, Newest first",
         "Use JSON lines, one per item.",
@@ -120,7 +120,7 @@ describe("renderSessionAnswers", () => {
     ).toBe(
       [
         "2026-10-27T11:00:00Z · user ana@example.com · answered your ask (replaces an earlier answer)",
-        "dispatch://INFRA-148/ask/ask-1 · INFRA-148: People's answers on every request",
+        "dispatch://CORE-7/ask/ask-1 · CORE-7: People's answers on every request",
         `Question: ${"q".repeat(199)}r…`,
         "Selected: none",
         "Use JSON lines, one per item.",

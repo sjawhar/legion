@@ -2035,7 +2035,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).toEqual({ session: "session-1", since, total: 10 });
   });
 
-  test("dispatch_answers against a Dispatch without the route says its build predates INFRA-148", async () => {
+  test("dispatch_answers against a Dispatch without the route says its build is older than the answers route", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> =>
       response(
         { code: "NOT_FOUND", error: `no route for GET ${new URL(String(url)).pathname}` },
@@ -2055,7 +2055,7 @@ describe("executeDispatchTool", () => {
         fetchImpl: fetchImpl as typeof fetch,
       })
     ).rejects.toThrow(
-      "This Dispatch (http://dispatch.test) has no answers route yet: its build predates INFRA-148."
+      "This Dispatch (http://dispatch.test) has no answers route yet: its build is older than the answers route."
     );
   });
 

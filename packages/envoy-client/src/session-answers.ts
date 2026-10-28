@@ -8,7 +8,7 @@ import { sessionDirectory, writeAtomically } from "./dispatch-session-directory"
 import { messageFor } from "./errors";
 
 /**
- * People's answers on every model request (dispatch://INFRA-148): what people wrote in the last 72
+ * People's answers on every model request: what people wrote in the last 72
  * hours that Dispatch delivered to a session (`GET /api/v1/agents/{session_id}/answers`), rendered
  * as one message under a cap, and read on each request within a deadline, carrying the last list
  * read when Dispatch does not answer in time. pi-envoy calls `readSessionAnswers` in process, its
@@ -43,7 +43,7 @@ export const SESSION_ANSWERS_MARKER =
 /** How the line standing in for a list that could not be read begins. */
 const FAILURE_MARKER = "[Dispatch: people's answers from the last 72 hours could not be read (";
 
-/** The reason a read gives when Dispatch has no answers route (a build older than INFRA-148). */
+/** The reason a read gives when Dispatch has no answers route (a build older than the route). */
 export const NO_ANSWERS_ROUTE_REASON = "this Dispatch build has no answers route";
 
 const RELATION_PHRASES: Readonly<Record<SessionAnswerRelation, string>> = {

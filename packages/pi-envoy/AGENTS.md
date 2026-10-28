@@ -621,7 +621,7 @@ holds the insertion rules, and `extensions/dispatch-first-omp.test.ts` checks tu
 a compaction, and without Dispatch on the real binary.
 
 The same `context` handler appends, after the last message of each main-loop request, what
-people wrote to the session in the last 72 hours (dispatch://INFRA-148): `readSessionAnswers`
+people wrote to the session in the last 72 hours: `readSessionAnswers`
 from `@legion/envoy-client/session-answers` over `GET /api/v1/agents/{session_id}/answers`, as a
 separate user message (`src/session-answers-context.ts`), never merged into the last message and
 never at the head. The session is the one `replyAddress` names: the top-level one's

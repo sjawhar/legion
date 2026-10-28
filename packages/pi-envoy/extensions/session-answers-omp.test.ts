@@ -22,7 +22,7 @@ import {
 } from "@legion/pi-shared/test/omp-harness";
 
 // What people wrote to a session, on every request of the real Oh My Pi's main loop
-// (src/session-answers-context.ts, dispatch://INFRA-148), and on none of the other requests its
+// (src/session-answers-context.ts), and on none of the other requests its
 // `context` handler runs for: a side turn, the handoff prompt and a remote compaction's request.
 // Oh My Pi keeps nothing a `context` handler returns, so what reaches the model, where the list
 // sits and where the binary puts its cache anchors can only be read off the requests it sends. One

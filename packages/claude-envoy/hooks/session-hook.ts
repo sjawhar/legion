@@ -33,7 +33,7 @@
 // without the skill file exits non-zero naming it, which Claude Code shows the user.
 //
 // answers (every SessionStart, and SubagentStart): puts what people wrote to the session in the
-// last 72 hours (dispatch://INFRA-148) into the model's context, as
+// last 72 hours into the model's context, as
 // `hookSpecificOutput.additionalContext` under the event that ran it: `readSessionAnswers`' list,
 // or its failure line naming why when a read failed and no list read before has an item to show.
 // The session is the hook input's `session_id`, which at SubagentStart is the parent's, the

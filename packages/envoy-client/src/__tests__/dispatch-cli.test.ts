@@ -331,7 +331,7 @@ const server = Bun.serve({
       });
     }
     if (pathname === "/v1/interests/ses-1") return interests();
-    // A Dispatch build older than INFRA-148, which has no answers route.
+    // A Dispatch build older than the answers route, which it therefore lacks.
     if (pathname.endsWith("/answers")) {
       return Response.json(
         { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
@@ -436,11 +436,11 @@ describe("the dispatch CLI", () => {
     expect(requests).toEqual([]);
   });
 
-  test("answers against a Dispatch without the route says its build predates INFRA-148, exit 1", async () => {
+  test("answers against a Dispatch without the route says its build is older than the answers route, exit 1", async () => {
     const { code, stdout } = await run(["answers"], omp);
     expect(code).toBe(1);
     expect(stdout).toBe(
-      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build predates INFRA-148.\n`
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build is older than the answers route.\n`
     );
     expect(requests.map((request) => request.path)).toEqual(["/api/v1/agents/ses-1/answers"]);
   });

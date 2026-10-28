@@ -2915,7 +2915,7 @@ export async function executeDispatchTool(
     } catch (error) {
       if (isNoAnswersRoute(error)) {
         throw new Error(
-          `This Dispatch (${configUrl}) has no answers route yet: its build predates INFRA-148.`
+          `This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`
         );
       }
       throw error;

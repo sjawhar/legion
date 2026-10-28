@@ -46,7 +46,7 @@ events and sends them to the current Claude Code session as supported
   so a session keeps one copy, and one opened before the skill shipped gets it. On the same
   `SessionStart` events and at each `SubagentStart`, `dist/session-hook.js answers`, a third hook of
   its own, puts what people wrote to the session in the last 72 hours (answers to its asks, replies
-  to its comments, comments on documents it wrote, messages to it; dispatch://INFRA-148) into the
+  to its comments, comments on documents it wrote, messages to it) into the
   context, read from `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`,
   which at `SubagentStart` is the parent's: the same list, under 8,000 characters, that every
   Oh My Pi model request carries (`@legion/envoy-client/session-answers`). It prints within 800 ms
