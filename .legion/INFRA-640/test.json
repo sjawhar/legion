@@ -2,48 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-640",
-  "completed": "2026-10-28T16:15:00Z",
-  "headTested": "f67fcb4298e9 (merge of main 5fbd8391 into the branch; handoff head 8763144e)",
+  "completed": "2026-10-28T18:45:00Z",
+  "round": 2,
+  "scope": "Narrowed by the INFRA-512 architect (Envoy 2026-10-28T17:36Z): check that the review-round refactor a9727ac8 keeps behaviour, by the 30-spec oracle run, the frozen oracles and the anchor benchmark. Tested at the merged head 0710aeb25214, where a9727ac8 is merged with main 53f39ba0 (#2455's walk).",
+  "headTested": "0710aeb25214 (handoff head 126eeead)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands at f67fcb4298e9, the merged head: AC1 with two replay pairs of my own (tools/load.py 0.3 1 27 8, GOMAXPROCS=2, my own Postgres, NATS and ports, Dispatch built at f67fcb42 and at main 5fbd8391): base 341.82 / 337.57 CPU-s, head 236.43 / 227.38 CPU-s, refreshAnchors share 24.7% / 23.5% -> 1.83% / 1.93%. AC2a: the corpus tests on 12 other real LINUX specs (LINUX-71, -127, -160, -162, -180, -181, -183, -55, -355, -389, -453, -656) that are not in the implementer's 30: ok 486s, every test PASS. AC3: BenchmarkAnchoredWrite -count=5 -benchtime=3x head N80/N10 (ns, B, allocs): doc-edit 0.93 / 0.98 / 1.02, anchored comment 0.90 / 1.01 / 1.02, upload 0.88 / 1.02 / 1.03; BenchmarkFindMarks N80/N10 1.15 (150 KB) and 1.10 (400 KB), per-key loop 8.89x and 8.20x. AC4: heap inuse_space at the window's end base 872 / 891 MB, head 904 / 783 MB, inside the base runs' 18 MB spread; the diff adds no field on Service, a room, a replica or liveWrite and no package variable (QuoteFinder and MarkWriter live in one call). Driven independently on the real server: the E2E below. The implementer's conflict-round entry (build, vet, corpus, docs tests at f67fcb42) agrees with these runs."
+    "how": "Re-ran its second-conflict-round commands at 0710aeb25214 on a larger corpus: the implementer's 30 LINUX specs and the 12 others I used in round 1 (42 files). PMDOC_WALK_CORPUS=<42 specs> go test ./internal/dispatch/pmdoc/ -run Walk -count=1 -v: TestWalkMatchesTheReferenceWalkOnACorpus 'walk corpus: 42 files ... mismatches 0', and every Walk test PASS (ok 194.9s). PMDOC_ANCHOR_CORPUS=<42 specs> go test ./internal/dispatch/pmdoc/ -run 'FindMarks|FindMark|MarkAttrs|Reanchor|YTextRanges|QuoteFinder|MarkWriter' -count=1 -v: every test PASS, the frozen FindMark/MarkAttrs/yTextRanges oracles included (ok 414.1s). BenchmarkAnchoredWrite -count=5 -benchtime=3x head N80/N10 (ns, B, allocs): doc-edit 0.96 / 0.99 / 1.02, anchored comment 1.24 / 1.01 / 1.02, upload 1.07 / 1.02 / 1.02 (AC3 limits 1.3 / 1.2 / 1.2). BenchmarkFindMarks N80/N10 ns: 1.07 at 150 KB (1.11 -> 1.19 ms) and 1.12 at 400 KB (2.85 -> 3.19 ms); the per-key FindMark loop grows 7.6x and 8.1x."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "AC2a/AC2b/AC2c: anchored rows, their quotes, orphan flags and blocks, the refresh events and their order, and the document versions are the same as before, on a real spec with many anchors, through the surface an agent uses",
-      "surface": "Live Dispatch server (packages/envoy/cmd/dispatch) built at f67fcb4298e9 and at main 5fbd8391, each on a fresh database (Postgres 17.11 + pgvector 0.8.7 on 127.0.0.1:55433) and its own NATS 2.12.1, driven only by the dispatch CLI (DISPATCH_URL=http://127.0.0.1:8767)",
-      "command": "start.sh base1 bin/dispatch-base && python3 e2e.py base1 t640_base1; start.sh head1 bin/dispatch-head && python3 e2e.py head1 t640_head1; python3 compare.py results/base1 results/head1 (scratch scripts under $TMPDIR/t640; 149 KB LINUX-364 spec; 81 open anchored rows: comments, suggestions and asks, overlapping and duplicate quotes, heading, table cell, inline code, emoji, hard break; 10 writes: doc-edit away from the anchors, edit inside a quote, delete a quote, delete the middle of two overlapping quotes, insert, anchored comment, anchored ask, comment on a quote that is not in the document, upload that moves a section and edits, drops and copies anchored text, doc-edit after the upload)",
-      "observed": "11 steps compared, 0 differences: same CLI output, same events in the same order (comment.anchor_refreshed for c02; c20 orphaned; c05, overlap-left, overlap-right; upload orphans c12 and s13), same rows (quote, orphaned, block, state) and same version hashes. Latency at 81 anchors head vs base: doc-edit 0.70 s vs 1.9-2.0 s, anchored comment 0.73 s vs 3.4 s, upload 1.16 s vs 7.2 s",
-      "headSha": "f67fcb4298e9",
-      "negativeControl": "A comment on a quote that is not in the document ('this text is in no document at all') is refused 'target not found; nearest blocks: ...' with the same text on both builds; compare.py found 2 differences on a first run whose upload body still held doc-read's trailer with run-specific ids, which shows the comparison sees a changed version"
+      "criterion": "The review-round refactor keeps behaviour: anchored rows, quotes, orphan flags, blocks, refresh events and their order, and document versions are the same as on main and as at round 1's head",
+      "surface": "Live Dispatch server (packages/envoy/cmd/dispatch) built at 0710aeb25214 and at main 53f39ba0, each on a fresh database (Postgres 17.11 + pgvector on 127.0.0.1:55433) with its own NATS, driven only by the dispatch CLI",
+      "command": "start.sh base2 bin/dispatch-base && python3 e2e.py base2 t640_base2; start.sh head2 bin/dispatch-head && python3 e2e.py head2 t640_head2; python3 compare.py results/base2 results/head2; python3 compare.py results/head1 results/head2 (scratch driver under $TMPDIR/t640: 149 KB LINUX-364 spec, 81 open anchored comments, suggestions and asks with overlapping, duplicate, heading, table-cell, inline-code, emoji and hard-break quotes; 10 writes: doc-edit away from the anchors, edit inside a quote, delete a quote, delete across two overlapping quotes, insert, anchored comment, anchored ask, comment on a missing quote, upload that moves a section and edits, drops and copies anchored text, doc-edit after the upload)",
+      "observed": "head vs main: 11 steps compared, 0 differences; head vs round 1's head f67fcb42: 11 steps compared, 0 differences. Latency at 81 anchors head vs main: doc-edit 0.51-0.60 s vs 0.64-0.79 s, anchored comment 0.62 s vs 0.89 s, upload 1.03 s vs 2.47 s",
+      "headSha": "0710aeb25214",
+      "negativeControl": "A comment on a quote not in the document is refused 'target not found; nearest blocks: ...' with the same text on both builds; round 1's control (a stored quote tampered in SQL is restored by the next write's refresh) shows the comparison sees a stale anchor"
     },
     {
-      "criterion": "Concurrent writes leave stored anchors equal to what the base's per-row refresh computes",
-      "surface": "The same live head server, then the same database restarted on the base binary",
-      "command": "start.sh conc bin/dispatch-head && python3 e2e.py conc t640_conc && python3 conc.py t640_conc (19 calls at once: 8 anchored comments, 6 doc-edits away from anchors, 4 doc-edits inside anchored quotes, 1 upload); restart.sh conc bin/dispatch-base; dispatch doc-edit (insert at end); count new anchor_refreshed events; restart.sh conc bin/dispatch-head; the same",
-      "observed": "All 19 calls exit 0; the 4 quote edits each refreshed their row (quote now holds CONC). After the restart on the base binary, a doc-edit appended only artifact.version: no anchor_refreshed event, so every anchor the head stored is what base's FindMark per row reads. The same on the head",
-      "headSha": "f67fcb4298e9",
-      "negativeControl": "update comments set anchor = jsonb_set(anchor,'{quote}','\"tampered quote\"') where body='c30', then one doc-edit: the head appended one comment.anchor_refreshed for c30 and restored its 42-character quote"
+      "criterion": "Frozen oracles and #2455's reference walk agree with the production code on real specs",
+      "surface": "pmdoc suite with PMDOC_WALK_CORPUS and PMDOC_ANCHOR_CORPUS over 42 real LINUX specs (never committed)",
+      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/t640/all-specs go test ./internal/dispatch/pmdoc/ -run Walk -count=1 -v; PMDOC_ANCHOR_CORPUS=$TMPDIR/t640/all-specs go test ./internal/dispatch/pmdoc/ -run 'FindMarks|FindMark|MarkAttrs|Reanchor|YTextRanges|QuoteFinder|MarkWriter' -count=1 -v",
+      "observed": "walk corpus: 42 files, 815,532 parsed nodes, 10,685 marks applied, mismatches 0 (ok 194.9s); anchor corpus: 16 tests PASS incl. TestFindMarksMatchesFindMarkOnAnchorCorpus, TestReanchorReuseMatchesPerCallOnAnchorCorpus, TestYTextRangesMatchesFrozenOnAnchorCorpus (ok 414.1s)",
+      "headSha": "0710aeb25214",
+      "negativeControl": "The implementer's recorded mutation (boundaryTokens returning 0 for blockquote) fails TestWalkMatchesTheReferenceWalk and TestYTextRangesMatchesFrozenOnDocuments, the same oracles run here"
     },
     {
-      "criterion": "AC3: a write's cost no longer grows with the number of open anchored comments (10, 40, 80), on the real server",
-      "surface": "Live Dispatch server at head and at base, fresh databases, dispatch CLI round trip",
-      "command": "start.sh sweephead bin/dispatch-head && python3 sweep.py sweephead; start.sh sweepbase bin/dispatch-base && python3 sweep.py sweepbase (medians of 5 per N: doc-edit away from anchors, anchored comment, upload that changes one word away from anchors)",
-      "observed": "head N=10/40/80: doc-edit 0.687/0.692/0.765 s, anchored comment 0.704/0.715/0.816 s, upload 0.890/0.942/1.051 s (N80/N10 1.11, 1.16, 1.18). base: doc-edit 0.833/1.339/2.147 s, anchored comment 1.006/2.000/3.625 s, upload 1.625/3.937/7.545 s (N80/N10 2.58, 3.60, 4.64)",
-      "headSha": "f67fcb4298e9",
-      "negativeControl": "The base build under the same driver grows 2.6-4.6x from 10 to 80 anchors, so the sweep detects growth"
-    },
-    {
-      "criterion": "FindMarks equals FindMark+MarkAttrs on documents nobody chose",
-      "surface": "pmdoc fuzz target FuzzFindMarks (oracle: unchanged FindMark and MarkAttrs)",
-      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run '^$' -fuzz '^FuzzFindMarks$' -fuzztime 6m -parallel 2",
-      "observed": "PASS after 347,648 runs, 171 interesting inputs, no failure",
-      "headSha": "f67fcb4298e9",
-      "negativeControl": "The implementer's recorded mutation (the separator written at an empty marked run that ends a span) fails TestFindMarksMatchesFindMarkOnHandBuiltTrees, the same oracle the fuzz target uses"
+      "criterion": "AC3 holds after the refactor and merge",
+      "surface": "BenchmarkAnchoredWrite (docs, Postgres, ~150 KB document) and BenchmarkFindMarks (pmdoc)",
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ -run '^$' -bench BenchmarkAnchoredWrite -benchmem -count=5 -benchtime=3x; go test ./internal/dispatch/pmdoc/ -run '^$' -bench BenchmarkFindMarks -benchmem -count=5",
+      "observed": "medians N=10/40/80 ms: doc-edit 115.9/128.2/110.8, anchored comment 78.6/69.7/97.4, upload 233.2/213.6/249.8; N80/N10 ns, B, allocs: 0.96/0.99/1.02, 1.24/1.01/1.02, 1.07/1.02/1.02. FindMarks N80/N10 1.07 (150 KB), 1.12 (400 KB)",
+      "headSha": "0710aeb25214",
+      "negativeControl": "The per-key FindMark loop in the same benchmark grows 7.6x (150 KB) and 8.1x (400 KB) from 10 to 80 keys, so the benchmark shows growth when it is there"
     }
   ],
-  "ci": "Read on GitHub at f67fcb4298e9 (2026-10-28 ~16:10Z): required checks lint, typecheck, test, pr-title green; dispatch-multiprocess, dispatch-memory, envoy-go-race, envoy-smoke, envoy-e2e-local green. envoy-infra-go red on TestDispatchConnectionsPerPodIsTheServers (expected 84, got 83), a red of main named by the INFRA-512 architect (fixed by #2464). envoy-go red only on cmd/listener TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (503 'role claim view is not complete'), outside this diff; every internal/dispatch package passed in that job and the test passed 30 of 30 locally at this head; reported as dispatch://INFRA-49/ask/371f2e89-5f90-4406-9a08-810819bbce8c, routed by the controller to INFRA-523. dispatch (browser suite) still running at the time of reading.",
-  "testCoverage": "The tests the implementer added catch the ways I tried to break this: FindMarks vs FindMark on hand-built trees, corpus, real-size and fuzzed documents; reused finder and writer vs per-call with bytes-equal CRDT state; yTextRanges vs a frozen copy, refusals included; refresh row order, shared marks, skip across types, orphan and restore transitions; MarkQuote's anchor from the written tree. I found no break that none of them would catch, so I wrote no red test."
+  "ci": "At 0710aeb25214 (read 2026-10-28 ~18:40Z) every check run was still queued (lint, typecheck, test, pr-title, build, changes, the daemon Postgres 16 suite); read as queued, not waited on.",
+  "previousRound": "Round 1 (f67fcb4298e9, handoff df9bf6f7): full test pass with the live-server differential, the concurrent-write cross-check against the base binary, the 10/40/80 sweep, two replay pairs for AC1, 12-spec corpus, benchmarks and a 6-minute FuzzFindMarks run; all held. This round's live-server run gives the same result as round 1's head.",
+  "testCoverage": "The refactor's own tests cover what it changes: FindMark and MarkAttrs are now one-key FindMarks and are checked against frozen copies of their base bodies; the position helpers shared by walk, nodeSize, splice and yFragmentLocations are checked against #2455's referenceWalk on hand-built shapes and real specs. I found no change in behaviour, so I wrote no red test."
 }
