@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-368",
+  "completed": "2026-10-28T14:13:50Z",
+  "decision": "changes_requested",
+  "reviewedHead": "8c466c99935f1879ee200cb474f88b7a21c722c7",
+  "codeHead": "7dc21ecd997b3f889bd06fa762e83e783b465034",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/text/refs.go:554",
+      "description": "On a document page, `?comment=<id>#b-<id>` now names a comment block. The dashboard itself writes a document block's fragment onto a URL that still carries `?comment=` (ProofDocument.tsx:732, after a comment deep link; useMarginSheet.ts:117 says nothing strips `?comment=`). Before this change such a URL named the comment. Now it names `comment/<id>#<document block id>`, which never exists, so the link is dead and drops out of Referenced by. The block-index drain re-reads stored text, so stored links of this shape move too. In the other direction, ProofDocument.tsx:424 focuses a document block named by a comment block's fragment."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/refs/item_block_nodes.go:98",
+      "description": "Every comment-block and message-block node in an edge list carries its whole text (lines 98 and 151). model.go:1503-1505 and the GraphNode type in contracts say Text is set only on the node a reference read names, and a document block node follows that rule. Each graph read also runs itemblocks.Split over the whole body of every message in the batch (line 140). Set Text only in the reference read's node, as blockReferenceNode does for a document block."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "There is no `## Contract change census` with search commands and a rollout line. The change moves a mention's source on `?to=` from the comment node to a `block` node. It makes the dashboard URLs `/issues/K/comments/<id>#b-…` and `?comment=<id>#b-…`, which named the comment, name a block. It counts a comment that cites one target from two blocks as 2 (graph.go heldByABlock). The body's `## Census` lists the readers in this repository, but has no search a reviewer can run again, does not cover the URL grammar change or the count change, and has no rollout line for released CLIs (an older referenceLines prints `mentions block <ref>`)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/item_blocks.go:62",
+      "description": "IndexedBlock and IndexItem's first return value are dead weight: all four callers discard them, and no test reads them."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/item_block_nodes.go:17",
+      "description": "itemBlocksKnown is always true in this binary (graph.go registers both loaders). It is false only under the test's asAnOlderBuild, yet it gates heldByABlock and itemRead on every graph read."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/block-spans.ts:81",
+      "description": "The valueOffset cursor resets on every block, because line 101 evaluates `to` before `from`. Replace it with `textareaValue(storedBody.slice(0, offset)).length`."
+    }
+  ],
+  "ci": "Required checks are lint, typecheck, test and pr-title (rulesets; base protection has none). The CI head is 7dc21ecd. Its lint, typecheck, test and pr-title runs were still queued when this review was written. The compare 7dc21ecd...8c466c99 is handoffs-only (1 file). The request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: `Verdict: APPROVE at 8c466c99` (3 Minor; I count its findings 1 and 2 as Important, above). code-quality: `Verdict: CHANGES at 8c466c99` (structural; its dead-weight items are the three minors above)."
+}
