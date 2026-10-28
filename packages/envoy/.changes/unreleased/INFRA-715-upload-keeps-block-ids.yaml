@@ -1,0 +1,6 @@
+kind: Fixed
+body: |-
+  A document upload keeps the block ids of the untyped blocks it leaves unchanged, and writes the
+  open anchors on text it keeps without stripping and adding them again. Before, every upload gave
+  every block a new id and re-marked every open anchor, so a live room kept about half a megabyte
+  more for each upload of a 25 KB spec; a one-token upload now adds about 2 KB, near what it stores.

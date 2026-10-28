@@ -58,7 +58,16 @@ Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in d
 and `EnsureBlockIDs` repairs missing and duplicate IDs (an id holding a NUL, which a hand-built
 client can set and no ask row or anchor can store, counts as missing; `storedBlockID`) before agent
 updates are written. Any other id a browser sets stays, such as `q:1` from a pasted `:::ask{#q:1}`,
-which the browser editor keeps. Document
+which the browser editor keeps. A whole-document upload (`docs.ReplaceText`) keeps the ids of the
+untyped blocks it leaves unchanged: its markdown cannot name them (`GET /text` renders none), so
+`pmdoc.ParseForWrite` pairs the parsed tree with the live one as `pmdoc.Update` aligns them and
+carries each unchanged untyped block's id (`carryBlockIDs`) before `EnsureBlockIDs` mints the rest.
+An id stays only with unchanged content at its paired position: an edited, moved, swapped or retyped
+block, every block holding a change, and a typed block whose markdown names no id take fresh ids.
+An upload over open anchors builds its tree with the anchors on it in a scratch document and writes
+that tree into the room with one `pmdoc.Update`, so anchored text it left unchanged is not
+re-formatted. Without either, every upload wrote a `blockId` tombstone for every block, and one per
+open anchor, which a live room keeps decoded for the document's life (INFRA-715). Document
 settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
 server-owned attributes of each ask block it reconciled) and persists the updates they captured in
 the same Postgres transaction as any resulting version and event, then renders and compares
