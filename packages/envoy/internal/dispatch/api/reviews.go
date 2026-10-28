@@ -292,12 +292,12 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		if state == "changes_requested" {
 			selected = docs.ApprovalOptionRequestChanges
 		}
-		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
+		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, nil, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, answeredEvents...)
+		events = append(events, appendedEvents(answeredEvents...)...)
 		askID = &answered.ID
 	}
 	review, event, err := docs.WriteReview(r.Context(), tx, s.deps.Events, artifact, version, state, actor, reason, askID)

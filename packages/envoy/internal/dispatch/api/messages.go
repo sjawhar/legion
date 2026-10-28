@@ -183,7 +183,7 @@ func (s *server) createStoredMessage(
 	var advice *writeAdvice
 	if issueKey != nil {
 		advice = s.writeAdvice(
-			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status,
+			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status, "",
 		)
 	}
 	if err := tx.Commit(ctx); err != nil {

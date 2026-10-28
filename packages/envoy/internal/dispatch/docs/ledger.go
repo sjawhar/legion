@@ -275,6 +275,22 @@ type pendingVersion struct {
 	docUpdateVersion int64
 }
 
+// PendingVersionMarkdown is the markdown of version number of artifactID when it is the version
+// this transaction last numbered and queued (writeVersionTx) and has not written yet: a route that
+// reads the version it just made - the diff a named version's event carries - takes it from here,
+// since the table holds the row only once Commit has run the queue. False when this transaction
+// queued no such version.
+func (l *Ledger) PendingVersionMarkdown(artifactID string, number int) (string, bool) {
+	if l.sealed {
+		return "", false
+	}
+	pending, queued := l.latest[artifactID]
+	if !queued || pending.version.Number != number {
+		return "", false
+	}
+	return pending.markdown, true
+}
+
 // pendingRoom is a document's stored history (doc_updates) as the writes this transaction has
 // queued to it leave it. A transaction that queues a write to it holds its document lock from
 // before it read the history to the end, so nothing else changes it meanwhile, and these are

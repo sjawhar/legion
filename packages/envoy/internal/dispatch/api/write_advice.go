@@ -62,6 +62,9 @@ func (e *adviceQueryError) Unwrap() error {
 	return e.err
 }
 
+// sessionWriteTypes are the events session_writes_since_human counts: the types its query names.
+var sessionWriteTypes = []string{"message.created", "comment.created", "ask.opened"}
+
 // computeWriteAdvice runs the issue-scoped advice queries for a session's write. Two of them are
 // about the calling session itself - its own writes since the last human event, its own open
 // asks - so writeAdvice calls this only for a session actor. The third, whether Legion owns the
@@ -69,7 +72,8 @@ func (e *adviceQueryError) Unwrap() error {
 // decides, so an ordinary write on an ordinary issue gains no query at all. status is the
 // issue's status as the write committed it, the same value writeAdvice reports. route names the
 // caller for the one query whose failure is logged rather than returned
-// (legionManagedStatusAdvice).
+// (legionManagedStatusAdvice). appending is the event the write appends after the advice is read
+// (writeAdvice).
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -78,6 +82,7 @@ func (s *server) computeWriteAdvice(
 	actor model.Actor,
 	excludeAskID string,
 	status string,
+	appending string,
 ) (*writeAdvice, error) {
 	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
@@ -94,6 +99,12 @@ func (s *server) computeWriteAdvice(
 		  and id > last_human.last_id
 	`, issueKey, actor.ID).Scan(&advice.SessionWritesSinceHuman); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
+	}
+	// The write's own event is not appended yet (writeAdvice), and it is the session's newest
+	// write: under the issue's owner lock no other event of the issue commits before it, and the
+	// write appends no human event, so the count it would have read after the append is one more.
+	if slices.Contains(sessionWriteTypes, appending) {
+		advice.SessionWritesSinceHuman++
 	}
 	if err := s.runAdviceQueryHook(ctx, tx, "your_open_asks"); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
@@ -174,6 +185,12 @@ func (s *server) runAdviceQueryHook(ctx context.Context, tx pgx.Tx, query string
 	return s.adviceQueryHook(ctx, tx, query)
 }
 
+// writeAdvice answers what a write tells its caller about the issue it wrote. A write joined to a
+// document ledger reads it in its read phase, before Commit runs its writes, so its queries hold no
+// transaction id (INFRA-636), and its own event is not in the table yet. appending names the event
+// the write appends for actor after this read - "" for none, or for a write that appends before
+// it reads its advice - and a counted one (sessionWriteTypes) is counted as if appended, so the
+// answer is the one the same read gave after the append.
 func (s *server) writeAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -182,6 +199,7 @@ func (s *server) writeAdvice(
 	actor model.Actor,
 	excludeAskID string,
 	status string,
+	appending string,
 ) *writeAdvice {
 	// A human write has no advice query to run - every one of them is about the calling session,
 	// and the triage line this answers is about what a session is told - so it is answered here,
@@ -208,7 +226,7 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "statement_timeout", err)
 		return nil
 	}
-	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status)
+	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status, appending)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
 		query := "unknown"

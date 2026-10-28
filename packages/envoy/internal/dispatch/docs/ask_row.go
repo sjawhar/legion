@@ -69,13 +69,17 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 // WriteAskResolution closes an open ask the caller has locked as retracted or resolved: it
 // records the kind, the reason and who closed it on the row, and returns the ask as it now
 // stands. It is the one place that says what resolving an ask stores; each caller writes a block
-// ask's own state and appends the ask.resolved event its path owns.
+// ask's own state and appends the ask.resolved event its path owns. The resolution is decided
+// here and its update is a write (write): queued on ctx's ledger when the caller joined one, so it
+// runs in the transaction's write phase in the order the caller made it.
 func WriteAskResolution(ctx context.Context, tx pgx.Tx, ask model.Ask, kind, reason string, actor model.Actor) (model.Ask, error) {
 	resolved, encoded, err := askResolution(ask, kind, reason, actor)
 	if err != nil {
 		return model.Ask{}, err
 	}
-	if err := writeAskResolution(ctx, tx, ask.ID, encoded); err != nil {
+	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		return writeAskResolution(ctx, tx, ask.ID, encoded)
+	}); err != nil {
 		return model.Ask{}, err
 	}
 	return resolved, nil

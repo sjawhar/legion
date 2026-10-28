@@ -362,7 +362,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if !changed {
 		advice := s.writeAdvice(
-			r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", before.Status,
+			r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", before.Status, "",
 		)
 		if err := tx.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
@@ -459,7 +459,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	advice := s.writeAdvice(
-		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status,
+		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status, "",
 	)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)

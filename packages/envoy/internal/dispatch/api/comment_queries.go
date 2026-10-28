@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -159,6 +160,20 @@ func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seed
 		return nil, err
 	}
 	return s.hydrateCommentSideTables(ctx, q, replies)
+}
+
+// withReply is replies, a chain loadReplyChain read, with reply, a reply to the chain's root this
+// transaction has queued the insert of and the table does not hold yet, in the place the chain's
+// query would have returned it: ordered by created_at, then id (a uuid orders as its canonical
+// text does).
+func withReply(replies []model.Comment, reply model.Comment) []model.Comment {
+	index, _ := slices.BinarySearchFunc(replies, reply, func(stored, added model.Comment) int {
+		if order := stored.CreatedAt.Compare(added.CreatedAt); order != 0 {
+			return order
+		}
+		return strings.Compare(stored.ID, added.ID)
+	})
+	return slices.Insert(replies, index, reply)
 }
 
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {

@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const (
@@ -181,6 +180,16 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
+	// Everything up to Commit is the read phase (Docs.Join): the document operations and this
+	// route queue their writes on the ledger, in the order made, and Commit runs them back to
+	// back. Write advice is read here, before the first write is queued, so its queries hold no
+	// transaction id, and counts the ask.opened this ask appends (writeAdvice).
+	var advice *writeAdvice
+	if owner.IssueKey != nil && status != nil {
+		advice = s.writeAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status, "ask.opened",
+		)
+	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -205,16 +214,25 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
-	var ask model.Ask
-	if err := tx.QueryRow(r.Context(), `
-		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		returning created_at
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind).Scan(&ask.CreatedAt); err != nil {
+	// The row's created_at is the transaction's now(), its column default, written explicitly so
+	// the ask this route answers and its event carry the time the row will hold.
+	createdAt, err := ledger.Now(r.Context())
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := asks.FollowAuthor(r.Context(), tx, rowID, actor); err != nil {
+	var ask model.Ask
+	ask.CreatedAt = createdAt
+	if err := queueExec(r.Context(), tx, ledger, `
+		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind, createdAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := queueWrite(r.Context(), tx, ledger, func(ctx context.Context, tx pgx.Tx) error {
+		return asks.FollowAuthor(ctx, tx, rowID, actor)
+	}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -236,44 +254,38 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
-	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	askChanges, err := s.queueReferences(r.Context(), tx, ledger, "ask", ask.ID, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events := []model.Event{}
+	events := []*model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
+		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		events = append(events, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, owner.event(
+	event, err := s.queueEvent(r.Context(), tx, ledger, owner.event(
 		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := refs.Stamp(r.Context(), tx, "ask", ask.ID, event.ID); err != nil {
+	if err := queueStamp(r.Context(), tx, ledger, "ask", ask.ID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask.OpenedEventID = &event.ID
 	events = append(events, event)
-	var advice *writeAdvice
-	if owner.IssueKey != nil && status != nil {
-		advice = s.writeAdvice(
-			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status,
-		)
-	}
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	ask.OpenedEventID = &event.ID
+	s.publish(appendedEvents(events...)...)
 	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
 	// suggestions on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the suggestions alone.
@@ -450,23 +462,28 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var editedAt time.Time
-	if err := tx.QueryRow(documentCtx, `
-		update asks
-		set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = now()
-		where id = $1
-		returning edited_at
-	`, ask.ID, ask.Question, options, ask.Multiple, ask.Urgency).Scan(&editedAt); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.replaceReferences(documentCtx, tx, "ask", ask.ID, ask.Question)
+	// edited_at is the transaction's now(), as the update's own now() writes it, read here so the
+	// ask this route answers and its event carry it before the queued update runs.
+	editedAt, err := ledger.Now(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(documentCtx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	if err := queueExec(r.Context(), tx, ledger, `
+		update asks
+		set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = $6
+		where id = $1
+	`, ask.ID, ask.Question, options, ask.Multiple, ask.Urgency, editedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	ask.EditedAt = timestampPtr(&editedAt)
+	askChanges, err := s.queueReferences(documentCtx, tx, ledger, "ask", ask.ID, ask.Question)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.queueEvent(documentCtx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.edited",
 		actor,
 		model.NewAskEditEventPayload(ask, previous, actor, askChanges),
@@ -475,7 +492,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := refs.Stamp(documentCtx, tx, "ask", ask.ID, event.ID); err != nil {
+	if err := queueStamp(documentCtx, tx, ledger, "ask", ask.ID, event); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -483,7 +500,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(*event)
 	WriteJSON(w, http.StatusOK, ask)
 }
 

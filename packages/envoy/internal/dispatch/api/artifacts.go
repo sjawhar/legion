@@ -500,7 +500,7 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
+		diff, err = s.namedVersionDiff(r.Context(), tx, ledger, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -533,7 +533,7 @@ func (s *server) storeArtifact(
 	var advice *writeAdvice
 	if target.IssueKey != nil && issueStatus != nil {
 		advice = s.writeAdvice(
-			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus,
+			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus, "",
 		)
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
@@ -753,28 +753,30 @@ func deref(value *string) string {
 	return *value
 }
 
-// commitArtifactVersionEvent appends the artifact.version event of a version the transaction wrote
-// and stamps the document's new mention edges with it (refs.Stamp), after the append so stamping
-// never touches sequence allocation.
+// commitArtifactVersionEvent queues the artifact.version event of a version the transaction wrote
+// and the stamp of the document's new mention edges with it (refs.Stamp), after the append so
+// stamping never touches sequence allocation. The event is filled in once Commit has run its step
+// (queueEvent).
 func (s *server) commitArtifactVersionEvent(
 	ctx context.Context,
 	tx pgx.Tx,
+	ledger *docs.Ledger,
 	eventOwner owner,
 	actor model.Actor,
 	artifactID, name string,
 	written docs.VersionResult,
 	diff *string,
-) (model.Event, error) {
-	event, err := s.appendEvent(ctx, tx, eventOwner.event(
+) (*model.Event, error) {
+	event, err := s.queueEvent(ctx, tx, ledger, eventOwner.event(
 		"artifact.version",
 		actor,
 		docs.ArtifactVersionEventPayload(artifactID, name, written.Version, diff, written.Changes),
 	))
 	if err != nil {
-		return model.Event{}, err
+		return nil, err
 	}
-	if err := refs.Stamp(ctx, tx, "artifact", artifactID, event.ID); err != nil {
-		return model.Event{}, err
+	if err := queueStamp(ctx, tx, ledger, "artifact", artifactID, event); err != nil {
+		return nil, err
 	}
 	return event, nil
 }
@@ -832,12 +834,12 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version := named.Version
-	diff, err := s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
+	diff, err := s.namedVersionDiff(r.Context(), tx, ledger, artifact.ID, version)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
+	event, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -846,7 +848,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(*event)
 	WriteJSON(w, http.StatusCreated, version)
 }
 
@@ -905,7 +907,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var written *docs.VersionResult
-	var published []model.Event
+	var published []*model.Event
 	// A batch that left the document as it was names no version, however deliberate its summary,
 	// so edits that change nothing never pile up byte-identical versions.
 	if edit.Changed {
@@ -930,13 +932,13 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		if written != nil {
 			var diff *string
 			if written.Version.Named {
-				diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, written.Version)
+				diff, err = s.namedVersionDiff(r.Context(), tx, ledger, artifact.ID, written.Version)
 				if err != nil {
 					s.writeHandlerError(w, err)
 					return
 				}
 			}
-			event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
+			event, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -947,7 +949,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	var advice *writeAdvice
 	if artifact.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
-			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status,
+			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status, "",
 		)
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
@@ -961,7 +963,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	s.publish(appendedEvents(published...)...)
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}
