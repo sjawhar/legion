@@ -980,9 +980,6 @@
 
 ### Changed
 
-- An issue's references answer, `GET /api/v1/issues/{key}/references`, now parses each
-  document's creator once and each distinct version author list once per request, where it parsed
-  both again for every version. The answer is unchanged.
 - Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
   `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
   request's `summary` gets what its question leaves of the same limit.

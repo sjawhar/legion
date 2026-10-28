@@ -10,9 +10,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/loadtest
-related_issues:
-  - "INFRA-650"
-  - "sjawhar/legion#2425"
 ---
 
 # A load-test CPU fix needs a seed that reaches the changed code, a load that completes it, and the function's profile share
@@ -53,9 +50,9 @@ the code you changed. Then judge the result by that code's share of the profile.
 
 - The load test's seed (sjawhar/legion#2369) writes no `dispatch://` reference. So every
   references closure was empty, and `loadArtifactsByRefKey` returned before its query
-  (`packages/envoy/internal/dispatch/api/references.go`, the `len(refKeys) == 0` return). INFRA-650
+  (`packages/envoy/internal/dispatch/api/references.go`, the `len(refKeys) == 0` return). sjawhar/legion#2425
   added 1,000 cited documents (19,471 versions) and 51,071 citations with a throwaway `refseed`
-  program (`dispatch://INFRA-650/artifact/infra650-refseed-tgz`). Its shape check found a distinct
+  program, attached to the pull request's Dispatch issue. Its shape check found a distinct
   author-list share of 5.4%, against production's 6.2%.
 - At the 1x step (`--events 4 --sessions 400 --requests 60`), the calibration passed (58% busy,
   59.7 of 60 req/s sent). But 1,703 goroutines waited for a pool connection, all 741 references

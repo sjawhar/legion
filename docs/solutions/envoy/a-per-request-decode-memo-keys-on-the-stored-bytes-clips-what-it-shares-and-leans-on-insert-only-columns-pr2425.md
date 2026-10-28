@@ -11,9 +11,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch
-related_issues:
-  - "INFRA-650"
-  - "sjawhar/legion#2425"
 ---
 
 # A per-request decode memo keys on the stored bytes, clips what it shares, and leans on insert-only columns
