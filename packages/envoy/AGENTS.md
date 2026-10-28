@@ -1599,6 +1599,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A replace that runs past an anchor's edge rewrote text outside it too, so that anchor keeps only the text the replace left alone, and one covering the whole anchor and more orphans it.
   A block replacement from an accepted suggestion takes no mark, since it can land a code block an ask's mark cannot cover.
 
+- A refresh finds every open row's mark in one walk of the tree (`pmdoc.FindMarks`, which reads for each identity exactly what `FindMark` and `pmdoc.MarkAttrs` read), then updates and announces the rows in their order (`openAnchoredMarks`:
+  the open asks, then the unresolved comments, each by `created_at` and `id`, so one refresh announces the same rows in the same order every time), and two rows naming one mark are each refreshed and announced:
+  a walk per row would make every write cost the whole document once per open anchor.
+  An upload (`ReplaceText`) reads its rows' marks in that one walk too, and re-anchors every row with one quote finder over the uploaded tree (`pmdoc.QuoteFinder`, whose `FindDiscardingMiss` ranks no nearest blocks for a miss the upload drops) and one mark writer over the fragment (`pmdoc.MarkWriter`, which reads the fragment's text ranges once).
+  A new anchored comment or ask reads its quote and block id off the tree its own write already read (`MarkQuote` reads `liveWrite.tree` after `applyLive`), not off a second read of the document.
+
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions:
   the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it).
   `kind` may be absent or `question`; `kind: "action"` (removed;
