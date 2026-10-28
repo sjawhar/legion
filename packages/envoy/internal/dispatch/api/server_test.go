@@ -2721,8 +2721,11 @@ func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
 // event stream unresolved until a body byte arrives (Firefox does), and so holds its reconnect
 // unopened, with the refresh it owes every query on open not yet run. A connection with no
 // backlog to replay and nothing new committing would send it nothing until the first heartbeat,
-// so the stream writes ": open" with its headers: the first body bytes arrive at once, cold or
-// resuming at the head, however long the heartbeat.
+// so the stream writes ": open" with its headers: the first body bytes arrive with them, cold or
+// resuming at the head, long before the heartbeat. A cold stream on a fresh process sends its
+// headers once its subscription is in place, which waits for the event horizon's first proof, and
+// a transaction another package holds open on the shared test Postgres can delay that by seconds;
+// the deadline is therefore well short of the heartbeat rather than a second or two.
 func TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte(t *testing.T) {
 	const heartbeat = time.Minute
 	const opened = ": open\n\n"
@@ -2746,7 +2749,7 @@ func TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte(t *testing.T) {
 	} {
 		t.Run(connection.name, func(t *testing.T) {
 			// The deadline covers the request and the read of its first body bytes alike.
-			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), heartbeat/4)
 			defer cancel()
 			request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v1/events", nil)
 			if err != nil {

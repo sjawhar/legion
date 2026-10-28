@@ -1087,8 +1087,13 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # internal/dispatch/api alone ran 410-572 s on main's runs of 2026-10-28, against go test's
+      # default ten-minute package deadline. Its live-stream and delivery-hub tests wait for the
+      # event log's safe horizon (INFRA-591), which every transaction other packages hold open on
+      # this job's one Postgres delays, so the package's time varies with them. The deadline
+      # names its own margin rather than ride the default.
       - name: Unit test envoy Go package
-        run: go list ./... | grep -v /integration | xargs go test
+        run: go list ./... | grep -v /integration | xargs go test -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
