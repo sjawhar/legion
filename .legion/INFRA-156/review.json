@@ -2,28 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-28T10:32:00Z",
-  "decision": "changes_requested",
-  "round": 8,
-  "scope": "The architect narrowed round 8 to three items (the request-approval regression, one stop-set constant, the AGENTS.md wording). Judged against round 8's diff: 48a891d4 and merge 10bc21e1.",
-  "headReviewed": "d63107e27e0739a8bd323b76b6ef7a2fc2372d81",
-  "codeHead": "10bc21e1b5c6",
-  "previousReview": "5680643410 (REQUEST_CHANGES at 2f67ed81)",
+  "completed": "2026-10-28T14:27:00Z",
+  "decision": "approved",
+  "round": 9,
+  "scope": "The architect set round 9 as upkeep: changelog fragments, the AGENTS.md sentence, and two tidy-ups that change no behaviour. Judged against round 9's diff (fe010e53, c5e2f63c): approve if done, the round-8 code is unchanged, and CI passes at the head.",
+  "headReviewed": "b2bee1a2b3b5ae9ad18a49115b22d8895db9fd9d",
+  "codeHead": "c5e2f63c93e0",
+  "previousReview": "5681227614 (REQUEST_CHANGES at f544a3fd)",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "item1": "Done. The new dispatch-execute.test.ts cases fail at 7c11b41c's dispatch-execute.ts (0 pass, 2 fail) and pass at the head (273 pass). Contracts dispatch-block-ref.test.ts passes (106); pmdoc filtered tests pass, go vet is clean. The regenerated JSON is byte-identical to the TS table. The deep review fuzzed 20,000 ids through both writers with no difference. No other code finds an opener by id.",
-  "dist": "bun run check-dist under the pinned Bun 1.4.4 at the head: 'dist/ and legion/ match a fresh build'. The rebuild touched only dist/dispatch.js, envoy-channel.js and session-hook.js (THIRD_PARTY_NOTICES and legion/ unchanged). The extra bundle changes are earlier rounds' contracts code (MAX_BLOCK_ID_BYTES, BLOCK_REFERENCE, DISPATCH_BLOCK_POINTER_VALUES, the ISSUE_KEY to ISSUE_KEY2 rename). Why the stale dist was missed: claude-envoy's check-dist failed at 8c232738 (run 40551354001) and was cancelled on every other head; it is not in main's required set.",
-  "item2": "Done. typedBlockIDShortcutExcluded is used by the reader and the writer.",
-  "item3": "Partly. 'no space, tab or line ending' is fixed, but the same sentence still says quote, <, =, > and backtick 'end' the shortcut.",
-  "ci": "Required set: lint, typecheck, test, pr-title. I now read every check-run. At CI head 10bc21e1 (compare to d63107e2: handoffsOnly true, 2 files), every check was still queued at 10:24Z, and no earlier round-8 head finished a run. A request for changes does not wait on CI.",
-  "threads": "15 threads, all resolved. The two round-7 threads (PRRT_kwDORFy7ds6xD-xr, PRRT_kwDORFy7ds6xD-xv) are fixed in 48a891d4; accepted in the review body.",
+  "important": 0,
+  "minor": 0,
+  "items": "(1) The four CHANGELOG.md files equal main's (merge base aeeee6c0). There are six pr2394-<slug>.yaml fragments, one per removed entry, each parsed and rendered by changie v1.26.0, with no Dispatch key. Two texts are reworded on purpose: the unexported constant's name and a quote that voids rather than ends. (2) The AGENTS.md sentence splits the characters that end the shortcut from those that void it, matching directive.go:373-379. (3) The read-back test reads the shared table, which gained six rows; no coverage is lost; the regenerated JSON is byte-identical. TYPED_BLOCK_ID_SHORTCUT_EXCLUDED is unexported with no importer. Fast-follow: none. Round-8 code is unchanged apart from the unexport.",
+  "localRuns": "contracts dispatch-block-ref.test.ts 112 pass; pmdoc filtered tests ok; contracts tsc clean; claude-envoy check-dist under the pinned Bun 1.4.4: dist/ and legion/ match a fresh build.",
+  "ci": "Every check-run at CI head ca457420 (compare to b2bee1a2: handoffsOnly true, 1 file) completed success or skipped, the required lint, typecheck, test and pr-title included. dispatch first failed on a Go module proxy stream error (proxy.golang.org INTERNAL_ERROR for bedrockruntime), and envoy-go-race on TestALoneRunnerMakesAPassOnEveryTick (a lease tick skipped 983 ms after the previous pass; that code is main's, untouched here). One rerun of the failed jobs: both success at 14:24Z and 14:08Z.",
+  "migrations": "main's highest is 0134. This PR's 0135_block_pointer_links collides with nothing on main. sjawhar/legion#2463 (also 0135) is open; by the agreement, whichever merges second renumbers.",
+  "threads": "18 threads, all resolved. The three round-8 threads (PRRT_kwDORFy7ds6xFB0j, PRRT_kwDORFy7ds6xFB0s, PRRT_kwDORFy7ds6xFB0x) are fixed in fe010e53 and c5e2f63c; accepted in the approval.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at d63107e2. Medium: the merge kept the PR's entries in CHANGELOG.md, against AGENTS.md:151's changelog-fragment rule from main's 184897ac. Minor: the AGENTS.md wording.",
-    "codeQuality": "Verdict: CHANGES at d63107e2. Two items that change no behaviour: the in-file Go spelling table duplicates 16 rows of the shared table; TYPED_BLOCK_ID_SHORTCUT_EXCLUDED is exported with no caller. Fast-follow."
+    "deepReview": "Verdict: APPROVE at b2bee1a2. No finding. It rendered every fragment with changie and confirmed the test's coverage.",
+    "codeQuality": "Verdict: APPROVE at b2bee1a2. No finding."
   },
-  "keyFindings": [
-    {"severity": "important", "file": "packages/*/CHANGELOG.md", "description": "Main's 184897ac (#2419) makes changelog entries fragment files (AGENTS.md:151): never edit a CHANGELOG.md, and an open PR moves its entries from the old section (now '## Before changelog fragments') into fragments the next time it merges main. Merge 10bc21e1 is that merge but kept six entries in packages/{contracts,envoy,envoy-client,claude-envoy}/CHANGELOG.md, and no .changes/unreleased file exists. The fold builds release blocks only from fragments (release-push.sh), so these entries never reach a release or main@<commit> heading. Reset the four CHANGELOG.md files to main's text, and write each entry as packages/<pkg>/.changes/unreleased/INFRA-156-<slug>.yaml (kind Added or Fixed, body as a |- block)."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": ":1721-1722 still says a quote, <, =, > and backtick 'end' the shortcut. Only a space, tab, line ending, #, . and } end it; the others make the editor read the line as no directive (as directive.go:373-379 says)."}
-  ]
+  "keyFindings": []
 }
