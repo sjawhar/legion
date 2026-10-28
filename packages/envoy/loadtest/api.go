@@ -54,6 +54,19 @@ type callResult struct {
 
 func (r callResult) ok() bool { return r.err == nil && r.status/100 == 2 }
 
+// errorCode is the code a non-2xx answer's JSON body names (Dispatch's writeError writes
+// {"error": ..., "code": ...}); "" for a 2xx answer, a transport error or a body naming none.
+func (r callResult) errorCode() string {
+	if r.err != nil || r.status/100 == 2 {
+		return ""
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(r.body, &body)
+	return body.Code
+}
+
 // transient is a failure worth retrying: a transport error, 429 or 5xx.
 func (r callResult) transient() bool {
 	return r.err != nil || r.status == http.StatusTooManyRequests || r.status >= 500

@@ -51,7 +51,8 @@ same step before and after its change, and compares the two rows.
 | `replay_anchor.go` | The rest of the seed's pure decisions: `chooseAnchor`, where an anchor lands (its logged quote, else a sentence of its logged block or of the nearest surviving one), which the replay source calls as `substituteAnchor`; and `planHistory`, the size of every synthetic version so each changes as many bytes as production's, built from a padding paragraph and a removed run of sections |
 | `replay_seed.go` | `loadgen replay-seed`: recreates a bundle's state through Dispatch's API, mapping every logged id to its local one in `loadtest.replay_ids` and each anchor's rule in `loadtest.replay_anchors` as it goes, so a killed seed resumes; `-ops-log` writes one CSV row per write with Dispatch's CPU ticks around it |
 | `replay_check.go` | `loadgen replay-check-seed` (each seeded document's version, version size changes, open anchored items, text and anchors against the bundle, the open-anchored-root distribution of the window's written documents, and `-out`, the results file stack.sh keeps), `replay-checksum` (row counts and an md5 of the versions and comment bodies) and `replay-logical-dump` (a seed with every uuid and timestamp masked, for `cmp`) |
-| `replay_source.go` | The replay request source (`loadgen run -source replay`, The replay below): the pure plan of a bundle's window (transactions, issue sampling, each logged write's CLI requests, edit ops from the logged diff or a substitute, read actions), `loadgen replay-plan`, and the sending: id resolution through `loadtest.replay_ids` and the run's own responses, one connection and one 60 s deadline per action |
+| `replay_source.go` | The replay request source (`loadgen run -source replay`, The replay below): the pure plan of a bundle's window (transactions, issue sampling, each logged write's CLI requests, read actions), `loadgen replay-plan`, and the sending: id resolution through `loadtest.replay_ids` and the run's own responses, one connection and one 60 s deadline per action |
+| `replay_edit.go` | The replay's edit ops: from the logged diff (`replace` of changed words, `insert` of an added paragraph) or substitutes, each one Dispatch 35efd326's edit route accepts on the client's text (The replay below); `TestReplayEditsBundle` (with `LOADTEST_REPLAY_BUNDLE`) replays every edit `replay-plan` plans at rate 1 against a model of those rules |
 | `replay_record.go` | The replay's per-run record: `summary.json` `replay` (Dispatch's CPU over the window from `/proc`, cores at the full rate, idle-corrected, drain, writes, saturation) and `meta.json` `replay` |
 | `replay-seed-len16.patch` | The allocation-free `len16` that `stack.sh replay-seed` applies to Dispatch at 35efd326 for the seed, with its tests (The replay, below) |
 | `zz_loadtest_pprof.go.txt` | The pprof listener a Dispatch tree without `cmd/dispatch/pprof.go` gets when `stack.sh` builds it from another commit |
@@ -747,7 +748,7 @@ The flags of `loadgen run -source replay`:
 | `-replay-read-mix` | `read=0.55,docread=0.30,commentref=0.10,search=0.05` | The read actions' kinds and weights. |
 | `-replay-uploads` | `0.25` | U: the share of named versions with a diff re-sent as a whole-document upload (the rest are edits), drawn per event from `-rng-seed`. |
 | `-replay-from`, `-replay-to` | `0`, `39m` | The sub-window, from 22:55:00: events with from <= offset < to. |
-| `-replay-roster` | `762` | Sessions registered with the listener: the bundle's roster ids, then `ses-replay-<n>`. |
+| `-replay-roster` | `762` | Sessions registered with the listener: the bundle's roster ids it accepts as a session key, then `ses-replay-<n>`. |
 | `-replay-keys-file` | (none) | Replay only the issues the file lists (as `replay-seed -keys-file`). |
 
 With `-source replay`, `-events 0 -requests 0` are required, `-sessions` is refused (the roster is
@@ -765,7 +766,7 @@ edits, synthetic specs and documents, file bytes and their multipart boundary. T
 in log order before the window, and so is the client's copy of each document, so every edit,
 upload and quote is fixed before anything is sent. At send time only the ids of the objects the
 run creates, the events cursor (`last_seq`) and an ask's `edited_at` come from responses, and the
-roster is the bundle's ids then `ses-replay-<n>`. Two runs of one bundle, flags and rng seed send
+roster is the bundle's session ids then `ses-replay-<n>`. Two runs of one bundle, flags and rng seed send
 the same requests, action by action, whatever the timing (`TestReplayDeterministic`); another rng
 seed sends other content. They end with the same anchors and versions when Dispatch takes the
 writes to each document in log order and none fails, so each document's writes are sent in plan
@@ -798,12 +799,23 @@ one action of one kind:
 | `child.status`, `comment.anchor_refreshed`, `comment.reopened`, `issue.closed` beside its `issue.updated`, `message.delivery`/`accepted`, `user_state.*` | not sent | derived by the server |
 
 All paths are under `/api/v1`. The client keeps each document's text (the bundle's `docs/`, its
-own edits, the created documents), so an upload sends the current text with no read. An edit is
-the logged diff's hunks as `replace` (or `delete`) ops when the diff is complete (not cut at 4,094
-characters) and each hunk's removed text, widened by context lines while repeated, occurs exactly
-once in the client's text (`edits.diff`); else one `replace` of a unique sentence by synthetic words
-that change the length by the logged size change (`edits.substitute`). A version with no usable
-sentence is not sent (`no_edit`).
+own edits, the created documents), so an upload sends the current text with no read. Every edit
+holds to what `POST /artifacts/{id}/edits` accepts at Dispatch 35efd326 (`replay_edit.go` names
+the code): a `find` or an insert's anchor is matched once against the document's rendered text,
+inside one textblock, so it holds no list marker, escape, table pipe or line break (else `404
+TARGET_NOT_FOUND`, `400 TARGET_SPANS_BLOCKS`, `409 TARGET_AMBIGUOUS`), and a `with` is inline (two
+paragraphs, or the block's own marker, is `400 INVALID_OP`). So each op replaces a plain run of one
+line (outside code spans, emphasis, links, autolinks and inline HTML, in no fence or directive) by
+plain text that is never empty. An edit is the logged diff (`edits.diff`) when the diff is complete
+(not cut at 4,094 characters), the client's text is the version it was taken from (each context and
+removed line is where its hunk says), and every run of changed lines is either as many lines
+changed as removed, each a `replace` of the changed words widened a word at a time until unique, or
+a paragraph added between two blocks, an `insert` of it after the one-line paragraph or heading
+before it, anchored on a unique plain run of that line; else `replace`s of unique sentences by
+synthetic words that change the length by the logged size change, as many sentences as a shrink
+takes (`edits.substitute`). A version with no usable sentence is not sent (`no_edit`). Dispatch then
+holds the client's text byte for byte, but for an answered ask block's `answered_at`, which the
+seed set when it answered.
 
 **Reads** (the stated assumption): before each write, rho read actions on its issue (on the parent
 for a created issue), read j of n sent (n - j) s before the write, never before the sub-window:
@@ -833,10 +845,17 @@ the Requests table, named `<method> <pattern> [<kind>]`. Replay writes carry no 
 delivery columns stay empty. A logged id resolves to the response of the run's own action that
 created it (waited for) or to `loadtest.replay_ids`; an action naming an object that neither has
 (a reply to a comment whose creation failed, say) is not sent and is counted in
-`skipped_missing_dep` by kind. The roster replaces the `ses-lg` sessions: each registers with a
-title, a directory and its home issue's topic (the issue its claim held at 22:55, else one of the
-kept issues) plus further issues' topics until its registration is about 458 bytes, and keeps the
-90 s heartbeat; each subscribes the same topics on NATS.
+`skipped_missing_dep` by kind. The roster replaces the `ses-lg` sessions: the bundle's roster ids
+the listener accepts as a session key (the NATS KV key alphabet; an actor id such as
+`legion-daemon:LINUX` is no session id and is skipped, `roster_skipped`), then synthetic ids up to
+`-replay-roster`. Each registers with a title, a directory and its home issue's topic (the issue
+its claim held at 22:55, else one of the kept issues) plus further issues' topics until its
+registration is about 458 bytes, and keeps the 90 s heartbeat; each subscribes the same topics on
+NATS. A request the action expects to fail (the issue create's `GET
+/projects/{project}/architecture-sources`, which 404s at 35efd326 as it does for the CLI) does not
+end its action; summary.json counts it under the route's `tolerated`, not its `failures`. Every
+route's non-2xx answers are counted by `<status> <code>` in `codes`, the code read from Dispatch's
+error body.
 
 **The record.** At the window start: one read of Dispatch's `/proc/<pid>/stat` (utime + stime),
 then `heap-start.pprof` (`/debug/pprof/heap`, no GC), then the first write. At its end:
@@ -865,6 +884,7 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `inflight_at_end`, `timeouts` | Actions in flight at the window end; actions that hit the 60 s deadline. |
 | `saturated`, `saturated_reasons` | Saturated when Dispatch's 5 s cores reach 0.9 × GOMAXPROCS in at least 10% of the window's samples (`dispatch_cpu`), an action timed out (`timeouts`), or more than 20 actions were in flight at the end (`inflight_at_end`). |
 | `roster` | Sessions registered. |
+| `roster_skipped` | Bundle roster ids the listener refuses as a session key, replaced by synthetic ids. |
 | `doc_order_waits` | Writes that found the previous write on their document still running and waited for it (Sending, above). |
 | `doc_order_wait_s` | Those waits in seconds: `n`, `p50`, `p90`, `p99`, `max`. |
 | `end_state` | {`documents`, `sha256`}: the documents the run wrote and the sha256 over one sorted line per document (its logged artifact id, its highest version number, that version's size, and the sorted sha256 of the quote and block id of each unresolved anchored root comment on it). `end_state.json` in the step directory holds the lines' fields (ids, numbers and hashes, no quote text). Null when the Postgres read failed (`-allow-foreign` with no Postgres reachable). |
@@ -1237,7 +1257,7 @@ There is one row per route and one column per step.
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
 | `route` | name | The route name, `<caller> GET <path template>`; under `-source replay`, `<method> <pattern> [<kind>]`. | the keys of `requests.routes` |
-| `<step name>` | ms, then count | Request latency p50 / p99 of the route in that step, then (failures / count). A failure is a status outside 2xx or a transport error. The count is the sent requests of the route. `-` when the step sent no request on the route. | `requests.routes.<route>.latency_ms`, `.failures`, `.count` |
+| `<step name>` | ms, then count | Request latency p50 / p99 of the route in that step, then (failures / count). A failure is a status outside 2xx or a transport error, an answer the action expected (`tolerated`) apart. The count is the sent requests of the route. `-` when the step sent no request on the route. | `requests.routes.<route>.latency_ms`, `.failures`, `.count` |
 
 ### Replay
 

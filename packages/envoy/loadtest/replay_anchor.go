@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -191,13 +192,24 @@ func refByQuote(text string, bm *replayBlockMap, quote string) int {
 }
 
 // substituteAnchor is chooseAnchor for the replay source's window anchors: given a document's
-// text, the logged block id and quote, the quote to anchor on and the branch that chose it.
+// text, the logged block id and quote, the first of the choice's candidates that the document's
+// rendered text holds once (mdDoc.rendered: a sentence unique in the markdown recurs in a code
+// block or where markup splits another copy of it, and Dispatch, matching the rendered text,
+// answers 409 TARGET_AMBIGUOUS), else the first such sentence of the whole text in fallbackOrder,
+// and the branch that chose it.
 func substituteAnchor(text string, bm *replayBlockMap, blockID, quote string, rngSeed uint64, docID, itemID string) (string, string, error) {
 	c := chooseAnchor(text, bm, blockID, quote, false, false, rngSeed, docID, itemID)
-	if len(c.Candidates) == 0 {
-		return "", c.Branch, fmt.Errorf("anchor %s on document %s has no usable quote", itemID, docID)
+	rendered := scanMarkdown(text).rendered
+	once := func(q string) bool { return strings.Count(rendered, q) == 1 }
+	for _, q := range c.Candidates {
+		if once(q) {
+			return q, c.Branch, nil
+		}
 	}
-	return c.Candidates[0], c.Branch, nil
+	if all := fallbackOrder(rngSeed, docID, itemID, slices.DeleteFunc(fallbackCandidates(text), func(q string) bool { return !once(q) })); len(all) > 0 {
+		return all[0], ruleNoBlockMap, nil
+	}
+	return "", c.Branch, fmt.Errorf("anchor %s on document %s has no usable quote", itemID, docID)
 }
 
 // --- history sizes -------------------------------------------------------------------------------
