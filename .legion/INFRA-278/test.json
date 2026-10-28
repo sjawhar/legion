@@ -2,53 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-27T17:50:00Z",
+  "completed": "2026-10-28T09:16:00Z",
   "generation": 3,
-  "round": 6,
-  "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
-  "codeHeadSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
-  "fingerprint": "Code change since the last full pass: main's batched outbox (#2302) came in with b31c73a4, plus the round-6 fixes (6ff13d39, d56b0642, 970b1209)",
+  "round": 7,
+  "headSha": "32e06ee55de3498dbb3071d16032231b321b600e",
+  "codeHeadSha": "99f818ca1d0b9b792f678a08ce7c8c5e54d18067",
+  "fingerprint": "Changed by the merge of main b295a3fb, which carries #2237 (INFRA-440) and #2228 (INFRA-439); PR comment 6464719458. This is a full round",
+  "workspace": "Recreated before this round. The branch held this tester's last handoff (72d623d5); only the throwaway driver and proxy under $TMPDIR were lost, and both were rebuilt",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at b8afd70b: 9 ok, 0 FAIL. Re-ran the browser suite: 43 passed, 3 skipped. Ran TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere: both subtests pass. One correction: the item-2 negative control says 'settle checking errMentionPending before failures makes both subtests fail'. It does not. b31c73a4's publisher.go with the new test passes both subtests, and so does the head with `errors.Is(err, errMentionPending)`, because attempt.err() (publisher.go:734-742) returns joined denials and failures before errMentionPending. The settle rewrite is a hardening with no change in behaviour. The test does lock attempt.err's precedence: with the deferral checked first there, both subtests fail. The behaviour the criterion asks for holds."
+    "how": "Re-ran `bash scripts/e2e/dispatch-claimant-delivery.sh` at 32e06ee5: 9 ok, 0 FAIL. Re-ran the browser suite (recipients-claim, followers, agent-name, plus issue): 43 passed, 3 skipped. Re-ran the outbox suite: 150 PASS, 0 SKIP. One error in the record, not the product: implement.json again says 'reordering settle so the pending mention wins fails TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere'. Round 6 showed settle's order does not decide that test; attempt.err's precedence does (comment 6449381816)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Claimant delivery inside main's batched outbox, including pending-mention and retry legs",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway delay proxy ($TMPDIR/infra278-test/delay-proxy.ts); throwaway driver $TMPDIR/infra278-test/adversarial.ts",
+      "criterion": "Claimant delivery at the integration head, including held, failed and timed-out mentions, a claim move while a mention is pending, a delivery retry and the roster cache",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener behind a throwaway delay proxy; throwaway driver $TMPDIR/infra278-test/adversarial.ts (rebuilt)",
       "command": "DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash $TMPDIR/infra278-test/adv.sh",
-      "observed": "23 ok, 0 FAIL. Base cases: a person's comment, edit, resolve and reopen {P:1} each; delivered mention {}; mention 404 {P:1}; follower-claimant mention 404 {C:1,P:1}; ask answered and resolved {C:1,P:1}; route session:R {P:1,R:1}; route session:P {P:1}; message.answered {P:1,Q:1}; targeted message and agent comment {}; agent ask reply with no subscription {C:1,P:1}; claim moved to Q {Q:1}; a person's claim {}. Pending legs: held 3 s then sent {}; held 3 s then 404 {P:1}; held 7 s, past the 5 s receipt timeout, {P:1} plus the mention (documented); pending while the claim moves P to Q {Q:1}; a failed mention then a successful delivery retry gives 1 retry send and the outbox copy stays {P:1}. Every held event ended published with attempt_count 0 (events table): deferred, never backed off",
-      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
-      "negativeControl": "Main fails 9 of the base cases (earlier rounds; main has no claimant route)"
+      "observed": "23 ok, 0 FAIL. A person's comment, edit, resolve and reopen {P:1} each. Delivered mention {}; mention 404 {P:1}; follower-claimant mention 404 {C:1,P:1}. Ask answered and resolved {C:1,P:1}. Route session:R {P:1,R:1}; route session:P {P:1}. message.answered {P:1,Q:1}. Targeted message and agent comment {}. Agent ask reply with no subscription {C:1,P:1}. Held 3 s then sent {}; held 3 s then 404 {P:1}; held 7 s {P:1} plus the mention (documented). Pending while the claim moves P to Q {Q:1}. Failed mention then a successful delivery retry: 1 retry send, one outbox copy. Roster probe: no_holder at once, live/adv-r 5.5 s later. Claim moved to Q {Q:1}; a person's claim {}",
+      "headSha": "32e06ee55de3498dbb3071d16032231b321b600e",
+      "negativeControl": "The same 23 cases with DISPATCH_BIN built from main b295a3fb -> 9 ok, 14 FAIL: every claimant copy is missing (comment cases {}, pending-then-failed {}, claim-moved-to-q {}), and the ask read has no claimant or route_status"
     },
     {
-      "criterion": "Reviewer item 2: a held-back copy defers only an attempt that failed nowhere else",
-      "surface": "Go outbox suite on real Postgres, plus mutants in a scratch copy of packages/envoy",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 -v ./internal/dispatch/outbox/; mutants run with -run HeldBack",
-      "observed": "Package ok: 150 PASS, 0 SKIP, TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere included. b31c73a4's publisher.go passes the test too, so the old code already behaved correctly",
-      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
-      "negativeControl": "attempt.err mutated to return errMentionPending before the joined denial and failure errors fails both subtests: 'attempt_count = 0, want the one backed-off attempt' and 'want the claim released: 0 and none'"
+      "criterion": "Main's merge leaves this PR's delivery path intact, and INFRA-439's receiver still shows the claimant copy once",
+      "surface": "the diff 2df3353c..b295a3fb over the outbox, events, model, comment and message writes, ask reads, roster, sse.ts, Inbox features, RouteReach.tsx and fake-envoy.ts; pi-envoy and envoy-client source",
+      "command": "jj diff --from 2df3353c523c --to b295a3fbcb42 --stat <those paths>; grep event_id in packages/envoy-client/src/delivery.ts and packages/pi-envoy/extensions/envoy.ts",
+      "observed": "The only change is api/asks.go, where the 800-character ask cap became contracts.AskQuestionMax. The receiver dedupes by event_id (delivery.ts:333,390), and INFRA-439's replay records delivery by event_id (envoy.ts:1469). The claimant copy shares dispatch-<id> with the issue-topic copy",
+      "headSha": "32e06ee55de3498dbb3071d16032231b321b600e",
+      "negativeControl": "n/a: a reading of the diff and the source. The live cases above carry the proof"
     },
     {
-      "criterion": "Reviewer item 1: the Reaches panel's roster-sensitive scenarios no longer race the 5 s roster",
-      "surface": "Dispatch browser suite (Chromium); the live rig for the cache itself",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts issue.e2e.ts agent-name.e2e.ts --project chromium --retries 0; then --grep 'follower that holds the claim|role route held by the claimant|holder is unknown' --repeat-each 5; the driver's roster-cache-probe leg",
-      "observed": "43 passed, 3 skipped (main's phone-only cases); 15 passed on repeat, none flaky. Probe: no_holder/null right after R took the role, live/adv-r 5.5 s later, which matches routeRosterTTL = 5 * time.Second (issue_route_status.go:66)",
-      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
-      "negativeControl": "The probe's immediate read answers from the stale roster, the race the polls wait out"
-    },
-    {
-      "criterion": "Reviewer item 4: skills/dispatch/SKILL.md:46 keeps its meaning",
-      "surface": "repository text and the skills word budget",
-      "command": "sed -n 46p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w",
-      "observed": "'… as a suspended architect's does: taking it removes the tree from the workflow.'; 1999 words. Line 48 is the approved text",
-      "headSha": "b8afd70bf5e1f216957982f0c04b673a39886947",
-      "negativeControl": "At b31c73a4 the clause read 'that takes the tree out of the workflow', with an ambiguous 'that'"
+      "criterion": "Outbox rules and the Reaches panel at the integration head",
+      "surface": "Go outbox suite on real Postgres; Dispatch browser suite (Chromium)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 -v ./internal/dispatch/outbox/; . /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts issue.e2e.ts agent-name.e2e.ts --project chromium --retries 0",
+      "observed": "outbox ok: 150 PASS, 0 SKIP. Browser: 43 passed, 3 skipped (main's phone-only cases), with the Reaches rows drawn by INFRA-440's AgentName. skills/dispatch/SKILL.md lines 46 and 48 are the approved text, at 1997 words",
+      "headSha": "32e06ee55de3498dbb3071d16032231b321b600e",
+      "negativeControl": "recipients-claim fails on a build of main (the implementer's generation 3 run); the attempt.err mutant fails the scan test (round 6)"
     }
   ],
-  "ci": "At code head 970b1209, read at 17:45Z: Tests 40551032144, Docs 40551032065 and Legion Envoy and Contracts 40551032514 queued; Worker Image 40551032049 and PR Title 40551032028 pending. Not waited for. GitHub reports MERGEABLE.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6449381816"
+  "ci": "At code head 99f818ca, read at 09:06Z: Worker Image 40659799302 success; PR Title 40659951880 success; Tests 40659799382, Docs 40659799199 and Legion Envoy and Contracts 40659799190 queued, cited as queued and not waited for. GitHub reports MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6464976218 (negative control: https://github.com/sjawhar/legion/pull/2225#issuecomment-6465087370)"
 }
