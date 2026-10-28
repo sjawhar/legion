@@ -2,23 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-631",
-  "completed": "2026-10-27T20:10:00Z",
+  "completed": "2026-10-28T10:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2422",
   "proof": [
     {
       "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
       "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, and its unit tests as CI runs them",
       "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0 at head; bun test of the unit file and the moved guides file: 8 pass, 0 fail (the tester's 7 unit tests unmodified)",
-      "headSha": "798895461a677b990e200fda595a41d4675f5494",
-      "negativeControl": "the tester's unit tests against the previous checker 43aac0eb: 0 pass, 7 fail; the checker on main b295a3fb's old files: exit 1, AGENTS 1599 R1 / 101 R2 / 8 R3, README 547 R1 / 23 R2 / 1 R3"
+      "observed": "checker exit 0 on both guides; 17 pass, 0 fail (the tester's 15 unit tests unmodified, the render-guard test, the moved guides test)",
+      "headSha": "77920cae32d7ed6c885f084995f8eaef00f07ec1",
+      "negativeControl": "with the render guard switched off (a scratch copy with renderDifference not called) the same unit file gives 11 pass, 5 fail (tab code, footnote, empty item, script-runner, the guard test); against the round-1 checker 43aac0eb the tester's first 7 tests give 0 pass, 7 fail"
+    },
+    {
+      "criterion": "Tool contract: --write changes only whitespace and never how a file renders (the architect's structural guarantee, 2026-10-28 09:03Z).",
+      "surface": "scripts/semantic-line-breaks.ts --write on copies of every tracked .md file of the repository",
+      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,166 files) copied under $TMPDIR/infra631/corpus/files; xargs bun scripts/semantic-line-breaks.ts --write; tr -s '[:space:]' ' ' + cmp per rewritten file; node $TMPDIR/infra631/render/compare.mjs (micromark 4.0.2 HTML, <p> removed); a second --write",
+      "observed": "1,098 rewritten, 0 of them whitespace-folded different, each render-equal by the guard's mdast comparison; 8 refused, all under packages/envoy/internal/dispatch/pmdoc/testdata/corpus/ (deliberate edge cases: code-span edge spaces, footnotes interrupting paragraphs, empty items, unclosed fences), each naming its block; second --write exit 0, no change. The independent micromark HTML comparison: 1,093 equal, 5 different, each the before side missing a line ending inside a code or HTML block of a tight list item: micromark's HTML compiler drops those line endings in tight lists (shown on a 6-line tight/loose pair), and the mdast values keep them",
+      "headSha": "77920cae32d7ed6c885f084995f8eaef00f07ec1",
+      "negativeControl": "'x ` \\nfoo\\n ` y.' (joining drops the code span's edge spaces): --write exits 2, 'refusing to write: the block at line 1 would render differently', file unchanged"
     },
     {
       "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
       "surface": "git history of the branch, compared as folded words and as CommonMark+GFM renderings (micromark 4.0.2 + micromark-extension-gfm 3.0.0), and restructure.ts as the reviewer re-runs it",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <main b295a3fb AGENTS.md> <out> <README.md> <out>, cmp with the head files; diff of grep '^#' between main and head; folded and rendered equality of the whitespace-only commits 3e604ca8→4b7a6bf9 and 2b4b7ddc→43aac0eb (checked in round 1, those commits unchanged)",
-      "observed": "regeneration from main b295a3fb byte-identical to the head; headings unchanged in both files; the only word changes against round 1's guides are main's own edits and the round's rewording 'the fence its Required configuration item lists'",
-      "headSha": "798895461a677b990e200fda595a41d4675f5494",
+      "command": "bun .legion/INFRA-631/restructure.ts --strict <main b295a3fb AGENTS.md> <out> <README.md> <out>, cmp with the head files (also --strict on current main 9652564f: exit 0)",
+      "observed": "regeneration from main b295a3fb byte-identical to the head guides (unchanged since 79889546: the checker fixes change nothing in them)",
+      "headSha": "77920cae32d7ed6c885f084995f8eaef00f07ec1",
       "negativeControl": "semantic-line-breaks.ts --write on a copy whose relayout replaced one word refused with exit 2 and the file unchanged; restructure.ts --strict on main's AGENTS.md with 'Shutdown stops HTTP first' reworded: exit 1, nothing written"
     },
     {
@@ -26,16 +34,16 @@
       "surface": "git merge-tree --write-tree on branches made from the head's files with the committed patches (refreshed against this head)",
       "command": "TMPDIR=$TMPDIR/infra631 bash .legion/INFRA-631/replay/run.sh (base read from 3c583c55, the regeneration of main 2df3353c the patches were written against)",
       "observed": "exit 0, 11/11 PASS: 5e45356e68aa, 4671996e14fd, 56d31191f8f1, 949ebe03bd4e clean; 5aee84d6930e and 125a3bfb0484 classified same-or-adjacent and conflict; append(a), append(b) clean",
-      "headSha": "798895461a677b990e200fda595a41d4675f5494",
+      "headSha": "77920cae32d7ed6c885f084995f8eaef00f07ec1",
       "negativeControl": "the four clean pairs on the old layout: git merge-tree exit 1 each; append(c), two items at one point of Routes, conflicts; controls 728b5e297fb5 and 4440fc7b57a2 conflict"
     },
     {
       "criterion": "4. Every citation of a moved section still resolves; and the PR body's porting recipe works as written on open pull requests.",
       "surface": "the repository's checks that read packages/envoy/AGENTS.md, Dispatch's document element measure, and the porting recipe driven on open PRs #2387, #2414, #2404 against this head",
-      "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; go test -overlay … -run TestMeasureGuides ./internal/dispatch/pmdoc/; the PR body's porting recipe (steps 2-7) on open PRs #2404 (AGENTS) and #2387 (both files), main.md = this head's files",
-      "observed": "embed limit pass; 49 passed; private names exit 0; AGENTS 24,923 elements / 568,671 bytes, README 10,016 / 169,028 (under 65,536 and 1 MiB); recipe: 0 merge conflicts on all three files; #2404 warns split-self-health-shutdown and its citation skipped for ours.md only and the checker names its 85-row item (recipe step 6/7 says to split it); #2387 README warns its 0138 note belongs in the .up.sql; #2387 AGENTS has one 54-row item from its own additions",
-      "headSha": "798895461a677b990e200fda595a41d4675f5494",
-      "negativeControl": "restructure.ts --strict on a README log noting `0138`: exit 1 'the log notes a migration above `0134`', nothing written; --lenient on main's AGENTS.md with the shutdown anchor reworded warns citation-shutdown-bullet skipped and writes no '(the shutdown bullet below)'"
+      "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; go test -overlay … -run TestMeasureGuides ./internal/dispatch/pmdoc/; the PR body's porting recipe (steps 1-7, S = the checkout's checker) on open PRs #2391 and #2245 (README) and #2404 (AGENTS)",
+      "observed": "embed limit pass; 49 passed; private names exit 0; AGENTS 24,923 elements / 568,671 bytes, README 10,016 / 169,028; recipe: #2391 warns once for each of 0135-0140 and merges with no conflict; #2245 warns for 0120_refs_owed and 0125_refs_owed_seed (numbers main took) and leaves 4 conflicts where both sides changed the same lines; #2404 merges with no conflict and warns split-self-health-shutdown and its citation skipped for ours.md only",
+      "headSha": "77920cae32d7ed6c885f084995f8eaef00f07ec1",
+      "negativeControl": "restructure.ts --strict on PR #2391's README: exit 1 naming each migration above 0134, nothing written"
     }
   ],
   "filesChanged": [
@@ -47,7 +55,8 @@
     ".legion/INFRA-631/replay/ (16 pair patches, 6 demo patches, run.sh, README.md; removed at retro)",
     "scripts/semantic-line-breaks.test.ts (the tester's red tests; the guides test moved out, nothing else changed)",
     "scripts/semantic-line-breaks.guides.test.ts (new: the guides layout test, moved byte for byte by the architect's decision, on demand, not in CI)",
-    ".github/workflows/pr-and-main.yaml (test job runs scripts/semantic-line-breaks.test.ts)"
+    ".github/workflows/pr-and-main.yaml (test job runs scripts/semantic-line-breaks.test.ts)",
+    "package.json, bun.lock (pinned root devDependencies mdast-util-from-markdown 2.0.3, mdast-util-gfm 3.1.0, micromark-extension-gfm 3.0.0, already in the lockfile)"
   ],
   "trickyParts": [
     "Main moved twice on both files after the plan (452e46479082, c210f10d6588): the PR conflicted at open and was resolved by the forward merge 52f2ecef, whose two guides are restructure.ts --strict on main 2df3353c's files. Any later merge to main touching either file conflicts again; resolve the same way and re-run .legion/INFRA-631/replay/run.sh.",
@@ -65,8 +74,10 @@
     "Round 2: the test 'the Envoy guide and the Dispatch server README keep the layout' moved byte for byte from scripts/semantic-line-breaks.test.ts to scripts/semantic-line-breaks.guides.test.ts (commit 38c0374f), on the architect's decision (Envoy 2026-10-27 17:41Z): on demand, deliberately not in CI. CI's test job runs only the unit test file (e4b226b1).",
     "Round 2: R1 accepts a lowercase sentence start only after a bare '.' (with emphasis closers), not after '?', '!', a quote or ')' directly, and a heading number like '## 1.' is no sentence end: both avoid false splits found across skills/ and docs/solutions/.",
     "Round 2: a table starts only where the next line is a matching delimiter row (micromark's rule); a '|'-led line without one is paragraph text.",
-    "Round 2: the migration sentence's number is the constant MIGRATION_NOTE.through (0134), not read from the input; --strict fails and --lenient warns when the input's log notes a higher migration."
+    "Round 2: the migration sentence's number is the constant MIGRATION_NOTE.through (0134), not read from the input; --strict fails and --lenient warns when the input's log notes a higher migration.",
+    "Round 3: by the architect's decision (Envoy 2026-10-28 09:03Z) the six constructs --write misread are covered by a render guard rather than each fixed; 01. and the 4-space fence line are also fixed in the scanner. A tab-indented code block, a footnote definition interrupting a paragraph, an empty item followed by content and a custom element such as <script-runner> make --write refuse the file.",
+    "Round 3: the recipe runs the checker from the checkout (bun install first), since the checker now imports its parser from the checkout's dependencies."
   ],
   "openQuestions": [],
-  "round": 2
+  "round": 3
 }
