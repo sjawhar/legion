@@ -2,28 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-559",
-  "completed": "2026-10-28T08:37:59Z",
-  "round": 3,
-  "decision": "approved",
-  "codeHead": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
+  "completed": "2026-10-28T16:45:52Z",
+  "round": 4,
+  "decision": "changes_requested",
+  "codeHead": "274bdf2a8a50874d0985786162ced8203e6f3f02",
   "critical": 0,
-  "important": 0,
-  "minor": 1,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/routes/router.go",
-      "description": "Cleanup only, on the Fast-follow line. The 'can Postgres store this text' guard is in two places: in dashboard.Store.GetAsset (dashboard.go:317, the right owner) and in the router (router.go:524). The router comment's reason 'answer a store failure' is no longer true now that the store guards itself. Both guards behave correctly, and the router copy only keeps such a path out of the memory reservation."
+      "severity": "important",
+      "file": "packages/dispatch/web/src/api/sse.ts",
+      "description": "PR #2323 conflicts with main e82b013b66ff (#2324, the tab's event-driven refetch). GitHub reports CONFLICTING/DIRTY, and `git merge-tree` shows conflicts in packages/dispatch/AGENTS.md, web/src/__tests__/sse-reconnect.test.tsx, web/src/api/sse.ts and internal/dispatch/api/routes_table_test.go. A correct resolution keeps main's `onOpen({ replayComplete })` and its refresh only when the replay is incomplete. In sse.ts the PR changes only a comment, so its spread wording must apply to the non-replay branch alone. The resolution also keeps main's EVENT_REPLAY_HEADER/StreamOpened beside the PR's RECONNECT_SPREAD_MS and jittered reconnectDelayMs in live.ts, keeps the sse-reconnect timer row at RECONNECT_SPREAD_MS + 1_000, and sets the routes pin to 142 (main's 141 plus /api/v1/dashboard/builds). Merge main, then the tester runs the head."
     }
   ],
-  "verifiedFixes": [
-    "Round-2 finding (invalid UTF-8 asset path reached the store and answered 502 + ERROR): fixed in fc31630412fe. The targeted Go tests pass on real Postgres 17 (dashboard, routes). The tester's negative control on the round-2 server gave 502 and 5 ERROR lines; the head gives 404 and 0 ERROR lines.",
-    "Round-2 stale workflow comment: fixed in 355331f0bd64."
+  "verified": [
+    "Merge 8675beea of main d47dbf05 (#2390 on main): the deep review compared the PR's changed lines before and after the merge, file by file. 59 of 73 files are identical. The other 14 are explained by main's changes, field alignment and the CHANGELOG entries moved into .changes/unreleased fragments. Nothing of INFRA-555 is reverted or duplicated. The registry takes dashboardBuild.Build (cmd/dispatch/main.go:539). Boot order is publish (main.go:268), then listen, then register (main.go:537).",
+    "274bdf2a (signin.multiprocess.e2e.ts and the harness oidc mode): the deep review ran the spec and it passed; harness-signin unit tests 7 pass. DISPATCH_E2E_SIGNIN is read only by the e2e harness and CI, and oidc mode mounts no dev sign-in. The tester's forged-cookie negative controls are refused with 400."
   ],
-  "ci": "Required set: lint, typecheck, test, pr-title. CI head fc31630412fe, and the compare to 252cf6f2 holds only .legion/ (2 files). lint, typecheck and pr-title passed. test first failed in the daemon's TestFetchKeepsAFeedAfterGitGC/killed_during_repack, a flake that dispatch://INFRA-523 tracks (code this PR does not touch; 5 of 5 passed in the pod). It passed on the single rerun (completed 2026-10-27T20:21:24Z).",
-  "thermonuclear": "Pair run once at 252cf6f2 (code fc31630412fe). The deep review approves: Go's and Postgres's views of valid UTF-8 agree, Publish cannot store a key the guard hides, and the slog swap in the subtests is race-free. The code quality review raised the duplicate guard and a repeated log-capture copy in assets_test.go; both are cleanup with no behaviour change.",
-  "threads": "Three threads, all mine; the implementer resolved all three. Round 1's thread was already answered. In this round I answer PRRT_kwDORFy7ds6wxsJM and PRRT_kwDORFy7ds6wxsJQ as fixed and accept them.",
-  "notes": [
-    "At this reading GitHub reports PR #2323 CONFLICTING again with main b295a3fbcb42. The conflicts are in CHANGELOG.md files (claude-envoy, contracts, envoy, pi-legion), packages/envoy/AGENTS.md and cmd/dispatch/main_test.go. There is no migration collision: main ends at 0134. The PR also merges only after #2390, so the implementer's forward merge comes back for the fingerprint check."
-  ]
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head 274bdf2a; the compare to cb08c3cf holds only .legion/ (2 files). The required checks were queued when read and none has passed; this round requests changes on the conflict, so I did not wait.",
+  "thermonuclear": "Pair run once at cb08c3cf (code 274bdf2a). The deep review approves, with no Medium or High finding, and gives the conflict-resolution guidance above. The code quality review found cleanup only, with no behaviour change: a test helper copied from round-robin-proxy.test.ts into harness-signin.test.ts, the oidc/processes mode decided in both harness-ports.ts and harness-listeners.ts, a sign-in check split across two blocks of run-server.sh, two ternaries in playwright.config.ts, env-shape assertions in harness-signin.test.ts, and the DISPATCH_E2E_SIGNIN_* mapping repeated in packages/dispatch/AGENTS.md.",
+  "threads": "Three threads, all mine, all answered and resolved in earlier rounds; no new thread."
 }
