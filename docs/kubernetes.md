@@ -5354,8 +5354,23 @@ issue's pod (every role of it alike) and the image probe's.
   project, and checks, per repository, that both GitHub Apps are installed on it (`GET
   /repos/{owner}/{repo}/installation` under each App's JWT): a repository either App is missing
   from is left out, not refused, and `legion state --json` names it under `repositories.refused`
-  with the App it lacks; a project with no repository mapped does not boot, and one whose every
-  repository lacks an App boots serving none, admitting nothing until an App is installed. Every
+  with the App it lacks; a repository whose installation read fails (any failure but GitHub's
+  answer, an installation or a 404, a read longer than 15 s included; each read is bounded on its
+  own, never the check as a whole, so a slow GitHub that answers is served) is left out for now,
+  named under `repositories.refused` with the App, the repository and the failure; an event of
+  an issue on it is applied and acknowledged with nothing said on it and nothing kept, and once
+  GitHub answers, the daemon recovers the repository: one read of Dispatch's project listing,
+  applied as the boot applies it, to the unrecorded issues on it, under a parent on it, or whose
+  event it applied silently for it during the outage (a
+  labelled root admitted, a child of a live tree recorded under it, parents first, a person's
+  issue left as it is), tried again on a failed listing; the mapping is read again, 30 s
+  doubling to 10 min, until GitHub answers, then the repository is served with no restart (a
+  served repository whose read fails stays served on its last answer, with the name and default
+  branch GitHub last gave it and no further read of GitHub, and is read again the same way); a project
+  with no repository mapped does not boot, one whose every repository lacks an App boots serving
+  none, admitting nothing until an App is installed, and one whose every repository's
+  installation read fails boots serving none and logs so at ERROR (the boot's own reads of the
+  Apps, their logins and their tokens, still refuse it when they fail). Every
   role's gh bundle holds a directory for each served repository's owner. An
   issue is recorded on the repository Dispatch resolves for it, with that repository's default
   branch as GitHub names it, when the daemon first records it, and keeps both. A claim on an issue

@@ -272,10 +272,10 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The mapping read waits out an unreachable Dispatch without limit, and the mapping's
-	// installation check and the App mint wait out GitHub's transient failures within appMintRetry;
-	// the boot budget bounds none of them, as it does not bound the plugin gate or the image probe:
-	// the work after them has a budget of its own.
+	// The mapping read waits out an unreachable Dispatch without limit, and the App mint waits out
+	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
+	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
+	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
 	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
@@ -1462,10 +1462,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
 	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
+	var unread func(string) bool
+	var await func(repo, tree, child, parent string)
 	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady, prepare = workflow.claimReady, workflow.prepareObserved
+		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
 		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
@@ -1507,6 +1509,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RepositoryUnread:   unread,
+		AwaitRecovery:      await,
 		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,

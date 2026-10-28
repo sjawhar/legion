@@ -317,6 +317,18 @@
 
 ### Changed
 
+- `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
+  a line number, since a line number is stale at the next edit. A sentence that cites a gate
+  passing (a test, review, check or proof) also says, in that sentence, what the pass does not
+  show, so a reader does not take it as evidence of more. To stay under the 2,000-word guard, lines
+  another loaded text already says are cut: the Legion reviewer names in "Each version" and the
+  design-gate pointer in "Approval" (`skill://legion-architect` holds both), the description's
+  pointer to `skill://legion-architect` (`dispatch-first`'s table names it), the approval Dispatch
+  carries (the version it carries to is approved, so "Approval" already asks for none), "The spec
+  is the issue's primary document" and "Name an issue by its `dispatch://` link" (`dispatch` says
+  both), "resolve the ask it answers" (`dispatch`, "Close what you opened"), "Write what is true
+  now", and "Length scales with the change".
+
 - `dispatch-writing-specs`, `dispatch` and `dispatch-first` tell a session to name the concrete
   case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
   choice in those terms, never "Which option?". The ask block template shows that shape. To stay
@@ -327,10 +339,9 @@
   the session's own tree touches is fixed in that tree's pull request, any other goes to the
   Legion controller, and a finding that needs a decision is an ask.
 
-- `dispatch request-approval --help`, and `dispatch-writing-specs`, "Each version", name both
-  reviewers a Legion architect runs before an approval request, `plan-gap-analyst` and
-  `plan-reviewer`. `--summary` says that a Legion architect ends it with one sentence giving the
-  two reviews' results.
+- `dispatch request-approval --help` names both reviewers a Legion architect runs before an
+  approval request, `plan-gap-analyst` and `plan-reviewer`. `--summary` says that a Legion
+  architect ends it with one sentence giving the two reviews' results.
 
 - Three Dispatch skills ship, under 2,000 words together, from four skills and the
   dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
@@ -351,19 +362,19 @@
   settled; each design choice no source states is a decision entry; the fresh reader gets the whole
   spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
   acceptance checks never delay approval; and text is about the design, never the person.
-- `dispatch-writing-specs`, "The outline": a spec's length scales with the change (a small change gets
-  a few sentences per part, no matrix), and the Summary names the change in the reader's own terms,
-  never in a category the writer coined.
+- `dispatch-writing-specs`, "The outline": a small change gets a few sentences per part, no matrix,
+  and the Summary names the change in the reader's own terms, never in a category the writer
+  coined.
 - `dispatch-first`, which every session holds, says: the moment a person blocks your work, open a
   `dispatch ask` for it, and run `dispatch open-asks` before you say you wait on a person; and record
   every request you accept in Dispatch before you start it, read that record before a turn ends, and
   drop no item. `src/skills-guard.test.ts` holds both rules to the context a session receives.
-- `dispatch-writing-specs`: name an issue by its `dispatch://` link and say in a clause what it does
-  for the reader, never a bare key; and when a person's answer, comment or edit changes a text, write
-  what is true now and never narrate the edit, since versions and comments hold the history. In
-  `dispatch`, three lines that repeat what the command prints are gone: the meaning of `You've sent N
-  messages`, "never progress or status" (`dispatch message --help`) and the read-back after an
-  inserted block (`dispatch doc-edit --help`).
+- `dispatch-writing-specs`: say in a clause what each issue you name does for the reader; and when a
+  person's answer, comment or edit changes a text, never narrate the edit or what used to be there,
+  since versions and comments hold the history. In `dispatch`, three lines that repeat what the
+  command prints are gone: the meaning of `You've sent N messages`, "never progress or status"
+  (`dispatch message --help`) and the read-back after an inserted block (`dispatch doc-edit
+  --help`).
 - `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
   only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
   such changes into one version. Any other fix goes in the plan or a comment, so the person is not
