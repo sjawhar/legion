@@ -131,7 +131,7 @@ func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, provide
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
 	require.NoError(t, err)
-	require.Equal(t, "POSTGRES_16", settings.DatabaseVersion)
+	require.Equal(t, "POSTGRES_18", settings.DatabaseVersion)
 	require.Equal(t, "db-custom-4-15360", settings.DatabaseTier)
 	require.True(t, settings.DeletionProtection)
 	require.Equal(t, "dispatch", settings.Namespace)
@@ -1235,9 +1235,11 @@ func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, 
 		dials+" dials the proxy at its Service, not at the pod")
 }
 
-// envoy-dispatch exits 1 when it cannot reach NATS through the proxy, and its /healthz answers 503
-// until it connects, so an app pod started before the front door and its Service exist never goes
-// ready and the rollout waits it out.
+// envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
+// false, and its bus clients connect in the background once the front door's proxy answers. So an
+// app pod started before the front door and its Service would still go ready, serving without
+// the bus until the proxy answers; the app waits for the front door only so that it starts
+// connected.
 func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1600,7 +1602,7 @@ func podProbes(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]
 }
 
 // A liveness probe restarts a container, so it fails only when the process does not answer at
-// all: Dispatch's and the listener's /healthz answer 503 while Postgres or NATS is down, and run
+// all: Dispatch's /healthz answers 503 while Postgres is down and the listener's while NATS is, and run
 // those checks on every call, so a liveness or startup probe failing on that, or waiting on it,
 // would turn a dependency outage or a slow hub into a restart of every pod. So no liveness or
 // startup command passes curl -f (any short-option cluster holding f, or --fail), none is an
@@ -1679,6 +1681,30 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 			policy = "PREVENT"
 		}
 		require.Equal(t, policy, m.One(t, "gcp:sql/database:Database").Inputs.Mappable()["deletionPolicy"])
+	}
+}
+
+// The instance runs the major databaseVersion names, and POSTGRES_18 when it is unset; the
+// settings the component resolves name the same version.
+func TestDispatchInstanceRunsTheDatabaseVersion(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		version *string
+		want    string
+	}{
+		{"unset", nil, "POSTGRES_18"},
+		{"POSTGRES_16", pulumi.StringRef("POSTGRES_16"), "POSTGRES_16"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseVersion = row.version
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.want, settings.DatabaseVersion)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, row.want, m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["databaseVersion"])
+		})
 	}
 }
 

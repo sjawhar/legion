@@ -107,9 +107,13 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	}
 	defer stop()
 	// The session publishes only while a viewer is attached, so it has to hear from this one
-	// before the first turn, not after it.
+	// before the first turn, not after it. The relay's connection refuses that publish at once
+	// while it is not connected to NATS (before its first connection, or during a reconnect), so the
+	// viewer is told the relay is unavailable rather than held on a stream nothing reaches, and the
+	// dashboard's reconnect attaches once the bus answers.
 	if err := source.Watch(sessionID); err != nil {
-		s.writeHandlerError(w, err)
+		writeError(w, "STREAM_UNAVAILABLE", http.StatusServiceUnavailable,
+			"the agent conversation relay cannot reach NATS; try again shortly")
 		return
 	}
 

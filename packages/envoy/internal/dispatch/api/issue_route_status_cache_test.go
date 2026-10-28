@@ -37,6 +37,13 @@ func sreReach(roster routeRoster) string {
 // machine takes to release the fetch, it reads no timeout as unknown and no expiry calls again.
 func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, release func()) {
 	t.Helper()
+	return heldRosterMux(t, http.NewServeMux(), Deps{})
+}
+
+// heldRosterMux is heldRosterServer mounted on mux over deps, whose Envoy it sets to the held
+// listener's client: a test that serves requests through mux gives deps a Store and an Identity.
+func heldRosterMux(t *testing.T, mux *http.ServeMux, deps Deps) (served *server, calls *atomic.Int32, release func()) {
+	t.Helper()
 	calls = &atomic.Int32{}
 	gate := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +60,8 @@ func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, releas
 	// Release before the close, which waits for every request in flight to finish.
 	t.Cleanup(listener.Close)
 	t.Cleanup(release)
-	served = register(http.NewServeMux(), t.Context(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))})
+	deps.Envoy = envoy.New(listener.URL, envoy.WithTimeout(time.Minute))
+	served = register(mux, t.Context(), deps)
 	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
 	return served, calls, release
 }

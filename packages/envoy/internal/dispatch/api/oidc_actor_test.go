@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
@@ -164,6 +167,40 @@ func TestServiceTokenForAnotherAudienceIsRejectedAsInvalidToken(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"code":"OIDC_TOKEN_INVALID"`) {
 		t.Fatalf("wrong-audience token body = %s, want code OIDC_TOKEN_INVALID", response.Body.String())
+	}
+}
+
+// issuerDownVerifier is a service-account token verifier whose issuer cannot be reached, as
+// *oidc.LazyVerifier answers before its issuer is discovered.
+type issuerDownVerifier struct{}
+
+func (issuerDownVerifier) Verify(context.Context, string) (oidc.Claims, error) {
+	return oidc.Claims{}, fmt.Errorf("%w: the test's issuer is down", oidc.ErrIssuerUnavailable)
+}
+
+// signInDownIdentity is a person whose lapsed confirmation the sign-in issuer could not renew,
+// as identity.Membership answers it: ErrSignInUnavailable with the issuer's own failure behind it.
+type signInDownIdentity struct{}
+
+func (signInDownIdentity) Login(*http.Request) (string, error) {
+	return "", fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, fmt.Errorf("oidc: refresh: %w: 503", oidc.ErrIssuerUnavailable))
+}
+
+// Each issuer's outage answers its own code on one server: a service-account token whose issuer
+// is down is 503 OIDC_ISSUER_UNAVAILABLE, never the sign-in's SIGNIN_UNAVAILABLE, and a person
+// whose confirmation the sign-in issuer could not renew is 503 SIGNIN_UNAVAILABLE, though that
+// error carries oidc.ErrIssuerUnavailable too.
+func TestAServiceTokenIssuerOutageAndASignInOutageEachAnswerTheirOwnCode(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuerDownVerifier{}, identity: signInDownIdentity{}})
+
+	service := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, "header.payload.signature")
+	if service.Code != http.StatusServiceUnavailable || !strings.Contains(service.Body.String(), `"code":"OIDC_ISSUER_UNAVAILABLE"`) {
+		t.Errorf("a service-account token while its issuer is down: status=%d body=%s, want 503 OIDC_ISSUER_UNAVAILABLE", service.Code, service.Body.String())
+	}
+	person := httptest.NewRecorder()
+	handler.ServeHTTP(person, httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil))
+	if person.Code != http.StatusServiceUnavailable || !strings.Contains(person.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) {
+		t.Errorf("a person while the sign-in issuer is down: status=%d body=%s, want 503 SIGNIN_UNAVAILABLE", person.Code, person.Body.String())
 	}
 }
 

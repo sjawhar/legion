@@ -53,20 +53,10 @@ it, and any other change to the head voids it.
   push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
   comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
   nothing: tell the architect and do not approve. A required check
-  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that run's
-  failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
-  succeeded too. Find the run and job at the CI head: the head's runs
-  (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<ci head>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
-  then each candidate run's jobs
-  (`gh api repos/<o>/<r>/actions/runs/<run-id>/jobs --jq '.jobs[] | [.id, .name, .status, .conclusion] | @tsv'`).
-  A cancelled job: `gh run rerun <run-id> --failed`, which GitHub applies to the run's failed and
-  cancelled jobs and the jobs that depend on them, and to nothing that succeeded. Never
-  `--job <job-id>` alone: under a routing workflow, re-running only the final job reads the
-  cancelled results again and stays red. GitHub refuses a re-run while an attempt of that run is
-  still in progress: wait for it. When no
-  run at the CI head holds the job, or nothing will run it (a check only a commit status reports, a
-  workflow another repository defines), tell the architect and do not approve. `gh pr checks <n>`
-  is not the read: it reads only the current head, which
+  `queued` or `in_progress`: wait. One `completed` as
+  `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
+  check only a commit status reports, a workflow another repository defines), tell the architect
+  and do not approve. `gh pr checks <n>` is not the read: it reads only the current head, which
   at a handoff head shows only the `pr-title` runs the review events start (measured on
   sjawhar/legion#1944 at 0220b94fc2 on 2026-10-14).
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
@@ -299,10 +289,11 @@ reviewing until you finish.
   repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
   on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
   job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
-  Dispatch's `server.started` naming such a build, or on the build the daemon read from Dispatch at
-  its boot. The woken look's task names the event (`Dispatch's issue.deployed: run <id> completed <t>`,
+  Dispatch's `server.started` announcing that every server process serves such a build, or on the
+  build the daemon read from Dispatch at its boot. The woken look's task names the event
+  (`Dispatch's issue.deployed: run <id> completed <t>`,
   `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <t>`,
-  `the Legion daemon's boot on build <sha>`, `Dispatch's start on build <sha>`,
+  `the Legion daemon's boot on build <sha>`, `Dispatch serving build <sha> on every server process`,
   `Dispatch's build <sha>`), and its `Production:` line names it too, so the pull request carries
   the cause. Never poll for the deploy, never wait on a reply, and never ask anyone for approval
   to deploy. Open a `dispatch ask` to a person only when the instructions name nobody for that

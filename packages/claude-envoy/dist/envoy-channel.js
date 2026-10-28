@@ -50647,12 +50647,8 @@ async function startChannelSession(options) {
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
-  const handoffFileChanged = (current) => {
-    if (current.ino !== 0)
-      requestHeartbeat();
-  };
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged);
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat);
     requestHeartbeat();
   }
   (async () => {
@@ -50715,7 +50711,7 @@ async function startChannelSession(options) {
       shuttingDown = true;
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
-        unwatchFile(handoffFile, handoffFileChanged);
+        unwatchFile(handoffFile, requestHeartbeat);
       await forwarder.close();
       await serialized(() => options.client.unregisterSession(identity.id)).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
