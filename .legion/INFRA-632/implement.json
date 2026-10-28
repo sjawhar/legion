@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-632",
+  "completed": "2026-10-28T18:11:12Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2474",
+  "codeHead": "464377da97100b501400d709128f7cd74c56c43b",
+  "proof": [
+    {
+      "criterion": "Acceptance 1: outside fences no line holds more than one sentence, list items are separated by blank lines, no item or table row is longer than one screen; failing tables are lists; no fence left under ## Commands",
+      "surface": "the checker as a contributor runs it: bun scripts/semantic-line-breaks.ts on the three guides at head",
+      "command": "bun scripts/semantic-line-breaks.ts AGENTS.md scripts/e2e/README.md docs/kubernetes.md; awk '/^## /{s=$0} /^```/ && s==\"## Commands\"{print FILENAME\":\"NR; bad=1} END{exit bad}' AGENTS.md; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "checker exit 0, stdout 0 B, stderr 0 B (no finding, no verbatim warning); awk exit 0; 95 tests pass, 0 fail; over all 1,255 tracked .md files the new verbatim warning names none",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "the same checker on main 690c0136's three files exits 1 with 2,408 R1, 295 R2 and 7 R3 findings; the awk check on main's AGENTS.md finds 4 fence lines and exits 1; the warning's unit tests fail against the checker without the warning change"
+    },
+    {
+      "criterion": "Acceptance 2: nothing lost; every difference is a named edit; head regenerates byte for byte; headings, anchors and pinned phrases unchanged",
+      "surface": "the regeneration script and the difference and rendered-text checks (micromark + GFM, as GitHub renders) on main's files and the head's",
+      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main 690c0136 files> <outs>; cmp outs head; bun .legion/INFRA-632/check-differences.ts --file <out> <base> <head> r.json; bun .legion/INFRA-632/check-rendered.ts <base> <head>; heading/link/pinned-phrase diffs",
+      "observed": "restructure exit 0 and all three outputs identical to head; check-differences: AGENTS 78, README 265, kubernetes 38 entries applied, 0 unexplained hunks; check-rendered: 0 missing words (15,786 / 71,909 / 86,135 base words), 109 Commands placeholders present; headings identical (10/55/56); in-file anchor links identical (0/131/170); every pinned phrase present",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "head AGENTS.md with one word ('own') deleted: check-differences exit 1, 'UNEXPLAINED ... [-own-]'; head AGENTS.md with `<tailnet>.ts.net` taken out of its code span: check-rendered exit 1, 'MISSING base word 8638 ... [tailnet]'"
+    },
+    {
+      "criterion": "Acceptance 3: replayed real conflicting merges on the restructured files merge clean where the edits changed different sentences or added different items; two items appended at different places of one list merge clean",
+      "surface": "git merge-tree --write-tree in a throwaway repository seeded from head commit 94850c01's three guides",
+      "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh",
+      "observed": "exit 0, 36 lines PASS: 20 real pairs classified different sentences or items merge clean (7 root, 8 README, 5 Kubernetes), three two-place appends (Commands, e2e index, capability-check tool list) merge clean; b1d8a21b1e8f (root) is an insertion directly before a command line the other side edits, classified adjacent, conflicts",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "every control conflicts: 760468db6c78 and 82fd7d27b4f2 (root), 3ac0f1f0ca6e and 9164e75b4c3c (README), e0ab76dcd45f, 702806bf4da7 and eceefebffe3f (Kubernetes), and two items appended at one point of each of the three lists"
+    },
+    {
+      "criterion": "Acceptance 4: every citation of a moved section still resolves; tests and checks that read the files pass",
+      "surface": "the repository's own tests that parse or scan the guides, and its lint and public-name checks",
+      "command": "cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestTheReclaimParagraph|TestTheBootCensusRefusesEverySandboxOfTheTreeVolumeLayout' -count=1 && go test ./internal/config -run TestLoadForValidationRefusesUnderKubernetes -count=1; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh; bunx biome check .",
+      "observed": "sandbox ok, config ok; skills-guard 13 pass; check-private-names exit 0; biome exit 0",
+      "headSha": "464377da97100b501400d709128f7cd74c56c43b",
+      "negativeControl": "docs/kubernetes.md with the reclaim paragraph's anchor sentence reworded ('The remedy' -> 'The cure', restored afterwards): TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume and TestTheReclaimParagraphNeverDeletesWhatItExempts FAIL, so the passing run reads the re-laid-out paragraph"
+    }
+  ],
+  "filesChanged": [
+    "AGENTS.md",
+    "scripts/e2e/README.md",
+    "docs/kubernetes.md",
+    "scripts/semantic-line-breaks.ts",
+    "scripts/semantic-line-breaks.test.ts",
+    "scripts/semantic-line-breaks.guides.test.ts",
+    ".legion/INFRA-632/restructure.ts",
+    ".legion/INFRA-632/check-differences.ts",
+    ".legion/INFRA-632/check-rendered.ts",
+    ".legion/INFRA-632/replay/ (run.sh, README.md, 72 patches)",
+    "carried from sjawhar/legion#2422 by merge 91d5417f: its checker, tests, two guides, package.json, bun.lock, pr-and-main.yaml"
+  ],
+  "trickyParts": [
+    "R3 counted a parent item's nested sub-items toward the parent, so nested enumerations could never pass; the checker now attributes each line to the innermost open item (three unit tests).",
+    "The Commands fences become Markdown: placeholders such as <tailnet> and @-prefixed tokens are put in code spans so nothing renders as an HTML tag or an include; check-rendered.ts proves every placeholder renders literally.",
+    "Two README table rows held an unescaped | in a code span (<on|off>), which GitHub read as an extra cell and dropped; as list items that text now renders.",
+    "The replay base is pinned to commit 94850c01 (REPLAY_BASE), so later regenerations on a newer main do not require re-porting the patches."
+  ],
+  "deviations": [
+    "Checker R3 changed to count an item's own lines (the plan assumed this behaviour for its nested sub-items).",
+    "The capability-check bullet's Debian group is split per tool, since the group alone was 69 screen rows.",
+    "Replay pair b1d8a21b1e8f (root) is classified adjacent and conflicts: an inserted command item directly before the Stage 4a command line the other side edits; the plan expected clean. Same limit as the settled control e0ab76dcd45f.",
+    "16 live-proof README tables converted and 19 kept by the rule on main's files (the plan estimated 19 and 14).",
+    "Four replay pairs are forward copies, recorded in replay/README.md."
+  ],
+  "openQuestions": [
+    "sjawhar/legion#2422 has not merged; this branch carries it (merge 91d5417f). Per the architect's decision, sign-off waits for #2422's merge and this branch's merge of main with an empty diff on #2422's paths."
+  ]
+}
