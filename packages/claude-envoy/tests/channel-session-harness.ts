@@ -196,9 +196,13 @@ export function settled(): Promise<void> {
  * server's own heartbeat performs, which no fake clock can advance. The
  * deadline is read from the monotonic clock, which `setSystemTime` leaves alone.
  *
- * The package's `test` script gives each test 15 s (`--timeout=15000`): no test here waits more
- * than twice, 2 × 5 s, and 5 s more covers startup and shutdown. Under bun's default of 5 s its
- * own timeout fired first, and a stuck wait never said which step it was.
+ * The package's `test` script gives each test 60 s (`--timeout=60000`), above the longest chain of
+ * waits one test makes: a wait that succeeds can take up to its 5 s, so a stuck wait names its step
+ * only once every wait before it has had its time. The longest is eleven, counting the waits of
+ * `boot` and `reconnect` (envoy-channel-replay.test.ts, "a stored frame the channel never takes is
+ * named in one notice…"): 11 × 5 s, and 5 s more covers startup and shutdown. A test that chains
+ * more raises it. Under bun's default of 5 s its own timeout fired first, and a stuck wait never
+ * said which step it was.
  */
 export async function waitFor(
   condition: () => Promise<boolean>,
