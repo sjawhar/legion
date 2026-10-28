@@ -1,4 +1,4 @@
--- 0135_comment_deliveries_pending.up.sql
+-- 0136_comment_deliveries_pending.up.sql
 --
 -- The comment mention sender's stranded pass (api/comment_mention_sender.go,
 -- strandedCommentMentions) runs in every Dispatch process at start and every 30 s, reading the

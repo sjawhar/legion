@@ -422,8 +422,7 @@ func commentWithAnUnansweredLookup(t *testing.T, lookup unansweredLookup) unansw
 // mentionLookupTimeout, and the mention sender delivers the mention after the response once the
 // listener answers. When the issue's route is the very string the comment mentions, both name
 // one session, so the event suppresses the route by that string and the session hears the
-// comment once, from the mention. The unanswered session:s1 mention still names s1, so the
-// event lists s1 among the sessions the author routes skip.
+// comment once, from the mention.
 func TestAnUnansweredMentionOfTheRouteItselfSuppressesTheRouteCopy(t *testing.T) {
 	got := commentWithAnUnansweredLookup(t, unansweredLookup{
 		route: "session:s1", mention: "session:s1", hungPath: "/v1/registry/s1",
@@ -432,9 +431,6 @@ func TestAnUnansweredMentionOfTheRouteItselfSuppressesTheRouteCopy(t *testing.T)
 		got.payload.SuppressedRouteSessionID != nil {
 		t.Fatalf("comment.created suppresses route %v (%q, session %v), want session:s1 suppressed by its string",
 			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
-	}
-	if !slices.Equal(got.payload.SuppressedAuthors, []string{"s1"}) {
-		t.Fatalf("comment.created suppresses authors %v, want [s1]: the mention names it", got.payload.SuppressedAuthors)
 	}
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
@@ -457,10 +453,6 @@ func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing
 		t.Fatalf("comment.created suppresses route %v (%q, session %v), want no route suppressed",
 			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
 	}
-	if len(got.payload.SuppressedAuthors) != 0 {
-		t.Fatalf("comment.created suppresses authors %v, want none: the unanswered role names no session",
-			got.payload.SuppressedAuthors)
-	}
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
 	}
@@ -471,16 +463,12 @@ func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing
 }
 
 // A reply that mentions session:s1, the session that wrote its thread's root, names s1 even when
-// s1's lookup goes unanswered: the author route skips s1, which hears the reply once, from the
-// mention.
+// s1's lookup goes unanswered: the comment's mentions name s1, so the author route leaves s1 to
+// the mention, and s1 hears the reply once, from it.
 func TestAnUnansweredSessionMentionOfTheRootAuthorSuppressesTheAuthorCopy(t *testing.T) {
 	got := commentWithAnUnansweredLookup(t, unansweredLookup{
 		mention: "session:s1", hungPath: "/v1/registry/s1", replyToS1: true,
 	})
-	if !slices.Equal(got.payload.SuppressedAuthors, []string{"s1"}) {
-		t.Fatalf("comment.created suppresses authors %v, want [s1]: the mention names the root author",
-			got.payload.SuppressedAuthors)
-	}
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
 	}
@@ -497,10 +485,6 @@ func TestAnUnansweredRoleMentionHeldByTheRootAuthorLeavesTwoCopies(t *testing.T)
 	got := commentWithAnUnansweredLookup(t, unansweredLookup{
 		mention: "role:reviewer", hungPath: "/v1/roles/reviewer", replyToS1: true,
 	})
-	if len(got.payload.SuppressedAuthors) != 0 {
-		t.Fatalf("comment.created suppresses authors %v, want none: the unanswered role names no session",
-			got.payload.SuppressedAuthors)
-	}
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
 	}

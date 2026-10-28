@@ -878,13 +878,19 @@ type AskEventPayload struct {
 	Ask
 	ReferenceChangesPayload
 	Restored bool `json:"restored,omitempty"`
+	// ThreadLogins is carried by ask.opened, ask.answered and ask.resolved: every login with a
+	// Replies row (user_threads) on the ask's thread once the write is in, read in its own
+	// transaction (events.ThreadLogins), so a viewer knows whether their Replies count can have
+	// moved. Absent on every other ask event; [] when nobody has a row.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // NewReferenceChangesPayload states what a write moved on a typed event payload.
 func NewReferenceChangesPayload(changes ReferenceChanges) ReferenceChangesPayload {
 	return ReferenceChangesPayload{
-		ReferencesChanged:          changes.Targets,
-		ReferencesChangedTruncated: changes.Truncated,
+		ReferencesChanged:               changes.Targets,
+		ReferencesChangedTruncated:      changes.Truncated(),
+		ReferencesChangedTruncatedKinds: changes.TruncatedKinds,
 	}
 }
 
@@ -908,9 +914,22 @@ type AskAnsweredEventPayload struct {
 // IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
 // plus what the write moved in the reference graph. A new issue's spec text is indexed in the
 // creating transaction, so `issue.created` names the nodes that body cited.
+//
+// issue.created, issue.updated and issue.closed also say what the write changed, read in its own
+// transaction: Changed names each field whose value the write moved (title, status, closed_at
+// for a close or a reopen, rank, priority, assignee, parent, labels, route, repo, components,
+// blocked_by, external_links; for issue.created every field the new issue holds a value in),
+// Ancestors the issue's parent chain,
+// parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
+// whose Replies count the move can change: for a close or a reopen every login with a Replies row
+// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
+// Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue
 	ReferenceChangesPayload
+	Changed      []string `json:"changed,omitzero"`
+	Ancestors    []string `json:"ancestors,omitzero"`
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // NewIssueEventPayload builds the payload of an `issue.*` event. A write that indexes no text
@@ -1213,19 +1232,28 @@ type Suggestion struct {
 }
 
 // ReferenceChanges is what one write moved in the reference graph, in the shape every event
-// that reports it carries: the counted targets it touched, or Truncated when there were more
-// than an event names and the reader refreshes its lists wholesale.
+// that reports it carries: the counted targets it touched, and TruncatedKinds, the kinds (issue,
+// ask, artifact, block) of which it touched more than an event names, for which the reader
+// refreshes every read wholesale while it still refreshes the named targets of the other kinds.
 type ReferenceChanges struct {
-	Targets   []ChangedReference
-	Truncated bool
+	Targets        []ChangedReference
+	TruncatedKinds []string
 }
 
-// The two wire keys every event that reports reference changes carries. A typed payload spells
+// Truncated is whether the write touched more targets of some kind than the event names.
+func (c ReferenceChanges) Truncated() bool {
+	return len(c.TruncatedKinds) > 0
+}
+
+// The three wire keys every event that reports reference changes carries. A typed payload spells
 // them in its struct tags through ReferenceChangesPayload and a map payload through
 // NameReferenceChanges, and model_test.go pins the two spellings together.
+// ReferencesChangedTruncatedKey stays beside the kinds for a reader written before them, which
+// falls back for every kind.
 const (
-	ReferencesChangedKey          = "references_changed"
-	ReferencesChangedTruncatedKey = "references_changed_truncated"
+	ReferencesChangedKey               = "references_changed"
+	ReferencesChangedTruncatedKey      = "references_changed_truncated"
+	ReferencesChangedTruncatedKindsKey = "references_changed_truncated_kinds"
 )
 
 // ReferencedByCountKey is the wire key carrying how many graph_edges rows point at an ask. Ask
@@ -1233,11 +1261,12 @@ const (
 // and model/reference_changes_test.go pins the spelling against the struct.
 const ReferencedByCountKey = "referenced_by_count"
 
-// ReferenceChangesPayload is the pair of fields a typed event payload carries, embedded so every
-// payload spells them once.
+// ReferenceChangesPayload is the fields a typed event payload carries, embedded so every payload
+// spells them once.
 type ReferenceChangesPayload struct {
-	ReferencesChanged          []ChangedReference `json:"references_changed,omitempty"`
-	ReferencesChangedTruncated bool               `json:"references_changed_truncated,omitempty"`
+	ReferencesChanged               []ChangedReference `json:"references_changed,omitempty"`
+	ReferencesChangedTruncated      bool               `json:"references_changed_truncated,omitempty"`
+	ReferencesChangedTruncatedKinds []string           `json:"references_changed_truncated_kinds,omitempty"`
 }
 
 // NameReferenceChanges records what a write moved on a map-shaped event payload, in the same
@@ -1246,19 +1275,28 @@ func NameReferenceChanges(payload map[string]any, changes ReferenceChanges) {
 	if len(changes.Targets) > 0 {
 		payload[ReferencesChangedKey] = changes.Targets
 	}
-	if changes.Truncated {
+	if changes.Truncated() {
 		payload[ReferencesChangedTruncatedKey] = true
+		payload[ReferencesChangedTruncatedKindsKey] = changes.TruncatedKinds
 	}
 }
 
 // ChangedReference is a node whose inbound reference edges one write moved, addressed the way
 // the lists that carry its backlink count are keyed: an issue by key, an ask by id together
-// with the issue or document whose ask list holds its row.
+// with the issue or document whose ask list holds its row. A document or file (kind "artifact")
+// is named by its uuid, the id its Referenced by panel's read reports for the node, and by Ref,
+// its dispatch:// address as refs.ArtifactRef spells it (the reference that panel is opened on);
+// Ref is empty for an artifact whose owner names no address. An artifact entry carries neither
+// IssueKey nor ArtifactID, which address an ask's row list. A block of a document (kind "block")
+// is named by its node id (`<document ref_key>#<block id>`, the id its graph read reports), by Ref,
+// its reference as refs.BlockRef spells it, and by ArtifactID, its document's uuid, whose panel
+// lists the edges at its blocks; a write names one whose inbound edges, or whose text, it moved.
 type ChangedReference struct {
 	Kind       string  `json:"kind"`
 	ID         string  `json:"id"`
 	IssueKey   *string `json:"issue_key,omitempty"`
 	ArtifactID *string `json:"artifact_id,omitempty"`
+	Ref        string  `json:"ref,omitempty"`
 }
 
 // CommentEventPayload is the wire payload of comment.* and suggestion.* events:
@@ -1291,32 +1329,34 @@ type CommentEventPayload struct {
 	// comment.answered a delivery callback appends; empty when the comment replies to an
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
-	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
-	// so the outbox can deduplicate without consulting the live session registry. They name
-	// candidates only: the sessions the comment's mentions deliver it to as far as its creation
-	// knows - the session the mention's lookup pinned, or the <id> of a session:<id> mention whose
-	// lookup went unanswered within its bound (that mention itself stays unpinned). The mention's
-	// send runs after the commit and can fail, so the outbox applies one rule to each candidate's
-	// copy when it publishes: it skips the copy once comment_deliveries shows the mention was sent,
-	// holds it back while that send is still pending, and publishes it when the send failed or was
-	// abandoned. It reads an unpinned session:<id> mention's attempts as that <id>'s. A pending
-	// attempt no sender ever claimed, created more than DeliveryClaimLapse ago, is abandoned: the
-	// outbox settles it failed, in one transaction under the comment's owner lock, before it
-	// publishes the copy, and a sender's claim that lands first keeps it pending, so whichever acts
-	// first settles the attempt and the session gets the mention or the copy, not both. A send
-	// queued behind its lane that long is settled so too, and its sender's later claim finds it
-	// settled and sends nothing. An attempt a sender claimed - a send in flight when its process
-	// died, which may have reached the listener - is left to the stranded pass, which resends it
-	// under its own idempotency key, so the listener drops a repeat; the outbox takes it as
-	// abandoned only past StrandedMentionWindow, when no sender resumes it. A send the API settles
-	// failed, that resend included, reopens the comment's comment.created event when the comment
-	// mentions the attempt's session and the event has not reached that session's topic, or the
-	// route suppression below names the attempt's target alone (published_at and next_attempt_at
+	// SuppressRoute is resolved before the comment event commits, so the outbox can deduplicate
+	// without consulting the live session registry. It names a candidate only: a session the
+	// comment's mentions deliver it to as far as its creation knows - the session the mention's
+	// lookup pinned, or the <id> of a session:<id> mention whose lookup went unanswered within its
+	// bound (that mention itself stays unpinned). The outbox's other session routes (an author,
+	// the thread's sessions, the primary document's, the claimant, a follower) read the comment's
+	// own mentions as their candidates the same way. The mention's send runs after the commit and
+	// can fail, so the outbox applies one rule to each candidate's copy when it publishes: it skips
+	// the copy once comment_deliveries shows the mention was sent, holds it back while that send is
+	// still pending, and publishes it when the send failed or was abandoned. It reads an unpinned
+	// session:<id> mention's attempts as that <id>'s. A pending attempt no sender ever claimed,
+	// created more than DeliveryClaimLapse ago, is abandoned: the outbox settles it failed, in one
+	// transaction under the comment's owner lock, before it publishes the copy, and a sender's
+	// claim that lands first keeps it pending, so whichever acts first settles the attempt and the
+	// session gets the mention or the copy, not both. A send queued behind its lane that long is
+	// settled so too, and its sender's later claim finds it settled and sends nothing. An attempt
+	// a sender claimed - a send in flight when its process died, which may have reached the
+	// listener - is left to the stranded pass, which resends it under its own idempotency key, so
+	// the listener drops a repeat; the outbox takes it as abandoned only past
+	// StrandedMentionWindow, when no sender resumes it. A send the API settles failed, that resend
+	// included, reopens the comment's comment.created event when the comment mentions the
+	// attempt's session and the event has not reached that session's topic, or the route
+	// suppression below names the attempt's target alone (published_at and next_attempt_at
 	// cleared, this payload unchanged), so the outbox publishes then whichever route, author,
-	// claimant or follower copy reaches the session, to the destinations the event has not reached:
-	// a mentioned session loses no comment through a kill. A copy on the session's own topic
-	// carries the failed attempt's own dedupe key (contracts.AgentSendDedupeKey of
-	// CommentMentionIdempotencyKey) rather than the event's dispatch-<event id>, so a send the
+	// thread, document, claimant or follower copy reaches the session, to the destinations the
+	// event has not reached: a mentioned session loses no comment through a kill. A copy on the
+	// session's own topic carries the failed attempt's own dedupe key (contracts.AgentSendDedupeKey
+	// of CommentMentionIdempotencyKey) rather than the event's dispatch-<event id>, so a send the
 	// killed process had handed the listener before it died, whose resend then fails for good (the
 	// listener down after the restart), is not shown twice: the host that holds the mention drops
 	// the copy, and the stream stores it no second time within its duplicate window. A session no
@@ -1330,19 +1370,18 @@ type CommentEventPayload struct {
 	// The route copy still duplicates the mention for an unanswered role:X mention whose holder
 	// the route names under another string, and for a role:X route whose own lookup went
 	// unanswered while a mention of another string reaches its holder; that session then receives
-	// two copies.
-	// SuppressedAuthors names the candidates the author routes skip: on a reply, its thread's root
-	// author when mentioned; on a new comment not in an ask's thread, every candidate, since the
-	// outbox reads the document's authors only when it publishes. An author route still
-	// duplicates an unanswered role:X mention whose holder is the root author or a document
-	// writer.
-	SuppressRoute            bool     `json:"suppress_route"`
-	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
-	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`
-	SuppressedAuthors        []string `json:"suppressed_authors"`
+	// two copies. Every other session route duplicates an unanswered role:X mention whose holder it
+	// reaches the same way: only the listener knows that holder.
+	SuppressRoute            bool    `json:"suppress_route"`
+	SuppressedRoute          string  `json:"suppressed_route,omitempty"`
+	SuppressedRouteSessionID *string `json:"suppressed_route_session_id,omitempty"`
 	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
 	// so a reader carrying their batched backlink counts refreshes exactly those rows.
 	ReferenceChangesPayload
+	// ThreadLogins is carried by comment.created and comment.answered: every login with a
+	// Replies row on the comment's thread (its ask, else its root) once the comment is in, read
+	// in its own transaction (events.ThreadLogins). Absent on every other comment event.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // Message is a short update, optionally linked to an issue and threaded under another message.
@@ -1402,6 +1441,11 @@ type MessageEventPayload struct {
 	ThreadTarget string `json:"thread_target,omitempty"`
 	// ReferenceChangesPayload carries the same signal comment events do.
 	ReferenceChangesPayload
+	// ThreadLogins is every login with a Replies row on the message's thread (its root, up
+	// in_reply_to) once the message is in, read in its own transaction (events.ThreadLogins).
+	// Carried by an issue message's message.created and message.answered; absent on a direct
+	// (issue-less) conversation's, which has no Replies thread, and on a delivery frame.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
 // UserAgentStateEventPayload is `user_agent_state.updated`: one viewer's Clear or read mark on

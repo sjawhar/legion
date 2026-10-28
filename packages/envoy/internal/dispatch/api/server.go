@@ -59,6 +59,13 @@ func projectKeyProblem(field, value string) string {
 // visible and filterable once it's no longer named by the project key.
 const repoLabelPrefix = "repo:"
 
+// ServiceTokenVerifier verifies a Kubernetes pod's projected service-account token.
+// *oidc.LazyVerifier is the one Dispatch serves with: until its issuer is discovered every Verify
+// fails with an error matching oidc.ErrIssuerUnavailable.
+type ServiceTokenVerifier interface {
+	Verify(ctx context.Context, raw string) (oidc.Claims, error)
+}
+
 // Deps are the API's application dependencies.
 type Deps struct {
 	Store          *store.Store
@@ -83,8 +90,10 @@ type Deps struct {
 	Architecture *architecture.Importer
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a
-	// JWT-shaped bearer is only ever an unknown personal token.
-	OIDC *oidc.Verifier
+	// JWT-shaped bearer is only ever an unknown personal token. A configured
+	// verifier stays non-nil while its issuer is undiscovered, so such a bearer
+	// is answered 503 then, never taken for a personal token.
+	OIDC ServiceTokenVerifier
 	// AgentStream relays a live session's own conversation to a human watching it; nil is a
 	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
 	AgentStream agentstream.Source
@@ -110,6 +119,11 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
 	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only: every read of the listener's
+	// session list (route_status on an issue read, GET /api/v1/agents) asks the listener rather
+	// than sharing the process's five-second copy, so a test that changes the listener's sessions
+	// sees the change at its next read. A deployment leaves it false.
+	ListenerRosterUncached bool
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -139,7 +153,7 @@ type DepsInput struct {
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App           *auth.AppConfig
 	GitHubAPIBase string
-	OIDC          *oidc.Verifier
+	OIDC          ServiceTokenVerifier
 	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
 	AgentStream agentstream.Source
 	// AgentSecretsURL is the secrets broker's API base URL (DISPATCH_AGENT_SECRETS_URL); empty
@@ -154,6 +168,9 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only; see
+	// Deps.ListenerRosterUncached.
+	ListenerRosterUncached bool
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -195,24 +212,25 @@ func NewDeps(input DepsInput) (Deps, error) {
 		heartbeat = defaultStreamHeartbeat
 	}
 	return Deps{
-		Store:            input.Store,
-		Identity:         input.Identity,
-		AgentTokens:      input.AgentTokens,
-		DefaultProject:   defaultProject,
-		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:             input.Docs,
-		Embedder:         input.Embedder,
-		Envoy:            envoyClient,
-		Events:           input.Events,
-		GitHub:           github,
-		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
-		OIDC:             input.OIDC,
-		AgentStream:      input.AgentStream,
-		AgentSecrets:     agentSecretsClient,
-		Files:            input.Files,
-		Lifetime:         input.Lifetime,
-		TestHooksEnabled: input.TestHooksEnabled,
-		StreamHeartbeat:  heartbeat,
+		Store:                  input.Store,
+		Identity:               input.Identity,
+		AgentTokens:            input.AgentTokens,
+		DefaultProject:         defaultProject,
+		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:                   input.Docs,
+		Embedder:               input.Embedder,
+		Envoy:                  envoyClient,
+		Events:                 input.Events,
+		GitHub:                 github,
+		Architecture:           architecture.NewImporter(input.Store, github, input.Events),
+		OIDC:                   input.OIDC,
+		AgentStream:            input.AgentStream,
+		AgentSecrets:           agentSecretsClient,
+		Files:                  input.Files,
+		Lifetime:               input.Lifetime,
+		TestHooksEnabled:       input.TestHooksEnabled,
+		StreamHeartbeat:        heartbeat,
+		ListenerRosterUncached: input.ListenerRosterUncached,
 	}, nil
 }
 
@@ -260,7 +278,8 @@ type server struct {
 	// publishes past its buffer.
 	beforeLiveWrite func()
 	// rosters is the process's copy of the listener's live-session list that issue reads judge
-	// routes against (issue_route_status.go). Only register gives it non-zero TTLs.
+	// routes against and the agents list lists (issue_route_status.go). Only register gives it
+	// non-zero TTLs.
 	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
@@ -687,9 +706,16 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
 // projected service-account token. A rejected token is a 401 of its own: it
 // never falls through to the personal-token lookup, so OIDC_TOKEN_INVALID tells
-// an operator the token was verified and refused rather than simply unknown.
+// an operator the token was verified and refused rather than simply unknown. A
+// token the verifier could not judge because its issuer has not been discovered
+// is a 503 OIDC_ISSUER_UNAVAILABLE, never a 401: the caller retries rather than
+// reads its token as refused.
 func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, bool, error) {
 	claims, err := s.deps.OIDC.Verify(r.Context(), token)
+	if errors.Is(err, oidc.ErrIssuerUnavailable) {
+		return model.Actor{}, false, errorf(http.StatusServiceUnavailable, "OIDC_ISSUER_UNAVAILABLE",
+			"the service-account token issuer cannot be reached; try again in a minute")
+	}
 	if err != nil {
 		reason := oidc.Reason(err)
 		// The class only. The error carries the token's own unverified iss and
@@ -734,8 +760,13 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 	}, nil
 }
 
+// writeAuthenticationError answers a caller that did not resolve: 401 NO_IDENTITY, or 503
+// SIGNIN_UNAVAILABLE for a person whose lapsed confirmation the sign-in issuer could not renew,
+// as identity.WriteError renders both; anything else as writeHandlerError does. Only identity's
+// own sentinels reach identity.WriteError, so a service-account token's issuer outage
+// (serviceTokenActor's OIDC_ISSUER_UNAVAILABLE) never reads as the sign-in issuer's.
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) {
+	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrSignInUnavailable) {
 		identity.WriteError(w, err)
 		return
 	}

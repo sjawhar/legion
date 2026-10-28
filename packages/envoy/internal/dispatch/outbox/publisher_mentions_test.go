@@ -100,8 +100,7 @@ func TestCommentPayloadSuppressesResolvedRouteAndAuthorSessions(t *testing.T) {
 	authorSuppression := func(id string) map[string]any {
 		return map[string]any{
 			"id": id, "reply_to": rootID,
-			"mentions":           mentionsOf("mentioned"),
-			"suppressed_authors": []string{"mentioned"},
+			"mentions": mentionsOf("mentioned"),
 		}
 	}
 	for _, tc := range []struct {
@@ -308,7 +307,6 @@ func TestAnUnansweredSessionMentionHoldsTheCopiesOfTheSessionItNames(t *testing.
 			var route *string
 			if tc.copy == "author" {
 				payload["reply_to"] = rootID
-				payload["suppressed_authors"] = []any{"s1"}
 			} else {
 				// role:reviewer's own lookup found s1, which the unanswered mention names.
 				route = new("role:reviewer")
@@ -370,11 +368,10 @@ func TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention(t *testi
 			err := publish(ctx, Deps{Store: database, Publisher: publisher}, model.Event{
 				ID: 104, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{
-					"id":                 commentID,
-					"mentions":           []any{map[string]any{"target": "role:reviewer", "delivery": "steer", "session_id": nil}},
-					"suppress_route":     true,
-					"suppressed_route":   "role:reviewer",
-					"suppressed_authors": []any{},
+					"id":               commentID,
+					"mentions":         []any{map[string]any{"target": "role:reviewer", "delivery": "steer", "session_id": nil}},
+					"suppress_route":   true,
+					"suppressed_route": "role:reviewer",
 				},
 				Notify: true, CreatedAt: time.Now(),
 			}, "", routing{route: new(tc.route)}, map[string]struct{}{})

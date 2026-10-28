@@ -117,9 +117,10 @@ func commentCreatedRow(t *testing.T, database *store.Store, commentID string) co
 }
 
 // The claimant route holds its copy back for a mention of the claimant as the issue route does,
-// here on a reply, whose suppressed_authors names no session. A process killed after it claimed that mention's attempt, before its send reached the listener,
-// leaves the attempt to the stranded pass; when that resend fails too, the claimant still hears
-// the comment, from the claimant copy the failure reopens.
+// here on a reply in a thread no session wrote in. A process killed after it claimed that
+// mention's attempt, before its send reached the listener, leaves the attempt to the stranded
+// pass; when that resend fails too, the claimant still hears the comment, from the claimant copy
+// the failure reopens.
 func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 	listener, state := newMentionListener(t)
 	stopping, stop := context.WithCancel(t.Context())
@@ -132,8 +133,8 @@ func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 	}); response.Code != http.StatusOK {
 		t.Fatalf("claim the issue as s1: status=%d body=%s", response.Code, response.Body.String())
 	}
-	// A reply in a thread a person started: its suppressed_authors names no session, so only the
-	// claimant route holds s1's copy back for the mention.
+	// A reply in a thread a person started: no session wrote in it, so only the claimant route
+	// holds s1's copy back for the mention.
 	root := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{"body": "Where should this go?"}))
 	stop()
 	claimed := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{

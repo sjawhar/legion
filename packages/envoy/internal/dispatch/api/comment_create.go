@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -478,30 +477,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		suppressRoute = true
 		suppressedRoute = route.route
 	}
-	// suppressed_authors names the sessions of mentionedSessions the author routes skip, since
-	// each hears the comment from its mention: on a reply, its thread's root author when it is
-	// one of them; on a new comment not in an ask's thread, every one of them, an author or not,
-	// since the outbox reads the document's writers only when it publishes. An author route still
-	// duplicates an unanswered role:X mention whose holder is the root author or a document
-	// writer: only the listener knows that holder.
-	//
-	// Either suppression names a candidate only. The outbox decides each copy when it publishes,
+	// The suppression names a candidate only, and the outbox's other session routes (an author,
+	// the thread's sessions, the primary document's, the claimant, a follower) take the comment's
+	// mentions as their candidates the same way. The outbox decides each copy when it publishes,
 	// by what the mention's attempts did (mentionDeliveryQuery in internal/dispatch/outbox): it
 	// skips the copy once the mention was sent, holds it back while the mention is pending, and
 	// publishes it once the mention failed or was abandoned. It finds an unanswered session:<id>
 	// mention's attempts by that <id>, and a route suppressed by its string alone by the mention of
 	// that target.
-	suppressedAuthors := []string{}
-	switch {
-	case replyRoot != nil:
-		if replyRoot.Author.Kind == "session" {
-			if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
-				suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
-			}
-		}
-	case input.AskID == nil:
-		suppressedAuthors = slices.Sorted(maps.Keys(mentionedSessions))
-	}
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
@@ -703,9 +686,13 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 	payload.SuppressRoute = suppressRoute
-	payload.SuppressedAuthors = suppressedAuthors
 	payload.SuppressedRoute = suppressedRoute
 	payload.SuppressedRouteSessionID = suppressedRouteSessionID
+	payload.ThreadLogins, err = commentThreadLogins(r.Context(), tx, comment)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, owner.event(
 		"comment.created",
 		actor,

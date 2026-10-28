@@ -59,13 +59,13 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			ID: askID, IssueKey: issue, Question: "Ship it?", State: "answered",
 		}}
 	}
-	commentEvent := func(eventType string, actor model.Actor, comment model.Comment, suppressedAuthors ...string) model.Event {
+	commentEvent := func(eventType string, actor model.Actor, comment model.Comment) model.Event {
 		comment.IssueKey = issue
 		if comment.ID == "" {
 			comment.ID = commentID
 		}
 		return model.Event{IssueKey: issue, Type: eventType, Actor: actor, Payload: model.CommentEventPayload{
-			Comment: comment, SuppressedAuthors: suppressedAuthors,
+			Comment: comment,
 		}}
 	}
 	messageEvent := func(eventType string, actor model.Actor, message model.Message) model.Event {
@@ -259,7 +259,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
 					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
-				}, claimant.ID), ""
+				}), ""
 			},
 			deliveries: map[string]string{claimant.ID: "sent"},
 			want:       []string{issueTopic + "comment.created"},
@@ -270,7 +270,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
 					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
-				}, claimant.ID), ""
+				}), ""
 			},
 			deliveries: map[string]string{claimant.ID: "failed"},
 			want:       []string{issueTopic + "comment.created", claimantTopic},
@@ -281,7 +281,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
 					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
-				}, claimant.ID), ""
+				}), ""
 			},
 			deliveries: map[string]string{claimant.ID: "pending"},
 			want:       []string{issueTopic + "comment.created"},
@@ -293,7 +293,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
 					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
-				}, claimant.ID), ""
+				}), ""
 			},
 			deliveries: map[string]string{claimant.ID: "abandoned"},
 			want:       []string{issueTopic + "comment.created", claimantTopic},
@@ -304,7 +304,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				return commentEvent("comment.created", alice, model.Comment{
 					Body: "@session-claimant ship it.", Mentions: mentionOf(claimant.ID),
-				}, claimant.ID), ""
+				}), ""
 			},
 			want: []string{issueTopic + "comment.created", claimantTopic},
 		},

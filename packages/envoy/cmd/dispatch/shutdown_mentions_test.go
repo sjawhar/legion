@@ -287,7 +287,10 @@ func waitForSent(
 // comment queued behind them at once, and each of them by its first stranded pass after the killed
 // process's claim has lapsed, within a minute and a pass interval of that process taking it. Each
 // resend repeats an idempotency key the listener has seen, so it is answered as a duplicate and not
-// handed over again: every recipient is handed each comment exactly once.
+// handed over again: every recipient is handed each comment exactly once. Both processes take one
+// DISPATCH_SIGNING_KEY, as every process of a deployment does: the killed process's registry row
+// is still live when the next starts, and a key the next minted in its own data dir would hold its
+// start up to a live window, until that row lapsed (processes.Register).
 //
 // The claim is the real minute. The test marks itself parallel once the second process runs, so
 // that minute passes beside the tests that run after it rather than after them; the bound is read
@@ -295,7 +298,7 @@ func waitForSent(
 func TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaimLapses(t *testing.T) {
 	listener := newHandoverListener(t)
 	database := storetest.Open(t)
-	options := dispatchOptions{Env: map[string]string{"ENVOY_URL": listener.url}}
+	options := dispatchOptions{SigningKey: "sigkill-mention-sends-key", Env: map[string]string{"ENVOY_URL": listener.url}}
 	killed := startDispatchProcessWith(t, database.Pool.Config().ConnString(), options)
 	killed.waitHealthy(t)
 	key, _ := killed.createIssue(t)
@@ -343,7 +346,9 @@ func TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaim
 // the third comment's send when the lock is released and the comment commits during the HTTP
 // drain: both attempts stay pending with no claim. The successor's periodic stranded pass sends
 // them once they have waited a claim lease, within a lease and one pass interval of the old
-// process's exit, and every recipient is handed each comment exactly once.
+// process's exit, and every recipient is handed each comment exactly once. Both processes take one
+// DISPATCH_SIGNING_KEY, as every process of a deployment does: a live server process refuses a
+// successor whose signing keys it does not hold (processes.Register).
 //
 // The test marks itself parallel once the old process has exited, so the pass interval passes
 // beside the tests that run after it rather than after them; the bound is read off when the
@@ -351,7 +356,7 @@ func TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaim
 func TestARollingUpdatesSuccessorHandsEachMentionTheOldProcessLeftOnce(t *testing.T) {
 	listener := newHandoverListener(t)
 	database := storetest.Open(t)
-	options := dispatchOptions{Env: map[string]string{"ENVOY_URL": listener.url}}
+	options := dispatchOptions{SigningKey: "rolling-update-mentions-key", Env: map[string]string{"ENVOY_URL": listener.url}}
 	old := startDispatchProcessWith(t, database.Pool.Config().ConnString(), options)
 	old.waitHealthy(t)
 	successor := startDispatchProcessWith(t, database.Pool.Config().ConnString(), options)
