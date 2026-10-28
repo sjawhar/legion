@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // A cached read's weight is what the cache's budget counts it as, so for every shape of document
@@ -78,7 +80,11 @@ func buildTestDocumentRead(t *testing.T, markdown string) *documentRead {
 	if err != nil {
 		t.Fatalf("read the tree: %v", err)
 	}
-	read, err := buildDocumentRead("artifact", DocumentStamp{Version: 1, Row: "1"}, tree)
+	valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+	if err != nil {
+		t.Fatalf("validate the tree: %v", err)
+	}
+	read, err := buildDocumentRead("artifact", DocumentStamp{Version: 1, Row: "1"}, valid)
 	if err != nil {
 		t.Fatalf("build the read: %v", err)
 	}

@@ -66,7 +66,11 @@ func DocumentReadWeightForTest(markdown string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	read, err := buildDocumentRead("", DocumentStamp{}, tree)
+	valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+	if err != nil {
+		return 0, err
+	}
+	read, err := buildDocumentRead("", DocumentStamp{}, valid)
 	if err != nil {
 		return 0, err
 	}

@@ -191,21 +191,29 @@ func tokenHash(encoded []byte) string {
 }
 
 // encodedTokens is tree's document token and the token of each block in it, from one encoding of
-// the tree into one buffer this call allocates and drops: the document's is the hash of the whole
-// buffer and each block's the hash of its own span (pmdoc.EncodeTokenJSON). Where several nodes
-// carry one block id, the last of them in pre-order holds it, as an edit addressing the id reads.
-// An error is the tree's, as nodeToken(tree) returns it.
+// the tree into one buffer this call allocates and drops (spanTokens). It validates tree first,
+// for checkEditPrecondition, which holds a tree nothing has validated. An error is the tree's, as
+// nodeToken(tree) returns it.
 func encodedTokens(tree *pmdoc.Node) (document string, blocks map[string]string, err error) {
 	var spans []pmdoc.TokenSpan
 	encoded, err := pmdoc.EncodeTokenJSON(tree, &spans)
 	if err != nil {
 		return "", nil, err
 	}
+	document, blocks = spanTokens(encoded, spans)
+	return document, blocks, nil
+}
+
+// spanTokens is the document token and the block tokens of encoded, one encoding of a tree, with
+// its block spans (pmdoc.EncodeTokenJSON): the document's is the hash of the whole buffer and each
+// block's the hash of its own span. Where several nodes carry one block id, the last of them in
+// pre-order holds it, as an edit addressing the id reads.
+func spanTokens(encoded []byte, spans []pmdoc.TokenSpan) (document string, blocks map[string]string) {
 	blocks = make(map[string]string, len(spans))
 	for _, span := range spans {
 		blocks[span.ID] = tokenHash(encoded[span.Start:span.End])
 	}
-	return tokenHash(encoded), blocks, nil
+	return tokenHash(encoded), blocks
 }
 
 // treeTokens is a tree's document token and its block tokens, each beside its own error: a block's
@@ -218,17 +226,19 @@ type treeTokens struct {
 	blocksErr   error
 }
 
-// documentTokens is tree's tokens from one encoding of the tree (encodedTokens); when the whole
-// tree cannot be encoded, the blocks are encoded each on its own, in pre-order, and the first that
-// cannot be is blocksErr. Only a tree holding an unencodable value, or failing validation, pays
-// for that second pass.
-func documentTokens(tree *pmdoc.Node) treeTokens {
-	document, blocks, err := encodedTokens(tree)
+// documentTokens is tree's tokens from one encoding of the tree, which it does not validate again
+// (pmdoc.ValidDocument.TokenJSON, spanTokens); when the whole tree cannot be encoded, the blocks
+// are encoded each on its own (nodeToken), in pre-order, and the first that cannot be is blocksErr.
+// Only a tree holding an unencodable value pays for that second pass.
+func documentTokens(tree pmdoc.ValidDocument) treeTokens {
+	var spans []pmdoc.TokenSpan
+	encoded, err := tree.TokenJSON(&spans)
 	if err == nil {
+		document, blocks := spanTokens(encoded, spans)
 		return treeTokens{document: document, blocks: blocks}
 	}
 	tokens := treeTokens{documentErr: err, blocks: make(map[string]string)}
-	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+	pmdoc.Walk(tree.Node(), func(node *pmdoc.Node) bool {
 		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 		if id == "" {
 			return true

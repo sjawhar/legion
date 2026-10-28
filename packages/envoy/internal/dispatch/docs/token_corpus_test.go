@@ -129,8 +129,9 @@ func tokenCorpusMark(node, parent *pmdoc.Node, texts *int) {
 	}
 }
 
-// tokenCorpusRead reads doc's tree and builds the document read from it, the two calls the corpus
-// times. A panic is returned as its error, as tokenCorpusDoc returns one.
+// tokenCorpusRead reads doc's tree, validates it and builds the document read from it, the calls
+// the corpus times, as foldDocument makes them. A panic is returned as its error, as
+// tokenCorpusDoc returns one.
 func tokenCorpusRead(doc *crdt.Doc) (read *documentRead, tree *pmdoc.Node, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -141,7 +142,11 @@ func tokenCorpusRead(doc *crdt.Doc) (read *documentRead, tree *pmdoc.Node, err e
 	if err != nil {
 		return nil, nil, err
 	}
-	read, err = buildDocumentRead("corpus", DocumentStamp{}, tree)
+	valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+	if err != nil {
+		return nil, nil, err
+	}
+	read, err = buildDocumentRead("corpus", DocumentStamp{}, valid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,7 +282,11 @@ func BenchmarkTokenCorpusLargest(b *testing.B) {
 	b.SetBytes(int64(len(source)))
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := buildDocumentRead("corpus", DocumentStamp{}, tree); err != nil {
+		valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := buildDocumentRead("corpus", DocumentStamp{}, valid); err != nil {
 			b.Fatal(err)
 		}
 	}

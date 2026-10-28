@@ -240,11 +240,14 @@ func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {
 
 // buildDocumentRead renders tree, the document as of stamp, into everything the four reads answer,
 // with one render, one placement walk, which lays each table out once for its paths and its rows,
-// and one token encoding for the document and its blocks: an error when any of them refuses the
-// tree, a document outside the schema, as the read computing it from the tree would. The document
-// token's error is returned as nodeToken returns it, after the rendering's.
-func buildDocumentRead(artifactID string, stamp DocumentStamp, tree *pmdoc.Node) (*documentRead, error) {
-	paths, rows, err := pmdoc.BlockPathsAndTableRows(tree)
+// and one token encoding for the document and its blocks, none of which validates the tree again:
+// its caller validated it once (pmdoc.ValidDocument). Its error is the one any of them gives when
+// it refuses the tree, a document outside the schema, as the read computing it from the tree
+// would: the placement walk's as it is, the descendants', a block token's or the rendering's
+// through documentSchemaError (renderedBlocks), and the document token's as nodeToken returns it,
+// after the rendering's.
+func buildDocumentRead(artifactID string, stamp DocumentStamp, tree pmdoc.ValidDocument) (*documentRead, error) {
+	paths, rows, err := tree.BlockPathsAndTableRows()
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +351,13 @@ func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold col
 	if err != nil {
 		return coldFold{treeErr: err}, nil
 	}
-	read, err := buildDocumentRead(artifactID, loaded.Stamp, tree)
+	// buildDocumentRead reads the tree without validating it again, once ValidateDocument has
+	// validated it here, refusing it as the placement walk did when that walk validated it itself.
+	valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+	if err != nil {
+		return coldFold{tree: tree}, nil
+	}
+	read, err := buildDocumentRead(artifactID, loaded.Stamp, valid)
 	if err != nil {
 		return coldFold{tree: tree}, nil
 	}

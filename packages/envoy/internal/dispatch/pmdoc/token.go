@@ -46,6 +46,16 @@ func EncodeTokenJSON(n *Node, blocks *[]TokenSpan) ([]byte, error) {
 	return encodeTokenJSON(n, blocks)
 }
 
+// TokenJSON is EncodeTokenJSON of d's tree, its spans appended to blocks when blocks is non-nil,
+// without validating the tree again. The zero ValidDocument is EncodeTokenJSON's error for a nil
+// tree.
+func (d ValidDocument) TokenJSON(blocks *[]TokenSpan) ([]byte, error) {
+	if d.doc == nil {
+		return EncodeTokenJSON(nil, blocks)
+	}
+	return encodeTokenJSON(d.doc, blocks)
+}
+
 // encodeTokenJSON is EncodeTokenJSON without the validation, for a tree its caller has validated.
 func encodeTokenJSON(n *Node, blocks *[]TokenSpan) ([]byte, error) {
 	encoder := tokenEncoder{blocks: blocks}
