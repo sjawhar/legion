@@ -28,6 +28,11 @@ type anchorChoice struct {
 	BlockID    string
 	Start, End int
 	Candidates []string
+	// Occurrence, when set, is the zero-based occurrence of the single candidate (the logged
+	// quote, repeated in the text) that lies inside the span: the anchor input's occurrence.
+	// QuoteAt is that occurrence's byte offset in the text.
+	Occurrence *int
+	QuoteAt    int
 }
 
 // find is the top-level index of a block id and the text it stands for: the block's own, or a
@@ -117,6 +122,25 @@ func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphan
 			return anchorChoice{Branch: ruleLoggedQuote, BlockID: blockID, Start: start, End: end, Candidates: []string{quote}}
 		}
 		return anchorChoice{Branch: ruleLoggedQuote, Start: q, End: q + len(quote), Candidates: []string{quote}}
+	}
+	// A logged quote repeated in the text but once inside its located block: that occurrence,
+	// counted under in_logged_block.
+	if located && !skipLogged && !orphaned && quote != "" {
+		k, at, inside := 0, -1, 0
+		for i, off := 0, 0; ; i++ {
+			j := strings.Index(text[off:], quote)
+			if j < 0 {
+				break
+			}
+			if p := off + j; p >= start && p+len(quote) <= end {
+				k, at = i, p
+				inside++
+			}
+			off += j + 1
+		}
+		if inside == 1 {
+			return anchorChoice{Branch: ruleInBlock, BlockID: blockID, Start: start, End: end, Candidates: []string{quote}, Occurrence: &k, QuoteAt: at}
+		}
 	}
 	if located {
 		if c := spanCandidates(text, start, end); len(c) > 0 {

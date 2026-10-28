@@ -50,6 +50,13 @@ func TestChooseAnchorBranches(t *testing.T) {
 	if c := chooseAnchor(anchorDoc, bm, "unknown", "third paragraph sentence", false, false, 1, "d", "c2b"); c.Branch != ruleLoggedQuote {
 		t.Fatalf("absent block, usable quote: %s", c.Branch)
 	}
+	// A repeated logged quote, once inside its located block: that occurrence (the second of
+	// three), under in_logged_block.
+	c = chooseAnchor(anchorDoc, bm, "p2", "paragraph sentence", false, false, 1, "d", "c2c")
+	if c.Branch != ruleInBlock || c.Occurrence == nil || *c.Occurrence != 1 || anchorDoc[c.QuoteAt:c.QuoteAt+len("paragraph sentence")] != "paragraph sentence" ||
+		c.QuoteAt < c.Start || !slices.Equal(c.Candidates, []string{"paragraph sentence"}) || quoteAt(c) != c.QuoteAt {
+		t.Fatalf("repeated quote in its block: %+v", c)
+	}
 	// Orphaned, or refused (skipLogged): in the block too.
 	for _, c := range []anchorChoice{
 		chooseAnchor(anchorDoc, bm, "p2", "second paragraph sentence", true, false, 1, "d", "c3"),

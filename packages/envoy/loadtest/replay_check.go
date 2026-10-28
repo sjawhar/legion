@@ -191,18 +191,18 @@ type sizeAnchorCheck struct {
 func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (sizeAnchorCheck, error) {
 	r := sizeAnchorCheck{Rules: map[string]int{}}
 	type anchorRow struct {
-		branch     string
-		start, end int
+		branch              string
+		start, end, quoteAt int
 	}
-	rows, err := conn.Query(ctx, `select kind, logged_id, branch, span_start, span_end from loadtest.replay_anchors`)
+	rows, err := conn.Query(ctx, `select kind, logged_id, branch, span_start, span_end, quote_at from loadtest.replay_anchors`)
 	if err != nil {
 		return r, fmt.Errorf("read loadtest.replay_anchors: %w", err)
 	}
 	recorded := map[[2]string]anchorRow{}
 	var kind, logged, branch string
-	var start, end int
-	if _, err := pgx.ForEachRow(rows, []any{&kind, &logged, &branch, &start, &end}, func() error {
-		recorded[[2]string{kind, logged}] = anchorRow{branch, start, end}
+	var start, end, at int
+	if _, err := pgx.ForEachRow(rows, []any{&kind, &logged, &branch, &start, &end, &at}, func() error {
+		recorded[[2]string{kind, logged}] = anchorRow{branch, start, end, at}
 		return nil
 	}); err != nil {
 		return r, err
@@ -279,6 +279,9 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			switch {
 			case quote == "" || text == "":
 				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, "no stored quote or document"})
+			case row.quoteAt >= 0 && row.quoteAt+len(quote) <= len(text) && text[row.quoteAt:row.quoteAt+len(quote)] == quote &&
+				row.quoteAt >= row.start && row.quoteAt+len(quote) <= row.end:
+				// A repeated logged quote pinned to its occurrence inside the span.
 			case strings.Count(text, quote) != 1 || i < row.start || i+len(quote) > row.end || row.end > len(text):
 				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, fmt.Sprintf("stored quote at byte %d, chosen span [%d, %d)", i, row.start, row.end)})
 			}

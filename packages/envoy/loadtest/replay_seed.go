@@ -42,7 +42,17 @@ create table if not exists loadtest.replay_ids (
 create table if not exists loadtest.replay_anchors (
   kind text not null, logged_id text not null, local_id text not null, logged_doc text not null,
   branch text not null, block_id text not null, span_start int not null, span_end int not null,
-  primary key (kind, logged_id))`
+  primary key (kind, logged_id));
+alter table loadtest.replay_anchors add column if not exists quote_at int not null default -1`
+
+// quoteAt is the byte offset in the text at At of the anchor's quote when the choice pinned an
+// occurrence of a repeated quote, -1 otherwise (the check then needs the quote to be unique).
+func quoteAt(c anchorChoice) int {
+	if c.Occurrence != nil {
+		return c.QuoteAt
+	}
+	return -1
+}
 
 // replay_ids kinds.
 const (
@@ -1160,11 +1170,11 @@ func (s *replaySeeder) choose(d *issueDoc, logged string, a *replayAnchor, skipL
 // recordAnchor keeps the branch and the chosen block's span of a seeded anchor in
 // loadtest.replay_anchors, where replay-check-seed reads them.
 func (s *replaySeeder) recordAnchor(ctx context.Context, kind, logged, local string, d *issueDoc, c anchorChoice) error {
-	_, err := s.pool.Exec(ctx, `insert into loadtest.replay_anchors (kind, logged_id, local_id, logged_doc, branch, block_id, span_start, span_end)
-		values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict (kind, logged_id) do update set local_id = excluded.local_id,
+	_, err := s.pool.Exec(ctx, `insert into loadtest.replay_anchors (kind, logged_id, local_id, logged_doc, branch, block_id, span_start, span_end, quote_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict (kind, logged_id) do update set local_id = excluded.local_id,
 		logged_doc = excluded.logged_doc, branch = excluded.branch, block_id = excluded.block_id,
-		span_start = excluded.span_start, span_end = excluded.span_end`,
-		kind, logged, local, d.a.ID, c.Branch, c.BlockID, c.Start, c.End)
+		span_start = excluded.span_start, span_end = excluded.span_end, quote_at = excluded.quote_at`,
+		kind, logged, local, d.a.ID, c.Branch, c.BlockID, c.Start, c.End, quoteAt(c))
 	if err != nil {
 		return fmt.Errorf("record anchor %s: %w", logged, err)
 	}
@@ -1190,7 +1200,11 @@ func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueD
 			break
 		}
 		for _, quote := range choice.Candidates {
-			body["anchor"] = map[string]any{"artifact": d.local, "quote": quote}
+			anchor := map[string]any{"artifact": d.local, "quote": quote}
+			if choice.Occurrence != nil {
+				anchor["occurrence"] = *choice.Occurrence
+			}
+			body["anchor"] = anchor
 			res, err := s.write(ctx, kind, key, len(d.text), d.local, kind, logged, "POST", path, w, jsonBody(body))
 			if err == nil {
 				local := idOf(res)
@@ -1206,7 +1220,8 @@ func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueD
 			s.lg.Printf("%s %s: quote refused (branch %s, status %d code %q)", kind, logged, choice.Branch, se.status, se.code)
 			last = err
 		}
-		if choice.Branch != ruleLoggedQuote {
+		// Only a refused logged quote (or its occurrence) is chosen again, without it.
+		if choice.Branch != ruleLoggedQuote && choice.Occurrence == nil {
 			break
 		}
 	}
