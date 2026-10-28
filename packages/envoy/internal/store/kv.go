@@ -583,10 +583,15 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // item and topics. ErrMalformedInterest is merged the same way: the record answered, so this is
 // not the transient case, its topics are ones this build never routed (the cache holds no record
 // it cannot decode), and the session's own subscribe is the authority on its record.
+//
+// The merged row keeps no topic reaching a private stream subject other than the
+// session's own agent subject (dropPrivateStreamTopics): a row stored before the
+// listener refused such a topic is cleaned at the session's next registration.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
+	sessionID := item.SessionID
 	if getErr == nil {
 		item = cur
 	}
@@ -594,6 +599,7 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	item.Dir = first(item.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
 	item = Merge(item, topics)
+	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 	sort.Strings(item.Topics)
 	return item, nil
 }
@@ -834,6 +840,7 @@ func (r *Registry) removeInterestTopics(ctx context.Context, sessionID string, t
 		return err
 	}
 	item = Remove(item, topics)
+	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 	if len(item.Topics) == 0 {
 		return r.deleteInterest(ctx, sessionID)
 	}

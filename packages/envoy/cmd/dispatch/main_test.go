@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -364,6 +365,53 @@ func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T
 		env["DISPATCH_AGENT_SECRETS_URL"] = badURL
 		if _, err := resolveBootConfig(envGetter(env)); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_URL") {
 			t.Fatalf("URL=%q: err = %v, want a DISPATCH_AGENT_SECRETS_URL rejection", badURL, err)
+		}
+	}
+}
+
+// Both DISPATCH_AGENT_SECRETS_URL refusals - a shape refusal (a path, or a value that does not
+// parse) and the dev sign-in's refusal of a remote broker - name a clean URL as it is and any
+// other value as redact.NotPrinted: user info, a query, escapes, a control byte.
+func TestResolveBootConfigRefusesAgentSecretsURLWithoutNamingItsCredential(t *testing.T) {
+	shape := func(brokerURL string) settingValues {
+		return envGetter(map[string]string{
+			"DATABASE_URL":                              "postgres://dispatch",
+			"DISPATCH_AGENT_TOKEN":                      "agent-token",
+			"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
+			"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		})
+	}
+	remote := func(brokerURL string) settingValues {
+		return devSignInEnvironment(map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		})
+	}
+	for name, row := range map[string]struct {
+		env  settingValues
+		want string
+	}{
+		"a clean path":                     {shape("https://broker.example.com/v1"), `DISPATCH_AGENT_SECRETS_URL="https://broker.example.com/v1"`},
+		"a clean remote broker":            {remote("https://broker.example.com"), `DISPATCH_AGENT_SECRETS_URL="https://broker.example.com"`},
+		"a path":                           {shape("https://tokuser9f3:hunter2pw@broker.example.com/v1?token=qtok77"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a remote broker":                  {remote("https://tokuser9f3:hunter2pw@broker.example.com?token=qtok77"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"an '@' in a query value":          {shape("https://broker.example.com/?password=hunter@2pwSECRET"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a remote broker, '@' in a query":  {remote("https://broker.example.com?a=1&token=qtok@77SECRET&b=2"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a literal '@' and an escaped one": {shape("https://ada@corp.example:hunter2pw%40127.0.0.1:1"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a double-escaped '@'":             {shape("https://tokuser9f3:hunter2pw%2540broker.example.com"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a newline forging a line":         {shape("https://broker.example.com\nFORGED"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+	} {
+		_, err := resolveBootConfig(row.env)
+		if err == nil || !strings.Contains(err.Error(), row.want) {
+			t.Errorf("%s: err = %v, want a refusal naming %s", name, err, row.want)
+			continue
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok", "2pwSECRET", "77SECRET", "ada@corp", "2540", "FORGED"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s: refusal %q names %q", name, err, secret)
+			}
 		}
 	}
 }
