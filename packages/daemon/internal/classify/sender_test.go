@@ -263,3 +263,29 @@ func TestCopiesOfTwoHeadsOnTheirWayAreBounded(t *testing.T) {
 		t.Errorf("let go %d (first %v), the record's first is %s's; want %d, s1's first, and s0's kept", len(named), named[:1], pr.Pushes[0].Sender, 100-maxCopies)
 	}
 }
+
+// A loop in a skipped gap is read as the release before reads it, by the shortest chain of its
+// pushes (withoutLoops): the record at h1, red; the review App's h1..c1, the implementer's code
+// c1..c2, the review App's forced return c2..c1 and its c1..c3, every synchronize but c1..c3's late,
+// the loop's first, so the path from h1 takes the loop. The loop c1>c2>c1 is erased, so the move is the review App's alone: no fix attempt, as with no
+// move named. Counting the loop's pushes, the implementer's code would count one.
+func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
+	start := record.PullRequest{HeadSHA: "h1", CheckedHead: "h1", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+	facts := []runFact{
+		pushed(record.ClassifiedPush{SHA: "c1", Before: "h1", ByReviewApp: true, Sender: "app"}),
+		pushed(record.ClassifiedPush{SHA: "c2", Before: "c1", Sender: "dev"}),
+		pushed(record.ClassifiedPush{SHA: "c1", Before: "c2", Forced: true, ByReviewApp: true, Sender: "app"}),
+		pushed(record.ClassifiedPush{SHA: "c3", Before: "c1", ByReviewApp: true, Sender: "app"}),
+		syncedAt("c1", "c3", "app", 4), syncedAt("c1", "c2", "dev", 2), syncedAt("c2", "c1", "app", 3), syncedAt("h1", "c1", "app", 1),
+	}
+	got := delivered(t, start, facts...)
+	unnamed := make([]runFact, len(facts))
+	for i, f := range facts {
+		unnamed[i] = namingNoMove(f)
+	}
+	asBefore := delivered(t, start, unnamed...)
+	if got.Run != nil || got.HeadSHA != "c3" || JudgementChanged(asBefore, got) || got.FixAttempts != 1 {
+		t.Errorf("the loop in the gap: %s at %s, run open %v; want %s, as with no move named", judged(got, "", ""), got.HeadSHA, got.Run != nil, judged(asBefore, "", ""))
+	}
+}
