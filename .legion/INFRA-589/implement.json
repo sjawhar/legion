@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-589",
+  "completed": "2026-10-28T09:30:00Z",
+  "round": 5,
+  "answersTestFailures": "test.json (tester round 4) failure 1: a step whose loadtest.event_commits read fails showed 0 committed, 0 / 0 receipts and (0 / n) per kind with exit 0. Fixed in 1e673f40 per the architect's cap decision: every reader of the run's database marks a failed read; the step fails when the commit-row read fails; the tester's red test passes unmodified.",
+  "proof": [
+    {
+      "criterion": "A step whose commit rows were not read (database without the commit trigger) shows '-' with a mark for committed counts, receipts and delivery, and exits non-zero",
+      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest (migration 129)",
+      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign <all eight flags for the local stack> -pg 'postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable' -name foreign-notrigger -events 1 -sessions 10 -requests 2 -duration 30s -warmup 5s -grace 5s; loadgen tables",
+      "observed": "exit 1: 'the run's commit rows were not read (summary.json events.commits_error: read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation \"loadtest.event_commits\" does not exist ...)'; Events row 'foreign-notrigger (commit rows not read) | ... | 1.00 / 1.03 / - | 0 / 0 | - | - | - |'; kinds '(- / 1)', '(- / 8)', ...; SSE and Resources marked; 4 notes naming events.commits_error; lock, ungranted and xid tables unmarked (their reads worked); 0 token matches in step files and stderr",
+      "headSha": "1e673f40c5e11e997e3701e91030c2b807970708",
+      "negativeControl": "smoke-r11 on the stack's own database: exit 0, committed = offered for all five kinds, 580/580 receipts, clock_anomalies 0, no mark in TABLES.md"
+    },
+    {
+      "criterion": "Every other reader of the run's database marks a failed read ('-' with a mark), without failing the step on its own",
+      "surface": "same pod and CLI",
+      "command": "the same foreign run with -pg 'postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable' (unreachable); loadgen tables; jq meta.json",
+      "observed": "exit 1 (commit rows unread); Events, kinds and SSE '(commit rows not read)'; Resources '(commit rows not read) (7 failed reads)'; commit-order lock, ungranted locks and transaction ids '(1 failed reads)' with '-' cells; meta.json postgres_version '' with postgres_version_error set",
+      "headSha": "1e673f40c5e11e997e3701e91030c2b807970708",
+      "negativeControl": "stepFailure unit cases: lock, sampler, xid or version read failures alone do not fail the step; smoke-r11 records the Postgres version and xids 7.6/s with no error"
+    },
+    {
+      "criterion": "The tester's red test passes unmodified, with one case per other reader",
+      "surface": "packages/envoy/loadtest unit tests",
+      "command": "cd packages/envoy && go test -count=1 ./loadtest && go test -count=1 -run TestTablesDoNotShowUnreadCommitsAsZero -v ./loadtest && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh",
+      "observed": "ok; '--- PASS: TestTablesDoNotShowUnreadCommitsAsZero'; run-step.test.sh 4 PASS; common.test.sh 5 PASS; jj diff of run-step.test.sh and commits_unread_test.go empty",
+      "headSha": "1e673f40c5e11e997e3701e91030c2b807970708",
+      "negativeControl": "the red test failed at 9d37005c (tester's commit a4e846c7) and passes at 1e673f40 with the file unchanged"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/loadtest/delivery.go, run.go, sample.go, tables.go, run-step.sh (comments)",
+    "packages/envoy/loadtest/pgreads_test.go (new), run_test.go, tables_test.go",
+    "packages/envoy/loadtest/README.md"
+  ],
+  "trickyParts": [
+    "readCommits reads nothing (and reports no error) when the step has no in-window markers, so a request-only foreign run does not fail on a database without the trigger.",
+    "resources.dispatch_cpu_s_per_op is null when the commit rows were not read, because its operation count includes committed writes."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "When resources is null (fewer than two sampler samples in the window), a failed xid read cannot be recorded in resources, so the transaction-id row is an unmarked '-'; the README says so."
+  ]
+}
