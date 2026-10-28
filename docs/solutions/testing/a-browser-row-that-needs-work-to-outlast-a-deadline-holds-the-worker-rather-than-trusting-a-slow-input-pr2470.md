@@ -17,9 +17,10 @@ related_issues:
 
 # A browser row that needs work to outlast a deadline holds the worker rather than trusting a slow input
 
-- **Never pick an input that is "big enough" to be slow.** How long it takes depends on the
-  runner. A GitHub-hosted runner can do in time what a 2-CPU issue pod cannot. Hold the work
-  instead, so the shipped deadline fires on every machine and the page gets no test hook.
+- **Hold the worker; never pick an input that is "big enough" to be slow.** How long work takes
+  depends on the runner: a GitHub-hosted runner can do in time what a 2-CPU issue pod cannot. A
+  held worker makes the shipped deadline fire on every machine, the page gets no test hook, and
+  any input will do (a 2-node flowchart is enough).
 - **Hold a Web Worker by serving its real chunk with one listener in front of its own.** Use
   `page.route(<chunk regex>)`, then `const response = await route.fetch()` and
   `route.fulfill({ response, body: prefix + "\n" + await response.text() })`. In the prefix,
@@ -51,6 +52,10 @@ routes). CI run 40732897855 shows ✓ for the row in chromium, iphone, webkit an
 it passed 20/20 with `--repeat-each=5`. The tester held a 2-node flowchart, which draws in
 1.0-2.4 s without the hold, and the page still refused it in all four projects. The built bundle
 contains no `mermaid-worker-held`.
+
+INFRA-532 moved both time-limit rows (a comment's and a document's) onto one helper,
+`holdWorkerSource`, with a 2-node flowchart each, since the hold, not the input, makes the work
+outlast the limit.
 
 The lapses each failed at their own line:
 
