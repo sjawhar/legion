@@ -215,21 +215,23 @@ func eventOwnerLock(e model.Event) (store.Owner, bool) {
 // key update`, which reads the sequence the append continues. The row lock is a write-phase lock:
 // it is the statement that gives a transaction appending its first event its transaction id, and
 // every Dispatch writer of an owner row takes the owner lock first, so the row is never contended
-// among them. The lock and the row read go in one batch, one round trip, as two statements: the
-// read's snapshot is taken after the lock is granted.
+// among them. The lock and the row read go in one round trip as two statements
+// (store.LockOwnerAndRead): the read's snapshot is taken after the lock is granted.
 func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error) {
 	owner, ok := eventOwnerLock(*e)
 	if !ok {
 		return 0, nil
 	}
 	var lastSeq int
-	var row string
+	var what, row string
 	var scan []any
 	switch owner.Kind {
 	case store.OwnerIssue:
+		what = "issue"
 		row = `select last_seq, project_key from issues where key = $1 for no key update`
 		scan = []any{&lastSeq, &e.Project}
 	case store.OwnerArtifact:
+		what = "unlinked artifact"
 		row = `
 			select last_seq, project_key
 			from artifacts
@@ -238,30 +240,13 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 		`
 		scan = []any{&lastSeq, &e.Project}
 	default:
+		what = "project"
 		row = `select last_seq from projects where key = $1 for no key update`
 		scan = []any{&lastSeq}
 		e.Project = owner.Key
 	}
-	batch := &pgx.Batch{}
-	store.QueueLockOwner(batch, owner)
-	batch.Queue(row, owner.Key)
-	results := tx.SendBatch(ctx, batch)
-	_, err := results.Exec()
-	if err == nil {
-		err = results.QueryRow().Scan(scan...)
-	}
-	if closeErr := results.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		switch owner.Kind {
-		case store.OwnerIssue:
-			return 0, fmt.Errorf("lock issue for event: %w", err)
-		case store.OwnerArtifact:
-			return 0, fmt.Errorf("lock unlinked artifact for event: %w", err)
-		default:
-			return 0, fmt.Errorf("lock project for event: %w", err)
-		}
+	if err := store.LockOwnerAndRead(ctx, tx, owner, row, []any{owner.Key}, scan...); err != nil {
+		return 0, fmt.Errorf("lock %s for event: %w", what, err)
 	}
 	return lastSeq, nil
 }

@@ -411,12 +411,9 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	defer tx.Rollback(ctx)
-	// The issue's owner lock, then the existence check and the re-read in statements of their own,
-	// so they see whatever the lock's previous holder committed (store.LockOwner).
+	// The issue's owner lock, then the re-read in a statement of its own, so it sees whatever the
+	// lock's previous holder committed (store.LockOwner); an issue with no row fails the re-read.
 	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
-		return claimApplied{}, err
-	}
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1`, key).Scan(new(string)); err != nil {
 		return claimApplied{}, err
 	}
 	before, err := s.loadIssue(ctx, tx, key)

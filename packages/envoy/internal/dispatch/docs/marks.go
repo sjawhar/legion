@@ -539,10 +539,9 @@ func commentMarkType(table string) string {
 // appends the affected row's own full refresh event in this transaction; callers publish the
 // collected committed events afterward. The anchors' read, the tree walk and the events' reads run
 // where it is called; every anchor's update and event append are one step (write), in anchor
-// order, so a transaction whose writes are queued runs them in its write phase. INFRA-605 batches
-// the statements inside that one step. Where the step is queued, the ledger records each refreshed
-// anchor (RegisterPendingAnchor), so a later refresh in the same transaction reads the anchor this
-// one leaves.
+// order, so a transaction whose writes are queued runs them in its write phase. Where the step is
+// queued, the ledger records each refreshed anchor (RegisterPendingAnchor), so a later refresh in
+// the same transaction reads the anchor this one leaves.
 func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node, actor model.Actor) error {
 	anchors, err := s.openAnchoredMarks(ctx, tx, artifactID)
 	if err != nil {
@@ -617,12 +616,15 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 
 // anchorRefreshEvent is the anchor-refresh event of mark's row once its anchor is refreshed: the
 // row as its update leaves it, with the quote and orphaned flag the update writes. A row the
-// transaction registered with an event of its own (PendingAnchor.Event) builds it when the write
-// phase reaches it; any other is read now, where the refresh is worked out, and given the two
-// fields the update writes, which is the row the update leaves.
+// transaction registered with an event of its own (PendingAnchor.Event) prepares it now and builds
+// it when the write phase reaches it; any other is read now, where the refresh is worked out, and
+// given the two fields the update writes, which is the row the update leaves.
 func (s *Service) anchorRefreshEvent(ctx context.Context, tx pgx.Tx, mark anchoredMark, refreshed model.Anchor, actor model.Actor) (func() (model.Event, error), error) {
 	if mark.pending != nil && mark.pending.Event != nil {
-		build := mark.pending.Event
+		build, err := mark.pending.Event(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
 		return func() (model.Event, error) { return build(refreshed) }, nil
 	}
 	var event model.Event

@@ -136,7 +136,7 @@ func lockProjectIssueDependencies(ctx context.Context, tx pgx.Tx, project string
 // naming the same issues queue one behind the other instead of each holding one while waiting for
 // the other. A key with no row costs a lock nobody else takes; the caller's own read of that key
 // refuses it. The parent is read in the statement after the locks, never in the same one, so it
-// is the parent the lock's previous holder committed (store.LockOwner): every writer of
+// is the parent the lock's previous holder committed (store.LockOwnersAndRead): every writer of
 // parent_key holds the issue's lock.
 func lockIssueRows(ctx context.Context, tx pgx.Tx, key string, others ...string) (*string, error) {
 	owners := make([]store.Owner, 0, len(others)+1)
@@ -144,11 +144,8 @@ func lockIssueRows(ctx context.Context, tx pgx.Tx, key string, others ...string)
 	for _, other := range others {
 		owners = append(owners, store.IssueOwner(other))
 	}
-	if err := store.LockOwners(ctx, tx, owners...); err != nil {
-		return nil, err
-	}
 	var parent *string
-	err := tx.QueryRow(ctx, `select parent_key from issues where key = $1`, key).Scan(&parent)
+	err := store.LockOwnersAndRead(ctx, tx, owners, `select parent_key from issues where key = $1`, []any{key}, &parent)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}

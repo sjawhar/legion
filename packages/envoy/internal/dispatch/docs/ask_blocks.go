@@ -16,7 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 type askBlock struct {
@@ -302,7 +301,7 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
-			changes, index, err := planReplaceCounted(ctx, tx, "ask", ask.ID, text.Extract(ask.Question, s.serverURL), nil, nil)
+			changes, index, err := planAskReferences(ctx, tx, ask.ID, ask.Question, s.serverURL)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
@@ -359,17 +358,11 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
-			id := ask.ID
-			if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `
-					update asks
-					set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = $6
-					where id = $1
-				`, id, block.question, options, block.multiple, block.urgency, editedAt); err != nil {
-					return fmt.Errorf("update reconciled ask: %w", err)
-				}
-				return nil
-			}); err != nil {
+			if err := writeExec(ctx, tx, "update reconciled ask", `
+				update asks
+				set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = $6
+				where id = $1
+			`, ask.ID, block.question, options, block.multiple, block.urgency, editedAt); err != nil {
 				return settlementReconciliation{}, err
 			}
 			ask.Question = block.question
@@ -378,7 +371,7 @@ func (s *Service) reconcileAskBlocks(
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
 			recordAskBlock(ctx, tx, artifactID, ask)
-			changes, index, err := planReplaceCounted(ctx, tx, "ask", ask.ID, text.Extract(ask.Question, s.serverURL), nil, nil)
+			changes, index, err := planAskReferences(ctx, tx, ask.ID, ask.Question, s.serverURL)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
@@ -816,13 +809,7 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 		}
 		answer = encoded
 	}
-	id := ask.ID
-	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `update asks set state = $2, answer = $3, resolution = null where id = $1`, id, prior.State, answer); err != nil {
-			return fmt.Errorf("restore retracted ask: %w", err)
-		}
-		return nil
-	}); err != nil {
+	if err := writeExec(ctx, tx, "restore retracted ask", `update asks set state = $2, answer = $3, resolution = null where id = $1`, ask.ID, prior.State, answer); err != nil {
 		return model.Ask{}, err
 	}
 	ask.State = prior.State

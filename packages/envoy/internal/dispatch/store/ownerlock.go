@@ -87,21 +87,12 @@ const (
 // read the owner (`select pg_advisory_xact_lock(...), closed_at from issues ...`) would read the
 // row as it stood before the wait and miss a close the lock's previous holder committed meanwhile.
 // The statement after the lock takes a fresh snapshot, which holds every commit of that holder.
+// LockOwnerAndRead sends the two in one round trip.
 //
 // A transaction that locks several owners takes them all through LockOwners, which orders them by
 // lock key. Taking the lock again in the transaction that holds it returns at once.
 func LockOwner(ctx context.Context, q OwnerLocker, owner Owner) error {
-	if _, err := q.Exec(ctx, ownerLock, ownerLockNamespace, owner.lockKey()); err != nil {
-		return fmt.Errorf("lock %s %s: %w", owner.Kind, owner.Key, err)
-	}
-	return nil
-}
-
-// QueueLockOwner queues owner's lock (LockOwner) on batch, ahead of the statements that read what
-// it guards, so the lock and those reads cost one round trip and stay statements of their own: the
-// server binds the next statement, taking its snapshot, only once the lock has been granted.
-func QueueLockOwner(batch *pgx.Batch, owner Owner) {
-	batch.Queue(ownerLock, ownerLockNamespace, owner.lockKey())
+	return LockOwners(ctx, q, owner)
 }
 
 // LockOwners takes the locks of every owner in owners (LockOwner) in one statement, sorted and
@@ -111,20 +102,69 @@ func QueueLockOwner(batch *pgx.Batch, owner Owner) {
 // by key, every transaction takes any two keys in the same order. As with LockOwner, the reads the
 // locks guard come in statements after this one.
 func LockOwners(ctx context.Context, q OwnerLocker, owners ...Owner) error {
-	switch len(owners) {
-	case 0:
+	if len(owners) == 0 {
 		return nil
-	case 1:
-		return LockOwner(ctx, q, owners[0])
 	}
+	lock, args := lockOwnersStatement(owners)
+	if _, err := q.Exec(ctx, lock, args...); err != nil {
+		return lockOwnersFailed(owners, err)
+	}
+	return nil
+}
+
+// LockOwnerAndRead takes owner's lock (LockOwner) and then runs read with args, the statement the
+// lock guards, scanning its one row into dest. The two go in one batch, one round trip, and stay
+// two statements: the server starts read, taking its snapshot, only once the lock is granted, so
+// read sees every commit of the lock's previous holder. A session waiting on the lock shows the
+// lock's statement (owner_lock) in pg_stat_activity. The lock's failure is wrapped as LockOwner
+// wraps it; read's comes back as Scan returned it, pgx.ErrNoRows included.
+func LockOwnerAndRead(ctx context.Context, tx pgx.Tx, owner Owner, read string, args []any, dest ...any) error {
+	return LockOwnersAndRead(ctx, tx, []Owner{owner}, read, args, dest...)
+}
+
+// LockOwnersAndRead is LockOwnerAndRead for the locks of several owners, taken as LockOwners takes
+// them, in one statement ahead of read.
+func LockOwnersAndRead(ctx context.Context, tx pgx.Tx, owners []Owner, read string, args []any, dest ...any) error {
+	batch := &pgx.Batch{}
+	lock, lockArgs := lockOwnersStatement(owners)
+	batch.Queue(lock, lockArgs...)
+	batch.Queue(read, args...)
+	results := tx.SendBatch(ctx, batch)
+	if _, err := results.Exec(); err != nil {
+		results.Close()
+		return lockOwnersFailed(owners, err)
+	}
+	err := results.QueryRow().Scan(dest...)
+	if closeErr := results.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// lockOwnersStatement is the statement that takes the locks of owners, at least one, and its
+// arguments: ownerLock for one owner, ownersLock for several.
+func lockOwnersStatement(owners []Owner) (string, []any) {
+	if len(owners) == 1 {
+		return ownerLock, []any{ownerLockNamespace, owners[0].lockKey()}
+	}
+	return ownersLock, []any{ownerLockNamespace, lockKeys(owners)}
+}
+
+// lockOwnersFailed is err, the failure of lockOwnersStatement's statement, naming what it locked.
+func lockOwnersFailed(owners []Owner, err error) error {
+	if len(owners) == 1 {
+		return fmt.Errorf("lock %s %s: %w", owners[0].Kind, owners[0].Key, err)
+	}
+	return fmt.Errorf("lock owners %v: %w", lockKeys(owners), err)
+}
+
+// lockKeys is each owner's lock key, in owners' order.
+func lockKeys(owners []Owner) []string {
 	keys := make([]string, len(owners))
 	for index, owner := range owners {
 		keys[index] = owner.lockKey()
 	}
-	if _, err := q.Exec(ctx, ownersLock, ownerLockNamespace, keys); err != nil {
-		return fmt.Errorf("lock owners %v: %w", keys, err)
-	}
-	return nil
+	return keys
 }
 
 // LockOwnerShared takes owner's lock in shared mode. It conflicts with LockOwner's exclusive lock

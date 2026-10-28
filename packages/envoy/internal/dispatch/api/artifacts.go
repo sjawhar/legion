@@ -293,9 +293,10 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 
 // queueNewArtifact queues the insert of the artifact an upload creates and returns the row as the
 // insert will leave it. Its id, which the document's own writes name before the row is written, is
-// taken here (gen_random_uuid, which assigns no transaction id); its ref_key is the one the 0071
-// trigger fills in, the target's owner key and the slug (artifactTarget.refPrefix); its created_at
-// is the column's default, the transaction's now() (docs.Ledger.Now), written explicitly.
+// taken here (gen_random_uuid, which assigns no transaction id), in the statement that reads its
+// created_at, the column's default, the transaction's now(), which the insert writes explicitly;
+// its ref_key is the one the 0071 trigger fills in, the target's owner key and the slug
+// (artifactTarget.refPrefix).
 func (s *server) queueNewArtifact(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -316,10 +317,7 @@ func (s *server) queueNewArtifact(
 	if err := json.Unmarshal(actorJSON, &artifact.CreatedBy); err != nil {
 		return model.Artifact{}, fmt.Errorf("decode artifact author: %w", err)
 	}
-	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text`).Scan(&artifact.ID); err != nil {
-		return model.Artifact{}, err
-	}
-	if artifact.CreatedAt, err = ledger.Now(ctx); err != nil {
+	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text, now()`).Scan(&artifact.ID, &artifact.CreatedAt); err != nil {
 		return model.Artifact{}, err
 	}
 	return artifact, queueExec(ctx, tx, ledger, `

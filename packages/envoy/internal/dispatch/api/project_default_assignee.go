@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A project's default assignee is the last step of an issue create's assignee chain
@@ -103,7 +105,7 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 	// The project's owner lock before its row's update, as every projects writer takes them
 	// (createIssue, lockEventOwner): taking the row first and the lock at the append below would
 	// wait, holding the row, on a create that holds the lock and waits for the row.
-	if err := lockOwner(r.Context(), tx, projectOwner(key)); err != nil {
+	if err := store.LockOwner(r.Context(), tx, store.ProjectOwner(key)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

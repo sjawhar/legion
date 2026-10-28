@@ -12,7 +12,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // OpenApprovalAsk returns the open approval ask on artifactID, or nil. The caller holds the document
@@ -91,12 +90,7 @@ func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 	if err := rewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL, sink); err != nil {
 		return err
 	}
-	if ledger := queueFor(ctx, tx); ledger != nil {
-		if ledger.approvals == nil {
-			ledger.approvals = make(map[string]*pendingApproval)
-		}
-		ledger.approvals[artifactID] = &pendingApproval{ask: ask}
-	}
+	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask})
 	return nil
 }
 
@@ -157,7 +151,7 @@ func rewriteApprovalAsk(
 	if err != nil {
 		return err
 	}
-	changes, index, err := planReplaceCounted(ctx, tx, "ask", ask.ID, text.Extract(ask.Question, serverURL), nil, nil)
+	changes, index, err := planAskReferences(ctx, tx, ask.ID, ask.Question, serverURL)
 	if err != nil {
 		return fmt.Errorf("index approval ask: %w", err)
 	}

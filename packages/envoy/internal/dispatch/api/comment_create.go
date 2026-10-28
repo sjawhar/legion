@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -504,17 +503,15 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// which still orders it after every comment committed before this transaction took the lock
 	// and before every comment committed after it; it is written explicitly, so the projection
 	// below, made before the insert runs, carries the time the row will hold.
-	var createdAt time.Time
-	if err := tx.QueryRow(r.Context(), `select clock_timestamp()`).Scan(&createdAt); err != nil {
+	var comment model.Comment
+	if err := tx.QueryRow(r.Context(), `select clock_timestamp()`).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var comment model.Comment
-	comment.CreatedAt = createdAt
 	if err := queueExec(r.Context(), tx, ledger, `
 		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON, createdAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON, comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -541,10 +538,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
 	if comment.Anchor != nil {
-		if err := s.registerCommentAnchor(r.Context(), tx, ledger, comment, actor, false); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+		s.registerCommentAnchor(ledger, comment, actor, false)
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -571,10 +565,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			root.ResolvedBy = nil
 			root.ResolvedAt = nil
 			reopenedRoot = &root
-			if err := s.registerCommentAnchor(r.Context(), tx, ledger, root, actor, true); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
+			s.registerCommentAnchor(ledger, root, actor, true)
 			reopenedArtifactName, err = s.commentArtifactName(r.Context(), tx, root)
 			if err != nil {
 				s.writeHandlerError(w, err)

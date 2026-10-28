@@ -282,7 +282,8 @@ type artifactOwner struct {
 // lock, so it serialises this writer against every other writer of the owner without taking a row
 // lock, and so without giving the transaction a transaction id or blocking the `for key share` a
 // child insert takes - see lockDocumentRoom for why that is the rule. Whether the issue is open is
-// read in the statement after the lock, so a close committed while this waited is seen.
+// read in the statement after the lock, sent with it (store.LockOwnerAndRead), so a close committed
+// while this waited is seen.
 func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
 	var owner artifactOwner
 	if err := tx.QueryRow(ctx, `
@@ -292,25 +293,18 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 		return artifactOwner{}, false, fmt.Errorf("load document owner: %w", err)
 	}
 	if owner.IssueKey == nil {
-		if err := store.LockOwner(ctx, tx, store.ArtifactOwner(artifactID)); err != nil {
-			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
-		}
-		var exists bool
-		if err := tx.QueryRow(ctx, `
+		if err := store.LockOwnerAndRead(ctx, tx, store.ArtifactOwner(artifactID), `
 			select true from artifacts where id = $1 and issue_key is null
-		`, artifactID).Scan(&exists); err != nil {
-			return artifactOwner{}, false, fmt.Errorf("read document artifact: %w", err)
+		`, []any{artifactID}, new(bool)); err != nil {
+			return artifactOwner{}, false, fmt.Errorf("lock and read document artifact: %w", err)
 		}
 		return owner, true, nil
 	}
-	if err := store.LockOwner(ctx, tx, store.IssueOwner(*owner.IssueKey)); err != nil {
-		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
-	}
 	var open bool
-	if err := tx.QueryRow(ctx, `
+	if err := store.LockOwnerAndRead(ctx, tx, store.IssueOwner(*owner.IssueKey), `
 		select closed_at is null from issues where key = $1
-	`, *owner.IssueKey).Scan(&open); err != nil {
-		return artifactOwner{}, false, fmt.Errorf("read document issue: %w", err)
+	`, []any{*owner.IssueKey}, &open); err != nil {
+		return artifactOwner{}, false, fmt.Errorf("lock and read document issue: %w", err)
 	}
 	return owner, open, nil
 }

@@ -158,7 +158,7 @@ func planBlockIndex(
 	return indexing.Moved(), func(ctx context.Context, tx pgx.Tx) error { return indexing.Apply(ctx, tx) }, nil
 }
 
-// planReplaceCounted is refs.ReplaceCountedRefs split in two: it plans the reconciliation of
+// planReplaceCounted is refs.ReplaceCounted split in two: it plans the reconciliation of
 // fromKind/fromID's references with found, a new edge dated insertedAt (nil: the transaction's
 // time), resolves the counted targets it and moved move, and returns those with the step that
 // writes it. It plans against the source's edges as the transaction's own queued reconciliation of
@@ -197,6 +197,12 @@ func planReplaceCounted(
 		return model.ReferenceChanges{}, nil, err
 	}
 	return changes, func(ctx context.Context, tx pgx.Tx) error { return replacement.Apply(ctx, tx) }, nil
+}
+
+// planAskReferences is planReplaceCounted for ask askID, whose references are the ones its
+// question cites.
+func planAskReferences(ctx context.Context, tx pgx.Tx, askID, question, serverURL string) (model.ReferenceChanges, WriteStep, error) {
+	return planReplaceCounted(ctx, tx, "ask", askID, text.Extract(question, serverURL), nil, nil)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep

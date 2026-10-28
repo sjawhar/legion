@@ -891,22 +891,31 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 
 // requireOpenIssue takes the issue's owner lock and returns its lifecycle status, rejecting
 // mutations after completion without a second issue query. The read is the statement after the
-// lock, so it sees a close the lock's previous holder committed while this one waited
-// (store.LockOwner).
+// lock, sent with it, so it sees a close the lock's previous holder committed while this one
+// waited (store.LockOwnerAndRead).
 func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
-	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
-		return "", err
-	}
-	return issueOpenStatus(ctx, tx, key)
+	var status string
+	var open bool
+	err := store.LockOwnerAndRead(ctx, tx, store.IssueOwner(key), issueOpenStatusRead, []any{key}, &status, &open)
+	return refuseClosedIssue(status, open, err)
 }
+
+// issueOpenStatusRead reads an issue's lifecycle status and whether it is open.
+const issueOpenStatusRead = `select status, closed_at is null from issues where key = $1`
 
 // issueOpenStatus is that same read and refusal made through q, so the check a comment makes
 // from the pool before its transaction opens refuses exactly what the locked check will.
 func issueOpenStatus(ctx context.Context, q queryer, key string) (string, error) {
 	var status string
 	var open bool
-	if err := q.QueryRow(ctx, `
-		select status, closed_at is null from issues where key = $1`, key).Scan(&status, &open); err != nil {
+	err := q.QueryRow(ctx, issueOpenStatusRead, key).Scan(&status, &open)
+	return refuseClosedIssue(status, open, err)
+}
+
+// refuseClosedIssue is the refusal of issueOpenStatusRead's answer: err as the read returned it, a
+// closed issue's ISSUE_CLOSED, else the issue's status.
+func refuseClosedIssue(status string, open bool, err error) (string, error) {
+	if err != nil {
 		return "", err
 	}
 	if !open {

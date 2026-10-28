@@ -430,12 +430,7 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 	if err != nil {
 		return fmt.Errorf("encode approval answer: %w", err)
 	}
-	if ledger := queueFor(ctx, tx); ledger != nil {
-		if ledger.approvals == nil {
-			ledger.approvals = make(map[string]*pendingApproval)
-		}
-		ledger.approvals[artifactID] = &pendingApproval{ask: ask, closed: true}
-	}
+	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask, closed: true})
 	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
 		answered, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded)
 		if err != nil {

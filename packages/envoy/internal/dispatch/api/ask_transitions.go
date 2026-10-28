@@ -16,7 +16,7 @@ import (
 )
 
 // askTransition is one way of closing or changing an ask's answer. Its writes are the
-// transaction's (ledger): Apply and After make them in the order they run today, each queued on
+// transaction's (ledger): Apply and After make them in the order they run, each queued on
 // ledger when the caller joined one, and the events After returns are filled in once Commit has run
 // their steps (queueEvent).
 type askTransition struct {

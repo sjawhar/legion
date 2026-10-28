@@ -83,7 +83,7 @@ func TestCommittedLedgerWritePersistsSettlementCreditWhenCallerContextCancelsAft
 		t.Fatalf("begin edit: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	joined, ledger := service.Join(ctx, cancelAfterCommitTx{Tx: tx, cancel: cancel})
+	joined, ledger := service.Join(ctx, &cancelAfterCommitTx{Tx: tx, cancel: cancel})
 	defer ledger.Discard()
 	actor := model.Actor{Kind: "session", ID: "canceled-after-commit-session"}
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{

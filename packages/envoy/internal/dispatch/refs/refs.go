@@ -35,40 +35,26 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it or
-// ReplaceCountedRefs, so no producer can reconcile the graph without holding what moved:
-// replaceRefs itself is unexported.
+// that source appends has to name. A write that indexes a body at once goes through it; one that
+// decides before it writes plans the same reconciliation (PlanReplace, PlanReplaceFrom), resolves
+// what it moves (CountedChanges) and applies it in its write phase. replaceRefs, which reconciles
+// without saying what moved, is unexported.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	return ReplaceCountedRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil, nil)
-}
-
-// ReplaceCountedRefs is ReplaceCounted for references a caller has already extracted: a new edge
-// takes insertedAt as its created_at (nil: the transaction's time), and the counted targets it
-// resolves are those replaceRefs moved together with moved, the targets the same write moved
-// elsewhere - a document version's block mentions (IndexBlocks) - so its event names them all.
-func ReplaceCountedRefs(
-	ctx context.Context,
-	tx pgx.Tx,
-	fromKind, fromID string,
-	found []text.Ref,
-	insertedAt *time.Time,
-	moved []Target,
-) (model.ReferenceChanges, error) {
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, insertedAt)
+	changed, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return CountedChanges(ctx, tx, append(changed, moved...))
+	return CountedChanges(ctx, tx, changed)
 }
 
 // replaceRefs reconciles the Dispatch references written by one source with found: targets no
 // longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
-// edges moved — deleted or inserted, oldest state first — so ReplaceCountedRefs can resolve the
+// edges moved — deleted or inserted, oldest state first — so ReplaceCounted can resolve the
 // ones whose readers carry a batched backlink count. It is PlanReplace and Apply back to back.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
 	replacement, err := PlanReplace(ctx, tx, fromKind, fromID, found, insertedAt)

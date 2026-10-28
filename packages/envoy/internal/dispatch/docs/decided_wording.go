@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // decidedWordingEdits finds the wording a decided ask's decision was given on, where a task of an
@@ -42,22 +41,25 @@ const decidedWordingEdits = `
 		order by d.id, e.id
 	)`
 
+// decidedWordingColumns is the wording an ask a gets back from its first edit's previous wording
+// f: the question the edit recorded, and options, multiple and urgency, each the row's own where
+// the edit recorded none.
+const decidedWordingColumns = `
+	f.wording->>'question', coalesce(f.wording->'options', a.options),
+	coalesce((f.wording->>'multiple')::boolean, a.multiple), coalesce(f.wording->>'urgency', a.urgency)`
+
 // decidedWordingDiffers holds for an ask a whose row asks something other than its first edit's
 // previous wording f.
 const decidedWordingDiffers = `
 	a.id = f.id
 	and f.wording ? 'question'
-	and (a.question, a.options, a.multiple, a.urgency) is distinct from
-		(f.wording->>'question', coalesce(f.wording->'options', a.options),
-		 coalesce((f.wording->>'multiple')::boolean, a.multiple), coalesce(f.wording->>'urgency', a.urgency))`
+	and (a.question, a.options, a.multiple, a.urgency) is distinct from (` + decidedWordingColumns + `)`
 
 // decidedWordingPlan reads each ask decidedWordingRestore would give back its decided wording,
 // writing nothing: its id, its document and block (both null for an ask no block holds) and the
 // wording.
 const decidedWordingPlan = decidedWordingEdits + `
-	select a.id::text, a.block_artifact_id::text, a.block_id, f.wording->>'question',
-		coalesce(f.wording->'options', a.options), coalesce((f.wording->>'multiple')::boolean, a.multiple),
-		coalesce(f.wording->>'urgency', a.urgency)
+	select a.id::text, a.block_artifact_id::text, a.block_id, ` + decidedWordingColumns + `
 	from asks a join first_edit f on a.id = f.id
 	where ` + decidedWordingDiffers + `
 	order by a.id`
@@ -67,10 +69,7 @@ const decidedWordingPlan = decidedWordingEdits + `
 // its first edit's previous wording, so it writes it no more.
 const decidedWordingRestore = decidedWordingEdits + `
 	update asks a
-	set question = f.wording->>'question',
-		options = coalesce(f.wording->'options', a.options),
-		multiple = coalesce((f.wording->>'multiple')::boolean, a.multiple),
-		urgency = coalesce(f.wording->>'urgency', a.urgency)
+	set (question, options, multiple, urgency) = (` + decidedWordingColumns + `)
 	from first_edit f
 	where ` + decidedWordingDiffers + `
 	returning a.id::text`
@@ -263,7 +262,7 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 	steps := make([]WriteStep, len(restored))
 	for index, wording := range restored {
 		planned[index] = wording.ask
-		_, step, err := planReplaceCounted(ctx, tx, "ask", wording.ask, text.Extract(wording.wording.Question, s.serverURL), nil, nil)
+		_, step, err := planAskReferences(ctx, tx, wording.ask, wording.wording.Question, s.serverURL)
 		if err != nil {
 			return nil, fmt.Errorf("index the restored question of ask %s: %w", wording.ask, err)
 		}

@@ -175,11 +175,15 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	var rowID string
-	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
+	// The row's created_at is the transaction's now(), its column default, read with its id and
+	// written explicitly, so the ask this route answers and its event carry the time the row will
+	// hold.
+	var ask model.Ask
+	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text, now()`).Scan(&ask.ID, &ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	rowID := ask.ID
 	// Everything up to Commit is the read phase (Docs.Join): the document operations and this
 	// route queue their writes on the ledger, in the order made, and Commit runs them back to
 	// back. Write advice is read here, before the first write is queued, so its queries hold no
@@ -214,19 +218,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
-	// The row's created_at is the transaction's now(), its column default, written explicitly so
-	// the ask this route answers and its event carry the time the row will hold.
-	createdAt, err := ledger.Now(r.Context())
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	var ask model.Ask
-	ask.CreatedAt = createdAt
 	if err := queueExec(r.Context(), tx, ledger, `
 		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind, createdAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind, ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -236,7 +231,6 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask.ID = rowID
 	ask.IssueKey = owner.IssueKey
 	ask.ArtifactID = owner.ArtifactID
 	ask.Author = actor
@@ -462,8 +456,8 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// edited_at is the transaction's now(), as the update's own now() writes it, read here so the
-	// ask this route answers and its event carry it before the queued update runs.
+	// edited_at is the transaction's now(), which the queued update writes, read here so the ask
+	// this route answers and its event carry it before that update runs.
 	editedAt, err := ledger.Now(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)

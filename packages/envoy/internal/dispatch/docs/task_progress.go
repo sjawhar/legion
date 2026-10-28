@@ -33,17 +33,12 @@ func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree 
 func recordTaskProgress(
 	ctx context.Context, tx pgx.Tx, artifactID string, progress pmdoc.TaskProgress,
 ) error {
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
-			update issues i
-			set tasks_done = $2, tasks_total = $3,
-			    tasks_version = (select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)
-			where i.key = (select issue_key from artifacts where id = $1 and is_primary)
-		`, artifactID, progress.Done, progress.Total); err != nil {
-			return fmt.Errorf("record issue task progress: %w", err)
-		}
-		return nil
-	})
+	return writeExec(ctx, tx, "record issue task progress", `
+		update issues i
+		set tasks_done = $2, tasks_total = $3,
+		    tasks_version = (select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)
+		where i.key = (select issue_key from artifacts where id = $1 and is_primary)
+	`, artifactID, progress.Done, progress.Total)
 }
 
 // RecordTaskProgressMarkdown is RecordTaskProgress for a caller that holds the canonical markdown
@@ -165,7 +160,7 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 // concurrent writer holding the issue is left alone: a version write records its own count, and any
 // other writer leaves the issue's drift to a later batch. The candidates are read in key order,
 // unlocked, and tried a page at a time until the batch is full or none are left, so issues another
-// writer holds give way to the next ones as skip locked did. What the batch counts is read in a
+// writer holds give way to the next ones. What the batch counts is read in a
 // statement after the locks, which sees whatever their previous holders committed, and an issue
 // such a holder has counted meanwhile is no longer drift and is left out.
 func (s *Service) reconcileTaskProgressBatch(

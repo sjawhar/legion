@@ -2,10 +2,8 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -118,9 +116,9 @@ type WriteStep func(ctx context.Context, tx pgx.Tx) error
 var ErrQueueSealed = errors.New("docs: the transaction's write queue is sealed: Commit has begun or the ledger was discarded")
 
 // Queue appends step to the transaction's write phase, after every write queued so far: a route
-// joined to the ledger queues each of its own writes here at the point it makes it today, so the
-// queue replays the transaction's statements, the document operations' and the route's, in the
-// order they were made. It refuses a ledger no caller joined and a sealed one (ErrQueueSealed).
+// joined to the ledger queues each of its own writes here at the point it makes it, so the queue
+// replays the transaction's statements, the document operations' and the route's, in the order
+// they were made. It refuses a ledger no caller joined and a sealed one (ErrQueueSealed).
 func (l *Ledger) Queue(step WriteStep) error {
 	if l.tx == nil {
 		return errUnjoined
@@ -138,25 +136,10 @@ func (l *Ledger) Queue(step WriteStep) error {
 // phase itself, whose nested writes run where the step runs them.
 func queueFor(ctx context.Context, tx pgx.Tx) *Ledger {
 	ledger := ledgerFrom(ctx)
-	if ledger == nil || ledger.writer == nil || ledger.sealed || !sameTx(ledger.writer, tx) {
+	if ledger == nil || ledger.writer == nil || ledger.sealed || ledger.writer != tx {
 		return nil
 	}
 	return ledger
-}
-
-// sameTx reports whether tx is writer, the ledger's transaction. A transaction whose type Go
-// cannot compare - a wrapper held by value, as a test's can be - is taken to be the ledger's when
-// the two types match: an operation takes its transaction from its ledger (txFromContext), and
-// the writers that bring one of their own, the durable writers, open a pgx transaction.
-func sameTx(writer, tx pgx.Tx) bool {
-	writerType := reflect.TypeOf(writer)
-	if writerType != reflect.TypeOf(tx) {
-		return false
-	}
-	if !writerType.Comparable() {
-		return true
-	}
-	return writer == tx
 }
 
 // write runs step in tx: queued on ctx's ledger (queueFor), so it runs in the write phase in the
@@ -168,6 +151,22 @@ func write(ctx context.Context, tx pgx.Tx, step WriteStep) error {
 		return nil
 	}
 	return step(ctx, tx)
+}
+
+// execStep is a write step of one statement whose result nothing reads, its failure wrapped as
+// what failed.
+func execStep(what, sql string, args ...any) WriteStep {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, sql, args...); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
+}
+
+// writeExec writes one statement whose result nothing reads (write, execStep).
+func writeExec(ctx context.Context, tx pgx.Tx, what, sql string, args ...any) error {
+	return write(ctx, tx, execStep(what, sql, args...))
 }
 
 // queueWrites marks ctx so the writes document code makes in tx queue (write) on a ledger of their
@@ -216,9 +215,9 @@ func (l *Ledger) Now(ctx context.Context) (time.Time, error) {
 		return time.Time{}, errUnjoined
 	}
 	if l.now == nil {
-		var now time.Time
-		if err := l.writer.QueryRow(ctx, `select now()`).Scan(&now); err != nil {
-			return time.Time{}, fmt.Errorf("read the transaction's time: %w", err)
+		now, err := readNow(ctx, l.writer)
+		if err != nil {
+			return time.Time{}, err
 		}
 		l.now = &now
 	}
@@ -231,8 +230,13 @@ func transactionNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 	if ledger := queueFor(ctx, tx); ledger != nil {
 		return ledger.Now(ctx)
 	}
+	return readNow(ctx, tx)
+}
+
+// readNow reads the transaction's now() through q.
+func readNow(ctx context.Context, q Queryer) (time.Time, error) {
 	var now time.Time
-	if err := tx.QueryRow(ctx, `select now()`).Scan(&now); err != nil {
+	if err := q.QueryRow(ctx, `select now()`).Scan(&now); err != nil {
 		return time.Time{}, fmt.Errorf("read the transaction's time: %w", err)
 	}
 	return now, nil
@@ -250,12 +254,11 @@ func (l *Ledger) NextVersion(ctx context.Context, artifactID string) (int, time.
 	}
 	number, numbered := l.numbers[artifactID]
 	if !numbered {
-		var now time.Time
-		if err := l.writer.QueryRow(ctx, `
-			select coalesce(max(number), 0), now() from artifact_versions where artifact_id = $1
-		`, artifactID).Scan(&number, &now); err != nil {
-			return 0, time.Time{}, fmt.Errorf("number the document's next version: %w", err)
+		latest, now, err := latestStoredVersion(ctx, l.writer, artifactID)
+		if err != nil {
+			return 0, time.Time{}, err
 		}
+		number = latest
 		if l.now == nil {
 			l.now = &now
 		}
@@ -306,16 +309,11 @@ func (l *Ledger) queuedVersion(artifactID string, pending pendingVersion) {
 // of its seeded spec - and returns the row as the insert will leave it. It is named when it has a
 // summary. Its number and time are NextVersion's; the update cursor it records is the head this
 // transaction's queued writes leave the document's stored history at (the seed's or the
-// replacement's append, made under the document's lock), else the stored head, which is what the
-// row's old subquery, max(doc_updates.version), read once that append had run. The ledger records
+// replacement's append, made under the document's lock), else the stored head. The ledger records
 // it as the document's latest version, so the reads that follow in this transaction
 // (latestVersion, PendingVersionMarkdown) take it from here rather than from a table that holds it
 // only once Commit has run the queue.
 func (l *Ledger) QueueVersion(ctx context.Context, artifactID, markdown string, authors []model.Actor, summary *string) (model.Version, error) {
-	encodedAuthors, err := json.Marshal(authors)
-	if err != nil {
-		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
-	}
 	number, createdAt, err := l.NextVersion(ctx, artifactID)
 	if err != nil {
 		return model.Version{}, err
@@ -326,22 +324,11 @@ func (l *Ledger) QueueVersion(ctx context.Context, artifactID, markdown string, 
 	} else if docUpdateVersion, err = currentUpdateCursor(ctx, l.writer, artifactID); err != nil {
 		return model.Version{}, err
 	}
-	// The row as the insert leaves it: its size is its markdown's (model.VersionSize), its authors
-	// what they decode to.
-	size := len(markdown)
-	version := model.Version{Number: number, Named: summary != nil, Summary: summary, CreatedAt: createdAt, Size: &size}
-	if err := json.Unmarshal(encodedAuthors, &version.Authors); err != nil {
-		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
+	version, insert, err := versionInsert(artifactID, markdown, authors, number, createdAt, summary != nil, summary, docUpdateVersion)
+	if err != nil {
+		return model.Version{}, err
 	}
-	if err := l.Queue(func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
-			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version, created_at)
-			values ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, artifactID, number, markdown, encodedAuthors, version.Named, summary, docUpdateVersion, createdAt); err != nil {
-			return fmt.Errorf("write document version: %w", err)
-		}
-		return nil
-	}); err != nil {
+	if err := l.Queue(insert); err != nil {
 		return model.Version{}, err
 	}
 	l.queuedVersion(artifactID, pendingVersion{version: version, markdown: markdown, docUpdateVersion: docUpdateVersion})
@@ -386,13 +373,14 @@ type PendingAnchor struct {
 	Anchor model.Anchor
 	// Open says whether a refresh refreshes the row: an open ask, an unresolved comment.
 	Open bool
-	// Event is the row's anchor-refresh event (ask.anchor_refreshed, comment.anchor_refreshed)
-	// once its anchor is refreshed to the one it is passed. It is called in the write phase, after
-	// the steps queued before the refresh have run, so it may read what they captured - the id of
-	// the event that opened the ask - and does only the light work of a step. Nil reads the row
-	// from the table in the read phase, as the refresh reads a stored row, which only a row the
-	// table already holds can be.
-	Event func(refreshed model.Anchor) (model.Event, error)
+	// Event prepares the row's anchor-refresh event (ask.anchor_refreshed,
+	// comment.anchor_refreshed). A refresh that moves the row's anchor calls it in the read phase,
+	// in tx, to read what the event needs, and calls the builder it returns in the write phase,
+	// with the anchor refreshed to, after the steps queued before the refresh have run, so the
+	// builder may read what they captured - the id of the event that opened the ask - and does
+	// only the light work of a step. Nil reads the row from the table in the read phase, as the
+	// refresh reads a stored row, which only a row the table already holds can be.
+	Event func(ctx context.Context, tx pgx.Tx) (func(refreshed model.Anchor) (model.Event, error), error)
 }
 
 // RegisterPendingAnchor records row, an anchored ask or comment row the caller has queued a write
@@ -431,6 +419,19 @@ func pendingAnchorsOf(ctx context.Context, artifactID string) []*PendingAnchor {
 type pendingApproval struct {
 	ask    *model.Ask
 	closed bool
+}
+
+// recordPendingApproval records pending as artifactID's open approval request on the ledger ctx
+// queues tx's writes on, when there is one: the caller has queued the write that leaves it so.
+func recordPendingApproval(ctx context.Context, tx pgx.Tx, artifactID string, pending pendingApproval) {
+	ledger := queueFor(ctx, tx)
+	if ledger == nil {
+		return
+	}
+	if ledger.approvals == nil {
+		ledger.approvals = make(map[string]*pendingApproval)
+	}
+	ledger.approvals[artifactID] = &pending
 }
 
 type ledgerVersion struct {

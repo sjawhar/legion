@@ -23,7 +23,7 @@ import (
 // queueWrite runs step in tx's write phase: queued on ledger after every write queued so far, or
 // at once where the transaction runs no queue (a nil ledger: a caller that joined no ledger, as
 // createArtifactReview's answer of an approval ask). A step's error stops the write phase and
-// Ledger.Commit returns it unchanged, so the route answers it as it answered the inline write.
+// Ledger.Commit returns it unchanged, so the route answers it as it would a statement run at once.
 func queueWrite(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, step docs.WriteStep) error {
 	if ledger == nil {
 		return step(ctx, tx)

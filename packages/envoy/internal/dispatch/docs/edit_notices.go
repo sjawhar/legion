@@ -100,23 +100,13 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	if latest == nil || latest.Kind != "user" || !slices.Contains(editors, latest.ID) {
 		slog.Info("dispatch: a version names no latest editor among the people it lists, so its edit notice names nobody new",
 			"artifact", artifactID, "version", version, "editors", editors, "latest", latest)
-		return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, holdEditNotice, artifactID, version, editorsJSON, s.editNoticeQuiet); err != nil {
-				return fmt.Errorf("hold edit notice: %w", err)
-			}
-			return nil
-		})
+		return writeExec(ctx, tx, "hold edit notice", holdEditNotice, artifactID, version, editorsJSON, s.editNoticeQuiet)
 	}
 	lastJSON, err := json.Marshal(*latest)
 	if err != nil {
 		return fmt.Errorf("encode edit notice last editor: %w", err)
 	}
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, openEditNotice, artifactID, version, editorsJSON, lastJSON, s.editNoticeQuiet); err != nil {
-			return fmt.Errorf("open edit notice: %w", err)
-		}
-		return nil
-	})
+	return writeExec(ctx, tx, "open edit notice", openEditNotice, artifactID, version, editorsJSON, lastJSON, s.editNoticeQuiet)
 }
 
 // editNoticeLease names the lease one sweep runs under, editNoticeInterval the sweep's period and

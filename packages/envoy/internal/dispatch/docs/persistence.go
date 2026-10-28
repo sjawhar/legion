@@ -207,7 +207,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 // appendUpdateTxClass appends update to room's stored history in tx. Its read half - the document
 // lock, an interrupted prune's checkpoint, the head and the gate (lockedHead,
 // refuseRoomBehindHead) - and the credit's take run where it is called, so the document lock is
-// held from the point the append is made, as it always was, and the credit is taken under it; its
+// held from the point the append is made and the credit is taken under it; its
 // writes - the insert, the pending settlement and the pending authors - go through write, so a
 // transaction whose writes are queued runs them in its write phase, in this order, and any other
 // runs them at once.
@@ -297,20 +297,18 @@ func (p *PgVersioned) lockedHead(ctx context.Context, tx pgx.Tx, room string) (i
 	if err != nil {
 		return 0, nil, err
 	}
+	recovered := ceilingOf(ceiling, recovering)
 	var latest int64
 	if err := tx.QueryRow(ctx, `
 		select coalesce(max(version), 0) from doc_updates
 		where artifact_id = $1 and ($2::bigint is null or version <= $2)
-	`, room, ceilingOf(ceiling, recovering)).Scan(&latest); err != nil {
+	`, room, recovered).Scan(&latest); err != nil {
 		return 0, nil, fmt.Errorf("read latest document update: %w", err)
 	}
 	if ledger == nil {
 		return latest, nil, nil
 	}
-	pending := &pendingRoom{head: latest}
-	if recovering {
-		pending.recovered = &ceiling
-	}
+	pending := &pendingRoom{head: latest, recovered: recovered}
 	if ledger.rooms == nil {
 		ledger.rooms = make(map[string]*pendingRoom)
 	}
@@ -333,12 +331,7 @@ func ceilingOf(ceiling int64, recovering bool) *int64 {
 // commits, so no update it has not read can be appended meanwhile. The delete goes through write,
 // so it runs in the settlement's write phase, in its place among the settlement's other writes.
 func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
-	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `delete from doc_settlements_pending where artifact_id = $1`, room); err != nil {
-			return fmt.Errorf("clear the document's pending settlement: %w", err)
-		}
-		return nil
-	})
+	return writeExec(ctx, tx, "clear the document's pending settlement", `delete from doc_settlements_pending where artifact_id = $1`, room)
 }
 
 // settlementPending reports whether room owes a settlement. Shutdown's drain uses this to skip

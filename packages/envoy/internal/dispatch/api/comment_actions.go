@@ -82,10 +82,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	comment.ResolvedBy = nil
 	comment.ResolvedAt = nil
 	if comment.Anchor != nil {
-		if err := s.registerCommentAnchor(r.Context(), tx, ledger, comment, actor, true); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+		s.registerCommentAnchor(ledger, comment, actor, true)
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -173,8 +170,8 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	}
 	// Everything up to Commit is the read phase (Docs.Join): this route and ProjectMark queue their
 	// writes on the ledger, in the order made, and Commit runs them back to back. edited_at is the
-	// transaction's now(), as the update's own now() wrote it, read here so the projection and
-	// the event carry it before the queued update runs.
+	// transaction's now(), which the queued update writes, read here so the projection and the
+	// event carry it before that update runs.
 	editedAt, err := ledger.Now(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -191,10 +188,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	comment.Body = input.Body
 	comment.EditedAt = timestampPtr(&editedAt)
 	if comment.Anchor != nil {
-		if err := s.registerCommentAnchor(r.Context(), tx, ledger, comment, actor, true); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+		s.registerCommentAnchor(ledger, comment, actor, true)
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -285,8 +279,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	}
 	// Everything up to Commit is the read phase (Docs.Join): this route and the document operations
 	// queue their writes on the ledger, in the order made, and Commit runs them back to back.
-	// resolved_at is the transaction's now(), as the update's own now() wrote it, read here so the
-	// projection and the event carry it before the queued update runs.
+	// resolved_at is the transaction's now(), which the queued update writes, read here so the
+	// projection and the event carry it before that update runs.
 	switch action {
 	case "resolve":
 		// An orphaned suggestion's mark is gone, so it has no projection kind to carry; the
@@ -409,10 +403,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		comment.ResolvedBy = &actor
 		comment.ResolvedAt = timestampPtr(&resolvedAt)
 	}
-	if err := s.registerCommentAnchor(r.Context(), tx, ledger, comment, actor, true); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
+	s.registerCommentAnchor(ledger, comment, actor, true)
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {

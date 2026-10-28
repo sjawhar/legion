@@ -240,33 +240,28 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// takes it first (an event append, a mapping write, the default assignee's PUT), so none of
 	// them holds the row while it waits on the lock this create holds, and none closes a cycle
 	// with the mapping check below.
-	if err := store.LockOwner(r.Context(), tx, store.ProjectOwner(input.Project)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
+	//
 	// The create's read phase (INFRA-636): the spec's parse, render and encoding (SeedText), its
 	// task count, its reference index and the advice all run here, before the update of the
 	// project's next_number - the create's first write, which every later statement follows - so
-	// none of that work holds the transaction's id. The issue's key is read now: next_number is
-	// written by an issue create alone, under the project's owner lock this one holds, so the
-	// update below takes exactly this number.
+	// none of that work holds the transaction's id. The issue's key is read now, in the statement
+	// after the lock: next_number is written by an issue create alone, under the project's owner
+	// lock this one holds, so the update below takes exactly this number. The spec's id is taken
+	// in the same read, before its row is written (gen_random_uuid assigns no transaction id), so
+	// the document's writes, which name it, are queued here with its version, its task count and
+	// its index, and run in the write phase after the artifact's insert. An issue created without
+	// a spec gets an empty primary document.
 	var number int
-	if err := tx.QueryRow(r.Context(), `select next_number from projects where key = $1`, input.Project).Scan(&number); err != nil {
+	var artifactID string
+	if err := store.LockOwnerAndRead(r.Context(), tx, store.ProjectOwner(input.Project), `
+		select next_number, gen_random_uuid()::text from projects where key = $1
+	`, []any{input.Project}, &number, &artifactID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	key := fmt.Sprintf("%s-%d", input.Project, number)
 	actorJSON, err := encodeJSON(actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// The spec's id is taken before its row is written (gen_random_uuid assigns no transaction
-	// id), so the document's writes, which name it, are queued here with its version, its task
-	// count and its index, and run in the write phase after the artifact's insert. An issue
-	// created without a spec gets an empty primary document.
-	var artifactID string
-	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&artifactID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -296,10 +291,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var parent any
 	var parentRef *string
 	if parentKey != "" {
-		parent = parentKey
 		parentRef = &parentKey
 	}
 	// A new issue is in triage (the column's default), and its row - its labels and its parent -
@@ -358,7 +351,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if _, err := tx.Exec(r.Context(), `
 		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
+	`, key, input.Project, number, input.Title, parentRef, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -408,8 +401,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	issue.LastSeq++
 	// The issue.created event and its stamp of the spec's new edges follow the spec's queued
-	// writes, as they followed the inline ones: the stamp needs the index's edges written, and the
-	// document's pending-settlement row comes before the events' commit-order lock.
+	// writes: the stamp needs the index's edges written, and the document's pending-settlement row
+	// comes before the events' commit-order lock.
 	event, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(key).event(
 		"issue.created",
 		actor,
@@ -460,14 +453,10 @@ func (s *server) respondWithExistingExternalIssue(
 	}
 	defer adviceReadTx.Rollback(r.Context())
 	var existingStatus string
-	// The owner lock, then the read in a statement of its own (store.LockOwner).
-	if err := store.LockOwner(r.Context(), adviceReadTx, store.IssueOwner(existingKey)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := adviceReadTx.QueryRow(r.Context(), `
+	// The owner lock, then the read in a statement of its own (store.LockOwnerAndRead).
+	if err := store.LockOwnerAndRead(r.Context(), adviceReadTx, store.IssueOwner(existingKey), `
 		select status from issues where key = $1
-	`, existingKey).Scan(&existingStatus); err != nil {
+	`, []any{existingKey}, &existingStatus); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

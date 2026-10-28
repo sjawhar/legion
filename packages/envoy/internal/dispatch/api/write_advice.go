@@ -62,7 +62,7 @@ func (e *adviceQueryError) Unwrap() error {
 	return e.err
 }
 
-// sessionWriteTypes are the events session_writes_since_human counts: the types its query names.
+// sessionWriteTypes are the events session_writes_since_human counts; its query binds them.
 var sessionWriteTypes = []string{"message.created", "comment.created", "ask.opened"}
 
 // computeWriteAdvice runs the issue-scoped advice queries for a session's write. Two of them are
@@ -97,9 +97,9 @@ func (s *server) computeWriteAdvice(
 		)
 		select count(*) from events, last_human
 		where issue_key = $1 and actor->>'kind' = 'session' and actor->>'id' = $2
-		  and type in ('message.created', 'comment.created', 'ask.opened')
+		  and type = any($3::text[])
 		  and id > last_human.last_id
-	`, issueKey, actor.ID).Scan(&advice.SessionWritesSinceHuman); err != nil {
+	`, issueKey, actor.ID, sessionWriteTypes).Scan(&advice.SessionWritesSinceHuman); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
 	// The write's own event is not appended yet (writeAdvice), and it is the session's newest
