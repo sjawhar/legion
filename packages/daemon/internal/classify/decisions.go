@@ -814,9 +814,11 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     closing at its bound the one change; so this daemon may deploy before the listener.
 //
 // The rule over before and sender has three floors, each pinned by the fuzz of a sender's moves
-// (TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem), which delivers every synchronize
-// through the workflow's own lateness rule (LateSynchronize) and outside which every order of
-// delivery is judged alike and as the fresh-commit oracle judges it:
+// (TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem), which delivers every synchronize as
+// the workflow does - late only when GitHub's clock puts it before the newest applied
+// (LateLifecycle), exactly as the release before - and outside which every order of delivery is
+// judged alike and as the fresh-commit oracle judges it. A synchronize is never dropped that the
+// release before would apply.
 //
 //   - A loop in a skipped gap: the moves whose synchronizes are late reach a head twice (the record's
 //     head, or one between it and before). The late names of a loop that ends where it began are
@@ -828,19 +830,20 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     no move - because the fresh-commit oracle judged by this rule and the same oracle judged by
 //     the release before then agree that this rule is right where the release before is wrong more
 //     often than the reverse; counting the loop's pushes, they did not agree. In the fuzz's long
-//     mode about 119,500 of 200,000 histories have such a loop, and about 66,500 of those are judged
-//     unlike their reference order or the oracle, or leave a run open (78,000 with the clock alone
-//     deciding lateness, as before LateSynchronize). With no synchronize lost, about 53,300 of the
-//     200,000 leave a head run open to its bound, every one in this floor or the next (108,000 with
-//     the clock alone): a same-second synchronize the record cannot tell late is a move that
-//     waits, never dropped.
-//   - Synchronizes of one second delivered reversed, whose head the record cannot yet tell the
-//     current path skipped (LateSynchronize): read as moves, they move the record's head back.
-//     About 40,400 of 200,000 histories deliver two synchronizes of one second reversed with no
-//     loop; about 1,450 of those are misjudged (with the clock alone, about 36,500).
+//     mode about 119,500 of 200,000 histories have such a loop, and about 78,500 of those are judged
+//     unlike their reference order or the oracle, or leave a run open.
+//   - Two moves in one GitHub second whose synchronizes arrive reversed: the older is not late by
+//     the clock, so it moves the record's head back, as on the release before, and the pull request
+//     is judged from there. About 40,400 of 200,000 histories deliver two synchronizes of one
+//     second reversed with no loop, and about 36,700 of those are judged unlike the oracle or leave
+//     a run open. Three rules that read such a synchronize as late from what the record knew of its
+//     heads each dropped a real move the release before applies; this floor is the release
+//     before's. With no synchronize lost, about 108,500 of the 200,000 histories leave a head run
+//     open to its bound, every one in this floor or the one before.
 //   - A synchronize never delivered: the arrival after it waits for the move it names, judged for
 //     now by the newest push of each two heads (provisional, the release before's), until the run's
-//     bound cuts it off.
+//     bound cuts it off. About 169,300 to 170,300 of 200,000 histories with one lost leave a run
+//     open to its bound.
 //
 // Outside those floors the rule is never wrong where the release before is right, by the
 // fresh-commit oracle judged by this rule, in the gates' comparison (the undo and any generators,
