@@ -5,7 +5,7 @@
   "completed": "2026-10-28T10:32:54Z",
   "generation": 3,
   "round": 9,
-  "reviewedCodeHead": "ad1d162b06474d3d9a3bf8ed3e02f0f3ab0d0a29",
+  "reviewedCodeHead": "ad1d162b0647c41ee8edb0d6e2685d9850e385b4",
   "previousApproval": "review 5680566969 at 8dc667cd; review 5680791549 (changes requested) at 806f3a4e",
   "scope": "Per the architect: everything since 8dc667cd. (1) packages/envoy/AGENTS.md follower exception; (2) dispatch_claim description in dispatch-tools.ts, its pr2225 fragment and the three claude-envoy bundles; (3) Dispatch keys removed from changelog lines, learnings renamed *-pr2225.md; (4) merge of main moving the PR's changelog entries into .changes/unreleased/pr2225-*.yaml fragments.",
   "decision": "approved",
