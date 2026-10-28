@@ -83,3 +83,36 @@ func TestEveryRouteAnswersADocumentHoldingNewerContentAlike(t *testing.T) {
 		})
 	}
 }
+
+// The test hook POST /api/v1/artifacts/{id}/_test/newer-content gives a browser test a document
+// holding newer content: after it, the document answers 409 DOC_NEWER_CONTENT naming the element.
+// Without DISPATCH_TEST_HOOKS the route is not mounted, and the document is unchanged.
+func TestTheNewerContentHookWritesAnElementThisBuildDoesNotKnow(t *testing.T) {
+	for _, hooks := range []bool{true, false} {
+		handler, _, _ := newTestServer(t, testServerOptions{testHooks: hooks})
+		issue := createArtifactIssue(t, handler)
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+			"name": "newer.md", "content": "before\n",
+		}, "alice")
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create document: status=%d body=%s", created.Code, created.Body.String())
+		}
+		base := "/api/v1/artifacts/" + decodeBody[struct {
+			Artifact model.Artifact `json:"artifact"`
+		}](t, created).Artifact.ID
+		hook := dispatchRequest(t, handler, http.MethodPost, base+"/_test/newer-content", nil, "alice")
+		text := dispatchRequest(t, handler, http.MethodGet, base+"/text", nil, "alice")
+		if !hooks {
+			if hook.Code != http.StatusNotFound || text.Code != http.StatusOK {
+				t.Fatalf("without the test hooks: the hook answered %d %s and /text %d %s, want 404 and the document unchanged", hook.Code, hook.Body.String(), text.Code, text.Body.String())
+			}
+			continue
+		}
+		if hook.Code != http.StatusNoContent {
+			t.Fatalf("the hook: status=%d body=%s, want 204", hook.Code, hook.Body.String())
+		}
+		if text.Code != http.StatusConflict || !strings.Contains(text.Body.String(), `"code":"DOC_NEWER_CONTENT"`) || !strings.Contains(text.Body.String(), docs.UnknownElementForTest) {
+			t.Fatalf("/text after the hook: status=%d body=%s, want 409 DOC_NEWER_CONTENT naming %s", text.Code, text.Body.String(), docs.UnknownElementForTest)
+		}
+	}
+}
