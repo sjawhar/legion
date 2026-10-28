@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-278",
+  "completed": "2026-10-28T09:51:59Z",
+  "generation": 3,
+  "round": 8,
+  "scope": "The architect's decision after retro: one sentence in packages/envoy/AGENTS.md:2621-2625 now names the follower route as the exception to 'only through a subscription'. Nothing else changed. The retro's docs/solutions commit 4eb64228 stays.",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
+  "headSha": "0e96c0ff",
+  "proof": [
+    {
+      "criterion": "The claimant paragraph of packages/envoy/AGENTS.md matches publishFollowerRoutes",
+      "surface": "repository text against packages/envoy/internal/dispatch/outbox/publisher.go",
+      "command": "sed -n 2617,2627p packages/envoy/AGENTS.md; sed -n '/^func publishFollowerRoutes/,/^}/p' packages/envoy/internal/dispatch/outbox/publisher.go",
+      "observed": "The sentence now ends '…takes no route copy either, except that a claimant following the ask gets either's non-quiet `ask.edited` and an agent's reply in that ask as a follower (`publishFollowerRoutes` runs outside the `notify` gate).' publishFollowerRoutes takes a non-quiet ask.edited and comment.* with an ask_id from any actor but the follower itself, and no Notify check guards it in publishDestinations",
+      "headSha": "0e96c0ff",
+      "negativeControl": "At 5b013cb9 the sentence said an agent's events reach a claimant 'only through that subscription'. The tester's live case agent-ask-reply-reaches-asker (generation 3 round 3) disproves that: an agent's ask reply reached a follower with no subscription"
+    }
+  ],
+  "filesChanged": [
+    "0e96c0ff: packages/envoy/AGENTS.md (one sentence)"
+  ],
+  "deviations": [],
+  "openQuestions": []
+}
