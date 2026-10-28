@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T15:05:00Z",
+  "completed": "2026-10-28T16:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -116,6 +116,14 @@
       "observed": "s1 receives exactly one copy (the outbox's route copy; the stranded pass finds the attempt settled failed and sends nothing). Outbox first: the row reads failed with mentionAbandonedError and one comment.delivery receipt is appended. Claim first: the row stays pending with no receipt and the event defers (errMentionPending).",
       "headSha": "95df981580720d7e9406090b2ba2f384f04dc37b",
       "negativeControl": "At 28e5a571 the red test counted 2 copies, and the tester's crash.sh stored c1..c8 twice in ses-a's NATS subject after a SIGKILL."
+    },
+    {
+      "criterion": "Each recipient gets one copy of a comment through a Dispatch kill when the mention was in flight: an attempt a process claimed is left to the stranded pass's resend under its original dedupe key (tester round 5; architect's ruling 2026-10-28T15:22Z).",
+      "surface": "The API handler with a mention whose sender claimed it and died after the listener took the frame (claim lapsed), the real outbox publishing comment.created, then a new mention sender's stranded passes resending; and the outbox against Postgres with a lapsed-claim attempt",
+      "command": "go test ./internal/dispatch/api/ -run 'TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses|TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth|TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment' -count=3; go test ./internal/dispatch/outbox/ -run TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst -count=1",
+      "observed": "All three api tests pass 3 of 3: the in-flight case ends with one copy (no route copy published; the resend repeats the landed text, which the listener counts once). Outbox: a lapsed-claim attempt stays pending with no receipt, no settle, no copy and no deferral; an unclaimed abandoned attempt is still settled by the outbox (or left to a claim that commits first).",
+      "headSha": "50e5026d374ea87f1f7cbf203b32bdbaa6cbdbd5",
+      "negativeControl": "At 95df9815 the tester's crash.sh stored c1 twice in ses-a's subject (mention handed over before the kill, and route copy dispatch-13001), and the red test failed with 2 copies."
     }
   ],
   "filesChanged": [
@@ -208,15 +216,18 @@
     "Reviewer's fast-follow done in this round (architect's ruling): hub generations own their views and conns (nine currency guards gone), deliveryHub.feed removed, the relay and the log route share readEventsAfterID, signal(q.wake), mention process tests moved to shutdown_mentions_test.go.",
     "Two forward merges of main (both on GitHub-reported conflicts), each fingerprinted on the PR. The second takes main's outbox/publisher.go whole (#2225) and drops this branch's claim-token edit and payload reopen in favour of extending main's leftToMention.",
     "A send that waits in its lane longer than model.DeliveryClaimLapse unclaimed is counted abandoned by main's outbox query, which then publishes the copy; the mention may also land (documented).",
-    "The outbox settles an abandoned mention attempt only for a session or target a held-back copy asks about, so a mention no copy covers is still left to the stranded pass; settling also appends the comment.delivery receipt through the broker."
+    "The outbox settles an abandoned mention attempt only for a session or target a held-back copy asks about, so a mention no copy covers is still left to the stranded pass; settling also appends the comment.delivery receipt through the broker.",
+    "The outbox counts an attempt a sender claimed as abandoned only past model.StrandedMentionWindow (one hour, moved from the API to model so both read one value); within it a lapsed claim leaves the copy to the stranded pass without deferring. A resend that then fails for good leaves the session with whatever the first send delivered."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "The activity feed renders every comment.delivery as 'delivered a comment mention to <target>', failed receipts included (activity-model.ts:112, as on base); reported to the architect under the review-round cap."
+  ],
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves cannot run on this pod's Postgres (byte-order collation only; the pgserver build has no ICU); CI runs it.",
     "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change.",
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 5,
-  "answersTest": "dfc17513276a404edc38e8cd98022e44ff2bd658"
+  "round": 6,
+  "answersTest": "998a4bd23c775745ca9794df18d9f0e37c542001"
 }
