@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-650",
+  "completed": "2026-10-28T08:37:30Z",
+  "decision": "approved",
+  "reviewedCodeHead": "2b85acda522fcd05ee25c9e5a02195233c04c15a",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "ci": "CI head 2b85acda522f (newest pull_request run); compare to c4933f20 handoffsOnly true, 2 files. Required checks lint, typecheck, test, pr-title: completed success. Non-required envoy-go-race failure: TestEventStreamRelayRecoversWhenTheEventLogIsReset (event_stream_relay_test.go:248), event stream relay code this PR does not touch, tracked in dispatch://INFRA-436.",
+  "thermonuclear": "Run once at 2b85acda522f. deep-review: no Medium or High; ref_key unique (migration 0009:28) so first-row creator decode keeps the same kept value and first error; null and [] distinct (fresh nil per miss, slices.Clip keeps both, Version.Authors has no omitempty, model.go:712); map store copies the key, so pgx buffer reuse is safe; failures not stored; only caller getIssueReferences reads and encodes once; no custom Marshal/Unmarshal on Actor/Version. code-quality: two Low test-structure findings, no production-code finding.",
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references_test.go:274-311", "description": "Test oracle uses loadVersions plus a raw created_by select and decode; one served.loadArtifact call (artifacts.go:1180, decodes CreatedBy at 1229 and calls loadVersions at 1206) is the document's own read. Equivalent check today; fast-follow cleanup."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/references_test.go:237-332", "description": "null/[] check selects the 40-version document by count and checks fixed positions derived from the seed formula; bytes.Contains over every member's versions is shorter. Fast-follow cleanup."}
+  ],
+  "threads": "No review threads on the pull request (gh api graphql, 0 nodes).",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body, each naming a local load-test Dispatch stack, commands, observations, head 2b85acda522f and a negative control.",
+  "security": "No sensitive surface: the diff changes the decode inside an authenticated read route (references.go:313-379) and adds no route, refusal, credential or subprocess; the per-request memo holds at most one entry per row the existing query already loads."
+}
