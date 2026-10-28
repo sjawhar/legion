@@ -58,8 +58,13 @@ handed each server's host name unresolved.
 Dispatch's server creates and updates the `ENVOY_NOTIFICATIONS` stream as the Envoy listener
 does, so give it the listener's `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`
 ([Running the listener](/legion/dispatch/envoy/#running-the-listener)): it creates the stream and
-its webhook redelivery bucket with that many copies, raises one it finds with fewer and never
-lowers one, and with no byte limit of its own keeps the one the stream has.
+its webhook redelivery bucket with that many copies, raises one it finds with fewer, raises a
+smaller byte limit, or none, to its own, never lowers either, and with no byte limit of its own
+keeps the one the stream has. The stream holds the most copies and the largest limit any Envoy
+program of the deployment carries, so a clustered deployment sets both alike in every listener and
+in Dispatch's server. Like the listener, it reads the stream again every 30 seconds and raises
+copies and a limit a start with other settings lowered
+([Keeping the stream](/legion/dispatch/envoy/#keeping-the-stream)).
 
 People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch
 names each person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
@@ -282,11 +287,11 @@ one. Three things have to be true first, and Dispatch can check none of them for
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 8 for the periodic work it runs once across the servers, up
+to 64 connections for requests, up to 9 for the periodic work it runs once across the servers, up
 to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
 three more open for as long as it runs: one each for the three things that wait on Postgres
 notifications, which are delivery, the live event stream, and closing a document session another
-server has written to. That is 81 connections for one server at its ceiling, and twice that for
+server has written to. That is 82 connections for one server at its ceiling, and twice that for
 two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.

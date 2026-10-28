@@ -137,11 +137,11 @@ read-only read the listener's `POST /v1/replay` makes to return the retained not
 session missed while its NATS subscription was down. It can create, change or delete nothing.
 `SessionPermissions` does not hold it, so the session user reads what it missed only through a
 listener. The same sets hold, for each key-value bucket they open, the update of the bucket's
-stream, `$JS.API.STREAM.UPDATE.KV_<bucket>`, beside its info and create: a start that finds a
-bucket with fewer copies than `ENVOY_NATS_REPLICAS` raises it with that update. This hub is one
-server, which refuses a replica count above 1, so the programs that use it run with
-`ENVOY_NATS_REPLICAS` unset or 1 (the hub's own listener sets none), and at 1 a start sends no
-raise.
+stream, `$JS.API.STREAM.UPDATE.KV_<bucket>`, beside its info and create: a start, and the
+program's keeper every 30 seconds after, raises a bucket with fewer copies than
+`ENVOY_NATS_REPLICAS` with that update. This hub is one server, which refuses a replica count
+above 1, so the programs that use it run with `ENVOY_NATS_REPLICAS` unset or 1 (the hub's own
+listener sets none), and at 1 neither sends a raise.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there

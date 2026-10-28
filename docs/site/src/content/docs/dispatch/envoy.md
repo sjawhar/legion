@@ -10,12 +10,13 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours, or less once it reaches a size limit you set, while role messages
-  and team topics travel live and are not kept. Envoy also keeps its own state in JetStream
-  key-value buckets: which session is subscribed to what (`envoy_interests`), which sessions are
-  live (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check results
-  (`envoy_ci_state`). The stream and every bucket are kept in at least as many copies as the
-  deployment's `ENVOY_NATS_REPLICAS` says ([Running the listener](#running-the-listener)).
+  session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
+  Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
+  what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
+  (`envoy_roles`), and pull request check results (`envoy_ci_state`). The stream and every bucket
+  are kept in at least as many copies as the deployment's `ENVOY_NATS_REPLICAS` says, when every
+  Envoy program of the deployment carries the same value
+  ([Keeping the stream](#keeping-the-stream)).
 - **The listener** is an HTTP service in front of it. It takes webhooks in, publishes them as
   events, and delivers events to the agent sessions that subscribed to them. Agents and Legion
   call its `/v1` API to subscribe, publish, claim roles, and send messages, and a session that
@@ -151,13 +152,11 @@ connection was down.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
-  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old while the stream is under its size
-  limit.
+  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
 - **What does not:** role messages and team topics, which are live only; anything from before the
   session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours, or dropped once the stream reached its size limit. When
-  the stream was recreated, or the session read it too late to find everything still there, it is
-  told once that messages may be missing.
+  recovers; anything older than 72 hours. When the stream was recreated, or the session read it too
+  late to find everything still there, it is told once that messages may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -254,8 +253,8 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
 | `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
-| `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies, raises one it finds with fewer, and never lowers one (`nats stream edit <stream> --replicas=<n>` does). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment, Dispatch's server included, the same value. |
-| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes: once the stream holds that much, it drops its oldest messages first, so it may keep less than 72 hours. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; removing one is `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`. A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment that sets it the same value. |
+| `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
+| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
@@ -271,7 +270,54 @@ Keep the API private: only `/webhook/...` needs to be reachable from GitHub and 
 Raising a bucket to `ENVOY_NATS_REPLICAS` copies is an update of the bucket's stream, so the
 listener's NATS user needs `$JS.API.STREAM.UPDATE.KV_<bucket>` for each of its buckets beside the
 info and create it already holds; the `envoy-infra` grant for a listener includes it. Under a grant
-without it, a start that finds a bucket with fewer copies exits with an error naming the variable.
+without it, a start that finds a bucket with fewer copies waits 10 seconds and exits with an error
+naming the bucket and the variable:
+`raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded`.
+
+### Keeping the stream
+
+Every Envoy program of a deployment carries `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`, so
+a clustered deployment sets both in every listener and in Dispatch's server. A start never writes
+fewer copies or a smaller limit than it found, so an operator's raise of either stands, and
+programs with different values do not fight: the most copies and the largest limit stand. But
+JetStream's stream update has no compare-and-swap: a start with other settings, or none, or
+another subject list, that reads the stream before another start writes it and writes after puts
+the old subjects, copies, limit and metadata back.
+
+So every program that owns the stream, each listener and Dispatch's server, reads it again every
+30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit below its
+`ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, and the 72-hour age and
+duplicate window and the discard policy (the same in every release), and adds back each subject
+its own build carries that the stream lacks, unless it overlaps a subject the stream has or is a
+role lane. It logs a WARN line `envoy nats keeper restored the stream` with, for example,
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+It never lowers the copies or the limit, so raising the limit of a full stream with
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` takes effect at once and stays. It only
+adds subjects and never removes or replaces one, so two releases with different subject
+lists do not switch the stream back and forth, and a subject a concurrent write dropped comes
+back within 30 seconds from the keeper of the release that carries it. A stream that still
+carries a role-lane subject is left to a start, which moves the role lanes off. It also raises
+the buckets its program opens back to `ENVOY_NATS_REPLICAS` (`envoy nats keeper raised a bucket`,
+with `replicas="1 -> 3"`). A pass that fails logs `envoy nats keeper could not restore the stream`
+or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds later; it never
+stops the program.
+
+During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
+seconds after the last start. To lower the copies, or to lower or remove the limit, change the
+setting in every program first, then run `nats stream edit <stream> --replicas=<n>` or
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none); otherwise the next pass
+puts it back.
+
+On a clustered NATS (nats-server v2.10.29 among them), the server keeps the id of a message the
+full stream refused on the stream's leader for 72 hours, a purge notwithstanding, and
+acknowledges every retry under that id as a duplicate it does not hold. Envoy then publishes the
+same message once more without its id, so the retry is stored as soon as the stream has room,
+with no operator step. While the stream is still full, that publish is refused too, and the
+retry fails with `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not
+hold, and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum
+bytes exceeded`, which is retried as a full stream is. The stream drops no repeat of a message
+stored without its id, so a later publish under the same id stores another copy, which the
+stream's consumers see.
 
 ### With Pulumi
 

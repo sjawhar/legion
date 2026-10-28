@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -451,7 +452,7 @@ func TestInterestSubscribeStoresOnlyTopicsThatReplayCannotTurnIntoAnotherSession
 			t.Fatalf("warning %d = %q, want it to name %s as not registered", index, answer.Warnings[index], topic)
 		}
 	}
-	stored, err := rig.deps.registry.Get(replaySession)
+	stored, err := rig.deps.registry.Get(context.Background(), replaySession)
 	if err != nil {
 		t.Fatalf("read the stored interest: %v", err)
 	}
@@ -503,7 +504,7 @@ func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	if !slices.Equal(answer.Topics, want) {
 		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 	}
-	stored, err := rig.deps.registry.Get(replaySession)
+	stored, err := rig.deps.registry.Get(context.Background(), replaySession)
 	if err != nil {
 		t.Fatalf("read the stored interest: %v", err)
 	}
@@ -546,7 +547,7 @@ func TestInterestSubscribeCleansAStoredRowOfTopicsReachingPrivateStreamSubjects(
 	if !slices.Equal(answer.Topics, want) {
 		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
 	}
-	stored, err := rig.deps.registry.Get(replaySession)
+	stored, err := rig.deps.registry.Get(context.Background(), replaySession)
 	if err != nil {
 		t.Fatalf("read the stored interest: %v", err)
 	}

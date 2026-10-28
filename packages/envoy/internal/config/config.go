@@ -9,19 +9,28 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 type Service struct {
 	MachineID string
 	NATSURLs  []string
-	// NATSReplicas is ENVOY_NATS_REPLICAS (ParseNATSReplicas): the deployment's replica count for
-	// the stream and every bucket the listener opens.
+	// NATSReplicas is ENVOY_NATS_REPLICAS (bus.ParseNATSReplicas): the deployment's replica count
+	// for the stream and every bucket the listener opens, which the listener raises them to at
+	// start and every keeper period after (bus.ConnectOwningStream).
 	NATSReplicas int
-	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (ParseStreamMaxBytes): the stream's byte limit, or 0
-	// when unset, which sets none and keeps a deployed one.
+	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (bus.ParseStreamMaxBytes): the stream's byte limit,
+	// or 0 when unset, which sets none and keeps a deployed one.
 	StreamMaxBytes int64
-	ListenHost     string
-	Port           int
+	// ListenHost and Port are the address the listener serves on: the inherited socket's own
+	// address with ENVOY_LISTEN_FD, else the one main binds, from ENVOY_LISTEN_HOST (127.0.0.1 when
+	// unset) and PORT (Load's default when unset). The API auth fence judges ListenHost, so what it
+	// judges is what serves.
+	ListenHost string
+	Port       int
+	// ListenSocket is the listening socket ENVOY_LISTEN_FD names, inspected but not yet adopted:
+	// main serves on it in place of binding ListenAddress. Nil when the variable is unset.
+	ListenSocket *listenfd.Socket
 	// AllowedHosts are the ENVOY_ALLOWED_HOSTS names, each as HostName writes it, that an
 	// unauthenticated listener serves /v1 to beside loopback.
 	AllowedHosts []string
@@ -34,6 +43,11 @@ func (s Service) ListenAddress() string {
 	return net.JoinHostPort(s.ListenHost, strconv.Itoa(s.Port))
 }
 
+// Load reads the listener's configuration from its environment, with defaultPort the port when
+// PORT is unset. With ENVOY_LISTEN_FD it inspects the inherited socket that names, and
+// ENVOY_LISTEN_HOST and PORT, each only when set, must name the socket's address: no default stands
+// in for one that is unset, and PORT=0 names no socket. It only inspects the socket; main adopts
+// it.
 func Load(defaultPort int) (Service, error) {
 	machine := strings.TrimSpace(os.Getenv("ENVOY_MACHINE_ID"))
 	if machine == "" {
@@ -48,22 +62,40 @@ func Load(defaultPort int) (Service, error) {
 		urls[i] = strings.TrimSpace(item)
 	}
 	port := defaultPort
-	if value := strings.TrimSpace(os.Getenv("PORT")); value != "" {
-		next, err := strconv.Atoi(value)
+	portValue := strings.TrimSpace(os.Getenv("PORT"))
+	if portValue != "" {
+		next, err := strconv.Atoi(portValue)
 		if err != nil {
 			return Service{}, fmt.Errorf("invalid PORT: %w", err)
 		}
 		port = next
 	}
-	listenHost := strings.TrimSpace(os.Getenv("ENVOY_LISTEN_HOST"))
+	hostValue := strings.TrimSpace(os.Getenv("ENVOY_LISTEN_HOST"))
+	listenHost := hostValue
 	if listenHost == "" {
 		listenHost = "127.0.0.1"
 	}
-	replicas, err := ParseNATSReplicas(os.Getenv(bus.ReplicasEnvVar))
+	var listenSocket *listenfd.Socket
+	if descriptor, set := os.LookupEnv("ENVOY_LISTEN_FD"); set {
+		socket, err := listenfd.Inspect("ENVOY_LISTEN_FD", descriptor)
+		if err != nil {
+			return Service{}, err
+		}
+		// An empty value is unset here, as above: an empty ENVOY_LISTEN_HOST means 127.0.0.1, not
+		// every interface.
+		if err := socket.CheckAgainst(
+			listenfd.Setting{Name: "ENVOY_LISTEN_HOST", Value: hostValue, Set: hostValue != ""},
+			listenfd.Setting{Name: "PORT", Value: portValue, Set: portValue != ""},
+		); err != nil {
+			return Service{}, err
+		}
+		listenHost, port, listenSocket = socket.Addr().IP.String(), socket.Addr().Port, &socket
+	}
+	replicas, err := bus.ParseNATSReplicas(os.Getenv(bus.ReplicasEnvVar))
 	if err != nil {
 		return Service{}, err
 	}
-	streamMaxBytes, err := ParseStreamMaxBytes(os.Getenv(bus.StreamMaxBytesEnvVar))
+	streamMaxBytes, err := bus.ParseStreamMaxBytes(os.Getenv(bus.StreamMaxBytesEnvVar))
 	if err != nil {
 		return Service{}, err
 	}
@@ -83,46 +115,9 @@ func Load(defaultPort int) (Service, error) {
 		StreamMaxBytes:     streamMaxBytes,
 		ListenHost:         listenHost,
 		Port:               port,
+		ListenSocket:       listenSocket,
 		SubscribeAllTopics: subscribeAllTopics,
 	}, nil
-}
-
-// MaxNATSReplicas is the most copies NATS keeps of a stream or a bucket. aws:WebhookListener's
-// rendering (MaxNatsReplicas in github.com/sjawhar/envoy/infra/aws/rendering) refuses a larger
-// natsReplicas by hand, so a component never deploys a listener this package would refuse.
-const MaxNATSReplicas = 5
-
-// ParseNATSReplicas reads ENVOY_NATS_REPLICAS (bus.ReplicasEnvVar), the deployment's replica
-// count: unset or blank is 1, and otherwise a whole number from 1 to MaxNATSReplicas. Anything else
-// (0, a negative number, more than NATS keeps, a word) is refused naming the variable and the
-// value, at load rather than as a server's refusal at the stream. envoy-listener (Load) and
-// envoy-dispatch read the setting through it.
-func ParseNATSReplicas(raw string) (int, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return 1, nil
-	}
-	replicas, err := strconv.Atoi(value)
-	if err != nil || replicas < 1 || replicas > MaxNATSReplicas {
-		return 0, fmt.Errorf("invalid %s %q: want a whole number of copies from 1 to %d", bus.ReplicasEnvVar, value, MaxNATSReplicas)
-	}
-	return replicas, nil
-}
-
-// ParseStreamMaxBytes reads ENVOY_STREAM_MAX_BYTES (bus.StreamMaxBytesEnvVar), the stream's byte
-// limit: unset or blank is 0, which sets no limit (a deployed stream keeps the one it has), and
-// otherwise a positive whole number of bytes. 0, a negative number or a word is refused naming the
-// variable and the value. envoy-listener (Load) and envoy-dispatch read the setting through it.
-func ParseStreamMaxBytes(raw string) (int64, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return 0, nil
-	}
-	limit, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || limit < 1 {
-		return 0, fmt.Errorf("invalid %s %q: want a positive whole number of bytes, or unset for no limit", bus.StreamMaxBytesEnvVar, value)
-	}
-	return limit, nil
 }
 
 // parseSubscribeAllTopics reads ENVOY_SUBSCRIBE_ALL_TOPICS: unset, empty or "0" off, "1" on. Any

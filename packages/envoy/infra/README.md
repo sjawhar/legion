@@ -15,10 +15,14 @@ Pulumi language needs only the Pulumi CLI:
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
-replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1), raises one it finds with fewer copies,
-and never lowers one. More than 1 needs a clustered NATS: a single server, which is what
-`aws:NatsService` and `gcp:NatsHub` deploy, refuses it, and the listener's start then stops with an
-error naming `ENVOY_NATS_REPLICAS`.
+replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1), and raises one it finds with fewer
+copies, at start and every 30 seconds after. The copies stay at that count only when every Envoy
+program of the deployment carries the same value, so a clustered deployment sets it in every
+listener and in the Dispatch server: JetStream's stream update has no compare-and-swap, and a
+start with a lower or unset value can put the old copies back until the next pass raises them.
+More than 1 needs a clustered NATS: a single server, which is what `aws:NatsService` and
+`gcp:NatsHub` deploy, refuses it, and the listener's start then stops with an error naming
+`ENVOY_NATS_REPLICAS`.
 
 The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
 stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
@@ -1379,7 +1383,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
-| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
 | `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
@@ -2206,8 +2210,10 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
   bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
   watchers' consumer create and delete and their flow-control replies. The update is the raise a
-  start sends when it finds a bucket with fewer copies than `ENVOY_NATS_REPLICAS`; a start never
-  lowers a bucket's copies;
+  start, or the listener's keeper every 30 seconds after, sends when it finds a bucket with fewer
+  copies than `ENVOY_NATS_REPLICAS`; neither writes fewer copies than it found, and a grant without
+  it makes that raise time out after 10 seconds with
+  `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

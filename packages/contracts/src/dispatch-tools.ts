@@ -55,9 +55,13 @@ const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
 const ASK_QUESTION_CONTRACT =
-  "The question carries the problem the reader recognises and why it matters now, what constrains " +
-  "the answer, and the recommendation with its reason. It asks how to solve the problem or which " +
-  "outcome is wanted; never enumerate choices in the question.";
+  "The question names the concrete case first: which machines, files, sessions or people, and the " +
+  "numbers. It asks the choice in those terms, saying what happens to whom under each option " +
+  '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' +
+  'proceed?" or "Which option?", because a reader cannot work back from a general question to ' +
+  "the case. It carries every fact the reader needs to decide and nothing " +
+  "that does not change the decision. Generalize only after the specifics, if at all. Then give " +
+  "your recommendation and its reason.";
 
 const ASK_OPTIONS_CONTRACT =
   "Options carry the genuinely different approaches. Each option has a label, and its description " +
@@ -263,8 +267,13 @@ function imagesArgument<E extends SchemaNode<E>>(z: SchemaApi<E>, owner: string,
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
-/** Longest ask question the Dispatch server accepts, in characters. */
-export const ASK_QUESTION_MAX = 800;
+/**
+ * Longest ask question the Dispatch server accepts, in UTF-16 code units. Generated into Go as
+ * `contracts.AskQuestionMax`, which the server enforces on an ask's question and from which it
+ * derives the room an approval request's summary has. A question names its concrete case, and
+ * 800 was too short for that: capped asks crowded the limit while uncapped ask blocks ran past it.
+ */
+export const ASK_QUESTION_MAX = 2000;
 
 /**
  * Longest comment, comment edit, message and broadcast body the Dispatch server accepts, in
@@ -541,16 +550,19 @@ export const dispatchToolSpecs = [
     example: {
       issue: "DSP-1",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -583,7 +595,7 @@ export const dispatchToolSpecs = [
       ref: z
         .string()
         .describe(
-          "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+          "Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link."
         )
         .optional(),
       question: z
@@ -625,16 +637,19 @@ export const dispatchToolSpecs = [
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -907,7 +922,7 @@ export const dispatchToolSpecs = [
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
-      "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
+      "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
       "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
@@ -915,6 +930,7 @@ export const dispatchToolSpecs = [
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
       "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " +
+      "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " +
       `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1114,6 +1130,7 @@ export const dispatchToolSpecs = [
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
       "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
+      "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
     arguments: (z) => ({
@@ -1166,6 +1183,9 @@ export const dispatchToolSpecs = [
       "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
+      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " +
+      "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " +
+      "reads `No block <id> in <document>.` " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
       "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " +
       "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " +
@@ -1186,7 +1206,10 @@ export const dispatchToolSpecs = [
           "Optional dispatch:// reference: dispatch://KEY, dispatch://KEY/spec, " +
             "dispatch://KEY/artifact/<slug>[@vN], dispatch://KEY/ask/<id>, dispatch://KEY/comment/<id>, " +
             "dispatch://KEY/message/<id>, dispatch://PROJECT/artifact/<slug>[@vN], and its " +
-            "/ask/<id> and /comment/<id>; or the dashboard URL of one."
+            "/ask/<id> and /comment/<id>; or the dashboard URL of one. A block: " +
+            "dispatch://KEY/spec#b-<block id>[@vN], dispatch://KEY/artifact/<slug>#b-<block id>[@vN] or " +
+            "dispatch://PROJECT/artifact/<slug>#b-<block id>[@vN], the id percent-encoded except ASCII " +
+            "letters, digits and -."
         )
         .optional(),
       message: z

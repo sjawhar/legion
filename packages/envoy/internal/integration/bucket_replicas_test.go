@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -49,18 +48,6 @@ func TestEveryBucketIsCreatedAtThreeCopiesOnAThreeCopyDeployment(t *testing.T) {
 	}
 
 	for _, bucket := range []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket, bus.WebhookRedeliveryBucket} {
-		stream := "KV_" + bucket
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			info, err := js.StreamInfo(stream)
-			if err == nil && info.Config.Replicas == replicas && info.Cluster != nil && info.Cluster.Leader != "" &&
-				1+len(info.Cluster.Replicas) == replicas && !slices.ContainsFunc(info.Cluster.Replicas, func(peer *natsgo.PeerInfo) bool { return !peer.Current || peer.Offline }) {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("bucket %s did not hold %d current copies within 30s: %+v (%v)", bucket, replicas, info, err)
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		testnats.AwaitStreamCopies(t, js, "KV_"+bucket, replicas)
 	}
 }

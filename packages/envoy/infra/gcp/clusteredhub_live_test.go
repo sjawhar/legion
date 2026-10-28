@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -434,11 +435,23 @@ func startLogged(t *testing.T, name string, cmd *exec.Cmd) *cmdtest.Process {
 	return p
 }
 
+// loopbackPort is a loopback TCP port the kernel chose, its socket closed again. nats-server and
+// the exporter take a port number and bind it themselves, so cmdtest.HoldPort, which hands a held
+// socket to a process that serves on it, cannot give them one; another program can take the port
+// before the process binds it, which startBound answers.
+func loopbackPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	return port
+}
+
 // startBound starts the process build makes and waits up to 30 s for ready to return nil. A
 // process that exits because a port it binds is taken is started again, from a new build, up to
-// 10 times: cmdtest.FreeTCPPort's ports lie inside the kernel's ephemeral range where that range
-// starts below them (gVisor's is 16000-65535), so an outgoing connection can hold one when the
-// process binds it.
+// 10 times: loopbackPort's port is free only when it returns, so another program, or an outgoing
+// connection's ephemeral port, can hold it when the process binds it.
 func startBound(t *testing.T, name string, build func() *exec.Cmd, ready func(*cmdtest.Process) error) *cmdtest.Process {
 	t.Helper()
 	for attempt := 1; ; attempt++ {
@@ -749,7 +762,7 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	for i := range servers {
 		servers[i] = &hubServer{
 			name: fmt.Sprintf("%s-%d", r.release, i), dir: t.TempDir(), binary: natsServer,
-			client: cmdtest.FreeTCPPort(t), monitor: cmdtest.FreeTCPPort(t), route: cmdtest.FreeTCPPort(t),
+			client: loopbackPort(t), monitor: loopbackPort(t), route: loopbackPort(t),
 		}
 	}
 	for i, s := range servers {
@@ -1024,7 +1037,7 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	for i, s := range servers {
 		var args []string
 		startBound(t, s.name+" exporter", func() *exec.Cmd {
-			exporterPorts[i] = cmdtest.FreeTCPPort(t)
+			exporterPorts[i] = loopbackPort(t)
 			// The chart's arguments with the exporter's port, -port=7777, and the monitoring port
 			// of http://localhost:8222/, both fixed by the pod, replaced by this server's.
 			args = podArgs(t, exporterArgs, map[string]string{

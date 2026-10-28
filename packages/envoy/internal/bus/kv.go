@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -26,8 +27,11 @@ type KeyValue struct {
 
 // EnsureKeyValue opens the KV bucket config names, creating it with config when it does not exist.
 // config.Replicas is the deployment's replica count (ReplicasEnvVar): a new bucket is created at
-// it, and an existing bucket with fewer copies is raised to it (raiseReplicas) and never lowered.
-// A refused create or raise of more than one copy names the setting (refusedSettings).
+// it, and an existing bucket with fewer copies is raised to it (raiseReplicas). A refused create or
+// raise of more than one copy names the setting (refusedSettings). A bucket a ConnectOwningStream
+// client names (WithKeptBuckets) is raised to the deployment's count again by that client's keeper
+// from then on, which also ends a lowering by a concurrent start with a lower count; the count
+// holds while every program of the deployment carries the same one.
 func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyValue, error) {
 	kv, err := js.KeyValue(config.Bucket)
 	switch {
@@ -35,7 +39,7 @@ func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyV
 		kv, err = js.CreateKeyValue(config)
 		err = refusedSettings(err, nil, &nats.StreamConfig{Replicas: config.Replicas})
 	case err == nil:
-		err = raiseReplicas(js, config.Bucket, config.Replicas)
+		_, err = raiseReplicas(js, config.Bucket, config.Replicas)
 	}
 	if err != nil {
 		return KeyValue{}, err
@@ -43,33 +47,34 @@ func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyV
 	return KeyValue{kv}, nil
 }
 
-// raiseReplicas raises the stream of the existing bucket to replicas copies when it has fewer. The
-// update writes back the stream's deployed configuration with only its replicas changed, so the
-// bucket's TTL, history, discard policy, direct get, rollup, delete settings, metadata and the rest
-// stay as they are. A bucket with as many copies or more is left alone, and one copy needs no read:
-// every stream has at least one. As for the stream (ensureStreamWithConfig), two starts raising at
-// once each write the deployment's one count, and a raise whose answer never came (unanswered)
-// succeeds when the stream, read again, has the copies.
-func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) error {
+// raiseReplicas raises the stream of the existing bucket to replicas copies when it has fewer, and
+// returns the copies it had then, 0 when it left the bucket alone. The update writes back the
+// stream's deployed configuration with only its replicas changed, so the bucket's TTL, history,
+// discard policy, direct get, rollup, delete settings, metadata and the rest stay as they are. A
+// bucket with as many copies or more is left alone, and one copy needs no read: every stream has at
+// least one. As for the stream (ensureStreamWithConfig), two starts raising at once each write the
+// deployment's one count, and a raise whose answer never came succeeds when the stream, read
+// again, has the copies (updateStream). Its error names the bucket's stream and, for a refused
+// raise, the setting (refusedSettings): `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: ...`, so
+// the keeper's line says which bucket it could not raise.
+func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) (int, error) {
 	if replicas <= 1 {
-		return nil
+		return 0, nil
 	}
 	stream := "KV_" + bucket
 	info, err := js.StreamInfo(stream)
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("raise %s: %w", stream, err)
 	}
 	if info.Config.Replicas >= replicas {
-		return nil
+		return 0, nil
 	}
 	raised := info.Config
 	raised.Replicas = replicas
-	if _, err = js.UpdateStream(&raised); unanswered(err) {
-		if again, infoErr := js.StreamInfo(stream); infoErr == nil && again.Config.Replicas >= replicas {
-			return nil
-		}
+	if err := updateStream(js, &raised, func(again *nats.StreamInfo) bool { return again.Config.Replicas >= replicas }); err != nil {
+		return 0, fmt.Errorf("raise %s: %w", stream, refusedSettings(err, &info.Config, &raised))
 	}
-	return refusedSettings(err, &info.Config, &raised)
+	return info.Config.Replicas, nil
 }
 
 // OpenKeyValue opens the existing KV bucket named bucket and creates nothing, as a rebuild does. It
@@ -230,6 +235,39 @@ func (kv KeyValue) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEn
 	}
 	history, err := kv.KeyValue.History(key, opts...)
 	return history, invalidKey(key, err)
+}
+
+// Bounded is call, a bucket call that takes no context, as a caller holding ctx waits for it:
+// nats.go's KV reads, writes and deletes take none and wait out the JetStream MaxWait (10 s), so
+// the wait ends at the earlier of call's answer and ctx's end. answered is false when ctx ended
+// first, and err is then ctx's error; the abandoned call runs on to its own end and its answer is
+// dropped, so a write or a delete it sent may still land after the caller has answered (each
+// caller says why that is safe). A ctx that has already ended starts no call, and a ctx that can
+// never end (context.Background, as every caller that answers no request passes) is simply call,
+// in this goroutine.
+func Bounded[T any](ctx context.Context, call func() (T, error)) (value T, answered bool, err error) {
+	if ctx.Done() == nil {
+		value, err = call()
+		return value, true, err
+	}
+	if err := ctx.Err(); err != nil {
+		return value, false, err
+	}
+	type answer struct {
+		value T
+		err   error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		value, err := call()
+		answers <- answer{value: value, err: err}
+	}()
+	select {
+	case got := <-answers:
+		return got.value, true, got.err
+	case <-ctx.Done():
+		return value, false, ctx.Err()
+	}
 }
 
 // StreamState is what one STREAM.INFO read says about the stream behind a KV bucket: its name, the

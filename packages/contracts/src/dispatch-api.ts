@@ -1252,10 +1252,7 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * dashboard makes the promise only inside it, and names the restart
  * (`packages/dispatch/web/src/features/conversation/delivery.ts`). `scripts/gen-go.ts` emits this
  * as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's
- * duplicate window and its age. The stream may hold less than the window: once its byte limit
- * (`ENVOY_STREAM_MAX_BYTES`) binds it drops its oldest messages first, and a repeat of a message
- * it already dropped may then be stored again, since nats-server keeps a dropped message's id only
- * in memory, which a server restart clears.
+ * duplicate window and its retention.
  *
  * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
@@ -1630,6 +1627,10 @@ export interface IssueReferences {
   readonly truncated: boolean;
 }
 
+// OutgoingReference is one Dispatch mention a document writes, by its target's kind and id.
+// `artifact` is the target document when it resolves; a block target (`kind: "block"`, `to_id`
+// `<document ref_key>#<block id>`) carries its document, and is listed only while a current
+// version of that document holds the block.
 export interface OutgoingReference {
   readonly kind: string;
   readonly to_id: string;
@@ -1656,12 +1657,65 @@ export type GraphEdgeKind =
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
+//
+// Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
+// and `changed_at` (who last changed its own text or fields and when; the maker when nothing
+// changed it since), `parent` (the node it belongs to) and `parent_version` (the version of the
+// parent it belongs to). An actor list Dispatch never recorded is `[]`, any other fact `null`.
+// They are optional because a server older than them omits them.
+//
+// A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
+// its document's reference as `document`, and `changed_version`, the document version in which
+// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
+// on the node a reference read names: `text` is the block's whole current text, and `pin`
+// answers a reference pinned to a version.
 export interface GraphNode {
-  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session" | "component";
+  readonly kind:
+    | "issue"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message"
+    | "session"
+    | "component";
   readonly id: string;
+  readonly block_id?: string;
   readonly issue_key?: string;
   readonly project?: string;
   readonly ref?: string;
+  readonly document?: string;
+  readonly changed_version?: number;
+  readonly made_by?: Actor[];
+  readonly made_at?: string | null;
+  readonly changed_by?: Actor[];
+  readonly changed_at?: string | null;
+  readonly parent?: GraphNodeParent | null;
+  readonly parent_version?: number | null;
+  readonly text?: string;
+  readonly pin?: BlockPin;
+}
+
+// GraphNodeParent is the node a graph node belongs to: `id` is the parent node's own `id` (an
+// artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref` its dispatch://
+// reference, absent when it has none (a session).
+export interface GraphNodeParent {
+  readonly kind: GraphNode["kind"];
+  readonly id: string;
+  readonly ref?: string;
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now.
+// `state` is "unchanged" when its current text equals `text`, "changed" when it differs, and
+// "removed" when no current version holds the block; `removed_version` is then the version that
+// deleted it.
+export interface BlockPin {
+  readonly version: number;
+  readonly ref: string;
+  readonly text: string;
+  readonly state: "unchanged" | "changed" | "removed";
+  readonly removed_version?: number;
 }
 
 // GraphExcerpt is the text shown beside an edge: the block containing a document mention
@@ -1674,10 +1728,13 @@ export interface GraphExcerpt {
 // GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
 // end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
 // writes, and `source_seq` is the events.id that introduced a mention (null for structure).
+// `block`, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 export interface GraphEdge {
   readonly kind: GraphEdgeKind;
   readonly direction: "in" | "out";
   readonly node: GraphNode;
+  readonly block?: GraphNode;
   readonly excerpt?: GraphExcerpt;
   readonly created_at: string;
   readonly source_seq: number | null;
@@ -1689,6 +1746,26 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+export interface BlockLink {
+  readonly kind: GraphEdgeKind;
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly created_at: string;
+  readonly created_version: number;
+}
+
+// BlockLinks is GET /api/v1/block-links?from=<document ref>&to=<document ref>: the two documents
+// and the links from blocks of `from` to blocks of `to`, newest first, then by `from.id`, then by
+// `to.id`. A link is listed only while both of its blocks are current blocks of their documents.
+export interface BlockLinks {
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly links: BlockLink[];
+}
+
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }
@@ -1698,6 +1775,23 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
   readonly name: string;
   readonly version: Version;
   readonly diff?: string;
+}
+
+/** `artifact.human_edited`: a person's browser edits of a document, sent once the document has
+ *  been quiet for 30 seconds after the last of them. `from_version` is the version before the
+ *  quiet window's first version by a person, `to_version` the window's last one; `editors` names
+ *  each person who wrote one, and the event's actor is the one who edited last. `diff` is the
+ *  unified diff of the two versions' stored markdown, cut at its last line end within 4,096 bytes,
+ *  `diff_truncated` then true; it is empty when a version is no longer stored. The event reaches
+ *  each session the document credits and the issue's route, never a person. */
+export interface ArtifactHumanEditedEventPayload {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly from_version: number;
+  readonly to_version: number;
+  readonly editors: readonly string[];
+  readonly diff: string;
+  readonly diff_truncated: boolean;
 }
 
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
@@ -1961,6 +2055,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.version";
       readonly payload: ArtifactVersionEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.human_edited";
+      readonly payload: ArtifactHumanEditedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.approved";
@@ -2573,6 +2671,16 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   name: z.string().optional(),
   version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
   diff: z.string().optional(),
+});
+
+export const ArtifactHumanEditedEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  name: z.string().optional(),
+  from_version: z.number().int().optional(),
+  to_version: z.number().int().optional(),
+  editors: z.array(z.string()).optional(),
+  diff: z.string().optional(),
+  diff_truncated: z.boolean().optional(),
 });
 
 export const ArtifactReviewEventPayloadSchema = z.object({
