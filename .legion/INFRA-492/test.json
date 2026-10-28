@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-492",
+  "completed": "2026-10-28T10:25:00Z",
+  "round": 6,
+  "scope": "Architect's ruling (Envoy, 2026-10-28 10:04Z) for the conflict-return head: (1) the @phone tag (#2313) selects this PR's phone-path tests on the iphone project, and none drops out of the run; (2) spec acceptance 1-2 and the freshness file on chromium and iphone; (3) claude-envoy check-dist. Nothing else.",
+  "headTested": "ea3d53bf91d37de7009740bfa2525ce8f29dba35 (code head 98ca021716f9, merges of main 460facf5 and aeeee6c0; GitHub mergeable, state blocked)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I re-ran the three checks myself on the pinned Bun 1.4.4, with my own Postgres 17.11 + pgvector (127.0.0.1:5433) and Chromium."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The @phone tag selects this PR's phone-path tests on the iphone project, and none of them drops out of the run",
+      "surface": "Playwright's own test selection for the iphone project (e2e/playwright.config.ts: grep /(^|\\s)@phone(\\s|$)/), then a run of the selected tests on iphone",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --list --project=iphone e2e/refetch-budget.e2e.ts e2e/refresh-freshness.e2e.ts e2e/live.e2e.ts e2e/inbox.e2e.ts; then the run below, plus `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=iphone e2e/live.e2e.ts e2e/inbox.e2e.ts -g \"reads neither the Inbox nor the pinned list|during a project list's first load|clears a hidden ask's pending refresh\"`",
+      "observed": "The list holds all 8 titles this PR's diff adds or renames with @phone: the 3 refetch-budget tests (sidebar, pin, replies), the 2 freshness tests (reference, inbox close), the 2 live.e2e.ts tests and the inbox.e2e.ts test. The 3 live and inbox tests: 3 passed on iphone. The other 5 passed in the run below. A script over the 7 e2e files this PR touches finds no test that branches on the iphone project or opens the phone navigation without the tag.",
+      "headSha": "ea3d53bf91d37de7009740bfa2525ce8f29dba35",
+      "negativeControl": "The untagged tests are excluded from iphone, as #2313 intends: refetch-budget's 'budget:' and 'project board:' and the freshness file's other 10 tests are absent from the iphone list. The run shows the same: iphone ran 5 of the 2 files' 15 tests. None of those has a phone branch."
+    },
+    {
+      "criterion": "Spec acceptance 1 (budget and freshness) and 2 (sidebar keeps its first responses), and every freshness test, hold after the merges of main",
+      "surface": "Dispatch in Chromium and iPhone (Playwright), production SPA bundle built from the head, against the branch's Go server, fake Envoy and the loopback Postgres",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts",
+      "observed": "20 passed (1.8m): 15 on chromium, 5 on iphone. REFETCH-BUDGET [chromium]: 0 GETs under /api/, 0 untouched-issue reads. REFETCH-SIDEBAR on chromium and iphone: inbox 1, pinned 1, projects 1. Pin 1, Replies 0 on both; board 6 and index no GETs on chromium. Acceptance 1 now runs on chromium only, because its test carries no @phone tag; the plan already had chromium carry the numbers.",
+      "headSha": "ea3d53bf91d37de7009740bfa2525ce8f29dba35",
+      "negativeControl": "The same refetch-budget.e2e.ts in a git archive of base 16e4bb0f758e (chromium, -g 'budget:|sidebar:') fails on its counts: budget 'Received: 1008' against '<= 5'; sidebar inbox 2, pinned 2, projects 2."
+    },
+    {
+      "criterion": "claude-envoy's committed bundle is fresh after the merges",
+      "surface": "packages/claude-envoy's build script in --check mode on the pinned Bun 1.4.4 after `bun install --frozen-lockfile`, as CI's claude-envoy job runs it",
+      "command": "cd packages/claude-envoy && bun run check-dist",
+      "observed": "exit 0: 'dist/ and legion/ match a fresh build'",
+      "headSha": "ea3d53bf91d37de7009740bfa2525ce8f29dba35",
+      "negativeControl": "In round 5, the same check at the merge ee6e83db, before a dist rebuild, exited 1: 'generated files are stale (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js)'."
+    }
+  ],
+  "ciAtHead": "Read at 10:23Z on 98ca021716f9 (ea3d53bf is handoff-only): build, changes, lint, test and typecheck queued, none settled. Not waited on."
+}
