@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-641",
+  "completed": "2026-10-28T14:26:30Z",
+  "round": 1,
+  "headReviewed": "914ac117300e948c5932ba53cd27863c2c28004d (code); review submitted on the handoff head this push makes",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/walk.go:31-32",
+      "description": "walk's doc comment states a looser contract than the new walk keeps: it forbids changing Text or Children of nodes not yet visited, but after visit walkNode reads the visited node's Type and Children against sizes measured before the walk (walk.go:54, 62-67), and a Type change on any unvisited node changes whether it is descended. A visitor that does either gets wrong pos/end or an index panic, where the old walk measured as it went. Say a visitor must not change any node's Type, Text or Children, the visited node included."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/walk_test.go:86-95",
+      "description": "referenceIsLeafNodeType copies isLeafNodeType's case list, which this PR does not change: it pins the schema's source list, so a later correct leaf-type addition fails TestWalkVisitsEveryNodeWithTodaysRange while walk is right. Use isLeafNodeType in referenceWalkNode, referenceNodeSize and markedReadBack; the frozen reference pins the walk algorithm and len16 (referenceLen16), which is what this PR changed."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/position_test.go:169-176",
+      "description": "TestLen16CountsTheUnitsUTF16EncodingWrites repeats FuzzLen16: plain go test runs every f.Add seed (the 22 len16Cases) with the same assertion. Delete the table test."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/walk_test.go:11-14",
+      "description": "The header rule that the file must compile at the commit before the measured walk mattered only for this PR's base-vs-head benchmark and nothing holds it; 'Todays' in TestWalkVisitsEveryNodeWithTodaysRange (348) and TestWalkMatchesTodaysWalkOnACorpus (635) names a 'today' that is gone once this merges. Remove lines 11-14 and name the tests for the reference walk they compare against."
+    }
+  ],
+  "thermonuclear": {
+    "deepReview": "APPROVE at 914ac117: no Medium/High; one Minor (the walk.go:31-32 contract comment, raised here as important). Exhaustive len16 vs utf16.Encode over all 3-byte strings and 4-byte strings starting F0-F4: 0 mismatches; frozen old insertAt vs new on 170 trees, every pos -1..Size+1, 8 inputs: 304,432 cases, 0 differences; every walk visitor read, only StripServerOwnedAttrs mutates (Attrs only).",
+    "codeQuality": "CHANGES at 914ac117: the three test-side findings above."
+  },
+  "ci": "Read at 14:16Z: required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 914ac117 (newest pull_request run); lint, typecheck, pr-title success; test in_progress. Compare 914ac117...78fd9888: handoffsOnly true, 2 files. A request for changes does not wait on CI.",
+  "threads": "No review threads on the pull request; no bot findings."
+}
