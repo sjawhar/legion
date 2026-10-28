@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-647",
+  "completed": "2026-10-28T09:49:34Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "reviewedCodeHead": "5d2d9883e15b6d8c8710ec9ef3e20133ce786b00",
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head 5d2d9883 (newest pull_request run): lint, typecheck, test success; pr-title success (an earlier duplicate run cancelled). Compare 5d2d9883...60b3d2c8: handoffsOnly true, 2 files.",
+  "thermonuclear": "Pair run at 60b3d2c8 (code 5d2d9883): deep review APPROVE, 0 findings; code quality APPROVE, 0 findings. Both traced the invariant: read is a private copy (readSettlementTree -> liveTree -> treeOf), and only reconcileAskBlocks changes it in place, recording each change in repairs/rewrites; withholdAnswers drops a repair only while rewrites stays non-empty. The [] selection compares equal to nil and []any{} in askServerAttributeEqual, so it adds no repair or version.",
+  "threads": "0 review threads on the pull request (gh api graphql).",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present in the body, each with surface, command, observation, ancestor head 5d2d9883 and a negative control.",
+  "contractCensus": "Not required: no refusal, required field, removed or renamed field, or boundary signature change.",
+  "risks": [
+    "The reuse invariant is held by comments, not a test; INFRA-648 must keep it.",
+    "The reused render error path is not exercised (no reachable tree found).",
+    "The tester did not re-run the LINUX replay; its independent local workload agrees in direction."
+  ]
+}
