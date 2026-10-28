@@ -26,7 +26,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the ask card lists the issue's claimant and route, and drops the claimant on release without a reload @phone", async ({
+test("the ask card lists the issue's claimant and route, and drops the claimant on release without a reload", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -102,7 +102,7 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
   }
 });
 
-test("a follower that holds the claim is listed once, and unfollowing it says the claim still reaches it @phone", async ({
+test("a follower that holds the claim is listed once, and unfollowing it says the claim still reaches it", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -168,7 +168,7 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
   }
 });
 
-test("a role route held by the claimant is counted once, under the claim that names its holder @phone", async ({
+test("a role route held by the claimant is counted once, under the claim that names its holder", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -218,7 +218,7 @@ test("a role route held by the claimant is counted once, under the claim that na
   }
 });
 
-test("unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker @phone", async ({
+test("unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -307,7 +307,7 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a close that also moves the route withdraws the open card's ask in place, without a reload @phone", async ({
+test("a close that also moves the route withdraws the open card's ask in place, without a reload", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
@@ -354,7 +354,7 @@ test("a close that also moves the route withdraws the open card's ask in place, 
   }
 });
 
-test("a claim that lands while the Inbox is loading reaches the card that mounts from the earlier list @phone", async ({
+test("a claim that lands while the Inbox is loading reaches the card that mounts from the earlier list", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
