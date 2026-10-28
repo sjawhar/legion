@@ -390,9 +390,9 @@ func (s *Service) authorizeSchemaVersion(room, token string) (websocket.Connecti
 
 // schemaPage is the schema a page presents on its document socket: version is C, the
 // schema_version it reads, and creatable is R, the schema_creatable it may create up to. A page
-// that sends no schema_creatable creates only what its version reads, so its R is its C. A page
-// that presents no number, or a number that does not parse, is not valid, and is admitted
-// read-only.
+// that sends no schema_creatable is a page from before the manifest, every element of which has
+// since 1, so its R is 1. A page that presents no number, or a number that does not parse, is not
+// valid, and is admitted read-only.
 type schemaPage struct {
 	version, creatable int
 	valid              bool
@@ -403,7 +403,7 @@ func schemaPageOf(query url.Values) schemaPage {
 	if err != nil {
 		return schemaPage{}
 	}
-	creatable := version
+	creatable := 1
 	if query.Has("schema_creatable") {
 		if creatable, err = strconv.Atoi(query.Get("schema_creatable")); err != nil {
 			return schemaPage{}
@@ -439,12 +439,15 @@ func readSchemaFleet(ctx context.Context, db processes.Querier) (schemaFleet, er
 
 // admits reports whether page may write a document whose elements need schema version
 // documentSince (pmdoc.DocumentSince) while fleet serves it: every process reads what the page
-// creates (R_page <= min V), and the page represents what every process creates and what the
-// document holds (C_page >= max(max R, D)). A page that cannot represent an element drops it from
-// its copy and writes the result back, and a process that cannot read an element the page wrote
-// refuses the document.
+// creates (R_page <= min V), some process creates what the page creates (R_page <= max R), and
+// the page represents what every process creates and what the document holds (C_page >= max(max
+// R, D)). A page that cannot represent an element drops it from its copy and writes the result
+// back, and a process that cannot read an element the page wrote refuses the document. The second
+// bound keeps every writable page's R at or under every other writable page's C, so no writable
+// page creates what another drops: after a rollback, a page of the newer build is read-only, and
+// the re-check closes its socket once no live process creates what it creates.
 func (f schemaFleet) admits(page schemaPage, documentSince int) bool {
-	return page.valid && page.creatable <= f.minVersion && page.version >= max(f.maxCreatable, documentSince)
+	return page.valid && page.creatable <= min(f.minVersion, f.maxCreatable) && page.version >= max(f.maxCreatable, documentSince)
 }
 
 // schemaAdmissionKey is what ygo's OnTokenAuth knows of a socket: its room, and the token, which

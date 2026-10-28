@@ -132,13 +132,16 @@ func useFutureBlock(t *testing.T, creatableSince int) {
 // A newer build creates an element this build reads but may not create yet. This build reads a
 // document holding it, from the live tree or from stored markdown, and edits around it. No write
 // of this build creates one: markdown written in whole or in part, a retype, or a tree written
-// over a document that does not hold the element.
+// over a document that does not hold the element. Each refusal tells the writer what to do. A tree
+// written over an empty document as content a stored version already holds (a rebuild's seed)
+// creates nothing, so it is written.
 func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.T) {
 	const markdown = ":::future{#future-1}\nBody.\n:::\n"
+	const instruction = "Remove it from your markdown, or write it again after the next release"
 	refusesFuture := func(t *testing.T, what string, err error) {
 		t.Helper()
-		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), `typed block "future"`) {
-			t.Fatalf("%s: error = %v, want ErrSchema naming typed block \"future\"", what, err)
+		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), `typed block "future"`) || !strings.Contains(err.Error(), instruction) {
+			t.Fatalf("%s: error = %v, want ErrSchema naming typed block \"future\" and saying %q", what, err, instruction)
 		}
 	}
 
@@ -199,6 +202,18 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 		return Update(txn, emptyFragment, read)
 	})
 	refusesFuture(t, "write a tree holding future over a document without it", err)
+	reseeded := crdt.New()
+	reseededFragment := reseeded.GetXmlFragment("prosemirror")
+	if err := reseeded.TransactE(func(txn *crdt.Transaction) error {
+		return UpdateHolding(txn, reseededFragment, read, read)
+	}); err != nil {
+		t.Fatalf("seed an empty document with a stored tree holding future: %v", err)
+	}
+	if seeded, err := Read(reseededFragment); err != nil {
+		t.Fatalf("read the seeded document: %v", err)
+	} else if rendered, err := Render(seeded); err != nil || rendered != markdown {
+		t.Fatalf("the seeded document renders %q (%v), want the stored %q", rendered, err, markdown)
+	}
 }
 
 // DocumentSince is the highest since among the declared elements a document holds: the schema

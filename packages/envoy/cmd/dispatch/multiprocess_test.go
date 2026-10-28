@@ -401,6 +401,71 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	t.Logf("the standby bound the dead holder's durables %v after it died", time.Since(handedOver))
 }
 
+// A process starts its delivery intakes before it joins the registry of live server processes, so
+// a process that waits for admission (processes.Register: a live peer refuses its signing keys)
+// can already deliver from both durables. A deploy that stops it in that wait stops its intakes
+// too: each hold is released, not left to lapse with the stopped process's deliver subject as its
+// token, and the process standing by takes each durable over within one bind interval. The peer
+// that refuses it has no GitHub App, so its intakes take nothing.
+func TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables(t *testing.T) {
+	pair := newPair(t)
+	seedDeliverySettings(t, pair.database)
+	fake := startGitHubFake(t)
+	fake.Release()
+	app := githubAppEnv(t, fake.URL())
+	peer := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey})
+	peer.waitHealthy(t)
+
+	waiting := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: "a-key-the-peer-does-not-share", Env: app})
+	waiting.waitForLog(t, 30*time.Second, "a live server process refuses this one's signing keys; waiting for its heartbeat to lapse")
+	for _, durable := range deliveryDurables {
+		waiting.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
+	}
+	standby := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Env: app})
+	for _, durable := range deliveryDurables {
+		standby.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer held by another process; standing by"`, "name="+durable)
+	}
+
+	conn := testnats.Connect(t, pair.nats)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	subjects := map[string]string{}
+	for _, durable := range deliveryDurables {
+		info, err := js.ConsumerInfo(bus.Stream, durable)
+		if err != nil {
+			t.Fatalf("read %s: %v", durable, err)
+		}
+		subjects[durable] = info.Config.DeliverSubject
+	}
+	if waiting.logged(`msg="dispatch: listening"`) {
+		t.Fatalf("the process refused admission serves; the row needs it still waiting:\n%s", waiting.Output.String())
+	}
+
+	waiting.Terminate(t)
+	waiting.WaitExit(t, "SIGTERM")
+	stopped := time.Now()
+	if code := waiting.Cmd.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("a process stopped while waiting for admission exited %d, want 0:\n%s", code, waiting.Output.String())
+	}
+	for _, durable := range deliveryDurables {
+		var left int
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select count(*) from duty_holds where name = $1 and token = $2`, "delivery-intake-"+durable, subjects[durable]).Scan(&left); err != nil {
+			t.Fatalf("read the hold of %s: %v", durable, err)
+		}
+		if left != 0 {
+			t.Errorf("the stopped process left its hold of %s in place, naming its deliver subject %s", durable, subjects[durable])
+		}
+	}
+	// One bind interval (delivery.durableBindInterval, 2 s) and a margin, not the hold's 15 s TTL.
+	for _, durable := range deliveryDurables {
+		standby.waitForLog(t, 4*time.Second-time.Since(stopped), `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
+	}
+	t.Logf("the standby bound both durables %v after the stop", time.Since(stopped))
+}
+
 // ───── documents ───────────────────────────────────────────────────────────
 
 // A spec tab is open on one process while the other writes the document. The two do not share a

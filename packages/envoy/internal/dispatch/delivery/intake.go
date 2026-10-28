@@ -324,6 +324,8 @@ func consumerGenerationMetadata() map[string]string {
 // floor. Starting there, the recreated durable redelivers at once every message the durable had
 // not acknowledged -- what a dead holder had been handed, what a stopped one handed back --
 // replays nothing it had, and skips nothing (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
+// The take-over records that start in its hold's token before it deletes the durable, so a create
+// that fails after the delete loses neither (intakeHoldToken).
 // The deployed metadata keeps its own keys and drops the ones nats-server sets itself (the
 // `_nats.` prefix), which the server sets again on create.
 func takeOverConfig(deployed *natsgo.ConsumerInfo, wanted natsgo.ConsumerConfig) natsgo.ConsumerConfig {
@@ -334,8 +336,13 @@ func takeOverConfig(deployed *natsgo.ConsumerInfo, wanted natsgo.ConsumerConfig)
 		config.OptStartTime = nil
 		config.Metadata = bus.OwnMetadata(deployed.Config.Metadata, 0)
 	}
+	return startingAt(config, deployed.AckFloor.Stream+1)
+}
+
+// startingAt is config delivering from stream sequence start on.
+func startingAt(config natsgo.ConsumerConfig, start uint64) natsgo.ConsumerConfig {
 	config.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
-	config.OptStartSeq = deployed.AckFloor.Stream + 1
+	config.OptStartSeq = start
 	return config
 }
 
@@ -369,10 +376,53 @@ const (
 	intakeHoldMargin = 2 * time.Second
 )
 
-// intakeHoldName names the hold a process delivers from durable under. Its token records the
-// deliver subject the holder made the durable deliver to, which tells the next holder whether a
-// binding it finds is a holder's.
+// intakeHoldName names the hold a process delivers from durable under. Its token records what the
+// next holder needs (intakeHoldToken).
 func intakeHoldName(durable string) string { return "delivery-intake-" + durable }
+
+// intakeHoldToken is what an intake's hold records as its token:
+//
+//   - subject, the deliver subject the last holder made the durable deliver to, which tells the
+//     next holder whether a binding it finds is a holder's (heldDurable.boundElsewhere);
+//   - start, the stream sequence a take-over that deleted the durable creates it again at, or 0
+//     for none. A take-over records it before its delete and clears it once its create succeeds.
+//     A create that fails after the delete -- a JetStream API timeout, a stop cancelling its
+//     context, a crash between the two -- leaves it in the row, so the next take-over, of this
+//     intake or of the process that takes the hold next, creates the durable at the old ack floor
+//     rather than at the default start (deliveryConsumerConfig names none, so the stream's first
+//     message). A holder that stops with it set lapses its hold rather than deleting the row
+//     (heldDurable.stop), so the next holder still reads it.
+//
+// The token is the subject alone, or the subject followed by intakeHoldTokenStart and the
+// sequence in decimal. A deliver subject holds no space, so the two never mix. A token of any
+// other shape reads as a subject alone.
+type intakeHoldToken struct {
+	subject string
+	start   uint64
+}
+
+// intakeHoldTokenStart separates an intake hold token's subject from its start.
+const intakeHoldTokenStart = " start="
+
+func (t intakeHoldToken) String() string {
+	if t.start == 0 {
+		return t.subject
+	}
+	return t.subject + intakeHoldTokenStart + strconv.FormatUint(t.start, 10)
+}
+
+// parseIntakeHoldToken reads the token a hold's row records (intakeHoldToken).
+func parseIntakeHoldToken(token string) intakeHoldToken {
+	subject, start, found := strings.Cut(token, intakeHoldTokenStart)
+	if !found {
+		return intakeHoldToken{subject: token}
+	}
+	sequence, err := strconv.ParseUint(start, 10, 64)
+	if err != nil || sequence == 0 {
+		return intakeHoldToken{subject: token}
+	}
+	return intakeHoldToken{subject: subject, start: sequence}
+}
 
 // intakeLeases is the pool an intake takes its durable's hold and consumer lease on and renews the
 // hold through: store.Pool.Leases, which StartIntakes hands each intake. A *pgxpool.Pool is both.
@@ -443,11 +493,13 @@ func (t *bindThrottle) reportStandby(name, message string) {
 //   - A standby tries for the hold every durableBindInterval and takes it when no holder holds it
 //     live: released, lapsed, or never taken.
 //   - Under the hold, and under the durable's consumer lease, it takes the durable over
-//     (takeOver): it deletes the durable, subscribes to a fresh deliver subject, creates the
-//     durable again at its ack floor on that subject, and records the subject as the hold's
-//     token. The delete and create, rather than an update of the deliver subject, redeliver a
-//     dead holder's unacked messages at once and fence the holder off: a subscription its client
-//     sends again after a reconnect is on a subject the durable no longer delivers to.
+//     (takeOver): it records the stream sequence after the durable's ack floor in the hold's
+//     token, deletes the durable, subscribes to a fresh deliver subject, creates the durable again
+//     at that sequence on that subject, and records the subject alone as the hold's token
+//     (intakeHoldToken). The delete and create, rather than an update of the deliver subject,
+//     redeliver a dead holder's unacked messages at once and fence the holder off: a
+//     subscription its client sends again after a reconnect is on a subject the durable no
+//     longer delivers to.
 //     nats-server refuses that update anyway while the old subject still has interest, which a
 //     dead connection keeps for minutes; a delete has no such check. Subscribing before the
 //     create leaves the durable push-bound from the moment it exists. A durable bound to a
@@ -478,9 +530,10 @@ type heldDurable struct {
 
 	// hold is the durable's hold while this intake holds it.
 	hold *duty.Hold
-	// recorded is the token the hold's row records: the deliver subject the last holder made the
-	// durable deliver to, which may be this intake's own.
-	recorded string
+	// recorded is the token the hold's row records (intakeHoldToken): the deliver subject the last
+	// holder made the durable deliver to, which may be this intake's own, and the start a take-over
+	// that deleted the durable and did not create it again recorded.
+	recorded intakeHoldToken
 	// subject is the deliver subject this intake delivers at, and empty while it delivers nothing.
 	subject string
 
@@ -592,7 +645,7 @@ func (d *heldDurable) takeHold(ctx context.Context, name string) bool {
 		d.throttle.reportStandby(name, heldElsewhere)
 		return false
 	}
-	d.hold, d.recorded = hold, token
+	d.hold, d.recorded = hold, parseIntakeHoldToken(token)
 	slog.Info("dispatch delivery: took the intake's hold", "name", name, "hold", holdName)
 	return true
 }
@@ -601,7 +654,7 @@ func (d *heldDurable) takeHold(ctx context.Context, name string) bool {
 // process of the build before holds, which this intake never takes the durable from. It says so
 // at INFO, throttled.
 func (d *heldDurable) boundElsewhere(info *natsgo.ConsumerInfo) bool {
-	if !info.PushBound || info.Config.DeliverSubject == d.recorded {
+	if !info.PushBound || info.Config.DeliverSubject == d.recorded.subject {
 		return false
 	}
 	d.throttle.reportStandby(info.Config.Durable, "dispatch delivery: NATS consumer bound to a process that holds no hold; standing by until it lets go")
@@ -615,12 +668,14 @@ func (d *heldDurable) holds() bool {
 }
 
 // takeOver makes the durable deliver to this intake, under the hold and the durable's consumer
-// lease. A durable that does not exist is created with this build's config. A durable bound to a
-// subject no hold recorded is left as it is (boundElsewhere). Any other -- unbound, or bound to the
-// subject the hold records, which is a holder that died or was cut off -- is deleted and created
-// again at its ack floor on a fresh deliver subject (takeOverConfig). The durable's state is read
-// again here, under the lease, since a process of the build before holds can bind it between
-// attempt's read and this one.
+// lease. A durable that does not exist is created with this build's config, at the start a
+// take-over before this one recorded when it deleted the durable and did not create it again
+// (intakeHoldToken). A durable bound to a subject no hold recorded is left as it is
+// (boundElsewhere). Any other -- unbound, or bound to the subject the hold records, which is a
+// holder that died or was cut off -- is deleted and created again at its ack floor on a fresh
+// deliver subject (takeOverConfig), and that start is recorded as the hold's token before the
+// delete. The durable's state is read again here, under the lease, since a process of the build
+// before holds can bind it between attempt's read and this one.
 //
 // This intake subscribes to the fresh deliver subject before it creates the durable, so the
 // durable is push-bound from the moment it exists. A process of the build before holds binds by
@@ -630,7 +685,7 @@ func (d *heldDurable) holds() bool {
 // the client's connection before the create's request goes out on the same connection, and the
 // server handles one connection's protocol in order, so the subject has interest before the
 // create is even read (TestATakeOverCreatesTheDurableAlreadyBound). Then this intake records the
-// subject as the hold's token, still under the lease.
+// subject alone as the hold's token, still under the lease.
 func (d *heldDurable) takeOver(ctx context.Context) {
 	js := d.nats.JS()
 	wanted := d.config()
@@ -639,6 +694,9 @@ func (d *heldDurable) takeOver(ctx context.Context) {
 	info, err := js.ConsumerInfo(bus.Stream, name, natsgo.Context(ctx))
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
+		if d.recorded.start != 0 {
+			create = startingAt(wanted, d.recorded.start)
+		}
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
 		return
@@ -649,6 +707,12 @@ func (d *heldDurable) takeOver(ctx context.Context) {
 		if !d.holds() {
 			return
 		}
+		pending := intakeHoldToken{subject: d.recorded.subject, start: create.OptStartSeq}
+		if err := d.hold.SetToken(ctx, pending.String()); err != nil {
+			slog.Error("dispatch delivery: record the take-over's start before deleting NATS consumer", "name", name, "start_seq", create.OptStartSeq, "error", err)
+			return
+		}
+		d.recorded = pending
 		if err := js.DeleteConsumer(bus.Stream, name, natsgo.Context(ctx)); err != nil && !errors.Is(err, natsgo.ErrConsumerNotFound) {
 			slog.Error("dispatch delivery: delete NATS consumer to take it over", "name", name, "error", err)
 			return
@@ -661,12 +725,13 @@ func (d *heldDurable) takeOver(ctx context.Context) {
 		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", create.FilterSubject, "error", err)
 		return
 	}
-	if _, err := js.AddConsumer(bus.Stream, &create, natsgo.Context(ctx)); err != nil {
+	if _, err := createDurable(js, &create, natsgo.Context(ctx)); err != nil {
 		slog.Error("dispatch delivery: create NATS consumer", "name", name, "subject", create.FilterSubject, "start_seq", create.OptStartSeq, "error", err)
 		d.StopDelivering()
 		return
 	}
-	if err := d.hold.SetToken(ctx, create.DeliverSubject); err != nil {
+	bound := intakeHoldToken{subject: create.DeliverSubject}
+	if err := d.hold.SetToken(ctx, bound.String()); err != nil {
 		// The durable delivers here, but the hold does not say so: the next holder would take
 		// the binding for a process that holds nothing and wait for it. Stop, and take the
 		// durable over again on the next attempt.
@@ -674,9 +739,15 @@ func (d *heldDurable) takeOver(ctx context.Context) {
 		d.StopDelivering()
 		return
 	}
-	d.recorded, d.subject = create.DeliverSubject, create.DeliverSubject
+	d.recorded, d.subject = bound, create.DeliverSubject
 	slog.Info("dispatch delivery: NATS consumer bound", "name", name, "subject", create.FilterSubject,
 		"start_seq", create.OptStartSeq, "generation", bus.MetadataGeneration(create.Metadata, consumerGenerationKey))
+}
+
+// createDurable creates the durable config describes on the notification stream. A var so a test
+// can make a take-over's create fail after its delete.
+var createDurable = func(js natsgo.JetStreamContext, config *natsgo.ConsumerConfig, opts ...natsgo.JSOpt) (*natsgo.ConsumerInfo, error) {
+	return js.AddConsumer(bus.Stream, config, opts...)
 }
 
 // check stops delivering when the durable no longer delivers to this intake's deliver subject:
@@ -701,7 +772,9 @@ func (d *heldDurable) check(ctx context.Context) {
 }
 
 // stop is the end of run: it stops delivering, then releases the hold, so a standby takes the
-// durable over at once and is redelivered whatever this intake handed back.
+// durable over at once and is redelivered whatever this intake handed back. A hold whose token
+// still records a take-over's start (intakeHoldToken) is lapsed instead, which frees it as
+// Release does and keeps the row, so the next holder reads that start.
 func (d *heldDurable) stop() {
 	d.StopDelivering()
 	if d.hold == nil {
@@ -709,7 +782,11 @@ func (d *heldDurable) stop() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), intakeHoldRenew)
 	defer cancel()
-	if err := d.hold.Release(ctx); err != nil {
+	release := d.hold.Release
+	if d.recorded.start != 0 {
+		release = d.hold.Lapse
+	}
+	if err := release(ctx); err != nil {
 		slog.Error("dispatch delivery: release the intake's hold", "name", d.name, "error", err)
 	}
 	d.hold, d.subject = nil, ""

@@ -204,13 +204,17 @@ func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.
 }
 
 // A page is writable on an open issue when every live server process reads what the page
-// creates (its schema_creatable is at most each process's schema version) and the page reads what
-// every live process creates and what the document holds (its schema_version is at least each
-// process's creatable version and the highest since in the document). This process counts as one
-// of them; a process of a build that predates the fleet columns, which registers no schema
-// numbers, and a process whose heartbeat lapsed do not. A page that sends no schema_creatable
-// creates what its version reads. The socket's acceptance and its token's answer agree, since the
-// provider takes the second as the socket's scope.
+// creates (its schema_creatable is at most each process's schema version), some live process
+// creates what the page creates (its schema_creatable is at most the highest creatable version),
+// and the page reads what every live process creates and what the document holds (its
+// schema_version is at least each process's creatable version and the highest since in the
+// document). This process counts as one of them; a process of a build that predates the fleet
+// columns, which registers no schema numbers, and a process whose heartbeat lapsed do not. So
+// after a rollback, when no live process creates what a newer page creates, that page is
+// read-only and an older page stays writable. A page that sends no schema_creatable is a page
+// from before the manifest, every element of which has since 1, so it creates up to 1. The
+// socket's acceptance and its token's answer agree, since the provider takes the second as the
+// socket's scope.
 func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 	v, r := pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()
 	if v != 2 || r != 1 {
@@ -228,16 +232,18 @@ func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 		token    string
 		writable bool
 	}{
-		{name: "a page one version newer whose creatable elements this build reads", query: page(3, 2), token: "3", writable: true},
-		{name: "a page one version older that represents everything the fleet creates", query: page(1, 1), token: "1", writable: true},
+		{name: "a page one version newer beside a live process of its build", fleet: []process{{3, 2, 0}}, query: page(3, 2), token: "3", writable: true},
+		{name: "after a rollback, a page one version newer creating what no live process creates", query: page(3, 2), token: "3"},
+		{name: "after a rollback, a page one version older that represents everything the fleet creates", query: page(1, 1), token: "1", writable: true},
 		{name: "a page that cannot represent an element the document holds", future: true, query: page(1, 1), token: "1"},
 		{name: "a page of this version beside the element it represents", future: true, query: page(2, 1), token: "2", writable: true},
 		{name: "a live process creating what an older page cannot represent", fleet: []process{{3, 2, 0}}, query: page(1, 1), token: "1"},
 		{name: "a live process that cannot read what a newer page creates", fleet: []process{{1, 1, 0}}, query: page(3, 2), token: "3"},
-		{name: "a process that predates the fleet columns is left out", fleet: []process{{0, 0, 0}}, query: page(3, 2), token: "3", writable: true},
-		{name: "a lapsed process is left out", fleet: []process{{1, 1, time.Hour}}, query: page(3, 2), token: "3", writable: true},
+		{name: "a process that predates the fleet columns is left out", fleet: []process{{0, 0, 0}}, query: page(2, 1), token: "2", writable: true},
+		{name: "a lapsed process is left out", fleet: []process{{3, 2, time.Hour}}, query: page(1, 1), token: "1", writable: true},
 		{name: "a page that sends no schema_creatable on this version", query: page(2, -1), token: "2", writable: true},
-		{name: "a page that sends no schema_creatable one version newer", query: page(3, -1), token: "3"},
+		{name: "a page that sends no schema_creatable one version newer creates what the first version reads", query: page(3, -1), token: "3", writable: true},
+		{name: "a page that sends no schema_creatable beside a live process that reads only the first version", fleet: []process{{1, 1, 0}}, query: page(2, -1), token: "2", writable: true},
 		{name: "a page presenting no number", query: url.Values{"schema_version": {"two"}}, token: "two"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -338,22 +344,61 @@ func TestAdmissionRecheckClosesASocketTheFleetNoLongerAdmits(t *testing.T) {
 		t.Fatalf("re-check the sockets' admission: %v", err)
 	}
 
-	_ = older.SetReadDeadline(time.Now().Add(5 * time.Second))
-	for {
-		_, _, err := older.ReadMessage()
-		if err == nil {
-			continue
-		}
-		var closed *gws.CloseError
-		if !errors.As(err, &closed) || closed.Code != gws.CloseServiceRestart {
-			t.Fatalf("the older page's socket ended with %v, want a close with %d", err, gws.CloseServiceRestart)
-		}
-		break
-	}
+	requireServiceRestartClose(t, older, "the older page's socket")
 	if socket, authenticated := admission(t, server.URL, artifactID, page(1, 1), "1"); socket || authenticated {
 		t.Errorf("the older page's reconnect was admitted writable=%t by its socket and %t by its token, want read-only", socket, authenticated)
 	}
 	if !probeWritable(t, current, artifactID) {
 		t.Error("the current page's socket no longer applies its updates after the re-check")
+	}
+}
+
+// After a rollback no live process creates what a newer page creates, so the next re-check closes
+// that page's socket with 1012, and its reconnect is read-only. A current page's socket stays open
+// and writable.
+func TestAdmissionRecheckClosesANewerPageOnceNoLiveProcessCreatesWhatItCreates(t *testing.T) {
+	service, artifactID, server := newAdmissionServer(t, false)
+	fleetProcess(t, service, 3, 2, 0)
+	newer := mustDialPage(t, server.URL, artifactID, page(3, 2))
+	if !tokenWritable(t, newer, artifactID, "3") {
+		t.Fatal("a newer page beside a live process of its build was authenticated read-only")
+	}
+	current := mustDialPage(t, server.URL, artifactID, page(pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()))
+	if !tokenWritable(t, current, artifactID, strconv.Itoa(pmdoc.SchemaVersion())) {
+		t.Fatal("a current page was authenticated read-only")
+	}
+
+	// The rollback stops the newer build's process.
+	if _, err := service.store.Pool.Exec(context.Background(), `delete from server_processes`); err != nil {
+		t.Fatalf("stop the newer build's process: %v", err)
+	}
+	if err := service.recheckSchemaAdmissions(context.Background()); err != nil {
+		t.Fatalf("re-check the sockets' admission: %v", err)
+	}
+
+	requireServiceRestartClose(t, newer, "the newer page's socket")
+	if socket, authenticated := admission(t, server.URL, artifactID, page(3, 2), "3"); socket || authenticated {
+		t.Errorf("the newer page's reconnect was admitted writable=%t by its socket and %t by its token, want read-only", socket, authenticated)
+	}
+	if !probeWritable(t, current, artifactID) {
+		t.Error("the current page's socket no longer applies its updates after the re-check")
+	}
+}
+
+// requireServiceRestartClose reads connection until it ends, and fails the test unless the server
+// closed it with 1012 within five seconds.
+func requireServiceRestartClose(t *testing.T, connection *gws.Conn, what string) {
+	t.Helper()
+	_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, _, err := connection.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var closed *gws.CloseError
+		if !errors.As(err, &closed) || closed.Code != gws.CloseServiceRestart {
+			t.Fatalf("%s ended with %v, want a close with %d", what, err, gws.CloseServiceRestart)
+		}
+		return
 	}
 }

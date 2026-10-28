@@ -498,11 +498,15 @@ func main() {
 	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
-	// stopIntakes waits for both intakes to stop. The shutdown calls it before it closes the
-	// database pool (serveUntilStopped below): an intake releases its duty.Hold through that
-	// pool as it stops, and a hold left in place for its TTL names the stopped process's deliver
-	// subject, which a process of the build before holds, binding by lookup, goes on delivering
-	// at, so the next holder would read that binding as a dead holder's and take it over.
+	// stopIntakes waits for both intakes to stop once ctx is cancelled; StartIntakes returns it as a
+	// sync.OnceFunc, so a second call returns once the first has. The shutdown calls it before it
+	// closes the database pool (serveUntilStopped below): an intake releases its duty.Hold through
+	// that pool as it stops, and a hold left in place for its TTL names the stopped process's
+	// deliver subject, which a process of the build before holds, binding by lookup, goes on
+	// delivering at, so the next holder would read that binding as a dead holder's and take it
+	// over. Every exit after the intakes start calls it too (exitAfterIntakes, and the stop during
+	// the registry's admission wait), since each intake can hold its durable before this process
+	// serves anything.
 	stopIntakes := func() {}
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
@@ -540,6 +544,13 @@ func main() {
 		waitDelivery()
 		stopIntakes()
 	}
+	// exitAfterIntakes ends a process that started its intakes and will not serve: it stops them,
+	// releasing their holds, and exits 1.
+	exitAfterIntakes := func() {
+		cancel()
+		stopIntakes()
+		os.Exit(1)
+	}
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
@@ -553,7 +564,7 @@ func main() {
 	}
 	if err != nil {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
-		os.Exit(1)
+		exitAfterIntakes()
 	}
 	// The registry row carries the document schema numbers this build reads and creates,
 	// which every process's document socket admission reads; the identity of its embedder, "" with
@@ -579,11 +590,12 @@ func main() {
 		// heartbeat to lapse (processes.Register's wait, up to a live window and a heartbeat) stops
 		// a process that has served nothing: a clean stop, not a failed start.
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			stopIntakes()
 			slog.Info("dispatch: stopped while waiting for admission to the registry of live server processes")
 			return
 		}
 		slog.Error("dispatch: register this server process", "error", err)
-		os.Exit(1)
+		exitAfterIntakes()
 	}
 	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDeliveryAndIntakes,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {

@@ -373,7 +373,7 @@ func refuseUncreatable(nodes []*Node, held func() *Node) error {
 	}
 	for _, element := range made {
 		if !present[element] {
-			return fmt.Errorf("%w: this Dispatch build reads %s but cannot write it yet. A later release writes it", ErrSchema, element)
+			return fmt.Errorf("%w: this Dispatch build reads %s but cannot write it yet. Remove it from your markdown, or write it again after the next release", ErrSchema, element)
 		}
 	}
 	return nil

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -136,7 +137,7 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 
 // A resident room remains live even when no writer holds its advisory lock, so the server registry
 // refuses rebuilding it without changing durable history. The refusal names what a rebuild would
-// discard and leaves the choice to a person, rather than telling the caller to rebuild or replace.
+// discard, names no other repair, and tells the caller to stop and ask a person.
 func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before\n")
@@ -148,8 +149,8 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 		t.Fatalf("count updates before rebuild: %v", err)
 	}
 	_, _, err := rebuildDocument(t, service, artifactID, nil)
-	if !errors.Is(err, ErrDocumentLive) || !strings.Contains(err.Error(), "A rebuild discards every edit made after saved version ") || !strings.Contains(err.Error(), "A person decides") || strings.Contains(err.Error(), "retry") {
-		t.Fatalf("rebuild resident room: %v, want ErrDocumentLive naming what a rebuild discards and that a person decides", err)
+	if !errors.Is(err, ErrDocumentLive) || !strings.Contains(err.Error(), "A rebuild discards every edit made after saved version ") || !strings.Contains(err.Error(), "Stop. Ask a person whether to rebuild the document") || strings.Contains(err.Error(), "either") || strings.Contains(err.Error(), "replace") || strings.Contains(err.Error(), "retry") {
+		t.Fatalf("rebuild resident room: %v, want ErrDocumentLive naming what a rebuild discards and telling the caller to stop and ask a person", err)
 	}
 	var after int
 	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&after); err != nil {
@@ -228,6 +229,52 @@ func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
 	}
 	if text, err := service.Text(context.Background(), artifactID); err != nil || text != heavy {
 		t.Fatalf("the rebuilt document reads %d bytes (%v), want the version's %d", len(text), err, len(heavy))
+	}
+}
+
+// storeLatestVersion makes markdown the latest saved version of artifactID, as a build that wrote
+// it stored it, and returns a service whose next load of the document's history does not decode,
+// the one state a rebuild repairs.
+func storeLatestVersion(t *testing.T, database *store.Store, artifactID, markdown string) *Service {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifactID, markdown); err != nil {
+		t.Fatalf("store the latest version: %v", err)
+	}
+	return New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+}
+
+// A rebuild from the latest saved version reads markdown the request did not send. A version that
+// holds an element this build does not know, which a newer build wrote during a release, is newer
+// content (ErrDocNewerContent), as every read of the document is, and not invalid markdown of the
+// caller's. Nothing is replaced.
+func TestARebuildFromAVersionHoldingNewerContentIsRefusedAsNewerContent(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	newer := "before\n\n:::" + UnknownElementForTest + "{#newer-1}\nWritten by a newer build.\n:::\n"
+	service := storeLatestVersion(t, database, artifactID, newer)
+	_, _, err := rebuildDocument(t, service, artifactID, nil)
+	if !errors.Is(err, ErrDocNewerContent) || errors.Is(err, ErrInvalidMarkdown) {
+		t.Fatalf("rebuild from a version holding newer content: %v, want ErrDocNewerContent and not ErrInvalidMarkdown", err)
+	}
+	if !strings.Contains(err.Error(), UnknownElementForTest) {
+		t.Errorf("the refusal %q does not name the element %q", err, UnknownElementForTest)
+	}
+}
+
+// A version that holds an element this build reads but may not create yet holds content the
+// document already stored, so a rebuild from it restores that content: the seed puts back what the
+// version holds and creates nothing.
+func TestARebuildFromAVersionHoldingAnElementThisBuildCannotCreateRestoresIt(t *testing.T) {
+	useFutureBlock(t, 3)
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	staged := "before\n\n:::future{#future-1}\nBody.\n:::\n"
+	service := storeLatestVersion(t, database, artifactID, staged)
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
+		t.Fatalf("rebuild from a version holding an element this build cannot create: %v", err)
+	}
+	if text, err := service.Text(context.Background(), artifactID); err != nil || text != staged {
+		t.Fatalf("the rebuilt document reads %q (%v), want the version's %q", text, err, staged)
 	}
 }
 

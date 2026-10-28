@@ -30,14 +30,16 @@ var (
 	ErrDocumentUnloadable = errors.New("the document's stored history cannot load. A rebuild from the latest saved version discards every edit made after that version. A person decides whether to rebuild the document")
 	// ErrDocumentLive is a rebuild refused because the document is resident in this server.
 	ErrDocumentLive = errors.New("document is live")
-	// ErrDocumentLoads is a rebuild refused because the document's stored history loads. Its message
-	// names what each repair discards and leaves the choice to a person.
-	ErrDocumentLoads = errors.New("this document's stored history loads, so Dispatch refused the rebuild. A rebuild discards every edit made after the latest saved version. A replacement from markdown discards the current content. A person decides whether to do either")
+	// ErrDocumentLoads is a rebuild refused because the document's stored history loads. A
+	// rebuild is only for a history that cannot load, so its message offers no repair and tells
+	// the caller to stop and ask a person.
+	ErrDocumentLoads = errors.New("this document's stored history loads, so Dispatch refused the rebuild. Dispatch rebuilds only a document whose stored history cannot load. Stop. Ask a person what to do with this document")
 	// ErrDocNewerContent is the tree a document holds refused because it holds an element this
 	// build does not know (pmdoc.ErrUnknownElement): two builds serve one database during a
 	// release, and a newer build wrote it. It is not ErrDocSchema: no repair applies, and a
-	// replacement from markdown would delete the element (NewerContentError).
-	ErrDocNewerContent = errors.New("this Dispatch process's build cannot read an element of this document. During a release, another build may serve the document. Try again in one minute. If you replace the document, the replacement deletes that element")
+	// replacement from markdown or a rebuild would delete the element (NewerContentError), so the
+	// message tells the caller to use neither.
+	ErrDocNewerContent = errors.New("this Dispatch process's build cannot read an element of this document. During a release, another build may serve the document. Try again in one minute. Do not replace or rebuild the document")
 )
 
 // OutsideSchemaError is ErrDocOutsideSchema with the refusal that names what is wrong. treeOf and
@@ -183,11 +185,19 @@ func asUploaded(tree *pmdoc.Node) *pmdoc.Node {
 // encodeDocumentTree writes tree into a fresh document and returns the first durable update for
 // callers that create or rebuild a document outside a live room.
 func encodeDocumentTree(tree *pmdoc.Node) ([]byte, error) {
+	return encodeDocumentTreeHolding(tree, nil)
+}
+
+// encodeDocumentTreeHolding is encodeDocumentTree for a tree whose content the document holds
+// already as held (pmdoc.UpdateHolding): a rebuild from the latest saved version puts back what
+// that version holds, an element this build may not create yet among it. held nil is
+// encodeDocumentTree.
+func encodeDocumentTreeHolding(tree, held *pmdoc.Node) ([]byte, error) {
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment(fragmentName)
 	doc.GetMap(marksMapName)
 	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
+		return pmdoc.UpdateHolding(transaction, fragment, tree, held)
 	}); err != nil {
 		return nil, err
 	}

@@ -14,7 +14,7 @@ import (
 // builds serve one database. Every route that starts from it - the reads, an edit (what `dispatch
 // doc-edit` calls) and a named version - answers 409 DOC_NEWER_CONTENT with one message, whether a
 // room holds the document or only the store does. The message says to try again in one minute and
-// that a replacement deletes the element, and an upload over the document is refused, so the
+// not to replace or rebuild the document, and an upload over the document is refused, so the
 // element stays.
 func TestEveryRouteAnswersADocumentHoldingNewerContentAlike(t *testing.T) {
 	for _, resident := range []bool{true, false} {
@@ -61,8 +61,8 @@ func TestEveryRouteAnswersADocumentHoldingNewerContentAlike(t *testing.T) {
 					Code  string `json:"code"`
 					Error string `json:"error"`
 				}](t, response)
-				if response.Code != http.StatusConflict || answer.Code != "DOC_NEWER_CONTENT" || !strings.Contains(answer.Error, "Try again in one minute") || !strings.Contains(answer.Error, "deletes that element") || !strings.Contains(answer.Error, docs.UnknownElementForTest) {
-					t.Fatalf("%s %s: status=%d body=%s, want 409 DOC_NEWER_CONTENT naming the element, the retry and the deletion", route.method, route.name, response.Code, response.Body.String())
+				if response.Code != http.StatusConflict || answer.Code != "DOC_NEWER_CONTENT" || !strings.Contains(answer.Error, "Try again in one minute. Do not replace or rebuild the document") || strings.Contains(answer.Error, "If you replace") || !strings.Contains(answer.Error, docs.UnknownElementForTest) {
+					t.Fatalf("%s %s: status=%d body=%s, want 409 DOC_NEWER_CONTENT naming the element, the retry and that no replacement or rebuild may follow", route.method, route.name, response.Code, response.Body.String())
 				}
 				messages[route.name] = answer.Error
 			}

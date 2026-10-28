@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
@@ -665,4 +666,153 @@ func fetchesOf(process *intakeProcess, numbers []int) map[int]int {
 		counts[number] = process.fetches(number)
 	}
 	return counts
+}
+
+// failCreatesWhile makes the take-over's create of the durable fail while failing reports true,
+// as a JetStream API timeout, a stop cancelling the create's context, or a crash between the delete
+// and the create leaves the durable deleted and not created. It counts every create attempt, and
+// restores the real create when the test ends, after every intake the test starts has stopped.
+func failCreatesWhile(t *testing.T, failing func() bool) *atomic.Int32 {
+	t.Helper()
+	attempts := &atomic.Int32{}
+	create := createDurable
+	createDurable = func(js natsgo.JetStreamContext, config *natsgo.ConsumerConfig, opts ...natsgo.JSOpt) (*natsgo.ConsumerInfo, error) {
+		attempts.Add(1)
+		if failing() {
+			return nil, errors.New("the test fails the create: JetStream API timed out")
+		}
+		return create(js, config, opts...)
+	}
+	t.Cleanup(func() { createDurable = create })
+	return attempts
+}
+
+// durablePartWayThrough publishes merged pull requests 1 to acknowledged+unacknowledged and leaves
+// the delivery durable as a holder that stopped part way through them leaves it: unbound, with the
+// first acknowledged of them acknowledged and the rest not. They are acknowledged through a pull
+// fetch, which reaches them in stream order, so the ack floor sits at the last of them.
+func durablePartWayThrough(t *testing.T, ctx context.Context, publisher *bus.Client, acknowledged, unacknowledged int) {
+	t.Helper()
+	for number := 1; number <= acknowledged+unacknowledged; number++ {
+		publishMergedPullRequest(t, publisher, number)
+	}
+	if _, err := publisher.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:       bus.DispatchDeliveryDurable,
+		FilterSubject: githubIntakeSubject,
+		AckPolicy:     natsgo.AckExplicitPolicy,
+	}); err != nil {
+		t.Fatalf("create the durable: %v", err)
+	}
+	js, err := jetstream.New(publisher.Conn)
+	if err != nil {
+		t.Fatalf("open the jetstream API: %v", err)
+	}
+	consumer, err := js.Consumer(ctx, bus.Stream, bus.DispatchDeliveryDurable)
+	if err != nil {
+		t.Fatalf("look up the durable: %v", err)
+	}
+	batch, err := consumer.Fetch(acknowledged, jetstream.FetchMaxWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("fetch from the durable: %v", err)
+	}
+	got := 0
+	for msg := range batch.Messages() {
+		if err := msg.DoubleAck(ctx); err != nil {
+			t.Fatalf("acknowledge a message: %v", err)
+		}
+		got++
+	}
+	if err := batch.Error(); err != nil || got != acknowledged {
+		t.Fatalf("fetch the first %d messages: got %d, err %v", acknowledged, got, err)
+	}
+	if info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable); err != nil || info.AckFloor.Consumer != uint64(acknowledged) {
+		t.Fatalf("the durable's ack floor = %s, want %d", consumerState(publisher), acknowledged)
+	}
+}
+
+// requireDeliveredFromTheFloor waits for process to handle each of the unacknowledged messages
+// once, then gives an acknowledged message the take-over wrongly replayed time to arrive too, and
+// fails the test for any of them.
+func requireDeliveredFromTheFloor(t *testing.T, publisher *bus.Client, process *intakeProcess, acknowledged, unacknowledged int) {
+	t.Helper()
+	var acked, unacked []int
+	for number := 1; number <= acknowledged+unacknowledged; number++ {
+		if number <= acknowledged {
+			acked = append(acked, number)
+		} else {
+			unacked = append(unacked, number)
+		}
+	}
+	waitFor(t, 30*time.Second, func() bool {
+		for _, number := range unacked {
+			if process.fetches(number) == 0 {
+				return false
+			}
+		}
+		return true
+	}, func() string {
+		return fmt.Sprintf("the intake did not handle the unacknowledged messages %v: %v; %s", unacked, fetchesOf(process, unacked), consumerState(publisher))
+	})
+	time.Sleep(2 * time.Second)
+	for _, number := range acked {
+		if got := process.fetches(number); got != 0 {
+			t.Errorf("message %d was acknowledged before the take-over and was handled %d times after it", number, got)
+		}
+	}
+	for _, number := range unacked {
+		if got := process.fetches(number); got != 1 {
+			t.Errorf("message %d was not acknowledged before the take-over and was handled %d times after it, want 1", number, got)
+		}
+	}
+}
+
+// A take-over deletes the durable and creates it again at its ack floor. When the create fails
+// after the delete, the next take-over of the same intake finds no durable and creates it at that
+// same floor: none of the acknowledged messages come back, and none of the others are skipped.
+func TestATakeOverWhoseCreateFailsCreatesTheDurableAtItsFloorOnTheNextAttempt(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	natsURL := testnats.URL(t)
+	publisher := intakeTestClient(t)
+	const acknowledged, unacknowledged = 5, 4
+	durablePartWayThrough(t, ctx, publisher, acknowledged, unacknowledged)
+
+	var failed atomic.Bool
+	attempts := failCreatesWhile(t, func() bool { return !failed.Swap(true) })
+	process := startIntakeProcess(t, pool, natsURL, nil)
+	requireDeliveredFromTheFloor(t, publisher, process, acknowledged, unacknowledged)
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("the intake tried the create %d times, want the failed one and one after it", got)
+	}
+}
+
+// A take-over whose create fails after the delete leaves its start to the next holder: a process
+// stopped gracefully before any create succeeded hands the hold on, and a fresh intake, as a
+// restarted process runs one, creates the durable at the old floor: none of the acknowledged
+// messages come back, and none of the others are skipped.
+func TestATakeOverWhoseCreateFailsLeavesTheFloorToTheNextHolder(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	natsURL := testnats.URL(t)
+	publisher := intakeTestClient(t)
+	const acknowledged, unacknowledged = 5, 4
+	durablePartWayThrough(t, ctx, publisher, acknowledged, unacknowledged)
+
+	var failing atomic.Bool
+	failing.Store(true)
+	attempts := failCreatesWhile(t, failing.Load)
+	first := startIntakeProcess(t, pool, natsURL, nil)
+	waitFor(t, 20*time.Second, func() bool {
+		_, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+		return attempts.Load() > 0 && errors.Is(err, natsgo.ErrConsumerNotFound)
+	}, func() string {
+		return fmt.Sprintf("the first intake did not delete the durable and fail its create (%d creates): %s", attempts.Load(), consumerState(publisher))
+	})
+	first.stop()
+	failing.Store(false)
+
+	next := startIntakeProcess(t, pool, natsURL, nil)
+	requireDeliveredFromTheFloor(t, publisher, next, acknowledged, unacknowledged)
 }

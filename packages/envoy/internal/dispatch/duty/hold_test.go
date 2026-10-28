@@ -217,6 +217,49 @@ func TestHoldReleaseFreesAtOnceAndNotifiesTheName(t *testing.T) {
 	mustTakeHold(t, second.Pool, uuid.New(), opts)
 }
 
+// Lapse ends the hold as Release does - Lost closes, a standby takes the name at once and is
+// notified - but keeps the row's token, so the next holder reads what this one recorded.
+func TestHoldLapseFreesAtOnceAndKeepsTheToken(t *testing.T) {
+	database := storetest.Open(t)
+	second := storetest.SecondProcess(t, database)
+	opts := HoldOptions{TTL: 3 * time.Second, Renew: 500 * time.Millisecond, Margin: time.Second, Token: "deliver.pending"}
+	ctx := context.Background()
+
+	listener, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("open the listening connection: %v", err)
+	}
+	defer func() { _ = listener.Close(context.Background()) }()
+	if _, err := listener.Exec(ctx, `listen `+HoldReleasedChannel); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	hold := mustTakeHold(t, database.Pool, uuid.New(), opts)
+	if err := hold.Lapse(ctx); err != nil {
+		t.Fatalf("lapse: %v", err)
+	}
+	select {
+	case <-hold.Lost():
+	default:
+		t.Error("Lost is open after Lapse")
+	}
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || held || token != "deliver.pending" {
+		t.Fatalf("HoldToken after Lapse = %q, held %v, error %v; want %q, not held", token, held, err, "deliver.pending")
+	}
+
+	waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	notice, err := listener.WaitForNotification(waiting)
+	if err != nil {
+		t.Fatalf("wait for the lapse notification: %v", err)
+	}
+	if notice.Channel != HoldReleasedChannel || notice.Payload != holdName {
+		t.Fatalf("notification on %q with %q, want %q with %q", notice.Channel, notice.Payload, HoldReleasedChannel, holdName)
+	}
+
+	mustTakeHold(t, second.Pool, uuid.New(), opts)
+}
+
 // A renewal that affects no row - the row taken over by another holder after a lapse - closes Lost
 // at once, long before the loss deadline, and the holder's Release then leaves the new holder's
 // row alone.
