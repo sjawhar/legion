@@ -1,17 +1,12 @@
 package pmdoc
 
-// The walk measures every subtree once, up front, where it measured each node again for each of its
-// ancestors. These tests hold it to the walk it replaced, frozen below as referenceWalk: the same
+// The walk measures every subtree once, up front, rather than each node again for each of its
+// ancestors. These tests hold it to referenceWalk, which measures as it visits: the same
 // nodes, in the same order, with the same paths and ranges, stopped at the same visit, on every
 // tree this package ships as test data, on synthetic trees at the edges of the size rule, and on a
 // generated document of a real spec's size. Failures name a node by its type, path, range and the
 // length of its text, never the text itself, so a private spec read by the opt-in corpus test
 // never reaches a log.
-//
-// The benchmark and the generators it uses reference only walk, Parse, LineFeeds, Node and the
-// standard library, and the rest of the file only what the commit before the measured walk has, so
-// the file compiles in that commit too (beside a shim defining referenceLen16) and the benchmark
-// compares the two walks on the same documents.
 
 import (
 	"fmt"
@@ -28,9 +23,11 @@ import (
 // walker is the shape walk and referenceWalk share, so one recorder runs either.
 type walker func(doc *Node, visit func(n *Node, path []int, pos, end int) bool)
 
-// referenceWalk is walk as it stood before it measured each subtree once: every node's end is
-// asked of referenceNodeSize as the node is visited. It is frozen here, not shared with walk, so
-// that any change to walk's visits shows up as a difference from it.
+// referenceWalk is walk without the up-front measure: every node's end is asked of
+// referenceNodeSize as the node is visited. It is frozen here, not shared with walk, so that any
+// change to walk's visits shows up as a difference from it. It pins the walk's algorithm and,
+// through referenceLen16, len16; it shares isLeafNodeType with walk, since the schema's leaf list
+// is not the walk's to pin.
 func referenceWalk(doc *Node, visit func(n *Node, path []int, pos, end int) bool) {
 	if doc == nil || visit == nil {
 		return
@@ -43,7 +40,7 @@ func referenceWalkNode(node *Node, path []int, pos int, visit func(n *Node, path
 	if !visit(node, path, pos, end) {
 		return false
 	}
-	if node.Type == "text" || referenceIsLeafNodeType(node.Type) {
+	if node.Type == "text" || isLeafNodeType(node.Type) {
 		return true
 	}
 
@@ -60,9 +57,8 @@ func referenceWalkNode(node *Node, path []int, pos int, visit func(n *Node, path
 	return true
 }
 
-// referenceNodeSize is the ProseMirror size rule as nodeSize applied it before the measured walk:
-// a text's UTF-16 length, one for a leaf, and two around the children of any other node but the
-// document.
+// referenceNodeSize is the ProseMirror size rule, recomputed for every call: a text's UTF-16
+// length, one for a leaf, and two around the children of any other node but the document.
 func referenceNodeSize(node *Node) int {
 	if node == nil {
 		return 0
@@ -70,7 +66,7 @@ func referenceNodeSize(node *Node) int {
 	if node.Type == "text" {
 		return referenceLen16(node.Text)
 	}
-	if referenceIsLeafNodeType(node.Type) {
+	if isLeafNodeType(node.Type) {
 		return 1
 	}
 	size := 0
@@ -81,17 +77,6 @@ func referenceNodeSize(node *Node) int {
 		size += referenceNodeSize(child)
 	}
 	return size
-}
-
-// referenceIsLeafNodeType is a literal copy of isLeafNodeType's list, so that a change to the list
-// walk reads is a difference these tests report rather than one both walks silently share.
-func referenceIsLeafNodeType(nodeType string) bool {
-	switch nodeType {
-	case "hr", "hardbreak", "image", "html", "footnote_reference":
-		return true
-	default:
-		return false
-	}
 }
 
 // walkVisit is one call of a walk's visitor. path is a copy, since a walk's path is valid only for
@@ -202,7 +187,7 @@ type namedTree struct {
 	tree *Node
 }
 
-// walkTestTrees are every tree TestWalkVisitsEveryNodeWithTodaysRange holds the walk to: the
+// walkTestTrees are every tree TestWalkMatchesTheReferenceWalk holds the walk to: the
 // shipped corpus and fixtures, the synthetic edges of the size rule, and the generated document.
 func walkTestTrees(t *testing.T) []namedTree {
 	t.Helper()
@@ -343,9 +328,9 @@ func syntheticWalkTrees(t *testing.T) []namedTree {
 	}
 }
 
-// The measured walk visits what the walk it replaced visits, with the same paths and ranges, and
-// stops where it stopped; Size agrees with the size rule it replaced.
-func TestWalkVisitsEveryNodeWithTodaysRange(t *testing.T) {
+// walk visits what referenceWalk visits, with the same paths and ranges, and stops where it stops;
+// Size agrees with referenceNodeSize.
+func TestWalkMatchesTheReferenceWalk(t *testing.T) {
 	for _, named := range walkTestTrees(t) {
 		want, wantPanicked := recordWalk(referenceWalk, named.tree, 0)
 		got, gotPanicked := recordWalk(walk, named.tree, 0)
@@ -600,7 +585,7 @@ func markedReadBack(parsed *Node) (*Node, int, error) {
 				}
 				eligible++
 			}
-		case !referenceIsLeafNodeType(n.Type):
+		case !isLeafNodeType(n.Type):
 			markable = n.Type == "paragraph" || n.Type == "heading" || n.Type == "code_block"
 		}
 		return true
@@ -629,10 +614,10 @@ func middleThird(value string) (from, to int) {
 	return units16(runes[:first]), units16(runes[:last])
 }
 
-// The measured walk agrees with the walk it replaced on a corpus of real specs, as parsed and as
-// read back from a live document under comment marks. It runs only when PMDOC_WALK_CORPUS names a
-// directory of markdown files, and logs counts and file names alone, never a spec's text.
-func TestWalkMatchesTodaysWalkOnACorpus(t *testing.T) {
+// walk agrees with referenceWalk on a corpus of real specs, as parsed and as read back from a live
+// document under comment marks. It runs only when PMDOC_WALK_CORPUS names a directory of markdown
+// files, and logs counts and file names alone, never a spec's text.
+func TestWalkMatchesTheReferenceWalkOnACorpus(t *testing.T) {
 	dir := os.Getenv("PMDOC_WALK_CORPUS")
 	if dir == "" {
 		t.Skip("PMDOC_WALK_CORPUS unset; set it to a directory of .md files to run this")

@@ -166,16 +166,8 @@ func referenceLen16(value string) int {
 	return len(utf16.Encode([]rune(value)))
 }
 
-// len16 counts the units utf16.Encode writes, invalid bytes (one U+FFFD each) included.
-func TestLen16CountsTheUnitsUTF16EncodingWrites(t *testing.T) {
-	for _, value := range len16Cases {
-		if got, want := len16(value), referenceLen16(value); got != want {
-			t.Errorf("len16(%q) = %d, want %d", value, got, want)
-		}
-	}
-}
-
-// len16 agrees with utf16.Encode on any string, valid UTF-8 or not.
+// len16 agrees with utf16.Encode on any string, valid UTF-8 or not, invalid bytes (one U+FFFD
+// each) included. Plain go test runs the seeds, every one of len16Cases.
 func FuzzLen16(f *testing.F) {
 	for _, value := range len16Cases {
 		f.Add(value)
