@@ -2,21 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-547",
-  "completed": "2026-10-28T10:11:05Z",
-  "round": 6,
-  "reviewedHead": "1da22cf89bd3b5cc1eda167d24b92dcbc2b8b3f3",
-  "codeHead": "6220ef2bac729b9c9adc85b71a26c3342e40f7f9",
+  "completed": "2026-10-28T10:38:35Z",
+  "round": 7,
+  "reviewedHead": "faee371d469871c076c845984d5c557a0034a3bb",
+  "codeHead": "407ae6d92a0b049b7203f615fda65b1a8e0514de",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "ci": "Required set on main: lint, typecheck, test, pr-title. CI head 6220ef2b; every check queued at 10:10Z. GitHub reports the pull request CONFLICTING, so no merge ref exists for its pull_request runs. On f18ca5a7, test and the Envoy jobs were cancelled by the push. No required check has completed on a head carrying main's merge.",
-  "threads": "15 threads, all mine, all resolved. Round 5: PRRT_kwDORFy7ds6xEXLr, PRRT_kwDORFy7ds6xEXL0 and PRRT_kwDORFy7ds6xEXL7 accepted (6220ef2b).",
-  "e2eLines": "Both present.",
-  "thermo": "Not re-run this round. The code delta since f18ca5a7, where the pair ran (deep review APPROVE; code quality cleanup only), is 6220ef2b: Go comments and a pi-envoy CHANGELOG entry, with no executable change (git diff e24ab951 6220ef2b). The next round reviews the forward merge, which changes code, and runs the pair at that head.",
+  "important": 0,
+  "minor": 2,
+  "correctnessFindingsStanding": 0,
+  "whyChangesRequested": "Two changelog fragments carry a wrong statement and a rendering defect, which ship in release notes. The deployment allows no deferral. Spec v2 also requires another forward merge for sjawhar/legion#2362 (not merged at 10:38Z), so these add no merge latency. Required CI on the code head was still queued.",
+  "ci": "Required set on main: lint, typecheck, test, pr-title. CI head 407ae6d9; compare to faee371d is handoffsOnly true (2 files). At 10:38Z every check was queued, so CI has not settled on any code head that carries main's merge.",
+  "mergeCheck": "Merge 407ae6d9 of main aeeee6c0. For every file but the CHANGELOGs and fragments, this change's patch against main is the same as before the merge (base b295a3fb to 6220ef2b), except: api.go (my comment-wrap nit, fixed) and two docs/solutions pages (the Dispatch key taken out). Main's own changes since b295a3fb touch no file this change does, outside the CHANGELOGs (they touch envoy/internal/dispatch search, envoy-infra gcp, the release fold and the daemon's JWT). Every CHANGELOG.md equals main's. Seven fragments are named pr2370-<Kind>-<time>.yaml under .changes/unreleased, as the controller ruled, and no entry names a Dispatch key.",
+  "threads": "16 threads, all mine, all resolved; PRRT_kwDORFy7ds6xEk3t accepted (407ae6d9).",
+  "thermo": "Not re-run. The runtime code of this change is unchanged since f18ca5a7, where the pair ran (deep review APPROVE, code quality cleanup only); see mergeCheck. Main's merged code does not overlap this change's files.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/CHANGELOG.md", "description": "The pull request is CONFLICTING with main (packages/envoy/CHANGELOG.md, after sjawhar/legion#2419), so it cannot merge, and GitHub runs no pull_request checks without a merge ref. Merge main forward. Main's AGENTS.md now forbids editing CHANGELOG.md and says an open pull request moves its entries into fragments (packages/<pkg>/.changes/unreleased/INFRA-547-<slug>.yaml, kind + body) when it next merges main; this branch edits the CHANGELOG.md of envoy, envoy-client, claude-envoy and pi-envoy. Spec v2 also wants sjawhar/legion#2362 (not merged at 10:10Z) on main before acceptance."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go:231", "description": "The new comment sentence about the daemon's reader runs to 156 characters on one line; wrap it to the file's width."}
+    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2370-Changed-20261028-101525.yaml", "description": "It says the daemon finishes 'the 403 a forward the listener's own NATS grant denies (no `reason`, notify.ErrPublishDenied)'. Since round 4 the daemon finishes only a 403 whose error opens with the listener's publishDeniedPrefix; a 403 with no reason and another body is a plain refusal it retries (notify.go:198). The release note states the rule round 4 removed."},
+    {"severity": "minor", "file": "packages/claude-envoy/.changes/unreleased/pr2370-Changed-20261028-101519.yaml", "description": "The body ends with a lone '.' on its own line, so the folded entry reads 'to the others .' (the tester's note too). Join it to the sentence. The pi-envoy fragment also breaks its last sentence after 'The'; rejoin it."}
   ],
-  "stack": "#2228 merged and is in the branch. #2362 is still open."
+  "stack": "#2362 (INFRA-546) still open at 10:38Z; spec v2 needs it on main before acceptance."
 }
