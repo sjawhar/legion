@@ -1252,22 +1252,32 @@ two-process mode the listener table starts Dispatch A on `DISPATCH_E2E_PORT_A` a
 `DISPATCH_NATS_DISABLED=1`, and `e2e/round-robin-proxy.ts` on `DISPATCH_E2E_PORT`, so `baseUrl` and
 every helper address one origin as before. `run-server.sh` takes each server's own inputs:
 `DISPATCH_E2E_SERVER_PORT` (default `DISPATCH_E2E_PORT`), `DISPATCH_E2E_SERVER_WEB_DIST` (default
-`../dispatch/web/dist`, a path from `packages/envoy`, as `DISPATCH_WEB_DIST` is), and
+`../dispatch/web/dist`, a path from `packages/envoy`, as `DISPATCH_WEB_DIST` is),
+`DISPATCH_E2E_SERVER_BINARY` (an envoy-dispatch to run in place of the one it builds from this
+tree, also a path from `packages/envoy`; it refuses one that is not an executable file), and
 `DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it passes on as the server's
 `DISPATCH_DEV_SIGNIN_SHARED_KEY` and requires in two-process mode; there it also sets both servers'
 `DISPATCH_SERVER_URL` to the proxy's origin. The harness generates that key once per run and hands
 it to both, so a person signed in through one process is signed in on the other, and points B at
-`DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist). The proxy alternates each HTTP
+`DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist) and at `DISPATCH_E2E_BINARY_B` when it
+is set (`binaryB` in `e2e/harness-processes.ts`): a previous release's build, which gets the same
+environment, since a release ignores a setting it does not know. Such a B knows no shared key, so
+`e2e/preflight.ts` leaves out its shared-key check. The proxy alternates each HTTP
 request and each websocket upgrade between A and B (two turns, each starting at A), streams event
 streams, and forwards `Host` and `Origin` unchanged. `X-Dispatch-E2E-Process: a|b` on any request
-pins it, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
-upgrades included; a pinned request takes no turn, and any other value is refused (400). A path
+pins it, over the cookie of its kind, `dispatch-e2e-page=a|b` for a page request (a navigation
+outside `/api/`, `/auth/` and `/ws/`, `/index.html`, `/assets/*`) and `dispatch-e2e-api=a|b` for
+every other, which split a browser context so one process's page runs against the other's
+server, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
+upgrades included; a pinned request takes no turn, and any other value of any of them is refused
+(400). A path
 containing `/_test/` goes to both processes, answering A's response or the first non-2xx of the
 two. A path containing `/_proxy/` is the proxy's own and never forwarded: `GET /_proxy/requests`
 (`[{path, method, upstream}]`), `GET /_proxy/sockets` (`[{id, path, upstream, open, openedAt}]` in
 open order, `openedAt` in epoch milliseconds) and `POST /_proxy/reset`, which empties both lists
-and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` to pin, and
-`pinnedTo` in `e2e/harness-processes.ts` builds the header for a plain fetch. `e2e/preflight.ts`
+and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` to pin, and sign
+in on that process for a cookie of its own; `pinnedTo` in `e2e/harness-processes.ts` builds the
+header for a plain fetch. `e2e/preflight.ts`
 asks each process, pinned, for this run's fake Envoy session, then signs a person in on A and
 requires B to know them. The proxy shares its relay with the plain-HTTP proxy
 (`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it),
@@ -1276,10 +1286,15 @@ Specs named `*.multiprocess.e2e.ts` run only there: the default run ignores them
 mode runs them alone, in the `chromium` project. `bun run e2e:multiprocess` builds the dashboard
 twice (`web/dist`, then `web/dist-b` with `DISPATCH_BUILD=e2e-b`, so its entry chunk differs from
 A's even where CI sets `GITHUB_SHA`; `web/vite.config.ts` takes `DISPATCH_BUILD` first) and runs
-Playwright in two-process mode with B on `dist-b`, passing on extra arguments
+Playwright in two-process mode with B on `dist-b`, or on the `DISPATCH_E2E_WEB_DIST_B` the caller
+set, passing on extra arguments
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). CI's
-`dispatch-browser-multiprocess` job runs it. Two-process mode starts its own servers, so it refuses
-`PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
+`dispatch-browser-multiprocess` job runs it, and `dispatch-two-builds` runs
+`cross-build.multiprocess` with `DISPATCH_E2E_BINARY_B` and `DISPATCH_E2E_WEB_DIST_B` naming the
+previous release's build (`e2e/cross-build.multiprocess.e2e.ts`: each direction's page against the
+other build's server, and, with both processes on this tree, a document holding newer content).
+Two-process mode starts its own servers, so it refuses `PLAYWRIGHT_BASE_URL`, and
+`bun run dispatch:local` refuses it.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,

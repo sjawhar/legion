@@ -25,6 +25,15 @@
   branch's merge base with `origin/main`) builds that previous build from `git archive` of its
   commit, and refuses a commit whose migrations stop below `0117`. The CI job `dispatch-two-builds`
   runs it against the previous release, or against the commit a manual run names (INFRA-558).
+  The job then runs the browser half, `packages/dispatch/e2e/cross-build.multiprocess.e2e.ts`, in
+  the browser suite's two-process mode with Dispatch B run from the previous build
+  (`DISPATCH_E2E_BINARY_B` and `DISPATCH_E2E_WEB_DIST_B`): each build's page against the other
+  build's server signs in, opens an issue list and an issue, comments, answers an ask, edits the
+  issue's document and sees the edit from a page of the other build, and opens the Delivery page,
+  whose socket subscribes. The round-robin proxy's `dispatch-e2e-page` and `dispatch-e2e-api`
+  cookies split one browser context that way. Under `DISPATCH_TEST_HOOKS=1`,
+  `POST /api/v1/artifacts/{id}/_test/newer-content` appends an element no build knows, so the same
+  spec opens a document holding newer content (INFRA-558).
 - `409 DOC_NEWER_CONTENT`: a stored document tree holding an element this Dispatch build does not
   know (a node, mark or typed block its manifest does not name, an undeclared attribute or an
   unlisted enum value), which a newer build wrote during a release. `/text`, `/blocks`,

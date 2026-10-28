@@ -2,6 +2,7 @@ import { resetFakeEnvoy, setLiveSessions } from "./agents";
 import { baseUrl, devSignInPath, listAgents, sessionCookieFrom } from "./api";
 import { harnessPorts } from "./harness-ports";
 import {
+  binaryB,
   type DispatchProcess,
   dispatchProcesses,
   harnessProcessCount,
@@ -18,7 +19,9 @@ import {
  *  In two-process mode (e2e/harness-processes.ts) both processes must, each asked pinned rather
  *  than whichever the round-robin proxy picks, and a person signed in on A must be signed in on B:
  *  without one cookie key (run-server.sh's DISPATCH_DEV_SIGNIN_SHARED_KEY) every page would sign
- *  its person out at the first request B answers. */
+ *  its person out at the first request B answers. B of a previous release
+ *  (`DISPATCH_E2E_BINARY_B`) knows no shared key, so that check is left out: such a run's rows
+ *  keep each context's requests on the process it signed in on (e2e/cross-build.multiprocess.e2e.ts). */
 export default async function preflight(): Promise<void> {
   const sentinel = { session_id: `e2e-preflight-${process.pid}`, title: "e2e preflight" };
   const { port, variable } = harnessPorts.fakeEnvoy;
@@ -48,7 +51,7 @@ export default async function preflight(): Promise<void> {
   } finally {
     await resetFakeEnvoy();
   }
-  if (harnessProcessCount === 2) await requireOneCookieKey();
+  if (harnessProcessCount === 2 && binaryB === undefined) await requireOneCookieKey();
 }
 
 /** Signs a person in on A and asks B who they are. The person row it writes is emptied by the

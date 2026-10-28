@@ -23,6 +23,20 @@ export const processPinHeader = "X-Dispatch-E2E-Process";
  *  included, which carry no header a page can set. */
 export const processPinCookie = "dispatch-e2e-process";
 
+/** The cookies that split a browser context between the two processes: `pagePinCookie` sends its
+ *  page requests (a navigation, `index.html`, `/assets/*`) to one process and `apiPinCookie` every
+ *  other request (the API, its event stream and websockets, `/auth`) to the other, so one build's
+ *  page runs against the other build's server. Each beats `processPinCookie` for its kind. */
+export const pagePinCookie = "dispatch-e2e-page";
+export const apiPinCookie = "dispatch-e2e-api";
+
+/** The envoy-dispatch Dispatch B runs in place of the one e2e/run-server.sh builds from this tree,
+ *  when `DISPATCH_E2E_BINARY_B` names one (a path from packages/envoy): a previous release's build
+ *  (packages/envoy/scripts/build-dispatch-build.sh), so a run drives two builds of the server. Such
+ *  a build knows no shared cookie key, so a context signed in on one process must keep every
+ *  request on it (`apiPinCookie`). */
+export const binaryB = process.env.DISPATCH_E2E_BINARY_B || undefined;
+
 /** Headers that send a fetch to `target`. */
 export function pinnedTo(target: DispatchProcess): Record<string, string> {
   return { [processPinHeader]: target };

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { usesFakeBroker } from "./harness-broker";
 import { type HarnessPort, harnessPorts } from "./harness-ports";
-import { harnessProcessCount } from "./harness-processes";
+import { binaryB, harnessProcessCount } from "./harness-processes";
 
 /** One process the harness starts, beside the port it listens on and that port's variable. */
 export interface HarnessListener extends HarnessPort {
@@ -22,11 +22,15 @@ const script = (name: string) => fileURLToPath(new URL(`./${name}`, import.meta.
 // Two-process mode (e2e/harness-processes.ts): Dispatch A and B, each a run-server.sh on its own
 // port against the one DATABASE_URL, with B on DISPATCH_E2E_WEB_DIST_B's build when it is set
 // (run-server.sh reads that path from packages/envoy, as the server reads DISPATCH_WEB_DIST),
-// and the round-robin proxy on DISPATCH_E2E_PORT, which every helper addresses. Both servers sign
+// and the round-robin proxy on DISPATCH_E2E_PORT, which every helper addresses. B runs the
+// envoy-dispatch DISPATCH_E2E_BINARY_B names when it is set (a path from packages/envoy too), in
+// place of the one run-server.sh builds from this tree: a previous release's build, so a browser
+// drives two builds of the server at once (e2e/cross-build.multiprocess.e2e.ts). Both servers sign
 // cookies with the key their one shared value derives, so a person signed in through whichever
 // answered stays signed in on the other; it is generated here, once per run, since each
 // run-server.sh is a process of its own. Every importer generates one, and only the process that
-// starts the servers hands its own to both.
+// starts the servers hands its own to both. A previous release knows no shared key and signs with
+// its own (run-server.sh).
 function dispatchListeners(): HarnessListener[] {
   const server = ["bash", script("run-server.sh")];
   if (harnessProcessCount === 1) {
@@ -36,24 +40,25 @@ function dispatchListeners(): HarnessListener[] {
   }
   const sharedKey = randomBytes(32).toString("base64url");
   const webDistB = process.env.DISPATCH_E2E_WEB_DIST_B;
-  const inputs = (port: HarnessPort, webDist: string | undefined) => ({
+  const inputs = (port: HarnessPort, webDist: string | undefined, binary: string | undefined) => ({
     DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY: sharedKey,
     DISPATCH_E2E_SERVER_PORT: String(port.port),
     ...(webDist ? { DISPATCH_E2E_SERVER_WEB_DIST: webDist } : {}),
+    ...(binary ? { DISPATCH_E2E_SERVER_BINARY: binary } : {}),
   });
   return [
     {
       ...harnessPorts.dispatchA,
       argv: server,
       deployed: false,
-      env: inputs(harnessPorts.dispatchA, undefined),
+      env: inputs(harnessPorts.dispatchA, undefined, undefined),
       name: "Dispatch A",
     },
     {
       ...harnessPorts.dispatchB,
       argv: server,
       deployed: false,
-      env: inputs(harnessPorts.dispatchB, webDistB),
+      env: inputs(harnessPorts.dispatchB, webDistB, binaryB),
       name: "Dispatch B",
     },
     {
