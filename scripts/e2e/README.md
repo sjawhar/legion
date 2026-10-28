@@ -741,6 +741,8 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthr
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> \
   bash scripts/e2e/claude-backend-tmux.sh     # the same, for a devbox with no Hawk gateway: one key file for both halves
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file holding the gateway key> LEGION_E2E_MODEL_BASE_URL=<gateway base URL> \
+  bash scripts/e2e/claude-backend-tmux.sh     # the same through an Anthropic-compatible model gateway: no Anthropic key
 ```
 
 The key-file route's file may come from the agent-secrets broker, which serves
@@ -816,21 +818,32 @@ route — the architect's and the planner's:
   (required in this mode) and `hawk-token` on `PATH`
   ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
 - `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode unless
-  `LEGION_E2E_CLAUDE_KEY_FILE` names the file), a 0600 file holding a plaintext Anthropic key, for
-  a devbox with no Hawk gateway at all
+  `LEGION_E2E_CLAUDE_KEY_FILE` names the file), a 0600 file holding a plaintext key for the model
+  endpoint, for a devbox with no Hawk gateway at all
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)). `hawk-token` is
   not required here.
 
 `prerequisites` refuses any other value, naming it, before it writes anything.
 
-`LEGION_E2E_CLAUDE_KEY_FILE` names a file holding the Anthropic API key the
+`LEGION_E2E_CLAUDE_KEY_FILE` names a file holding the key the
 Claude Code implementer reaches its model with. It is required under `gateway`; under `key-file`,
 left unset, it falls back to `LEGION_E2E_ANTHROPIC_KEY_FILE`, so one key file serves both halves of
 the run, and naming both puts the Claude Code pane on `LEGION_E2E_CLAUDE_KEY_FILE` and the Oh My Pi
 agents on `LEGION_E2E_ANTHROPIC_KEY_FILE`, with both paths in the run's notes.
-`prerequisites` refuses a run with neither, naming the variables, before it writes anything, and
-refuses a key Anthropic's `GET /v1/models` does not accept
-(the key goes by a 0600 header file, never an argv). The run copies the key once into its work
+`LEGION_E2E_MODEL_BASE_URL` (optional; an `http://` or `https://` URL with no credentials, refused
+by name otherwise) is the endpoint those keys are for, Anthropic's own when unset: an
+Anthropic-compatible model gateway (a LiteLLM proxy, say) whose gateway key the key file holds, so
+the run needs no Anthropic key. The Claude Code pane calls it under either route, as
+`ANTHROPIC_BASE_URL` in the run's `legion.yaml` (`runtime.tmux.pane_env`, a plain value every pane
+carries; an Oh My Pi pane calls its own profile's `baseUrl`, which outranks it), and under
+`key-file` the Oh My Pi agents' profile names it as the `anthropic` provider's `baseUrl`
+(`--base-url`). `prerequisites` refuses a run with neither key file, naming the variables, before
+it writes anything, and refuses a key the endpoint's `GET /v1/models` does not accept (the key goes
+by a 0600 header file, never an argv). With `LEGION_E2E_MODEL_BASE_URL` named it holds that
+endpoint to more ([`lib/model-endpoint.sh`](#libmodel-endpointsh)): `GET /v1/models` with no key
+must not answer 200, or the endpoint checks no key; the alias its `GET /v1/key/info` names for
+the key is noted (or that it names none); and the agents' key file, when it is another file, is
+held to the same. The run copies the pane's key once into its work
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
@@ -872,7 +885,7 @@ LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's im
 LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
 LEGION_E2E_CLAUDE_MODEL=<model id> \
-[LEGION_E2E_CLAUDE_BASE_URL=<gateway>/anthropic] \
+[LEGION_E2E_MODEL_BASE_URL=<gateway base URL>] \
 LEGION_E2E_POD_REACHABILITY=aws-private-ip \
 LEGION_E2E_MODEL_ROUTE=gateway \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
@@ -882,17 +895,21 @@ LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_POR
 LEGION_E2E_SESSION_DB_PORT=<port> \
   bash scripts/e2e/claude-backend-sandbox.sh     # → "claude backend sandbox e2e: PASS", exit 0
 
-# A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway; the six
-# ports are free ports on the devbox, and the runtime kubeconfig is built as below:
+# A cluster whose pods cannot reach the devbox at all (GKE's shape), with no Hawk gateway; the six
+# ports are free ports on the devbox, and the runtime kubeconfig is built as below. The two
+# optional lines put both lanes on an Anthropic-compatible model gateway whose gateway key the key
+# file holds, the second for a gateway the pods reach at a cluster address the devbox cannot:
 LEGION_E2E_OPERATOR_CONTEXT=<operator context> \
 LEGION_E2E_RUNTIME_KUBECONFIG=<file> \
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
-LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
+LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key, or the gateway key> \
 LEGION_E2E_CLAUDE_MODEL=<model id> \
 LEGION_E2E_POD_REACHABILITY=bridge \
 LEGION_E2E_MODEL_ROUTE=key-file \
+[LEGION_E2E_MODEL_BASE_URL=<gateway base URL as the pods reach it>] \
+[LEGION_E2E_MODEL_PREFLIGHT_BASE_URL=<the same gateway as the devbox reaches it>] \
 LEGION_E2E_DAEMON_PORT=<port> LEGION_E2E_WORKER_STREAM_PORT=<port> \
 LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_PORT=<port> \
 LEGION_E2E_SESSION_DB_PORT=<port> \
@@ -1008,16 +1025,27 @@ block. Set, the run's pods preempt lower-priority work on a full node, and only 
 cluster's own system pods) preempts them; `prerequisites` refuses a class the operator context
 cannot read on the cluster. A priority-0 bridge pod on a full GKE node was preempted by the
 cluster's `kube-dns` mid-run on 2026-10-26, which is why the input exists. `LEGION_E2E_CLAUDE_KEY_FILE`
-(required) names a file holding the
-Anthropic API key the Claude Code implementer reaches its model with; the run copies it once (0600),
-holds the endpoint to accepting it (`GET /v1/models`, the key in a 0600 header file and never an
-argv), and creates the providers Secret the runtime names for the project with it, which
-`provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}` hands every pod — so the key travels as a
-mounted Secret the shim exports into the agent's environment, and never in the pod's spec, which
-refuses a credential-shaped name. `LEGION_E2E_CLAUDE_MODEL` (required) and
-`LEGION_E2E_CLAUDE_BASE_URL` (optional, Anthropic's own endpoint when unset) are that lane's
-non-credential `ANTHROPIC_MODEL` and `ANTHROPIC_BASE_URL` in `runtime.kubernetes.pod.env`, for a
-devbox whose route to Anthropic is a gateway. `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or
+(required) names a file holding the key the Claude Code implementer reaches its model with, an
+Anthropic API key or the gateway key of the endpoint `LEGION_E2E_MODEL_BASE_URL` names; the run
+copies it once (0600), holds the endpoint to accepting it (`GET /v1/models`, the key in a 0600
+header file and never an argv), and creates the providers Secret the runtime names for the project
+with it, which `provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}` hands every pod — so the key
+travels as a mounted Secret the shim exports into the agent's environment, and never in the pod's
+spec, which refuses a credential-shaped name. `LEGION_E2E_CLAUDE_MODEL` (required) is that lane's
+non-credential `ANTHROPIC_MODEL` in `runtime.kubernetes.pod.env`. `LEGION_E2E_MODEL_BASE_URL`
+(optional; an `http://` or `https://` URL with no credentials, refused by name otherwise) is the
+endpoint the key is for, Anthropic's own when unset: an Anthropic-compatible model gateway (a
+LiteLLM proxy, say) whose gateway key the key file holds, so the run needs no Anthropic key. The
+pod's Claude Code calls it under either route, as the non-credential `ANTHROPIC_BASE_URL` in the
+same `pod.env`, and under `key-file` the Oh My Pi roles call it too: the run's copy of
+`models-key-file.yml` names it as the `anthropic` provider's `baseUrl` in place of Anthropic's
+own, and the repository's file stays as it is. `LEGION_E2E_MODEL_PREFLIGHT_BASE_URL` (optional,
+and only with `LEGION_E2E_MODEL_BASE_URL`, which it defaults to) is the same endpoint as the devbox
+reaches it, for a gateway the pods reach at a cluster address the devbox cannot resolve: the key's
+preflight reads it. With a base URL named the preflight holds the endpoint to more
+([`lib/model-endpoint.sh`](#libmodel-endpointsh)): `GET /v1/models` with no key must not answer
+200, or the endpoint checks no key, and the alias its `GET /v1/key/info` names for the key is noted
+(or that it names none). `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or
 `key-file`) is the route the pod's *Oh My Pi* roles take, the operator route's own as Stage 4a takes
 it: under `gateway`, `{pod,models}.yml` with `LEGION_E2E_MODEL_GATEWAY_URL` and
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` (both required then); under `key-file`,
@@ -3208,22 +3236,31 @@ caller does, with its work directory and `<cache-dir>`.
 
 ## lib/install-key-file-model-route.sh
 
-Routes a named OMP profile's model turns straight to Anthropic's own endpoint, keyed from a local
-file: the key-file alternative to [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s
+Routes a named OMP profile's model turns straight to a model endpoint, Anthropic's own unless
+`--base-url` names another, keyed from a local file: the key-file alternative to
+[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s
 Hawk route, for a devbox that has no Hawk gateway at all. Mirrors the model-route pattern
 [`deploy/kubernetes/operator-route/models-key-file.yml`](../../deploy/kubernetes/operator-route/models-key-file.yml)
 gives Stage 4a's pods: an operator-supplied key, read fresh on every call, never minted and never
 written into the tree.
 
 ```sh
-scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file>
+scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file> [--base-url <url>]
 # → <key-dir>/anthropic-key
 ```
 
-`--key-file` names a file holding the plaintext Anthropic key alone (one line; a trailing newline
-is read past), refused unless it is a regular file only its owner can read (no group or other
-permission bit) — checked once, here, before any pane exists, never read beyond that check, so a
-key a caller rotates mid-run takes effect on the very next call with no restart.
+`--base-url` (default `https://api.anthropic.com`, so a caller that names none gets Anthropic's own
+endpoint) is the `anthropic` provider's `baseUrl`: an Anthropic-compatible model gateway (a LiteLLM
+proxy, say) whose gateway key `--key-file` holds, as
+[`claude-backend-tmux.sh`](#claude-backend-tmuxsh) passes `LEGION_E2E_MODEL_BASE_URL`. It must be
+an `http://` or `https://` URL of letters, digits and `:/._~-` alone, so no user or password,
+ending in neither a colon nor a slash, refused otherwise
+([`lib/model-endpoint.sh`](#libmodel-endpointsh)'s `model_base_url_refusal`).
+
+`--key-file` names a file holding the plaintext key that endpoint takes, alone (one line; a
+trailing newline is read past), refused unless it is a regular file only its owner can read (no
+group or other permission bit) — checked once, here, before any pane exists, never read beyond
+that check, so a key a caller rotates mid-run takes effect on the very next call with no restart.
 
 `--dest` and `--key-dir` must be different directories (refused otherwise), and the caller gives
 them different lifetimes. `--dest` gets only the call record (`<dest>/anthropic-key.log`,
@@ -3241,15 +3278,37 @@ on). It appends one tab-separated line per call to `<dest>/anthropic-key.calls`,
 caller's `MODEL_GATEWAY_CALLS_FILE` when its environment names one, in exactly the record shape
 [`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads — the installer's preflight
 (`--preflight`) is no agent's and is left out, the same rule `hawk-token`'s own key command
-follows. The profile's `agent/models.yml` points the `anthropic` provider at
-`https://api.anthropic.com` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and
-its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every
+follows. The profile's `agent/models.yml` points the `anthropic` provider at `--base-url` with
+`apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins
+every model role to `anthropic/claude-opus-4-8` and disables every
 other provider a pane could reach without the key file, the same shape
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes.
 
 The script creates the profile's two directories, `<dest>` and `<key-dir>`, and removes neither;
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it
 keeps no evidence.
+
+## lib/model-endpoint.sh
+
+The model endpoint a Claude Code backend proof's key file is for, sourced by
+[`claude-backend-tmux.sh`](#claude-backend-tmuxsh) and
+[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), whose own `note` and `fail` it calls, and
+by [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh). `anthropic_base_url`
+is Anthropic's own endpoint, the one a run with no `LEGION_E2E_MODEL_BASE_URL` calls.
+`model_base_url_refusal URL` prints why `URL` cannot be a model base URL, and nothing when it can:
+an `http://` or `https://` URL of letters, digits and `:/._~-` alone (so it carries no user or
+password, and stays a plain YAML scalar), ending in neither a colon nor a slash.
+
+`model_key_preflight BASE KEY HEADER WHAT` holds the endpoint `BASE` (Anthropic's own when empty)
+to the key in `KEY`, the run's 0600 copy of the key file `WHAT` names: `GET /v1/models` with the
+key must answer 200, or the run fails naming the endpoint and the code. With `BASE` named it also
+asks `GET /v1/models` with no key, which must not answer 200 (an endpoint that serves a caller
+with no key proves nothing about the key; the code a refusal gave is noted), and `GET
+/v1/key/info` with the key, whose `key_alias` (a LiteLLM proxy's non-secret name for the key) is
+noted as `the model key is <alias>`, or that the endpoint names no alias, never failing on it.
+Every call sends `anthropic-version: 2023-06-01`; the key reaches curl in `HEADER`, a 0600 header
+file removed before it returns (the callers' cleanup removes it too, after a `fail`), never an
+argv, and neither the key nor a response body is printed.
 
 ## lib/install-box-login-route.sh
 

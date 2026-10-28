@@ -90,19 +90,28 @@
 #   Unset, none of them has a priority class and the legion.yaml carries no scheduling block. Set,
 #   the run's pods preempt lower-priority work on a full node, and are themselves preempted only by
 #   a higher class (a cluster's own system pods): prerequisites refuses a class the cluster lacks.
-# - LEGION_E2E_CLAUDE_KEY_FILE (required) names a file holding the Anthropic API key the Claude Code
-#   implementer reaches its model with. The run copies it once (0600) and creates the providers
+# - LEGION_E2E_CLAUDE_KEY_FILE (required) names a file holding the key the Claude Code implementer
+#   reaches its model with: an Anthropic API key, or the gateway key of the endpoint
+#   LEGION_E2E_MODEL_BASE_URL names. The run copies it once (0600) and creates the providers
 #   Secret the runtime names for the project with it, which `provider_keys: {ANTHROPIC_API_KEY:
 #   ANTHROPIC_API_KEY}` hands the pod: the key travels as a mounted Secret the shim exports into the
 #   agent's environment, never in the pod's spec, since runtime.kubernetes.pod.env refuses a
 #   credential-shaped name.
 # - LEGION_E2E_CLAUDE_MODEL (required) is the model id that pod's Claude Code runs, carried as the
 #   non-credential ANTHROPIC_MODEL in runtime.kubernetes.pod.env.
-# - LEGION_E2E_CLAUDE_BASE_URL (optional) is the Anthropic endpoint it calls, carried as the
-#   non-credential ANTHROPIC_BASE_URL in the same pod.env, for a devbox whose route to Anthropic is
-#   a gateway. Unset, the pod calls Anthropic's own endpoint, which is where the key's preflight
-#   reads too. Whichever it is, the key in LEGION_E2E_CLAUDE_KEY_FILE must be one that endpoint
-#   accepts; the preflight below holds it to that before anything is created.
+# - LEGION_E2E_MODEL_BASE_URL (optional; an http:// or https:// URL with no credentials in it) is
+#   the endpoint the key file's key is for, an Anthropic-compatible model gateway (a LiteLLM proxy,
+#   say) whose gateway key the key file holds, so no Anthropic key is needed. The pod's Claude Code
+#   calls it under either route, carried as the non-credential ANTHROPIC_BASE_URL in the same
+#   pod.env; under `key-file` the Oh My Pi roles call it too, the run's copy of
+#   models-key-file.yml naming it as anthropic's baseUrl. Unset, both call Anthropic's own
+#   endpoint, which is where the key's preflight reads too.
+# - LEGION_E2E_MODEL_PREFLIGHT_BASE_URL (optional, LEGION_E2E_MODEL_BASE_URL by default, and only
+#   with it) is the same endpoint as the devbox reaches it, for a gateway the pods reach at a
+#   cluster address the devbox cannot resolve. The key's preflight below (lib/model-endpoint.sh)
+#   reads it before anything is created: its `GET /v1/models` must accept the key, and with a base
+#   URL named must refuse a call with no key, and the alias its `GET /v1/key/info` names for the
+#   key is noted.
 # - LEGION_E2E_MODEL_ROUTE (required, `gateway` or `key-file`) is the route the pod's *Oh My Pi*
 #   roles take, the architect and the planner, which is the operator route's own
 #   (deploy/kubernetes/operator-route) as Stage 4a takes it: under `gateway`,
@@ -194,7 +203,8 @@ pod_reachability=${LEGION_E2E_POD_REACHABILITY:-}
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 claude_key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
 claude_model=${LEGION_E2E_CLAUDE_MODEL:-}
-claude_base_url=${LEGION_E2E_CLAUDE_BASE_URL:-}
+model_base_url=${LEGION_E2E_MODEL_BASE_URL:-}
+preflight_base_url=${LEGION_E2E_MODEL_PREFLIGHT_BASE_URL:-}
 port_daemon=${LEGION_E2E_DAEMON_PORT:-}
 port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-}
 port_dispatch=${LEGION_E2E_DISPATCH_PORT:-}
@@ -284,6 +294,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/role-namespaces.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/claude-transcript.sh
 . "$root/scripts/e2e/lib/claude-transcript.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/model-endpoint.sh
+. "$root/scripts/e2e/lib/model-endpoint.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -570,7 +582,7 @@ write_pod_fixture() {
     pod=${pod//"$placeholder"/"$gateway_audience"}
   fi
   added=$(printf '  ANTHROPIC_MODEL: "%s"' "$claude_model")
-  [ -z "$claude_base_url" ] || added=$(printf '%s\n  ANTHROPIC_BASE_URL: "%s"' "$added" "$claude_base_url")
+  [ -z "$model_base_url" ] || added=$(printf '%s\n  ANTHROPIC_BASE_URL: "%s"' "$added" "$model_base_url")
   awk -v add="$added" '{ print } $0 == "env:" { print add }' <<<"$pod" |
     sed "s/name: legion-operator-route\$/name: $route_configmap/" >"$work/pod.yml"
   grep -qx "  ANTHROPIC_MODEL: \"$claude_model\"" "$work/pod.yml" ||
@@ -583,7 +595,9 @@ write_pod_fixture() {
   cp "$work/pod.yml" "$evidence/pod.yml"
 }
 # create_route_configmap is the operator's step before any pod runs: the chosen route's models.yml,
-# the gateway's base URL in place of the placeholder under `gateway`, and the route's overlay.yml.
+# the gateway's base URL in place of the placeholder under `gateway`, LEGION_E2E_MODEL_BASE_URL in
+# place of Anthropic's own endpoint under `key-file` when it is named (the run's copy alone; the
+# repository's file stays as it is), and the route's overlay.yml.
 create_route_configmap() {
   local placeholder='${MODEL_BASE_URL}' models
   if [ "$model_route" = gateway ]; then
@@ -591,13 +605,18 @@ create_route_configmap() {
     printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
     grep -qFx "    baseUrl: $gateway" "$work/models.yml" ||
       fail "the operator route's models.yml has no baseUrl $placeholder to point at the gateway"
+  elif [ -n "$model_base_url" ]; then
+    models=$(<"$operator_route/models-key-file.yml")
+    printf '%s\n' "${models//"    baseUrl: $anthropic_base_url"/"    baseUrl: $model_base_url"}" >"$work/models.yml"
+    grep -qFx "    baseUrl: $model_base_url" "$work/models.yml" ||
+      fail "the operator route's models-key-file.yml has no baseUrl $anthropic_base_url to point at LEGION_E2E_MODEL_BASE_URL"
   else
     cp "$operator_route/models-key-file.yml" "$work/models.yml"
   fi
   op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
     --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
-  note "[operator] ConfigMap $route_configmap: the $model_route route's models.yml and the route's overlay.yml, label legion.dev/project=$run_label"
+  note "[operator] ConfigMap $route_configmap: the $model_route route's models.yml (anthropic's baseUrl $(sed -n 's/^    baseUrl: //p' "$work/models.yml")) and the route's overlay.yml, label legion.dev/project=$run_label"
 }
 # create_providers_secret is the one Secret of the run, under the name the runtime gives the
 # project's providers Secret: the Anthropic key, under the name provider_keys hands the pods, and the
@@ -1086,10 +1105,16 @@ esac
   fail "LEGION_E2E_CLAUDE_KEY_FILE names $claude_key_file, which is not a readable file"
 [ -n "$claude_model" ] ||
   fail "LEGION_E2E_CLAUDE_MODEL is unset: name the model id the pod's Claude Code runs, which travels as ANTHROPIC_MODEL in runtime.kubernetes.pod.env"
-case "$claude_base_url" in
-  '' | https://?*) ;;
-  *) fail "LEGION_E2E_CLAUDE_BASE_URL must be an https:// URL or unset (Anthropic's own endpoint), not '$claude_base_url'" ;;
-esac
+# The endpoint the key file's key is for, and the same endpoint as the devbox reaches it for the
+# preflight (lib/model-endpoint.sh); neither value is printed in a refusal.
+for named in "LEGION_E2E_MODEL_BASE_URL:$model_base_url" "LEGION_E2E_MODEL_PREFLIGHT_BASE_URL:$preflight_base_url"; do
+  [ -n "${named#*:}" ] || continue
+  why=$(model_base_url_refusal "${named#*:}")
+  [ -z "$why" ] || fail "${named%%:*} $why: name the model endpoint's base URL, or leave it unset"
+done
+[ -z "$preflight_base_url" ] || [ -n "$model_base_url" ] ||
+  fail "LEGION_E2E_MODEL_PREFLIGHT_BASE_URL is set and LEGION_E2E_MODEL_BASE_URL is not: the preflight address is the devbox's way to the endpoint LEGION_E2E_MODEL_BASE_URL names for the pods"
+preflight_base_url=${preflight_base_url:-$model_base_url}
 case "$model_route" in
   gateway)
     gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
@@ -1148,15 +1173,15 @@ mkdir -p "$state"
 chmod 0700 "$state"
 (umask 077 && tr -d '[:space:]' <"$claude_key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($claude_key_file) holds no key"
-# The key's preflight, against the endpoint the pod's Claude Code will call: it lists its models to
-# a key it accepts. The header goes by file, so the key is in no argv.
-(umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
-code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
-  "${claude_base_url:-https://api.anthropic.com}/v1/models") || code="unreachable (curl exited $?)"
-rm -f "$work/claude-key-header"
-[ "$code" = 200 ] ||
-  fail "the model endpoint ${claude_base_url:-https://api.anthropic.com} refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($claude_key_file): GET /v1/models answered $code"
-note "the Claude Code implementer's key from $claude_key_file: ${claude_base_url:-https://api.anthropic.com} accepts it, and it runs $claude_model"
+# The key's preflight, against the endpoint the pod's Claude Code will call, as the devbox reaches
+# it: it lists its models to a key it accepts, and a named one is held to more
+# (lib/model-endpoint.sh). The header goes by file, so the key is in no argv.
+model_key_preflight "$preflight_base_url" "$work/claude-model-key" "$work/claude-key-header" "LEGION_E2E_CLAUDE_KEY_FILE ($claude_key_file)"
+note "the Claude Code implementer's key from $claude_key_file: ${preflight_base_url:-$anthropic_base_url} accepts it, and it runs $claude_model"
+[ "$preflight_base_url" = "$model_base_url" ] ||
+  note "the pods call that endpoint at $model_base_url, LEGION_E2E_MODEL_BASE_URL; the devbox reached it at $preflight_base_url"
+[ "$model_route" != key-file ] || [ -z "$model_base_url" ] ||
+  note "the pods' Oh My Pi roles call $model_base_url too, with the same key (the key-file route's models.yml)"
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh):
 # each App's key command runs as the daemon runs it, and GET /app under the key's JWT must answer
 # the App's id and the write permission its role needs. legion.yaml's github_apps is the block
@@ -1309,7 +1334,7 @@ begin operator-route
 write_pod_fixture
 create_route_configmap
 create_providers_secret
-note "the pods' Oh My Pi route is the $model_route fixture; the Claude lane's ANTHROPIC_MODEL$([ -n "$claude_base_url" ] && echo " and ANTHROPIC_BASE_URL") in runtime.kubernetes.pod.env, its key in provider_keys"
+note "the pods' Oh My Pi route is the $model_route fixture; the Claude lane's ANTHROPIC_MODEL$([ -n "$model_base_url" ] && echo " and ANTHROPIC_BASE_URL") in runtime.kubernetes.pod.env, its key in provider_keys"
 pass
 
 begin daemon

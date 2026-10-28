@@ -15,17 +15,26 @@
 #   - `gateway`: the Hawk model gateway, as Stage 3's agents do, with
 #     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh) and
 #     hawk-token on PATH; LEGION_E2E_CLAUDE_KEY_FILE names the Claude Code pane's own key file.
-#   - `key-file`: Anthropic's own endpoint keyed by a 0600 file read fresh on every call
-#     (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. The file is
-#     LEGION_E2E_ANTHROPIC_KEY_FILE, and LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one
-#     key file serves both halves of the run; naming both puts the Claude Code pane on
-#     LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the
-#     notes name both paths.
-# The Claude Code pane's key file holds the Anthropic API key the Claude Code implementer reaches
-# its model with, and Anthropic's own `GET /v1/models` must accept it before any pane starts: the
-# run copies it once into its work directory (0600), and the implementer's claim directory names a
-# key command that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's
-# environment, no argv and no transcript.
+#   - `key-file`: the model endpoint LEGION_E2E_MODEL_BASE_URL names (Anthropic's own when unset),
+#     keyed by a 0600 file read fresh on every call (lib/install-key-file-model-route.sh), for a
+#     devbox with no Hawk gateway. The file is LEGION_E2E_ANTHROPIC_KEY_FILE, and
+#     LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one key file serves both halves of the
+#     run; naming both puts the Claude Code pane on LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi
+#     agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the notes name both paths.
+# LEGION_E2E_MODEL_BASE_URL (optional; an http:// or https:// URL with no credentials in it) is the
+# endpoint the key files' keys are for, unset for Anthropic's own: an Anthropic-compatible model
+# gateway (a LiteLLM proxy, say) whose gateway key the key file holds, so no Anthropic key is
+# needed. The Claude Code pane calls it under either route, as ANTHROPIC_BASE_URL in legion.yaml's
+# runtime.tmux.pane_env; under `key-file` the Oh My Pi agents' profile names it as anthropic's
+# baseUrl too (lib/install-key-file-model-route.sh --base-url).
+# The Claude Code pane's key file holds the key the Claude Code implementer reaches its model with,
+# and the endpoint's own `GET /v1/models` must accept it before any pane starts. With
+# LEGION_E2E_MODEL_BASE_URL named, the preflight (lib/model-endpoint.sh) also holds the endpoint to
+# refusing that call with no key, notes the alias its `GET /v1/key/info` names for the key, and
+# holds the agents' key file to the same when it is another file. The run copies the pane's key
+# once into its work directory (0600), and the implementer's claim directory names a key command
+# that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no
+# argv and no transcript.
 # The rig is Stage 3's without its GitHub ingress bridge: scratch
 # Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through the App key runner
 # (LEGION_E2E_APP_KEY_RUNNER, `agent-secrets` by default; this
@@ -96,6 +105,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/leftovers.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/claude-transcript.sh
 . "$root/scripts/e2e/lib/claude-transcript.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/model-endpoint.sh
+. "$root/scripts/e2e/lib/model-endpoint.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -132,10 +143,11 @@ cleanup() {
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   # First, before anything slower (stopping panes, docker, the gh calls in remove_run_branch) can
-  # hang or be ended by a second signal: the Claude pane's key copy and the key-file route's own
-  # key command, which bakes in --key-file's resolved path. Neither may survive this script on any
-  # exit, so neither is conditioned on how the rest of cleanup goes. Stages 2 and 3 do the same.
-  rm -f "$work/claude-model-key" "$work/claude-key-header"
+  # hang or be ended by a second signal: the key copies and their header files, and the key-file
+  # route's own key command, which bakes in --key-file's resolved path. None may survive this
+  # script on any exit, so none is conditioned on how the rest of cleanup goes. Stages 2 and 3 do
+  # the same.
+  rm -f "$work/claude-model-key" "$work/claude-key-header" "$work/agent-model-key" "$work/agent-key-header"
   rm -rf "$work/model-gateway-key" || true
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
@@ -202,7 +214,9 @@ start_dispatch() {
 }
 
 # The one setting under test is worker_backends; the design gate is off, so the architect's gate
-# registration starts planning with no human approval.
+# registration starts planning with no human approval. A named LEGION_E2E_MODEL_BASE_URL is every
+# pane's ANTHROPIC_BASE_URL (runtime.tmux.pane_env, a plain value), which the Claude Code pane
+# calls; an Oh My Pi pane calls its profile's own anthropic baseUrl, which outranks the variable.
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
@@ -229,6 +243,8 @@ worker_backends:
   implementer: claude
 $(<"$work/github-apps.yaml")
 EOF
+  [ -z "$model_base_url" ] ||
+    printf 'runtime:\n  tmux:\n    pane_env:\n      ANTHROPIC_BASE_URL: "%s"\n' "$model_base_url" >>"$work/legion.yaml"
 }
 
 # start_daemon runs the Go daemon with the run's Claude Code launch pinned: the claude and bun it
@@ -495,6 +511,11 @@ case "$model_route" in
 gateway | key-file) ;;
 *) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
 esac
+# The endpoint the key files' keys are for (lib/model-endpoint.sh), Anthropic's own when unset.
+model_base_url=${LEGION_E2E_MODEL_BASE_URL:-}
+if [ -n "$model_base_url" ] && why=$(model_base_url_refusal "$model_base_url") && [ -n "$why" ]; then
+  fail "LEGION_E2E_MODEL_BASE_URL $why: name the model endpoint's base URL, or leave it unset for Anthropic's own"
+fi
 # The Claude Code pane's own key file. Under the key-file route the Oh My Pi agents read a key
 # file too, so one file can serve both halves: whichever of the two variables is set serves both,
 # and naming both puts the Claude pane on LEGION_E2E_CLAUDE_KEY_FILE and the agents on
@@ -522,14 +543,18 @@ command -v "$app_key_runner" >/dev/null || fail "$app_key_runner, the App key ru
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
-# The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
-# key is in no argv.
-(umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
-code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
-  https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
-rm -f "$work/claude-key-header"
-[ "$code" = 200 ] || fail "Anthropic refuses the key in $key_file_var ($key_file): GET /v1/models answered $code"
-note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
+# The key's preflight: the model endpoint lists its models to a key it accepts, and a named one is
+# held to more (lib/model-endpoint.sh). The header goes by file, so the key is in no argv.
+model_key_preflight "$model_base_url" "$work/claude-model-key" "$work/claude-key-header" "$key_file_var ($key_file)"
+note "the Claude Code implementer's key from $key_file: ${model_base_url:-Anthropic} accepts it"
+# The agents' own key file, when it is another, is held to the same before any pane reads it.
+if [ -n "$model_base_url" ] && [ "$agent_key_file" != "$key_file" ]; then
+  (umask 077 && tr -d '[:space:]' <"$agent_key_file" >"$work/agent-model-key")
+  [ -s "$work/agent-model-key" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE ($agent_key_file) holds no key"
+  model_key_preflight "$model_base_url" "$work/agent-model-key" "$work/agent-key-header" "LEGION_E2E_ANTHROPIC_KEY_FILE ($agent_key_file)"
+  rm -f "$work/agent-model-key"
+  note "the Oh My Pi agents' key from $agent_key_file: $model_base_url accepts it"
+fi
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
 # legion.yaml's github_apps is the block proved.
 write_github_apps implement review
@@ -554,11 +579,11 @@ gateway)
     fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
   ;;
 key-file)
-  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file") ||
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file" --base-url "${model_base_url:-$anthropic_base_url}") ||
     fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
   ;;
 esac
-note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s' "$agent_key_file")"
+note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s, calling %s' "$agent_key_file" "${model_base_url:-$anthropic_base_url}")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
