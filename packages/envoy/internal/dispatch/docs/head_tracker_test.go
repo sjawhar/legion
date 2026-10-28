@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -439,6 +443,136 @@ func TestAColdReadOnOneServiceSeesAnotherServicesWriteWithinTheNotificationDelay
 	slices.Sort(delays)
 	t.Logf("delay from a write's commit to the other service's cold read of it over %d writes: p50 %s, p99 %s, max %s",
 		writes, delays[len(delays)/2], delays[len(delays)*99/100], delays[len(delays)-1])
+}
+
+// A cold read on a process whose document LISTEN connection has gone half-open - its socket still
+// up, delivering nothing and reporting no error, as a dropped NAT entry or a failover leaves it -
+// still sees another process's write within the notification delay the test above allows, and
+// does not serve its cached copy until the listener's idle ping finds the connection dead. The head
+// tracker trusts itself while the listener has a connection; a half-open one is a connection that
+// has stopped proving anything. On a real Dispatch pair, with the reader's document LISTEN backend
+// stopped and every other connection of it working, the reader served the old text for 31.4 s
+// after the other process's edit committed, where the build before this change read it at once.
+func TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen(t *testing.T) {
+	const bound = 10 * time.Second
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	writer, _ := newTestServiceInstance(t, database)
+	readerStore := storetest.SecondProcess(t, database)
+	reader := newReadCacheService(t, readerStore, NewPgVersioned(readerStore))
+	seedServiceText(t, writer, artifactID, "Write 0.\n")
+	connConfig := readerStore.Pool.Config().ConnConfig
+	proxy := newSilencingProxy(t, net.JoinHostPort(connConfig.Host, strconv.Itoa(int(connConfig.Port))))
+	runProbedEvictor(t, reader, func(evictor *staleRoomEvictor) {
+		evictor.dial = func(ctx context.Context) (*pgx.Conn, error) {
+			config := connConfig.Copy()
+			config.Host, config.Port, config.Fallbacks = "127.0.0.1", proxy.port, nil
+			return pgx.ConnectConfig(ctx, config)
+		}
+	})
+	if text, err := reader.Text(ctx, artifactID); err != nil || text != "Write 0.\n" {
+		t.Fatalf("the first cold read = %q (%v), want the seeded text", text, err)
+	}
+	if cacheEntry(t, reader, artifactID) == nil {
+		t.Fatal("the cold read cached nothing, so nothing here is tested")
+	}
+
+	proxy.silence()
+	if _, err := joinedApplyOps(writer, artifactID, []model.EditOp{
+		{Op: "replace", Find: "Write 0.", With: "Write 1."},
+	}, model.Actor{Kind: "session", ID: "agent"}, nil); err != nil {
+		t.Fatalf("write on the other service: %v", err)
+	}
+	committed := time.Now()
+	for {
+		text, err := reader.Text(ctx, artifactID)
+		if err != nil {
+			t.Fatalf("cold read on the reader: %v", err)
+		}
+		if text == "Write 1.\n" {
+			return
+		}
+		if time.Since(committed) > bound {
+			t.Fatalf("the reader still reads %q %s after the other service's write committed while its LISTEN connection was half-open, want %q within %s: the head tracker kept trusting a connection that had stopped delivering", text, time.Since(committed).Round(time.Millisecond), "Write 1.\n", bound)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// silencingProxy forwards each TCP connection it accepts to target until silence, after which the
+// connections it already holds forward nothing and neither end of them is closed: each looks open
+// to both ends and stays silent, a half-open connection. A connection accepted after silence
+// forwards as usual, so a listener that redials gets a working connection.
+type silencingProxy struct {
+	listener net.Listener
+	port     uint16
+	target   string
+	mu       sync.Mutex
+	gates    []*atomic.Bool
+	conns    []net.Conn
+}
+
+func newSilencingProxy(t *testing.T, target string) *silencingProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the proxy: %v", err)
+	}
+	proxy := &silencingProxy{listener: listener, port: uint16(listener.Addr().(*net.TCPAddr).Port), target: target}
+	go proxy.serve()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		for _, conn := range proxy.conns {
+			_ = conn.Close()
+		}
+	})
+	return proxy
+}
+
+func (p *silencingProxy) serve() {
+	for {
+		client, err := p.listener.Accept()
+		if err != nil {
+			return
+		}
+		server, err := net.Dial("tcp", p.target)
+		if err != nil {
+			_ = client.Close()
+			continue
+		}
+		gate := &atomic.Bool{}
+		p.mu.Lock()
+		p.gates = append(p.gates, gate)
+		p.conns = append(p.conns, client, server)
+		p.mu.Unlock()
+		go func() { _, _ = io.Copy(silencedWriter{to: server, gate: gate}, client) }()
+		go func() { _, _ = io.Copy(silencedWriter{to: client, gate: gate}, server) }()
+	}
+}
+
+// silence stops every connection the proxy holds from forwarding, closing neither end.
+func (p *silencingProxy) silence() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, gate := range p.gates {
+		gate.Store(true)
+	}
+}
+
+// silencedWriter writes to to until gate is set, and from then on drops what it is given.
+type silencedWriter struct {
+	to   net.Conn
+	gate *atomic.Bool
+}
+
+func (w silencedWriter) Write(p []byte) (int, error) {
+	if w.gate.Load() {
+		return len(p), nil
+	}
+	return w.to.Write(p)
 }
 
 // A process reads its own write through the read cache at once, without waiting for the
