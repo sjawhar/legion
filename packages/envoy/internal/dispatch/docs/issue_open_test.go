@@ -23,7 +23,8 @@ import (
 // the issue and closes its rooms of the issue's documents (issueOpenChanged), so their browsers
 // reconnect with the scope the issue now allows, which ygo fixes when a browser connects. A
 // browser's append on a closed issue is refused by the append gate, which reads the issue itself,
-// whether the notification reached the room's process or not.
+// whether the notification reached the room's process or not, unless the room took the update no
+// later than closeMargin after the close committed.
 
 // writeIssueClosed sets issueKey's closed_at in database as PATCH /api/v1/issues/{key} does when it
 // closes or reopens the issue: a commit whose notification reaches every process listening.
@@ -167,11 +168,60 @@ func TestClosingAnIssueOnOneProcessClosesEveryProcessesRoomsAndReopeningMakesThe
 	})
 }
 
+// A keystroke the room took while the issue was open is stored, even when its append reaches the
+// gate only after the close committed: the room's persistence is still storing an earlier update,
+// or waits on the document's lock behind a settlement or a compaction, and the close's notification
+// closes the room meanwhile, which hands the room's queued updates to the gate (CloseRoom flushes
+// it). The room's observer took the update before the close, which the gate tells by comparing the
+// update's age with how long ago the issue closed (appendGate.head). Here task A's persistence is
+// held while the issue closes through task B; alice's socket closes, the hold runs out, her
+// keystroke is stored, and her browser comes back read-only holding it.
+func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	taskA, serverA := newTestServiceInstance(t, database)
+	taskA.hooks = newTestHooks()
+	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
+	seedServiceText(t, taskA, artifactID, "before")
+	waitForLandedAppends(t, taskA, artifactID)
+	runRoomSync(t, newRoomSync(taskA))
+	runRoomSync(t, newRoomSync(taskB))
+	alice := connectWithScope(t, serverA.URL, artifactID, "alice", "read-write", "before\n")
+	waitForLandedAppends(t, taskA, artifactID)
+	head := storedHead(t, database, artifactID)
+
+	const hold = 3 * time.Second
+	held := time.Now().Add(hold)
+	if err := taskA.HoldRoomPersistence(artifactID, hold); err != nil {
+		t.Fatalf("hold task A's persistence: %v", err)
+	}
+	typeOver(t, alice, "before", "typed before the close")
+	waitFor(t, roomWait(t), "task A's room to take alice's keystroke", func() bool {
+		return strings.Contains(roomMarkdown(t, taskA, artifactID), "typed before the close")
+	})
+	writeIssueClosed(t, taskB.store, "DOC-1", true)
+	requireEnds(t, alice, "closing the issue through task B left alice's browser on task A connected")
+	if moved := storedHead(t, database, artifactID); moved != head || time.Now().After(held) {
+		t.Fatalf("the close was meant to take effect while task A held alice's keystroke unstored, but the head moved from %d to %d or the hold ran out first", head, moved)
+	}
+	// The room's close waits for its persistence to store what it holds (CloseRoom's flush), so
+	// once the room is gone the keystroke's append has been decided.
+	waitFor(t, roomWait(t), "task A's room to finish closing", func() bool {
+		return taskA.srv.GetDoc(artifactID) == nil
+	})
+	if stored := storedMarkdown(t, database, artifactID); !strings.Contains(stored, "typed before the close") {
+		t.Fatalf("the keystroke alice typed while the issue was open was dropped by its close: the store holds %q", stored)
+	}
+	connectWithScope(t, serverA.URL, artifactID, "alice", "readonly", "typed before the close\n")
+}
+
 // The notification may not reach a process in time: its listener can be redialing for up to thirty
-// seconds (pglisten.RedialBackoff), and even a live one hears the close a moment after its commit.
-// Here no room sync runs at all, so nothing tells the room the issue closed: the gate refuses its
-// browser's next append (ErrIssueClosed), which is not stored, and the room is closed for its issue
-// rather than failed, so the browser reconnects read-only.
+// seconds (pglisten.RedialBackoff). Here no room sync runs at all, so nothing tells the room the
+// issue closed, and the issue closed longer ago than closeMargin before alice types: the gate
+// refuses her browser's append (ErrIssueClosed), which is not stored, and the room is closed for
+// its issue rather than failed, so the browser reconnects read-only. (A keystroke the room takes
+// within closeMargin of the close is stored instead: the close's notification may not have reached
+// the room yet.)
 func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
@@ -182,7 +232,11 @@ func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.
 	service.beforeFailedEviction = func(string) { failed.Store(true) }
 	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
 
-	writeIssueClosed(t, database, "DOC-1", true)
+	closedAgo := closeMargin + 30*time.Second
+	if _, err := database.Pool.Exec(context.Background(),
+		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, "DOC-1", closedAgo.Seconds()); err != nil {
+		t.Fatalf("close issue DOC-1 %v ago: %v", closedAgo, err)
+	}
 	head := storedHead(t, database, artifactID)
 	typeOver(t, alice, "before", "typed after the close")
 	requireEnds(t, alice, "the gate refused alice's keystroke on the closed issue and left her browser connected")

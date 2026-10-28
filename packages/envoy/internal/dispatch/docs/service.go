@@ -2467,8 +2467,9 @@ func (s *Service) issueOpenChanged(ctx context.Context, issueKey string) {
 	states, err := s.readRoomIssueStates(ctx, issueDocumentsStatement, issueKey)
 	if err != nil {
 		// Every room keeps the state it had until the next change of the issue, or the next
-		// LISTEN (recheckResidentIssues); meanwhile its browsers' appends are refused by the gate,
-		// which reads the issue itself (refuseClosedIssueAppend).
+		// LISTEN (recheckResidentIssues); meanwhile the gate, which reads the issue itself,
+		// refuses its browsers' appends taken later than closeMargin after the close
+		// (refuseClosedIssueAppend).
 		if ctx.Err() == nil {
 			slog.Error("dispatch: read the open state of an issue's documents", "issue", issueKey, "error", err)
 		}
@@ -2507,12 +2508,15 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 }
 
 // refuseClosedIssueAppend is a browser's append the gate refused because the document's issue is
-// closed (ErrIssueClosed). When room's record still holds the issue open, the issue closed without
-// this process hearing it yet - its listener redialing, or the notification still on its way - and
-// the room is closed for its issue here, as the notification would close it (setRoomIssueOpen), so
-// it stops taking edits and its browsers reconnect read-only. That runs on a goroutine of its own:
-// this is ygo's persistence worker, which the close waits for. A record already marked closed is
-// being closed for its issue, whose close hands the room's last updates here, and they are dropped.
+// closed and the room took the update later than closeMargin after the close (ErrIssueClosed); an
+// update the room took before then is stored (appendGate.observedBeforeClose), and never reaches
+// here. When room's record still holds the issue open, the issue closed without this process
+// hearing it - its listener redialing, which outlasts the margin - and the room is closed for its
+// issue here, as the notification would close it (setRoomIssueOpen), so it stops taking edits and
+// its browsers reconnect read-only. That runs on a goroutine of its own: this is ygo's persistence
+// worker, which the close waits for. A record already marked closed is being closed for its issue,
+// whose close hands the room's last updates here, and an update among them the room took that late
+// is dropped.
 func (s *Service) refuseClosedIssueAppend(room string) {
 	state := s.lockExistingState(room)
 	if state == nil {

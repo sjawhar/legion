@@ -112,16 +112,21 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 
 // StoreUpdateContext appends a room's update with the in-flight credit its update observer
 // recorded (AppendUpdateWithCredit), and with that observer's record of which room instance the
-// update was made in (documentUpdateClass.cursor): the append is a browser's (appendBrowser), so
-// the gate admits it from a room behind the head with its history intact - it lands at the head,
-// and the instance's cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses
-// it only when the room's stored history was replaced under it or the document's issue is closed.
+// update was made in (documentUpdateClass.cursor) and when it took the update
+// (documentUpdateClass.observed): the append is a browser's (appendBrowser), so the gate admits it
+// from a room behind the head with its history intact - it lands at the head, and the instance's
+// cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses it only when the
+// room's stored history was replaced under it, or when the document's issue is closed and the room
+// took the update later than closeMargin after the close. An update the room took before the close
+// and whose append reaches the gate after it - queued behind the room's earlier appends, waiting on
+// the document's lock behind a settlement or a compaction, or handed here by the close of the room
+// itself (setRoomIssueOpen) - is stored, and settled once the issue reopens.
 // A replaced history fails the room, as any failed append does: the room reloads from the store,
 // which is the close-and-reload a replaced history needs (plan D3.3), and the browser resends the
-// update to the reloaded room. A closed issue drops the update and closes the room for its issue
-// (refuseClosedIssueAppend), so its browsers reconnect read-only. Either is decided under the
-// document's advisory lock, so it is never this process's own write in flight, and needs no
-// room-sync lane to run.
+// update to the reloaded room. A refused update on a closed issue is dropped and closes the room
+// for its issue (refuseClosedIssueAppend), so its browsers reconnect read-only. Either is decided
+// under the document's advisory lock, so it is never this process's own write in flight, and needs
+// no room-sync lane to run.
 // An update that never reaches the store - its room failed, or a live write, a settlement or a
 // catch-up already made it durable - lands its credit here instead: the room drops it with the
 // update, which the browser resends. An update a live write of this process stored ahead of its own
@@ -155,7 +160,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return nil
 	}
 	a.service.hooks.awaitPersistenceHold(ctx, room)
-	appending := withStoredAhead(withBrowserAppend(ctx, class.cursor), class.ahead)
+	appending := withStoredAhead(withBrowserAppend(ctx, class.cursor, class.observed), class.ahead)
 	if _, err := a.store.AppendUpdateWithCredit(appending, room, update, class.contentChanged, class.credit); err != nil {
 		if errors.Is(err, ErrIssueClosed) {
 			a.service.refuseClosedIssueAppend(room)
@@ -688,7 +693,7 @@ func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *r
 		// reaches the store: a room evicted and reloaded in between is a different instance,
 		// which did not take this update and must not be recorded as holding the version it
 		// is stored at.
-		class := &documentUpdateClass{update: append([]byte(nil), logged.Update...), contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
+		class := &documentUpdateClass{update: append([]byte(nil), logged.Update...), contentChanged: contentChanged, durable: true, cursor: &instance.cursor, observed: time.Now()}
 		if contentChanged {
 			// The authors of the ask blocks this render first showed go with the credit to the
 			// update's append, which records them durably (recordAskAuthors): a tree is rendered

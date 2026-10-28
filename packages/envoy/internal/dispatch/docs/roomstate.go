@@ -105,8 +105,11 @@ type roomState struct {
 // documentUpdateClass is what the room's update observer recorded for one update, which its
 // persistence takes (consumeUpdateClass): whether it changed the content, whether it is durable
 // work the room's state waits on, the browser edit's in-flight credit, nil for an update no
-// browser edit credited, and cursor, the durable version the room instance the update was made in
-// stands at, which gates and then takes in the update's own append (StoreUpdateContext).
+// browser edit credited, cursor, the durable version the room instance the update was made in
+// stands at, which gates and then takes in the update's own append (StoreUpdateContext), and
+// observed, when the observer classified the update, on this process's monotonic clock, which
+// tells the gate an update the room took before its issue closed from one taken after
+// (appendGate.observedBeforeClose); zero for a class no observer of the room's log classified.
 //
 // An update only the room holds - not a published live write's nor a catch-up's, which are stored
 // already - also names instance, the room instance it was made in, whose list of unstored updates
@@ -121,6 +124,7 @@ type documentUpdateClass struct {
 	durable        bool
 	credit         *UpdateCredit
 	cursor         *roomCursor
+	observed       time.Time
 	instance       *roomInstance
 	ahead          *storedAhead
 }

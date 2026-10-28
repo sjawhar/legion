@@ -254,15 +254,16 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// peer of this very room whose append committed under this lock has already advanced the
 	// cursor (appendUpdate) and two peers of one room never refuse each other. A browser's delta
 	// is admitted from a room behind an intact history, since Yjs updates commute and this lock
-	// serialises them, unless the document's issue is closed (ErrIssueClosed); a derived write - an
-	// upload's or a conditional edit's version, a settlement's repairs - only from a room holding
-	// the head, since what it renders from that room's document would be rendered from text the
-	// writer has not seen (appendKind). An append no room's cursor gates - a cold write, a new
-	// document's seed, a test's own append - reads the head alone.
+	// serialises them, unless the document's issue is closed and the room took the delta later than
+	// closeMargin after the close (ErrIssueClosed); a derived write - an upload's or a conditional
+	// edit's version, a settlement's repairs - only from a room holding the head, since what it
+	// renders from that room's document would be rendered from text the writer has not seen
+	// (appendKind). An append no room's cursor gates - a cold write, a new document's seed, a
+	// test's own append - reads the head alone.
 	var latest int64
 	var err error
-	if cursor, kind := appendingCursor(ctx, room); cursor != nil {
-		latest, err = gateAppend(ctx, tx, room, cursor.heldThrough(), kind)
+	if cursor, kind, observed := appendingCursor(ctx, room); cursor != nil {
+		latest, err = gateAppend(ctx, tx, room, cursor.heldThrough(), kind, observed)
 	} else {
 		latest, err = currentUpdateCursor(ctx, tx, room)
 	}
