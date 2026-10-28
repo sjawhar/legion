@@ -229,11 +229,12 @@ func (s *server) describeAsk(
 }
 
 // commentRoute is the owner's delivery route as the Envoy listener resolved it before the
-// comment's transaction opened: the route string the pre-transaction read saw, and the live
-// session it names. checked is false where the write consults no route at all - a project
-// document, a comment with no mentions, an owner that does not exist - and the locked row is
-// then not compared against it. unanswered says the route string is one the comment mentions
-// and the listener did not answer that mention's lookup in time, so no session is known.
+// comment's transaction opened: the route string the pre-transaction read saw, and the session
+// it names - the one its lookup pinned, or, when the route's own lookup went unanswered, the <id>
+// of a session:<id> route (mentionedSession). checked is false where the write consults no route
+// at all - a project document, a comment with no mentions, an owner that does not exist - and the
+// locked row is then not compared against it. unanswered says the route string is one the comment
+// mentions and the listener did not answer that mention's lookup in time; sessionID is then nil.
 type commentRoute struct {
 	checked    bool
 	route      string
@@ -276,10 +277,12 @@ func (s *server) readCommentRoute(ctx context.Context, owner owner, mentioned bo
 }
 
 // resolveCommentLookups makes every Envoy listener lookup a comment needs, all at once and each
-// bounded by mentionLookupTimeout, so a listener that answers none delays the comment by one
-// timeout: each mention's, and the route's session. mentions, when non-nil, were resolved on an
-// earlier pass whose route then moved, and are kept; only the new route is resolved. A route the
-// comment mentions is resolved by that mention and makes no lookup of its own.
+// bounded by mentionLookupTimeout: each mention's, up to mentionLookupConcurrency at a time, and,
+// beside them, the route's session. A listener that answers none delays a comment with up to 8
+// mentions by one 250 ms timeout, and each further 8 mentions add one: ceil(k/8) timeouts for k
+// mentions. mentions, when non-nil, were resolved on an earlier pass whose route then moved, and
+// are kept; only the new route is resolved. A route the comment mentions is resolved by that
+// mention and makes no lookup of its own.
 func (s *server) resolveCommentLookups(
 	ctx context.Context, route commentRoute, targets []string, delivery string, mentions []ResolvedMention,
 ) ([]ResolvedMention, commentRoute) {
@@ -296,7 +299,9 @@ func (s *server) resolveCommentLookups(
 	}
 	lookups.Wait()
 	if lookUpRoute {
-		route.sessionID = routeLookup.SessionID
+		if sessionID, named := routeLookup.mentionedSession(); named {
+			route.sessionID = &sessionID
+		}
 		return mentions, route
 	}
 	if route.route == "" {
@@ -305,9 +310,7 @@ func (s *server) resolveCommentLookups(
 	for index := range mentions {
 		if mentions[index].Target == route.route {
 			route.sessionID = mentions[index].SessionID
-			// No pinned session and no resolve error is the shape of a lookup cut short by its
-			// timeout (resolveMentionTarget).
-			route.unanswered = route.sessionID == nil && mentions[index].ResolveError == ""
+			route.unanswered = mentions[index].unanswered
 			break
 		}
 	}
@@ -416,14 +419,18 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	// mentionedSessions are the sessions the comment's mentions deliver it to, as far as creation
+	// knows (mentionedSession): each pinned session, and the <id> of an unanswered session:<id>
+	// mention. Only a pinned session is stored on the mention, its attempt and comment_mentions;
+	// an unanswered mention stays unpinned there, and the sender resolves it after the response.
 	mentions := make([]model.Mention, 0, len(resolvedMentions))
 	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
 	for _, resolved := range resolvedMentions {
 		mentions = append(mentions, model.Mention{
 			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
 		})
-		if resolved.SessionID != nil {
-			mentionedSessions[*resolved.SessionID] = struct{}{}
+		if sessionID, named := resolved.mentionedSession(); named {
+			mentionedSessions[sessionID] = struct{}{}
 		}
 	}
 	tx, status, route := start.tx, start.status, start.route
@@ -448,6 +455,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	input.ReplyTo = threadTarget.ReplyTo
 	input.AskID = threadTarget.AskID
 	replyRoot := threadTarget.ReplyRoot
+	// The route copy is suppressed when a mention delivers the comment to the session the route
+	// reaches: the route names a session (its lookup pinned it, or its own lookup went unanswered
+	// and it is session:<id>) that is one of mentionedSessions, or the route string is the target
+	// of a mention whose lookup went unanswered - one string names one session - and is then
+	// suppressed by that string alone, so a route later moved to that session's direct form is
+	// not. The route copy still duplicates the mention for an unanswered role:X mention whose
+	// holder the route names under another string, and for a role:X route whose own lookup went
+	// unanswered: neither names a session to compare.
 	suppressRoute := false
 	suppressedRoute := ""
 	var suppressedRouteSessionID *string
@@ -459,17 +474,15 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			suppressedRouteSessionID = route.sessionID
 		}
 	case route.unanswered:
-		// The route string is a mention's target, and one string names one session, so the
-		// mention delivers to whichever session the route copy would reach. The route is
-		// suppressed by its string alone; with no session known, a route later moved to that
-		// session's direct form is not.
 		suppressRoute = true
 		suppressedRoute = route.route
 	}
-	// A session a mention delivers this comment to hears it from the mention alone: the author
-	// routes skip it (suppressed_authors). A reply's author route reaches its thread's root
-	// author; a new comment's reaches the sessions that wrote its document, which the outbox reads
-	// when it publishes, so every session a mention resolved to is named, an author or not.
+	// suppressed_authors names the sessions of mentionedSessions the author routes skip, since
+	// each hears the comment from its mention: on a reply, its thread's root author when it is
+	// one of them; on a new comment not in an ask's thread, every one of them, an author or not,
+	// since the outbox reads the document's writers only when it publishes. An author route still
+	// duplicates an unanswered role:X mention whose holder is the root author or a document
+	// writer: only the listener knows that holder.
 	suppressedAuthors := []string{}
 	switch {
 	case replyRoot != nil:

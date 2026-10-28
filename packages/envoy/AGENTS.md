@@ -1267,7 +1267,9 @@ per-session read tells a session that ended from one that cache has not refilled
 that did not answer never reports the session gone: a broadcast and a claim are refused `503
 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still
 created `201`. A mention lookup is bounded at 250 ms (`mentionLookupTimeout`, as is the route's
-when the comment mentions anyone, and up to 8 run at once): one cut short leaves its mention
+when the comment mentions anyone, and up to 8 run at once, the route's beside them): a listener
+that answers none delays a comment with up to 8 mentions by one 250 ms timeout, and each further 8
+mentions add one (ceil(k/8) timeouts for k mentions). One cut short leaves its mention
 unresolved, for the sender to resolve when it sends, and one the listener answered with its own
 `envoy listener: …` error records that mention's delivery `failed` with that text. A write -
 `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
@@ -1281,9 +1283,11 @@ with it still `pending`; the post-commit sender - and every later `POST
 records that resolution on the claimed row, sends, and records `sent` or `failed` with its
 `comment.delivery` event in a second transaction. The post-commit sender (`mentionSender`,
 `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
-session the mention's lookup pinned, else its target as written, so `role:X` and
-`session:<X's holder>` share a lane): each recipient gets the comments this process accepted in
-the order it accepted them, at most 8 lanes send at once, and at most 4,096 sends wait. A send
+session the mention's lookup pinned, else its target as written: `role:X` shares
+`session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X`
+is keyed by its string, so two comments to one recipient can then arrive in either order): each
+recipient gets the comments this process accepted, on one lane, in the order it accepted them, at
+most 8 lanes send at once, and at most 4,096 sends wait. A send
 past that bound is not queued and stays `pending` and unclaimed. Once the server's lifetime ends
 no queued send starts, and the sends in flight get 10 s (`mentionDrainTimeout`) before their
 context is cancelled. A recovery pass at startup, and again once an overflowed queue drains,
@@ -2326,8 +2330,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   conversation names no document and reaches no author. An author route is skipped for a human
   author, who has no topic, for the event's own actor, so a session commenting on a document it
   wrote is never told of its own comment, and for a session the comment's mentions already reach
-  (`suppressed_authors`: on a new comment every session a mention resolved to, so a mentioned
+  (`suppressed_authors`: on a new comment every mentioned session - one a mention's lookup
+  pinned, or the `<id>` of a `session:<id>` mention whose lookup went unanswered - so a mentioned
   writer hears the comment once; on a reply only the thread's root author when mentioned). An
+  unanswered `role:X` mention names no session, so a root author or writer who holds `role:X`
+  hears the comment twice. An
   agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.

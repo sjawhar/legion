@@ -21,7 +21,9 @@ import (
 
 // ResolvedMention binds a canonical mention to the session that owned it when the comment was
 // created. SessionID is nil when no live holder was found; attemptSessionID remains internal so
-// legacy message attempts retain their existing session-id representation.
+// legacy message attempts retain their existing session-id representation. unanswered says the
+// lookup was cut short by its bound while the request was still live (resolveMentionTarget), so
+// the listener has not said who holds the target.
 type ResolvedMention struct {
 	Target       string
 	Delivery     string
@@ -30,15 +32,34 @@ type ResolvedMention struct {
 
 	title            string
 	attemptSessionID string
+	unanswered       bool
+}
+
+// mentionedSession is the session this mention delivers the comment to, as far as the comment's
+// creation knows: the pinned session when its lookup found one, and otherwise, when the lookup
+// went unanswered, the <id> of a session:<id> target, which names its session without a lookup.
+// An unanswered role:X mention names no session: only the listener knows its holder.
+func (m ResolvedMention) mentionedSession() (string, bool) {
+	if m.SessionID != nil {
+		return *m.SessionID, true
+	}
+	if !m.unanswered {
+		return "", false
+	}
+	return strings.CutPrefix(m.Target, "session:")
 }
 
 // mentionLookupTimeout bounds each listener lookup a comment's creation makes before its
 // transaction opens: every mention's, and the issue route's. A lookup cut short leaves its
 // target unresolved (resolveMentionTarget), and the comment is created and answered without it.
+// A listener that answers no lookup delays a comment with up to mentionLookupConcurrency
+// mentions by one timeout, and each further mentionLookupConcurrency mentions by one more:
+// ceil(k/8) timeouts for k mentions.
 const mentionLookupTimeout = 250 * time.Millisecond
 
-// mentionLookupConcurrency is how many targets resolveMentionTargets resolves at once, so a
-// comment's k mentions cost one listener round trip rather than k.
+// mentionLookupConcurrency is how many targets resolveMentionTargets resolves at once, so up to 8
+// mentions cost a comment one listener round trip - one 250 ms timeout when the listener answers
+// none - and each further 8 add one: ceil(k/8) for k mentions.
 const mentionLookupConcurrency = 8
 
 // resolveMentionTargets performs the only registry lookup for a comment's original deliveries.
@@ -62,11 +83,12 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 
 // resolveMentionTarget resolves one mention target. timeout, when positive, bounds the lookup;
 // zero leaves it bounded by the listener client's own window. A lookup that timeout cut short,
-// while ctx itself is still live, yields the target with no pinned session and no resolve error: the
-// listener has not answered, so nothing is known to refuse and no session is known to suppress
-// (createCommentFor still suppresses an issue route whose string is this target). Its attempt row
-// records neither, which is the shape of an attempt stranded before anything was resolved, so
-// the sender resolves it when it sends (mentionResolutionFor).
+// while ctx itself is still live, yields the target unanswered, with no pinned session and no
+// resolve error: the listener has not answered, so nothing is known to refuse and nothing is
+// pinned. createCommentFor still counts the session a session:<id> target names
+// (mentionedSession) when it decides what the mention makes redundant. Its attempt row records
+// neither a session nor an error, which is the shape of an attempt stranded before anything was
+// resolved, so the sender resolves it when it sends (mentionResolutionFor).
 func (s *server) resolveMentionTarget(
 	ctx context.Context, target, delivery string, timeout time.Duration,
 ) ResolvedMention {
@@ -85,6 +107,7 @@ func (s *server) resolveMentionTarget(
 	sessionID, title, resolveError := s.resolveDeliveryTarget(lookup, route, delivery)
 	if sessionID == "" && resolveError != "" && ctx.Err() == nil &&
 		errors.Is(lookup.Err(), context.DeadlineExceeded) {
+		item.unanswered = true
 		return item
 	}
 	item.title = title

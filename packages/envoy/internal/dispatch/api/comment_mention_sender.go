@@ -55,7 +55,9 @@ type mentionSend struct {
 }
 
 // lane is the recipient a send is ordered by: the session the mention pinned when its lookup
-// found one, so role:X and session:<X's holder> share one, and the target as written otherwise.
+// found one, and the target as written otherwise. role:X shares session:<X's holder>'s lane only
+// when its lookup found the holder; an unanswered role:X is keyed by its string, so two comments
+// to one recipient, one naming it by role and one by session, can then arrive in either order.
 func (m mentionSend) lane() string {
 	if m.mention.SessionID != nil {
 		return "session:" + *m.mention.SessionID
@@ -64,10 +66,12 @@ func (m mentionSend) lane() string {
 }
 
 // mentionSender delivers comment mentions after the comment's response, one FIFO lane per
-// recipient (mentionSend.lane), so each recipient gets the comments this process accepted in the
-// order it accepted them. A lane is served by at most one goroutine and at most mentionSendLanes
-// lanes send at once; a goroutine whose lane still has sends while another lane waits moves on to
-// the waiting lane, so one busy recipient cannot hold the others back.
+// recipient (mentionSend.lane), so each recipient gets the comments this process accepted on one
+// lane in the order it accepted them. role:X shares its holder's lane only when its lookup found
+// the holder; an unanswered role:X is keyed by its string, so two comments to one recipient can
+// then arrive in either order. A lane is served by at most one goroutine and at most
+// mentionSendLanes lanes send at once; a goroutine whose lane still has sends while another lane
+// waits moves on to the waiting lane, so one busy recipient cannot hold the others back.
 //
 // Every database statement the sender makes goes through its two functions, send and stranded,
 // which register binds to the server (sendCommentMention, strandedCommentMentions).

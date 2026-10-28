@@ -260,9 +260,9 @@ func TestABlockedMentionRecipientDoesNotHoldBackAnother(t *testing.T) {
 	}
 }
 
-// A comment's mention lookups run at once, so k mentions cost the comment one listener round
-// trip rather than k: three lookups of 200 ms each, seen from the listener, all finish within
-// 400 ms of the first one starting.
+// A comment's mention lookups run at once, up to mentionLookupConcurrency of them, so up to 8
+// mentions cost the comment one listener round trip rather than one each: three lookups of
+// 200 ms each, seen from the listener, all finish within 400 ms of the first one starting.
 func TestMentionLookupsOfOneCommentRunAtOnce(t *testing.T) {
 	const lookup = 200 * time.Millisecond
 	var mu sync.Mutex
@@ -313,49 +313,74 @@ func TestMentionLookupsOfOneCommentRunAtOnce(t *testing.T) {
 	}
 }
 
-// unansweredLookupComment is what one comment whose mention lookup the listener did not answer
-// in time came to: its comment.created payload, every send the listener took, and the topics the
-// outbox published comment.created to.
+// unansweredLookupComment is what one comment whose listener lookup went unanswered in time came
+// to: its comment.created payload, every send the listener took, and the topics the outbox
+// published comment.created to.
 type unansweredLookupComment struct {
 	payload      model.CommentEventPayload
 	sends        []mentionListenerSend
 	destinations []string
 }
 
-// commentWithAnUnansweredLookup posts a comment mentioning mention on an issue whose route is
-// route, while the listener holds every lookup of hungPath unanswered. It checks that the comment
-// answers within mentionLookupTimeout's bound with that mention unresolved and its attempt
-// pending, then lets the listener answer, waits for the mention sender to send the attempt to
-// s1, and runs the outbox until it has published comment.created. The listener resolves every
-// session of senderTestSessions, and role:reviewer to s1.
-func commentWithAnUnansweredLookup(t *testing.T, route, mention, hungPath string) unansweredLookupComment {
+// unansweredLookup is the comment commentWithAnUnansweredLookup posts: one mentioning mention, on
+// an issue whose route is route ("" for none), while the listener holds every lookup of hungPath
+// unanswered. replyToS1 makes the comment a reply to a root comment session s1 wrote. pinned says
+// the mention's own lookup is not the held one, so it answers in time and pins s1.
+type unansweredLookup struct {
+	route, mention, hungPath string
+	replyToS1                bool
+	pinned                   bool
+}
+
+// commentWithAnUnansweredLookup posts the comment lookup describes. It checks that the comment
+// answers within mentionLookupTimeout's bound with its attempt pending - with the mention
+// unresolved, or pinned to s1 when lookup.pinned - then lets the listener answer, waits for the
+// mention sender to send the attempt to s1, and runs the outbox until it has published
+// comment.created. The listener resolves every session of senderTestSessions, and role:reviewer
+// to s1.
+func commentWithAnUnansweredLookup(t *testing.T, lookup unansweredLookup) unansweredLookupComment {
 	t.Helper()
 	listener, state := newMentionListener(t)
-	letAnswer := state.holdLookups(hungPath)
+	letAnswer := state.holdLookups(lookup.hungPath)
 	defer letAnswer()
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "An unanswered lookup", "before")
-	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
-		"route": route,
-	}, "alice"); patched.Code != http.StatusOK {
-		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+	if lookup.route != "" {
+		if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+			"route": lookup.route,
+		}, "alice"); patched.Code != http.StatusOK {
+			t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+		}
+	}
+	input := map[string]any{"body": "Are you there?", "mentions": []map[string]any{{"target": lookup.mention}}}
+	if lookup.replyToS1 {
+		root := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "Where should this go?", "actor": map[string]any{"kind": "session", "id": "s1"},
+		})
+		input["reply_to"] = decodeMentionedComment(t, root).ID
 	}
 
 	started := time.Now()
-	response := postMentionedComment(t, handler, issue.Key, map[string]any{
-		"body": "Are you there?", "mentions": []map[string]any{{"target": mention}},
-	})
+	response := postMentionedComment(t, handler, issue.Key, input)
 	answered := time.Since(started)
 	created := decodeMentionedComment(t, response)
 	if bound := mentionLookupTimeout + 500*time.Millisecond; answered >= bound {
-		t.Fatalf("the comment answered after %v with its lookup unanswered, want under %v", answered, bound)
+		t.Fatalf("the comment answered after %v with a lookup unanswered, want under %v", answered, bound)
 	}
-	if len(created.Mentions) != 1 || created.Mentions[0].SessionID != nil {
-		t.Fatalf("mentions = %#v, want the mention unresolved", created.Mentions)
+	pinnedTo := func(sessionID *string) bool {
+		if lookup.pinned {
+			return sessionID != nil && *sessionID == "s1"
+		}
+		return sessionID == nil
+	}
+	if len(created.Mentions) != 1 || !pinnedTo(created.Mentions[0].SessionID) {
+		t.Fatalf("mentions = %#v, want the one mention pinned to s1 only when its own lookup answered (%v)",
+			created.Mentions, lookup.pinned)
 	}
 	if len(created.Deliveries) != 1 || created.Deliveries[0].State != "pending" ||
-		created.Deliveries[0].SessionID != nil || created.Deliveries[0].Error != nil {
-		t.Fatalf("deliveries = %#v, want one pending attempt with no session and no failure", created.Deliveries)
+		!pinnedTo(created.Deliveries[0].SessionID) || created.Deliveries[0].Error != nil {
+		t.Fatalf("deliveries = %#v, want one pending attempt with no failure, on s1 only when pinned (%v)",
+			created.Deliveries, lookup.pinned)
 	}
 
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
@@ -374,9 +399,9 @@ func commentWithAnUnansweredLookup(t *testing.T, route, mention, hungPath string
 	if payload == nil {
 		t.Fatalf("no comment.created event for %s: %s", created.ID, events.Body.String())
 	}
-	if len(payload.SuppressedAuthors) != 0 || len(payload.Mentions) != 1 || payload.Mentions[0].SessionID != nil {
-		t.Fatalf("comment.created suppresses authors %v with mentions %#v, want no author suppressed for the unresolved mention",
-			payload.SuppressedAuthors, payload.Mentions)
+	if len(payload.Mentions) != 1 || !pinnedTo(payload.Mentions[0].SessionID) {
+		t.Fatalf("comment.created mentions = %#v, want the one mention pinned to s1 only when its own lookup answered (%v)",
+			payload.Mentions, lookup.pinned)
 	}
 
 	letAnswer()
@@ -395,13 +420,19 @@ func commentWithAnUnansweredLookup(t *testing.T, route, mention, hungPath string
 // mentionLookupTimeout, and the mention sender delivers the mention after the response once the
 // listener answers. When the issue's route is the very string the comment mentions, both name
 // one session, so the event suppresses the route by that string and the session hears the
-// comment once, from the mention.
+// comment once, from the mention. The unanswered session:s1 mention still names s1, so the
+// event lists s1 among the sessions the author routes skip.
 func TestAnUnansweredMentionOfTheRouteItselfSuppressesTheRouteCopy(t *testing.T) {
-	got := commentWithAnUnansweredLookup(t, "session:s1", "session:s1", "/v1/registry/s1")
+	got := commentWithAnUnansweredLookup(t, unansweredLookup{
+		route: "session:s1", mention: "session:s1", hungPath: "/v1/registry/s1",
+	})
 	if !got.payload.SuppressRoute || got.payload.SuppressedRoute != "session:s1" ||
 		got.payload.SuppressedRouteSessionID != nil {
 		t.Fatalf("comment.created suppresses route %v (%q, session %v), want session:s1 suppressed by its string",
 			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
+	}
+	if !slices.Equal(got.payload.SuppressedAuthors, []string{"s1"}) {
+		t.Fatalf("comment.created suppresses authors %v, want [s1]: the mention names it", got.payload.SuppressedAuthors)
 	}
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
@@ -417,16 +448,83 @@ func TestAnUnansweredMentionOfTheRouteItselfSuppressesTheRouteCopy(t *testing.T)
 // goes unanswered: no session is known to compare. s1 receives the comment twice, once from the
 // mention sender and once as the route copy on its own topic, under different dedupe keys.
 func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing.T) {
-	got := commentWithAnUnansweredLookup(t, "session:s1", "role:reviewer", "/v1/roles/reviewer")
+	got := commentWithAnUnansweredLookup(t, unansweredLookup{
+		route: "session:s1", mention: "role:reviewer", hungPath: "/v1/roles/reviewer",
+	})
 	if got.payload.SuppressRoute || got.payload.SuppressedRoute != "" || got.payload.SuppressedRouteSessionID != nil {
 		t.Fatalf("comment.created suppresses route %v (%q, session %v), want no route suppressed",
 			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
+	}
+	if len(got.payload.SuppressedAuthors) != 0 {
+		t.Fatalf("comment.created suppresses authors %v, want none: the unanswered role names no session",
+			got.payload.SuppressedAuthors)
 	}
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
 	}
 	if !slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
 		t.Fatalf("the outbox published comment.created to %v, want s1's topic among them as well: s1 gets two copies",
+			got.destinations)
+	}
+}
+
+// A reply that mentions session:s1, the session that wrote its thread's root, names s1 even when
+// s1's lookup goes unanswered: the author route skips s1, which hears the reply once, from the
+// mention.
+func TestAnUnansweredSessionMentionOfTheRootAuthorSuppressesTheAuthorCopy(t *testing.T) {
+	got := commentWithAnUnansweredLookup(t, unansweredLookup{
+		mention: "session:s1", hungPath: "/v1/registry/s1", replyToS1: true,
+	})
+	if !slices.Equal(got.payload.SuppressedAuthors, []string{"s1"}) {
+		t.Fatalf("comment.created suppresses authors %v, want [s1]: the mention names the root author",
+			got.payload.SuppressedAuthors)
+	}
+	if len(got.sends) != 1 || got.sends[0].session != "s1" {
+		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
+	}
+	if slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic left out: the mention delivered it",
+			got.destinations)
+	}
+}
+
+// A reply that mentions role:reviewer, which the root author s1 holds, names no session when the
+// role's lookup goes unanswered: the author route still reaches s1, which hears the reply twice,
+// once from the mention sender and once on its own topic.
+func TestAnUnansweredRoleMentionHeldByTheRootAuthorLeavesTwoCopies(t *testing.T) {
+	got := commentWithAnUnansweredLookup(t, unansweredLookup{
+		mention: "role:reviewer", hungPath: "/v1/roles/reviewer", replyToS1: true,
+	})
+	if len(got.payload.SuppressedAuthors) != 0 {
+		t.Fatalf("comment.created suppresses authors %v, want none: the unanswered role names no session",
+			got.payload.SuppressedAuthors)
+	}
+	if len(got.sends) != 1 || got.sends[0].session != "s1" {
+		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
+	}
+	if !slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic among them as well: s1 gets two copies",
+			got.destinations)
+	}
+}
+
+// A session:s1 route whose own lookup goes unanswered still names s1, so a mention that resolves
+// to s1 under another string - role:reviewer, which s1 holds - suppresses the route copy for s1:
+// s1 hears the comment once, from the mention.
+func TestARouteWhoseOwnLookupGoesUnansweredIsSuppressedForTheSessionItNames(t *testing.T) {
+	got := commentWithAnUnansweredLookup(t, unansweredLookup{
+		route: "session:s1", mention: "role:reviewer", hungPath: "/v1/registry/s1", pinned: true,
+	})
+	if !got.payload.SuppressRoute || got.payload.SuppressedRoute != "session:s1" ||
+		got.payload.SuppressedRouteSessionID == nil || *got.payload.SuppressedRouteSessionID != "s1" {
+		t.Fatalf("comment.created suppresses route %v (%q, session %v), want session:s1 suppressed for s1",
+			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
+	}
+	if len(got.sends) != 1 || got.sends[0].session != "s1" {
+		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
+	}
+	if slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic left out: the mention delivered it",
 			got.destinations)
 	}
 }
