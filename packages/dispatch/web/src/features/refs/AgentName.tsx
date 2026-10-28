@@ -11,6 +11,7 @@ import {
   offlineDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
+import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
 import { relativeTimeLabel } from "./Timestamp";
@@ -262,18 +263,31 @@ export function useAgentText(): AgentText {
   }, [registry]);
 }
 
-const RESOLUTION_VERB: Record<AskResolution["kind"], string> = {
-  resolved: "Resolved",
-  retracted: "Retracted",
-};
+/** The text before and after a resolution's actor. A withdrawal is the close of the ask's issue,
+ *  so it names the closer: `Withdrawn when <agent> closed the issue`; else `<Verb> by <agent>`. */
+function resolutionFrame(resolution: AskResolution): readonly [before: string, after: string] {
+  return resolution.kind === "withdrawn"
+    ? ["Withdrawn when ", " closed the issue"]
+    : [`${askResolutionBadge(resolution)} by `, ""];
+}
 
-/** `Resolved by <agent>` / `Retracted by <agent>`: the verb-and-actor prefix of a resolution,
- *  for callers that render its reason with their own markup. */
-export function AskResolutionLine({ resolution }: { resolution: AskResolution }): ReactNode {
+/** `Resolved by <agent>` / `Retracted by <agent>` / `Withdrawn when <agent> closed the issue`:
+ *  the actor sentence of a resolution, for callers that render its reason (`askResolutionReason`)
+ *  with their own markup. `agent="static"` names the agent without its link, for a host that is
+ *  itself one control (a listbox option). */
+export function AskResolutionLine({
+  agent,
+  resolution,
+}: {
+  agent?: "link" | "static";
+  resolution: AskResolution;
+}): ReactNode {
+  const [before, after] = resolutionFrame(resolution);
   return (
     <>
-      {`${RESOLUTION_VERB[resolution.kind]} by `}
-      <AgentName actor={resolution.actor} inline />
+      {before}
+      <AgentName actor={resolution.actor} inline kind={agent} />
+      {after}
     </>
   );
 }
@@ -311,12 +325,15 @@ export function AgentParts({
   ));
 }
 
-/** `Resolved by <agent> - <reason>` / `Retracted by <agent> - <reason>` as `AgentPart`s, for
- *  the description builders (the activity and event descriptions). */
+/** `Resolved by <agent> - <reason>` / `Retracted by <agent> - <reason>` / `Withdrawn when <agent>
+ *  closed the issue` (a withdrawal's reason only repeats it) as `AgentPart`s, for the description
+ *  builders (the activity and event descriptions). */
 export function askResolutionParts(resolution: AskResolution): AgentPart[] {
+  const [before, after] = resolutionFrame(resolution);
+  const reason = askResolutionReason(resolution);
   return [
-    `${RESOLUTION_VERB[resolution.kind]} by `,
+    before,
     { actor: resolution.actor },
-    ` - ${resolution.reason}`,
+    reason === undefined ? after : `${after} - ${reason}`,
   ];
 }

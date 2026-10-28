@@ -9,10 +9,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import { type AskBlockHost, askBlockFacts, askBlockShell } from "../doc/typed-block-drawing";
+import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -28,23 +29,18 @@ const NO_PICTURES: readonly PictureAnchor[] = [];
 /** The same, for a body with no decision card to mount. */
 const NO_ASK_HOSTS: readonly AskBlockHost[] = [];
 
-/** An `ask` shell a body drew and the host its card mounts into. */
-interface AskShellHost {
-  readonly shell: HTMLElement;
-  readonly host: AskBlockHost;
-}
-
 /**
  * A host for each `ask` shell `paint` drew under `element` (`renderAskBlockShell`), paired in
- * document order with the parsed document's `ask` nodes, each with the shell it came from. A
- * surface that drew no shell for them (`MarkdownPreview` paints one line of inline content) gets
- * none: the shells must match the nodes one for one, every one with both slots, or no card is
- * mounted. It writes nothing; the caller folds each shell's source option list.
+ * document order with the parsed document's `ask` nodes. A surface that drew no shell for them
+ * (`MarkdownPreview` paints one line of inline content) gets none: the shells must match the
+ * nodes one for one, every one with its three slots (`askShellSlots`), or no card is mounted and
+ * nothing is written. Once every shell has paired, it writes each through `applyAskBlockShell`,
+ * and only there, because a card is mounted into it.
  */
-function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskShellHost[] {
+function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskBlockHost[] {
   const shells = element.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]');
   if (shells.length === 0) {
-    return [];
+    return NO_ASK_HOSTS;
   }
   const nodes: ProseMirrorNode[] = [];
   parsed.descendants((node) => {
@@ -54,19 +50,25 @@ function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonl
     return !node.isTextblock;
   });
   if (nodes.length !== shells.length) {
-    return [];
+    return NO_ASK_HOSTS;
   }
-  const collected: AskShellHost[] = [];
+  const paired: {
+    readonly content: HTMLElement;
+    readonly host: AskBlockHost;
+    readonly shell: HTMLElement;
+  }[] = [];
   for (const [index, node] of nodes.entries()) {
-    const shell = shells[index];
-    const header = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-header]");
-    const footer = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-footer]");
-    if (header === null || header === undefined || footer === null || footer === undefined) {
-      return [];
+    const slots = askShellSlots(shells[index]);
+    if (slots === undefined) {
+      return NO_ASK_HOSTS;
     }
-    collected.push({ host: { footer, header, key: index, node }, shell });
+    const { content, footer, header } = slots;
+    paired.push({ content, host: { footer, header, key: index, node }, shell: shells[index] });
   }
-  return collected;
+  for (const { content, host, shell } of paired) {
+    applyAskBlockShell(shell, content, host.node);
+  }
+  return paired.map(({ host }) => host);
 }
 
 /** How a surface fills its element from the parsed document: `MarkdownBody` serializes the whole
@@ -126,10 +128,14 @@ export interface RenderedMarkdownOptions {
  * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names.
  * Where the app provides a decision card (`TextAskCard`), each `ask` shell a parsed `paint` drew
  * gets one, mounted in the same commit (`collectAskHosts`); the card is a dependency, so a new
- * provider value renders again. `onRendered` fires after each render lands; the newest callback
- * is the one called, and a new callback alone re-renders nothing. `paint` and `decorate` are
- * dependencies: a caller passes a module-level function or memoises one on what it reads. The
- * options object itself is not one, so a caller builds it inline on every render.
+ * provider value renders again. On a painted body, each fenced `mermaid` block then draws as its
+ * diagram (`drawMermaidDiagrams`, which draws a source it has not drawn before late, once its
+ * worker answers; the effect's cleanup cancels that). It runs after every other pass, so a
+ * `dispatch://` in a diagram's label is never wrapped as a link or collected as a reference.
+ * `onRendered` fires after each render lands; the newest callback is the one called, and a new
+ * callback alone re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a
+ * module-level function or memoises one on what it reads. The options object itself is not one,
+ * so a caller builds it inline on every render.
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
@@ -151,7 +157,8 @@ export function useRenderedMarkdown(
       throw new Error("The Markdown element is unavailable.");
     }
     setIsFallback(false);
-    return renderWithEngine((engine) => {
+    let cancelDraw: (() => void) | undefined;
+    const cancelRender = renderWithEngine((engine) => {
       const parsed = engine?.parse(markdown, softBreaks);
       let hosts = NO_ASK_HOSTS;
       if (engine === undefined || parsed === undefined) {
@@ -160,17 +167,7 @@ export function useRenderedMarkdown(
       } else {
         paint(element, parsed, engine.serializer);
         if (Card !== undefined) {
-          const collected = collectAskHosts(element, parsed);
-          // A mounted card renders the options as rows, so the shell folds its source option
-          // list where `askBlockShell` says so (not while malformed), as `AskBlockView` does.
-          for (const { host, shell } of collected) {
-            if (askBlockShell(askBlockFacts(host.node)).foldsOptions) {
-              shell.dataset.dispatchAskOptions = "rows";
-            }
-          }
-          if (collected.length > 0) {
-            hosts = collected.map(({ host }) => host);
-          }
+          hosts = collectAskHosts(element, parsed);
         }
       }
       setAskHosts(hosts);
@@ -180,8 +177,17 @@ export function useRenderedMarkdown(
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       const placeholders = collectPictureAnchors(element);
       setPictureAnchors(placeholders.length === 0 ? NO_PICTURES : placeholders);
+      if (engine !== undefined && parsed !== undefined) {
+        cancelDraw = drawMermaidDiagrams(element, parsed, markdown, (source) =>
+          engine.parse(source, softBreaks)
+        );
+      }
       onRenderedRef.current?.();
     });
+    return () => {
+      cancelRender();
+      cancelDraw?.();
+    };
   }, [Card, decorate, markdown, paint, root, softBreaks]);
 
   return {

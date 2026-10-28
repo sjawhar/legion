@@ -205,10 +205,12 @@ type PaneInputs struct {
 	// then told no gh variable at all: every pane of a runtime whose GitHubCredential function is
 	// nil.
 	GHOwnersDir, GHDefault, GH string
-	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env) and PiConfigFiles the
-	// operator's Oh My Pi overlays (runtime.tmux.pi_config_files); nil for none.
-	OperatorEnv   map[string]string
-	PiConfigFiles []string
+	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env), PiConfigFiles the
+	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files), and
+	// RoleConfigFiles the ones this pane's role alone names (role_config_files); nil for none.
+	OperatorEnv     map[string]string
+	PiConfigFiles   []string
+	RoleConfigFiles []string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -220,8 +222,9 @@ type PaneInputs struct {
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
 // LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
-// agent's bash tool; PI_CONFIG_FILES, the operator's overlays then the turn-scoping overlay
-// writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay), last so its keys outrank theirs), the
+// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, then the
+// turn-scoping overlay writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay), last so its keys
+// outrank theirs), the
 // four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
 // spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
 // them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
@@ -263,7 +266,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
-	overlays := append(slices.Clone(in.PiConfigFiles), filepath.Join(in.StateDir, podsafety.TurnScopeFile))
+	overlays := slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, []string{filepath.Join(in.StateDir, podsafety.TurnScopeFile)})
 	add("PI_CONFIG_FILES", strings.Join(overlays, ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.StateDir) {
@@ -535,7 +538,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
-		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles,
+		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }

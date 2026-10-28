@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type BrowserContext, expect, test } from "@playwright/test";
 
 import {
@@ -8,8 +11,10 @@ import {
   createProject,
   editArtifact,
   getArtifact,
+  getArtifactText,
   getArtifactVersion,
 } from "./api";
+import { runDispatch } from "./dispatch-cli";
 import {
   connectedDot,
   countDocumentSockets,
@@ -22,6 +27,7 @@ import {
   selectEditorText,
   typeAtEnd,
 } from "./editor";
+import { engineParagraphs } from "./read-back";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -36,7 +42,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the spec opens as a formatted, editable document with no source pane", async ({
+test("the spec opens as a formatted, editable document with no source pane @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "READ", name: "Readable" });
@@ -164,7 +170,7 @@ test("reading a document gives its headings ids without versioning it or crediti
   }
 });
 
-test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both", async ({
+test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -518,7 +524,7 @@ test("document marks and table alignment use classes rather than inline styles",
   );
 
   // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
-  // explicit desktop context even while the mark/table invariant runs under every project.
+  // explicit desktop context.
   const [alice, selectionAlice, selectionBob] = await Promise.all([
     asUser(browser, "alice"),
     asUser(browser, "alice", { viewport: { height: 900, width: 1440 } }),
@@ -648,7 +654,7 @@ test("a version deep link renders the comment's original quote highlighted in a 
   }
 });
 
-test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload", async ({
+test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "NAV", name: "Navigation" });
@@ -690,6 +696,61 @@ test("clicking a Markdown dispatch:// link in the live editor navigates in-app w
     expect(
       await page.evaluate(() => (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker)
     ).toBe(true);
+  } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-536: `\&` is an escaped ampersand, so `\&amp;` is the text `&amp;`, not `&` - in the
+// browser editor's engine (remark/micromark), in the server's Go reading of the document, and in
+// what an agent reads back from the command line.
+test("a backslash before a character reference reads as its text in a document, a comment and the command line", async ({
+  browser,
+}, testInfo) => {
+  const written = "Plain \\&amp; end.";
+  const text = "Plain &amp; end.";
+  await createProject({ key: "REF", name: "References" });
+  const issue = await createIssue(
+    { project: "REF", spec: `${written}\n`, title: "Escaped reference" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    await expect.poll(() => editor.locator("p").allTextContents()).toEqual([text]);
+
+    // Stored as the canonical markdown for that text, which the engine reads back unchanged.
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect(stored).toBe("Plain &amp;amp; end.\n");
+    expect(engineParagraphs(stored)).toEqual([text]);
+
+    // A comment's body is rendered by the engine alone: the control for the document's reading.
+    const comment = await createComment(issue.key, { body: written }, session);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(
+      page.locator(`[data-turn="comment:${comment.id}"]`).getByText(text, { exact: true })
+    ).toBeVisible();
+
+    // The command runs outside the browser, so one project runs it.
+    if (testInfo.project.name === "chromium") {
+      const home = mkdtempSync(join(tmpdir(), "dispatch-cli-doc-read-"));
+      try {
+        const read = await runDispatch(
+          ["doc-read", "--issue", issue.key, "--artifact", "spec"],
+          home
+        );
+        expect(read.code, `${read.stdout}${read.stderr}`).toBe(0);
+        const trailer = read.stdout.indexOf("Document token:");
+        expect(trailer, read.stdout).toBeGreaterThan(-1);
+        // The stored markdown, its own line ending, then the blank line before the trailer.
+        expect(read.stdout.slice(0, trailer)).toBe("Plain &amp;amp; end.\n\n\n");
+      } finally {
+        rmSync(home, { force: true, recursive: true });
+      }
+    }
   } finally {
     await alice.close();
   }

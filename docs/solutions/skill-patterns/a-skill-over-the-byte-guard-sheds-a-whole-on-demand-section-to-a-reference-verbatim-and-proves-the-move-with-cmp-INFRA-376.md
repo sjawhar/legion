@@ -8,7 +8,7 @@ tags:
   - architect-skill
   - claude-envoy
 date: 2026-10-25
-status: active
+status: superseded in part by sjawhar/legion#2423 — the pull request no longer regenerates or commits the Claude Code copy under `packages/claude-envoy/legion/`, which main's Rebuild Claude Envoy plugin workflow commits after each merge, so the third `cmp` check reads a `bun scripts/build.ts --out <dir>` build; the byte budget, the verbatim move, the pointer and naming the broken pull requests stand
 module: skills/legion-architect
 related_issues:
   - "INFRA-376"

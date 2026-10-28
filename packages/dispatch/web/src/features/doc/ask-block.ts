@@ -6,8 +6,8 @@ import type { BlockSchema, BlockTypeSchema } from "../../api/types";
 import { pictureNodeView } from "./picture-view";
 import {
   type AskBlockHost,
-  askBlockFacts,
-  askBlockShell,
+  applyAskBlockShell,
+  askShellSlots,
   renderAskBlockShell,
   renderTypedBlock,
 } from "./typed-block-drawing";
@@ -55,38 +55,25 @@ class AskBlockView implements NodeView {
     private readonly publish: () => void
   ) {
     this.node = node;
-    const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderAskBlockShell(node));
+    const { dom } = DOMSerializer.renderSpec(document, renderAskBlockShell(node));
     this.dom = dom as HTMLElement;
-    if (contentDOM === undefined) {
-      throw new Error("the decision shell has no content hole");
+    const slots = askShellSlots(this.dom);
+    if (slots === undefined) {
+      throw new Error("the decision shell has no header, content or footer slot");
     }
-    this.contentDOM = contentDOM;
-    this.header = slot(this.dom, "data-dispatch-ask-header");
-    this.footer = slot(this.dom, "data-dispatch-ask-footer");
+    this.contentDOM = slots.content;
+    this.header = slots.header;
+    this.footer = slots.footer;
     this.applyShell();
     this.register();
   }
 
   private applyShell(): void {
-    const facts = askBlockFacts(this.node);
-    const shell = askBlockShell(facts);
-    this.dom.className = shell.frameClass;
-    this.dom.dataset.blockId = facts.blockId;
-    this.dom.dataset.dispatchAskBlock = facts.blockId;
-    for (const [name, value] of Object.entries(shell.stamps)) {
-      this.dom.setAttribute(name, value);
-    }
-    if (shell.stamps["data-dispatch-ask-malformed"] === undefined) {
-      this.dom.removeAttribute("data-dispatch-ask-malformed");
-    }
-    if (shell.foldsOptions) {
-      // The card renders the options as rows; the source list shows while malformed, or while
-      // the caret is inside the block (`askBlockEditingPlugin`).
-      this.dom.dataset.dispatchAskOptions = "rows";
-    } else {
-      delete this.dom.dataset.dispatchAskOptions;
-    }
-    this.contentDOM.className = shell.contentClass;
+    // The block's identity is the editor's alone (`renderAskBlockShell` says why).
+    const blockId = String(this.node.attrs.blockId);
+    this.dom.dataset.blockId = blockId;
+    this.dom.dataset.dispatchAskBlock = blockId;
+    applyAskBlockShell(this.dom, this.contentDOM, this.node);
   }
 
   private register(): void {
@@ -122,16 +109,6 @@ class AskBlockView implements NodeView {
     this.registry.delete(this.key);
     this.publish();
   }
-}
-
-/** The shell's own slot element marked with `attribute`: a child of the shell, never the slot of
- *  a decision nested in its content. */
-function slot(dom: HTMLElement, attribute: string): HTMLElement {
-  const element = dom.querySelector<HTMLElement>(`:scope > [${attribute}]`);
-  if (element === null) {
-    throw new Error(`the decision shell has no ${attribute} slot`);
-  }
-  return element;
 }
 
 /** The document position of the `ask` node the selection head sits inside, or undefined when

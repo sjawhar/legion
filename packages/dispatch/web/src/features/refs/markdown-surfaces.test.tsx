@@ -16,7 +16,7 @@ import type {
   BroadcastSummary,
   Comment,
   CommentRead,
-  IssueDetails,
+  IssueReferenceSummary,
   SearchResult,
 } from "../../api/types";
 import { AgentThread } from "../agent-view/AgentThread";
@@ -49,37 +49,13 @@ const RENDERED = /Heading\s+Bold then code and a link to Design decision\.?\s+fi
  *  surface that showed `dispatch://CORE-1` unresolved fails too. */
 const LITERAL_SYNTAX = ["##", "**", "`", "[link](", "- first", "dispatch://"];
 
-const issue: IssueDetails = {
-  route_status: null,
-  route_holder: null,
-  artifacts: [],
-  children: [],
-  closed_at: null,
-  created_at: "2026-09-09T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  external_links: [],
+/** CORE-1's summary read, which a reference to it shows. */
+const issue: IssueReferenceSummary = {
+  documents: [],
   key: "CORE-1",
-  labels: [],
-  last_seq: 1,
-  number: 1,
-  open_asks: [],
-  progress: { tasks: null, children: null },
-  parent: null,
-  blocked_by: [],
-  assignee: null,
-  claim: null,
-  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-  primary_artifact_id: "artifact-none",
-  priority: null,
   project: "CORE",
-  rank: "U",
-  referenced_by_count: 0,
-  route: null,
-  repo: null,
-  resolved_repo: null,
   status: "in_progress",
   title: "Design decision",
-  updated_at: "2026-09-09T00:00:00Z",
 };
 
 const comment: Comment = {
@@ -203,7 +179,7 @@ afterEach(() => {
 });
 
 test("the agent transcript renders assistant and reasoning text as Markdown", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const messages: KeyedMessage[] = [
     {
       content: [
@@ -236,12 +212,12 @@ test("the agent transcript renders assistant and reasoning text as Markdown", as
     }
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("the agent transcript renders the viewer's turn, another sender's turn and a Dispatch reply as Markdown", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const messages: KeyedMessage[] = [
     {
       content: [{ text: FIXTURE, type: "text" }],
@@ -282,7 +258,7 @@ test("the agent transcript renders the viewer's turn, another sender's turn and 
     }
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -351,7 +327,7 @@ test("a transcript turn keeps single newlines as line breaks and still formats b
 
 test("the reference hover card renders a comment's body and an ask's question formatted", async () => {
   const getComment = spyOn(api, "getComment").mockResolvedValue(commentRead);
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   jest.useFakeTimers();
   const view = render(
     <Providers>
@@ -383,7 +359,7 @@ test("the reference hover card renders a comment's body and an ask's question fo
   } finally {
     view.unmount();
     getComment.mockRestore();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -394,7 +370,7 @@ test("the unfurl card under a bare reference renders the target's text formatted
     comment: { ...comment, body: long },
     replies: [],
   });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const view = render(
     <Providers>
       <Unfurl body="dispatch://CORE-1/comment/comment-1" />
@@ -420,12 +396,12 @@ test("the unfurl card under a bare reference renders the target's text formatted
   } finally {
     view.unmount();
     getComment.mockRestore();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("a reply quote renders the quoted parent formatted on one line after the app's own prefix", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const view = render(
     <Providers>
       <ReplyQuote author={undefined} excerpt={FIXTURE} to="/issues/CORE-1/messages/message-1" />
@@ -444,12 +420,12 @@ test("a reply quote renders the quoted parent formatted on one line after the ap
     expectOneLine(body);
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("the margin's collapsed thread preview renders the root formatted on one line", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const thread: Thread = {
     anchor: null,
     key: comment.id,
@@ -489,12 +465,12 @@ test("the margin's collapsed thread preview renders the root formatted on one li
     expectOneLine(body);
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("a search hit's snippet renders formatted with the matched words still highlighted", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const hit: SearchResult = {
     href: "/issues/CORE-1/comments/comment-1",
     id: "comment-1",
@@ -531,12 +507,12 @@ test("a search hit's snippet renders formatted with the matched words still high
   } finally {
     view.unmount();
     search.mockRestore();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("the broadcasts list shows each broadcast's first line formatted", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   const sent: BroadcastSummary = {
     author: { id: "alice", kind: "user" },
     body: FIXTURE,
@@ -564,7 +540,7 @@ test("the broadcasts list shows each broadcast's first line formatted", async ()
     view.unmount();
     listBroadcasts.mockRestore();
     listAgents.mockRestore();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -573,7 +549,7 @@ test("the broadcasts list shows each broadcast's first line formatted", async ()
  * version, captioned with its file name. A surface that renders through `MarkdownBody` shows it at
  * the column's width, named by its caption; one that renders through `MarkdownPreview` shows its
  * 40 px thumbnail beside the caption on the preview's one line. `DispatchPicture` builds the
- * address from the reference alone, so the issue read lists no such artifact: a picture that fell
+ * address from the reference alone, so the issue summary lists no such document: a picture that fell
  * back to its reference (`RefLink`) draws no `<img>` at all and fails every assertion below.
  */
 const PICTURE = "The broken layout: ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)";
@@ -642,18 +618,18 @@ describe("a Dispatch picture on every surface", () => {
   // (`MarkdownBody.test.tsx`). The test DOM is happy-dom's window (`__tests__/setup.ts`).
   const testWindow = window as unknown as HappyDOMWindow;
   let pageBefore = "about:blank";
-  let getIssue: Mock<typeof api.getIssue>;
+  let getIssueSummary: Mock<typeof api.getIssueSummary>;
 
   beforeEach(() => {
     pageBefore = window.location.href;
     testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
-    // A picture that fell back to its reference resolves it against this issue, which lists no
-    // artifact, rather than reaching the network.
-    getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+    // A picture that fell back to its reference resolves it against this issue's summary, which
+    // lists no document, rather than reaching the network.
+    getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   });
 
   afterEach(() => {
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
     testWindow.happyDOM.setURL(pageBefore);
   });
 
