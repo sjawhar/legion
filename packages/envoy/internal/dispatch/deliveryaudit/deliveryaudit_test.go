@@ -118,7 +118,7 @@ func newRig(t *testing.T) *rig {
 			t.Errorf("shut down the document service: %v", err)
 		}
 	})
-	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("signing-key"), nil)
 	if err := people.Record(context.Background(), "alice"); err != nil {
 		t.Fatalf("record alice: %v", err)
 	}
