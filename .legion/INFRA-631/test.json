@@ -2,64 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T12:58:00Z",
-  "round": 10,
-  "headTested": "a2a1e1fdb778643b4499f5f2ad0d31b4abe344ac",
+  "completed": "2026-10-28T13:35:00Z",
+  "round": 11,
+  "headTested": "518c25baa648cc5ef331449591d9ab33d50d308e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at a2a1e1fd (code head 6cbc88e3, a merge of main c2746962, which is main@origin): checker exit 0 on both guides; `restructure.ts --strict` on c2746962's files byte-identical to head, and --structural-only folded-equal to head for both files; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 39 pass, my tests unchanged (the implementer's round-9 idempotence-refusal test now expects 'line 1 of the re-laid-out text', the reviewer's minor finding)."
+    "how": "Re-ran at 518c25ba (code head ad3ffed9, a merge of main 5fbd8391, which is main@origin): checker exit 0 on both guides; `restructure.ts --strict` on 5fbd8391's files byte-identical to head; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 45 pass, my tests unchanged."
   },
   "reviewFindings": {
-    "joins inside inline <pre>/<code> where scanBlocks splits a paragraph micromark reads as one": "fixed: '> Quote <pre>\\nline one\\nline two</pre>', '[^1]: Run <pre>a\\nb\\nc</pre> now.', '> Run <code>make\\nbuild\\ntest</code> first.' and 'Use <code>a \\\\</code> b\\nc</code> here.' are refused (exit 2, naming the block), file unchanged; the round-9 checker (c2a08196) writes the first as 'line one line two</pre>', exit 0",
-    "conflict with main": "fixed: merged main c2746962 and regenerated; mergeable",
-    "second-relayout line": "fixed: the refusal says 'line 5 of the re-laid-out text'"
+    "nested, emphasised and unclosed verbatim elements": "fixed: 'Use <pre>a <pre>b</pre> c. Then more text\\nd</pre> here.', the nested <code> variant, '> Quote *x <pre>y*\\nline one\\nline two</pre>' and 'Use <pre>x\\n\\nNext b. Then c\\nd.' are left byte for byte, exit 0",
+    "CRLF after <pre": "fixed: '<pre\\r\\nclass=\"x\">a. Then b\\r\\nc</pre>' is left as it is",
+    "pi-envoy AGENTS.md table reference": "fixed: 'the \"Listener API\" list of packages/envoy/AGENTS.md'"
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
-      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, plus an independent paragraph-level scanner",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?  (and the Python scanner: fences removed; code spans, inline HTML and link destinations masked per paragraph)",
-      "observed": "exit 0, no output; the scanner finds 0 two-sentence lines in either guide; --write on copies of both guides changes nothing",
-      "headSha": "a2a1e1fdb778643b4499f5f2ad0d31b4abe344ac",
-      "negativeControl": "the same command on main c2746962's old-layout files exits 1: AGENTS 1635 R1 / 101 R2 / 9 R3, README 473 R1 / 23 R2 / 1 R3"
-    },
-    {
-      "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
-      "surface": "restructure.ts as the reviewer re-runs it, compared with the guides at head",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <c2746962 AGENTS.md> <out> <c2746962 README.md> <out>; cmp with head; --strict --structural-only on the same files, folded-compared with head",
-      "observed": "byte-identical; the structural output (named edits only) is folded-equal to head for both files, so the re-layout changed only whitespace; the named edits were classified hunk by hunk in round 2 (0 left over; 10 tables cell for cell)",
-      "headSha": "a2a1e1fdb778643b4499f5f2ad0d31b4abe344ac",
-      "negativeControl": "restructure.ts --strict exits 1 and writes nothing when an anchor is missing (round 2)"
-    },
-    {
-      "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
-      "surface": "git merge-tree --write-tree on branches made from the new-layout files with the committed patches",
-      "command": "TMPDIR=$TMPDIR/infra631-test10/own/rp bash .legion/INFRA-631/replay/run.sh",
-      "observed": "exit 0, 11/11 PASS; four real different-sentence pairs and both added-item demos merge clean, the two same-or-adjacent pairs conflict as classified; round 1's ports 6112adc201ea, e26a66480011, 26a15dcf333e clean",
-      "headSha": "a2a1e1fdb778643b4499f5f2ad0d31b4abe344ac",
-      "negativeControl": "append(c), two items at one point of Routes, conflicts; same-sentence controls 728b5e297fb5 and 4440fc7b57a2 conflict; every clean pair conflicts on the old layout"
-    },
-    {
-      "criterion": "4. Every citation of a moved section still resolves, and the porting recipe in the PR body works.",
-      "surface": "the recipe driven literally (rounds 3 and 7); restructure.ts unchanged since round 8",
-      "command": "recipe steps 1-8 on 73 open-PR file runs (round 3); step 4's refusal branch (round 7)",
-      "observed": "66 of 73 runs merge with no conflict, none loses a line; the refusal branch writes ours.new and names its block's line; position words resolve at head",
-      "headSha": "a2a1e1fdb778643b4499f5f2ad0d31b4abe344ac",
-      "negativeControl": "--write with no node_modules prints 'run `bun install`', exit 2, file unchanged"
-    },
-    {
-      "criterion": "Tool contract: --write changes only whitespace, never front matter, never how GitHub renders a file, and a second run changes nothing.",
-      "surface": "scripts/semantic-line-breaks.ts --write on copies of every tracked .md file, compared with cmark-gfm and PyYAML, run twice",
-      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,216 files) copied to $TMPDIR/infra631-test10/work; xargs bun <checkout>/scripts/semantic-line-breaks.ts --write; fm.py; cm.py (cmarkgfm 2024.11.20, whitespace kept inside pre/code/textarea/kbd/samp/tt); copy to work2, --write again, diff -rq",
-      "observed": "1,143 written, 4 refused (pmdoc corpus hazards); 0 of 852 front matter blocks changed (6 unparseable before and after); cmark-gfm rendering equal for all but docs/kubernetes.md's loose-list </p> before the <dir> block main already has; first vs second run: 0 files differ; 66 crafted inputs (rounds 4-10, the reviewer's included) left as they are, refused, or rendering the same, each idempotent",
-      "headSha": "a2a1e1fdb778643b4499f5f2ad0d31b4abe344ac",
-      "negativeControl": "the round-9 checker (c2a08196) writes '> Quote <pre>\\nline one\\nline two</pre>' as '> Quote <pre>\\nline one line two</pre>', exit 0; the head refuses it, exit 2, file unchanged"
+      "criterion": "1. A check shows the layout (and the file-head instruction: '`bun scripts/semantic-line-breaks.ts <this file>` checks the layout, and `--write` fixes it').",
+      "evidence": "markVerbatim counts verbatim open tags on a block's raw lines 'conservatively (one inside a code span counts too)', and a tag counted open with no close keeps every later block verbatim to the end of the file, unchecked by R1/R2 and left by --write. So one mention of an element name inside a code span switches the tool off for the rest of the file: `printf 'Use \\`<code>\\` for code.\\n\\nLater one. Later two.\\n' > m.md; bun scripts/semantic-line-breaks.ts m.md` exits 0 with no finding, and --write leaves `Later one. Later two.` on one line. Real files: docs/kubernetes.md names `(<code>)` in a code span at line 647 of 6,395, and its findings drop from 1,494 (round-10 checker 6cbc88e3) to 144 at head; scripts/e2e/README.md 1,032 -> 693; packages/pi-envoy/AGENTS.md 279 -> 143. A paragraph `Tail one. Tail two.` appended to each is reported by the round-10 checker and not by the head. These are the guides dispatch://INFRA-632 will lay out with this tool. Both packages/envoy guides contain no such mention today, so the check of this PR's guides still holds, but the first edit that names `<code>`, `<pre>` or `<kbd>` in a code span disables the check for the rest of that guide. Regression from round 11 (78fc6191). Red tests (commit 449b7358): 'a <code> named inside a code span opens no element, so later blocks are still checked' and 'a <code> named inside a code span opens no element, so --write re-lays out later blocks'; `bun test scripts/semantic-line-breaks.test.ts` -> 44 pass, 2 fail. Fix shape: count tags only where proseMask (or the parser) reads raw HTML, not inside code spans, link destinations or escaped text."
     }
   ],
+  "failed": 1,
   "verified": [
-    "CI read at 12:51Z: the handoff head a2a1e1fd carries skip-checks; at the code head 6cbc88e3 lint, test, typecheck, build x2, changes and pr-title are queued. Mergeable against main c2746962."
+    "Full sweep at 518c25ba: --write on all 1,231 tracked .md files writes 1,156 and refuses 4 (pmdoc corpus); 0 of 865 front matter blocks changed; cmark-gfm rendering equal for every written file; a second run changes 0 files. 71 crafted inputs (rounds 4-11, the reviewer's included) are left as they are, refused, or render the same, each idempotent. --write remains safe; the failure is the tool going silent.",
+    "CI read at 13:28Z: the code head ad3ffed9 has lint, test, typecheck, build x2, changes and pr-title queued; the handoff heads carry skip-checks. Mergeable against main 5fbd8391."
   ],
   "notes": [
     "Not counted, as before: README Identity list split halves read as identity modes (disclosed deviation)."
