@@ -2,21 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-546",
-  "completed": "2026-10-28T08:46:17Z",
-  "round": 4,
-  "reviewedHead": "pushed with this handoff, above d7767c9bddbb8ce04ed2c68e6916761e42bfdfbc",
-  "codeHead": "7f536f31512aac649d3b262e8deda3046648c9a7",
+  "completed": "2026-10-28T12:32:42Z",
+  "round": 5,
+  "reviewedHead": "pushed with this handoff, above 305409971247b9727aaa9a2a35448f1e90399452",
+  "codeHead": "81cf8c12ad439ac091aa7a35fd9d3850e24bb729",
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "scope": "Narrowed by the INFRA-14 architect at the round cap: the two round-3 findings and correctness; anything else goes to the Fast-follow line.",
-  "roundThreeFindings": "Both fixed. (1) ae6ca339: after ErrNotStored, publishJetStream and the window send the envelope once more without its Nats-Msg-Id. The quality agent's -overlay mutation check showed each path's removal fails publish_not_stored_test.go:117. The deep agent read v2.15.1: the republish never fires there. The PR body's consumer citations hold. (2) 7f536f31: AwaitReady restarts a member no peer's meta group heard from in 15 s (at most 3), for the nats-server 2.10.29 sendq start race; envoy-go-race is green. Threads PRRT_kwDORFy7ds6wwejw and PRRT_kwDORFy7ds6wwej0 are answered by the implementer and resolved.",
-  "ci": "At code head 7f536f31 (compare to d7767c9b: handoffsOnly true), read 2026-10-28T08:36Z: every check-run completed success or skipped, including the required lint, typecheck, test and pr-title, and envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke and envoy-e2e-local.",
-  "thermonuclear": "At d7767c9b (code 7f536f31): deep-review APPROVE with no finding (the first attempt failed with a model 401 and was re-run); code-quality: both fixes correct, two Minor doc mismatches, which go to Fast-follow per the narrowing.",
-  "baseNote": "#2228 merged 2026-10-27T19:10Z; the base is now main, and GitHub reports the PR CONFLICTING with main. The implementer merges main per the retarget rule; the head then comes back for a fingerprint confirmation or a new round.",
+  "minor": 3,
+  "whyNewRound": "The retarget merge of main (9bcba1ee) was followed by code changes: the tester's round-6 red test (3ceb0bea), the full-stream answer fix (859993f7) and the changelog entries moved into changie fragments (81cf8c12). The fingerprint differs from the approved 7f536f31, so this is a new round, with the thermonuclear pair run again.",
+  "verified": "The merge kept every PR change (deep agent compared pr4 with pr5, file by file). A full stream's send and publish now answer 503, Retry-After: 1, under streamFullPrefix, recorded as stream_full (cmd/listener/api.go, request_record.go); the tester proved this on a real envoy-listener, with a bus-down negative control still recorded as bus_unavailable. ErrNotStored wrapping ErrStreamFull reaches the same answer through the two %w wraps. The seven fragments are kind Changed with Issue pr2362, per the controller's changelog ruling (dispatch://INFRA-576/comment/5d511270-d79f-40ed-9c52-f385fc944500), and CHANGELOG.md is unchanged against the base.",
+  "ci": "At code head 81cf8c12 (compare to 30540997: handoffsOnly true), read 2026-10-28T12:32Z: lint, typecheck, test, pr-title success, and every envoy lane (envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local), dispatch and the TS lanes success. One of the two 'build' jobs, Worker Image (not required; this diff touches no daemon or image file), failed in the image's chromium TLS probe (chromium killed, dbus); rerun requested, queued.",
+  "thermonuclear": "At 30540997 (code 81cf8c12): deep-review APPROVE with three Minors; code-quality CHANGES: an Important doc item and two Minors. Under the architect's narrowing (correctness only, docs/wording to Fast-follow) the doc item is Fast-follow: the code and the tester's real-binary proof agree, and no alert or filter reads the outcome.",
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/bus/async.go:25", "description": "Fast-follow: four docs (async.go:25-26, stream.go:211-213, outbox/publisher.go:209-210, AGENTS.md first sentence of the duplicate-window paragraph) still say the stream's MsgId drops a repeat, but the republish carries no MsgId; consumers drop repeats by event_id/dedupe_key."},
-    {"severity": "minor", "file": "packages/envoy/internal/bus/async.go:40", "description": "Fast-follow: a window's republish goes out after later sends, so 'stored in send order' (async.go:40-43, publisher.go:196-199) needs the exception named; daemon facts are fenced by Dispatch seq, so there is no wrong state."}
+    {"severity": "minor", "file": "packages/envoy/docs/architecture.md:86", "description": "Fast-follow: the send and publish answer table and the outcome list (lines 142-144) leave out the full stream's 503 under streamFullPrefix and the stream_full outcome."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/full_stream_answer_test.go:63", "description": "Fast-follow: assert outcome == stream_full and the streamFullPrefix prefix (a mutation of both passes now), and add an ErrNotStored-wrapping-ErrStreamFull case."},
+    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr-2362-replica-count.yaml", "description": "For the record: fragments carry Issue pr2362 per the controller's ruling, while main's AGENTS.md says to use the issue key; no gate reads it."}
   ]
 }
