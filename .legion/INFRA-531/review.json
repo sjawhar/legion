@@ -2,26 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-531",
-  "completed": "2026-10-28T22:08:00Z",
-  "round": 3,
-  "codeHead": "3ff56757db47",
+  "completed": "2026-10-28T23:25:00Z",
+  "round": 4,
+  "codeHead": "28ae264dce47",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
-  "ci": "No verdict yet: every workflow for 3ff56757 (Tests, Legion Envoy and Contracts, Docs, Worker Image, PR Title) has been queued since 21:11 UTC; GitHub now reports the pull request MERGEABLE/BLOCKED.",
-  "thermonuclear": "Both run at 3ff56757. Deep review: merge resolution 143b0235 sound (the full count per distinct writing chooses main's spelling); raw-HTML fix holds for tags, closing tags, comments, processing instructions, uppercase declarations and CDATA, in quotes, lists and tables; 0 ok-to-refused writes over 38,684 random documents; one Medium (below). Code quality: no finding on the merge; three structure items in rawHTMLScan, which change no output and go on the Fast-follow line with INFRA-535 by the architect's direction.",
-  "roundTwoThreads": "Answered: PRRT_kwDORFy7ds6xTuxo accepted (AGENTS.md sentence fixed); PRRT_kwDORFy7ds6xTuxv, PRRT_kwDORFy7ds6xTux4, PRRT_kwDORFy7ds6xTux8, PRRT_kwDORFy7ds6xTuyA accepted as moved to dispatch://INFRA-535 by the architect; PRRT_kwDORFy7ds6xTuxi still stands in part (lowercase declarations and control characters in unquoted attribute values).",
+  "minor": 0,
+  "ci": "No verdict for the code yet: at 28ae264d Tests, Legion Envoy and Contracts and Worker Image are queued (the repository had 105 queued runs at 22:50 UTC) and Docs is in progress. Required pr-title is red at 28ae264d on 'body:15: names a Tailscale MagicDNS host': a Dispatch web link the reviewer put into the PR body in round 1. The reviewer replaced it with dispatch://INFRA-531/comment/2dfdf469-5c03-4bfd-8751-462fdcc6ef3e at 22:51 UTC; the head 44bcf0a6 carries skip-checks, so pr-title re-runs only at the next code push.",
+  "thermonuclear": "Both run at 28ae264d. Deep review: round 3's finding fixed (inline raw HTML by CommonMark's and the engine's grammar, open tags, lowercase declarations, the kind-2 cache, Match side effects all checked); one High (below). Code quality: no behaviour-changing finding; merge 0771e73c keeps main's fixture list plus bare-address-after-punctuation and applies #2481's import fix.",
+  "roundThreeThreads": "PRRT_kwDORFy7ds6xTuxi (raw HTML) accepted as fixed for inline raw HTML; the block-start case is a new comment.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:723,761",
-      "description": "rawHTMLScan asks goldmark's raw HTML parser, which reads a declaration only after `<!` plus an uppercase letter and rejects control characters in an unquoted attribute value; CommonMark 0.31 and the editor's engine read both as raw HTML. Reproduced: `\\<!x;a@b.cc>`, `Set \\<!x;a@b.cc> now`, `Set \\<!doctype x;a@b.cc> now` and `\\<a b=\\x01;a@b.cc>` are stored escaped at base af1ff09c (the engine reads text and a mailto: link) and stored raw at 3ff56757: the engine reads `Set ` + an html node (the link lost), and for `<!x;[a@b.cc](mailto:a@b.cc)>` and `<a b=\\x01;…>` gives no document at all (MilkdownError: Cannot create node for doc)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/pr2373-Fixed-20261028-151646.yaml:17-19",
-      "description": "The fragment names the autolink escape only; the raw-HTML escape (`Set \\<input value=me@x.cc>` stored with `\\<`) is not described."
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:716-755 (and escape.go lineReadsAsText)",
+      "description": "At a paragraph's first character the engine (micromark html-flow) also opens an HTML block, whose kind-7 tag grammar accepts a second `=value` in an unquoted attribute and whose kind 4 accepts `<!` plus any letter; rawHTMLScan checks only inline raw HTML and the block-start check is goldmark's. Reproduced: `\\<span title=a=b;a@b.cc>` and `\\<a href=x?a=1&b=me@x.cc>` are stored escaped at main 1767c9af (or as a document the engine loads) and stored raw at 28ae264d (`<span title=a=b;[a@b.cc](mailto:a@b.cc)>`), and the engine gives no document (MilkdownError: Cannot create node for doc). The same block-start gap stores `\\<a b=x=*y*>` raw on main too, so fix the class at block start."
     }
   ]
 }
