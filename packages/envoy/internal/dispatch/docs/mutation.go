@@ -110,7 +110,16 @@ func (op *liveOperation) abandon() {
 // change runs mutate, which writes the operation's fork, and captures every update it makes, for
 // the record to append, and the margin records it changes (watchMargin), for the growth weigh. A
 // panic in mutate is its error (recoverMutation).
+//
+// What says the change moved the fork is the fork itself, read on either side of mutate: its state
+// vector and its delete set, since a deletion advances no clock (forkHeld). The updates the fork
+// emits cannot say it, for they include one for a transaction that changes nothing. A change whose
+// transactions changed nothing writes nothing: appended, its empty update would refresh the anchors
+// and mark the document owing a settlement again (markUpdateOwed), which every repair pass over a
+// closed issue would then sweep. Its updates are dropped, so the caller answers
+// websocket.ErrNoChanges and the fork, which it left as it was, is kept.
 func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
+	wasClocks, wasDeletes := op.fork.StateVector(), crdt.DeleteSetFromDoc(op.fork)
 	unsubscribe := op.fork.OnUpdate(func(update []byte, _ any) {
 		op.updates = append(op.updates, append([]byte(nil), update...))
 	})
@@ -121,6 +130,9 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 	}()
 	stopMargin()
 	unsubscribe()
+	if err == nil && len(op.updates) > 0 && forkHeld(wasClocks, wasDeletes, op.fork) {
+		op.updates = nil
+	}
 	return margin, err
 }
 
@@ -197,8 +209,10 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
 // does not commit never reaches the room, a browser or a version's authors. It returns
-// websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
-// ErrServiceUnavailable when the room its slot is on failed before its append.
+// websocket.ErrNoChanges, as the room's Apply does for a write that wrote nothing, when mutate
+// left the fork as it was, even through a transaction: ygo hands the fork's observers an update
+// for every transaction, one that changes nothing included. It returns ErrServiceUnavailable when
+// the room its slot is on failed before its append.
 //
 // mutate is handed the fork and current, the fork's tree as the operation starts, which applyLive
 // reads anyway to weigh the write against: every mutate starts from it (startTree, editTree) rather
@@ -282,7 +296,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, contentChanged, weak.Pointer[crdt.Doc]{}); err != nil {
 		return err
 	}
-	if contentChanged {
+	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
+	// pending author and leaves the document's latest edit source as it was.
+	if contentChanged && !isLifecycleWrite(ctx) {
 		s.creditLiveWrite(op.write, actor)
 		maps.DeleteFunc(added, func(id string, _ struct{}) bool {
 			_, excluded := op.write.renamedAskBlockIDs[id]
