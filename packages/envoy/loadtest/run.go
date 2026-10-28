@@ -53,6 +53,9 @@ type runConfig struct {
 	// args are the run's arguments as meta.json records them: the token values redacted
 	// (redactArgs).
 	args []string
+	// copyMeta is the -copy-meta file's JSON object, which meta.json records under copy; nil
+	// without the flag.
+	copyMeta json.RawMessage
 }
 
 func runLoad(args []string) error {
@@ -77,6 +80,7 @@ func runLoad(args []string) error {
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
+	copyMetaPath := fs.String("copy-meta", "", "JSON object file that describes the copy a foreign run measures, recorded verbatim in meta.json under copy")
 	_ = fs.Parse(args)
 
 	// Every input is validated before the first connection.
@@ -117,6 +121,12 @@ func runLoad(args []string) error {
 	if *out == "" {
 		return fmt.Errorf("-out is required")
 	}
+	var copyMeta json.RawMessage
+	if *copyMetaPath != "" {
+		if copyMeta, err = readCopyMeta(*copyMetaPath); err != nil {
+			return err
+		}
+	}
 	if *seedPath == "" {
 		*seedPath = filepath.Join(loadtestRoot(), "seed.json")
 	}
@@ -147,6 +157,7 @@ func runLoad(args []string) error {
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: redactArgs(fs, args),
+		copyMeta: copyMeta,
 	}, sf)
 }
 
@@ -290,6 +301,11 @@ type metaFile struct {
 	AllowForeign         bool            `json:"allow_foreign"`
 	PIDs                 map[string]int  `json:"pids"`
 	MarkerNonce          string          `json:"marker_nonce"`
+	// PGClock is Postgres's clock against loadgen's on -pg, read at the step's start and after its
+	// window (readPGClock).
+	PGClock *pgClocks `json:"pg_clock,omitempty"`
+	// Copy is the -copy-meta file's JSON object, verbatim; absent without the flag.
+	Copy json.RawMessage `json:"copy,omitempty"`
 }
 
 func execute(cfg runConfig, sf seedFile) error {
@@ -346,6 +362,9 @@ func execute(cfg runConfig, sf seedFile) error {
 
 	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
+	end := readPGClock(context.Background(), cfg.ep.pg)
+	logPGClock(lg, "end", end)
+	meta.PGClock.End = &end
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
@@ -781,6 +800,10 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	} else {
 		m.PostgresVersion = v
 	}
+	start := readPGClock(ctx, cfg.ep.pg)
+	logPGClock(lg, "start", start)
+	m.PGClock = &pgClocks{Start: &start}
+	m.Copy = cfg.copyMeta
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}

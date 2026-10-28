@@ -520,36 +520,14 @@ cmd_seed() {
   note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
 
-  note "waiting for the outbox to publish every seed event"
-  local deadline=$((SECONDS + 900)) pending
-  while :; do
-    pending=$(sql dispatch 'select count(*) from events where published_at is null')
-    [ "$pending" = 0 ] && break
-    ((SECONDS < deadline)) || die "the outbox still holds $pending unpublished events after 900 s; see $LOGS/dispatch-seed.log"
-    sleep 2
-  done
-  # Dispatch's block-index backfill (internal/dispatch/docs/block_index.go, migrations 0121-0126)
-  # indexes 20 owed documents a tick in the background. A seed that still owes it would hand every
-  # step about 100 s of that backfill, inside its window; production in steady state owes none.
-  # The tables do not exist in a build older than 0121, which owes nothing; Postgres resolves every
-  # table a statement names before it runs, so the existence check is its own query.
-  if [ "$(sql dispatch "select to_regclass('public.document_block_versions') is not null and to_regclass('public.block_grammar_owed') is not null")" = t ]; then
-    note "waiting for Dispatch's block-index backfill to finish"
-    deadline=$((SECONDS + 900))
-    while :; do
-      pending=$(sql dispatch 'select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)')
-      [ "$pending" = 0 ] && break
-      ((SECONDS < deadline)) || die "Dispatch still owes $pending block-index entries after 900 s; see $LOGS/dispatch-seed.log"
-      sleep 2
-    done
-  fi
+  # loadgen seed-finish (seedfinish.go), while Dispatch still runs: it waits until the outbox has
+  # published every seed event, then until Dispatch's block-index backfill owes nothing (each wait
+  # at most 15 min), runs vacuum analyze and installs the commit-time trigger. It reaches Postgres
+  # directly, not through the latency proxy.
+  loadgen seed-finish -pg "postgres://postgres@127.0.0.1:$(port postgres)/dispatch?sslmode=disable" ||
+    die "loadgen seed-finish failed; see $LOGS/dispatch-seed.log"
   stop_one dispatch
   trap - EXIT
-
-  note "vacuum analyze"
-  sql dispatch 'vacuum analyze' >/dev/null
-  note "installing the commit-time trigger (loadtest.event_commits)"
-  loadgen trigger-sql | psql_db dispatch >/dev/null
 
   local migration counts
   migration=$(sql dispatch 'select max(version) from schema_migrations')

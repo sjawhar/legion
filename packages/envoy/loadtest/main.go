@@ -21,6 +21,8 @@ commands:
   seed             seed 4 projects, 1,000 issues and 8,000 comments through Dispatch; writes seed.json
   run              one load step against the stack in stack.json; writes summary.json and profiles
   tables           render TABLES.md and pprof tops from step directories
+  seed-finish      after seed: wait for the outbox and the block-index backfill, vacuum, install the commit-time trigger
+  cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
   series-sessions  print the session count of the series step at a load factor
   trigger-sql      print the commit-time trigger SQL (commit-trigger.sql)
   box-busy         print the box's busy fraction over the next 5 s, from /proc/stat
@@ -43,6 +45,10 @@ func main() {
 		err = runLoad(os.Args[2:])
 	case "tables":
 		err = runTables(os.Args[2:])
+	case "seed-finish":
+		err = runSeedFinish(os.Args[2:])
+	case "cgroup-merge":
+		err = runCgroupMerge(os.Args[2:])
 	case "series-sessions":
 		err = runSeriesSessions(os.Args[2:])
 	case "trigger-sql":

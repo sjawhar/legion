@@ -20,6 +20,12 @@ type stepData struct {
 	name string
 	sum  summary
 	meta *metaFile
+	// cgroup is the directory's cgroup.json (loadgen cgroup-merge), nil without one.
+	cgroup *cgroupFile
+	// failed is set when the directory holds step-failed.json, and failedKinds are its reasons'
+	// kinds.
+	failed      bool
+	failedKinds []string
 }
 
 func runTables(args []string) error {
@@ -87,6 +93,10 @@ func readStep(dir string) (stepData, error) {
 			st.meta = &m
 		}
 	}
+	if st.cgroup, err = readCgroupFile(dir); err != nil {
+		return st, err
+	}
+	st.failedKinds, st.failed = readFailedKinds(dir)
 	return st, nil
 }
 
@@ -126,16 +136,20 @@ func p99(s stat) float64  { return s.P99 }
 func smax(s stat) float64 { return s.Max }
 
 // label is the step's name in a table row, marked "(<names> exited)" when a stack process exited
-// during the step.
+// during the step, and failedMark when its directory holds step-failed.json.
 func (s stepData) label() string {
-	if len(s.sum.StackExits) == 0 {
-		return s.name
+	label := s.name
+	if len(s.sum.StackExits) > 0 {
+		names := make([]string, len(s.sum.StackExits))
+		for i, x := range s.sum.StackExits {
+			names[i] = x.Name
+		}
+		label += " (" + strings.Join(names, ", ") + " exited)"
 	}
-	names := make([]string, len(s.sum.StackExits))
-	for i, x := range s.sum.StackExits {
-		names[i] = x.Name
+	if s.failed {
+		label += " " + failedMark(s.failedKinds)
 	}
-	return s.name + " (" + strings.Join(names, ", ") + " exited)"
+	return label
 }
 
 // probeLabel is the step's label in a table of a probe, marked "(<n> failed reads)" when the probe
@@ -262,6 +276,7 @@ func eventsTable(md *markdown, steps []stepData) {
 	if exited {
 		md.line("\n(<process> exited): that stack process exited during the step (summary.json `stack_exits`), so the step failed and its row, in every table here, does not measure the load.")
 	}
+	failedNote(md, slices.ContainsFunc(steps, func(s stepData) bool { return s.failed }))
 	commitsUnreadNote(md, unread, "the committed events/s, the delivery latencies from arrival and from commit, and the issue-topic receipts")
 }
 
@@ -296,61 +311,87 @@ func kindsTable(md *markdown, steps []stepData) {
 
 func resourcesTable(md *markdown, steps []stepData) {
 	md.line("\n## Resources\n")
-	md.header("step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
-		"box busy", "box busy before", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
+	// The working-set column exists only when a step holds cgroup.json, so a table of steps
+	// without one is unchanged.
+	withCgroup := slices.ContainsFunc(steps, func(s stepData) bool { return s.cgroup != nil })
+	columns := []string{"step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
+		"box busy", "box busy before", "Dispatch RSS max MiB"}
+	if withCgroup {
+		columns = append(columns, cgroupWorkingSetH)
+	}
+	md.header(append(columns, "heap in use MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
-		"Dispatch CPU-s per operation")
-	marked, unread := false, false
+		"Dispatch CPU-s per operation")...)
+	marked, unread, cgFailed, cgUnmeasured := false, false, false, false
 	for _, s := range steps {
 		unread = unread || s.sum.Events.commitsUnread()
 		busyBefore := "-"
 		if s.meta != nil && s.meta.BoxBusyBefore != nil {
 			busyBefore = num(100**s.meta.BoxBusyBefore, 0) + "%"
 		}
+		label := s.commitsLabel()
+		// With no sampler window every cell is "-" but box busy before, which is meta.json's
+		// reading, not the sampler's, and the cells that cgroup.json gives.
+		dispatch, pgCores, listener, nats, loadgen, proxy, busy, rss := "-", "-", "-", "-", "-", "-", "-", "-"
+		heap, goroutines, pool, pgMax, lockWait, perOp := "-", "-", "-", "-", "-", "-"
 		r := s.sum.Resources
-		if r == nil {
-			// No sampler window: every cell is "-" but box busy before, which is meta.json's
-			// reading, not the sampler's.
-			md.row(s.commitsLabel(), "-", "-", "-", "-", "-", "-", "-", busyBefore, "-", "-", "-", "-", "-", "-", "-")
-			continue
-		}
-		marked = marked || r.failedReads() > 0
-		cores := func(name string, d int) string {
-			v, ok := r.CPUCoresMean[name]
-			if !ok {
-				return "-"
+		if r != nil {
+			marked = marked || r.failedReads() > 0
+			label = withFailedReads(label, r.failedReads())
+			cores := func(name string, d int) string {
+				v, ok := r.CPUCoresMean[name]
+				if !ok {
+					return "-"
+				}
+				return num(v, d)
 			}
-			return num(v, d)
+			if v, ok := r.CPUCoresMean["dispatch"]; ok {
+				dispatch = num(v, 2) + " / " + num(r.CPUCoresPeak5s["dispatch"], 2)
+			}
+			pgCores, listener, nats, loadgen, proxy = cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2)
+			busy = num(100*r.SysBusyFrac, 0) + "%"
+			if v, ok := r.RSSMiBMax["dispatch"]; ok {
+				rss = num(v, 0)
+			}
+			heap, goroutines, pool = pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0), pair(r.PoolAcquireGoroutines, p50, smax, 0)
+			if r.DispatchCPUSPerOp != nil && !s.sum.Events.commitsUnread() {
+				perOp = num(*r.DispatchCPUSPerOp, 4)
+			}
+			if st, ok := r.PGConnsByState["active|Lock"]; ok {
+				lockWait = num(st.P50, 0)
+			} else if r.PGConnsTotal.N > 0 {
+				lockWait = "0"
+			}
+			if r.PGConnsTotal.N > 0 {
+				pgMax = num(r.PGConnsTotal.Max, 0)
+			}
 		}
-		dispatch := "-"
-		if v, ok := r.CPUCoresMean["dispatch"]; ok {
-			dispatch = num(v, 2) + " / " + num(r.CPUCoresPeak5s["dispatch"], 2)
+		workingSet := "-"
+		if s.cgroup != nil {
+			c := s.cgroup.resources()
+			dispatch, pgCores, listener, nats, loadgen, workingSet = c.dispatch, c.postgres, c.listener, c.nats, c.loadgen, c.workingSet
+			// The operations are the ones summary.json's figure counts: committed events and sent
+			// requests, unknown when the commit rows were not read.
+			ops := s.sum.Events.Committed + s.sum.Requests.Sent
+			if (r == nil || r.DispatchCPUSPerOp == nil) && c.dispatchCPUS != nil && !s.sum.Events.commitsUnread() && ops > 0 {
+				perOp = num(*c.dispatchCPUS/float64(ops), 4)
+			}
+			cgFailed = cgFailed || c.failed
+			cgUnmeasured = cgUnmeasured || len(c.unmeasured) > 0
+			if m := c.mark(); m != "" {
+				label += " " + m
+			}
 		}
-		rss := "-"
-		if v, ok := r.RSSMiBMax["dispatch"]; ok {
-			rss = num(v, 0)
+		cells := []string{label, dispatch, pgCores, listener, nats, loadgen, proxy, busy, busyBefore, rss}
+		if withCgroup {
+			cells = append(cells, workingSet)
 		}
-		perOp := "-"
-		if r.DispatchCPUSPerOp != nil && !s.sum.Events.commitsUnread() {
-			perOp = num(*r.DispatchCPUSPerOp, 4)
-		}
-		lockWait := "-"
-		if st, ok := r.PGConnsByState["active|Lock"]; ok {
-			lockWait = num(st.P50, 0)
-		} else if r.PGConnsTotal.N > 0 {
-			lockWait = "0"
-		}
-		pgMax := "-"
-		if r.PGConnsTotal.N > 0 {
-			pgMax = num(r.PGConnsTotal.Max, 0)
-		}
-		md.row(withFailedReads(s.commitsLabel(), r.failedReads()), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
-			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
-			pair(r.PoolAcquireGoroutines, p50, smax, 0), pgMax, lockWait, perOp)
+		md.row(append(cells, heap, goroutines, pool, pgMax, lockWait, perOp)...)
 	}
 	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity and of Dispatch's goroutine and heap profiles",
 		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
 	commitsUnreadNote(md, unread, "the Dispatch CPU-s per operation, whose operations count the committed writes,")
+	cgroupNotes(md, withCgroup, cgFailed, cgUnmeasured)
 }
 
 // failedReadsNote defines the "(<n> failed reads)" mark under a table, when a row has it: what
