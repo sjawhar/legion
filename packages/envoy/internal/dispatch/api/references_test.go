@@ -425,10 +425,12 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	edge := incoming.Edges[0]
 	acmeKey := acme.Key
 	messageRef := "dispatch://" + acme.Key + "/message/" + message.ID
+	// An edge's block node carries no text, only the node a reference read names does; the edge's
+	// excerpt holds the block's text.
 	wantNode := model.GraphNode{
 		Kind: "block", ID: "message/" + message.ID + "#b1", BlockID: "b1", IssueKey: &acmeKey, Project: "ACME", Ref: messageRef + "#b-b1",
 		MadeBy: []model.Actor{message.Author}, MadeAt: &message.CreatedAt, ChangedBy: []model.Actor{message.Author}, ChangedAt: &message.CreatedAt,
-		Parent: &model.NodeParent{Kind: "message", ID: message.ID, Ref: messageRef}, Text: message.Body,
+		Parent: &model.NodeParent{Kind: "message", ID: message.ID, Ref: messageRef},
 	}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)

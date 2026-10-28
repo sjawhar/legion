@@ -775,7 +775,7 @@ func scanMessage(row pgx.Row, extra ...any) (model.Message, error) {
 // hold none either: only its blocks are indexed, and it moves nothing.
 func (s *server) indexMessage(ctx context.Context, tx pgx.Tx, message model.Message) (model.ReferenceChanges, error) {
 	if message.IssueKey == nil {
-		_, _, err := refs.IndexItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, message.CreatedAt, nil, nil)
+		_, err := refs.IndexItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, message.CreatedAt, nil, nil)
 		return model.ReferenceChanges{}, err
 	}
 	return refs.ReplaceCountedItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, s.deps.ServerURL, message.CreatedAt, nil)

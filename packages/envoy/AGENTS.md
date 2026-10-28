@@ -1588,14 +1588,16 @@ no mention, as before, and has no address, so its blocks resolve to no node (`lo
 reads only an issue message's): no reference reads one (`404 NOT_FOUND`, naming none of its text),
 an edge at one is omitted, and its text never shows on a `?to=` read. The API
 names the node kind `block`, id `<item kind>/<item uuid>#<block id>` (`comment/1b2c…#b2`,
-`text.TargetID`), with `block_id`, no `document`, and `text` its whole text (a comment block's
-latest `comment_block_texts` row, a message block's slice of the stored body); an edge from one
-carries its stored excerpt. `graph_edges` and `refs.to_kind` store it under the kind
+`text.TargetID`), with `block_id` and no `document`. As a document block's, only the node a
+reference read names carries `text`, its whole text (`refs.CurrentItemBlockText`: a comment
+block's latest `comment_block_texts` row, a message block's slice of the stored body); an edge's
+block node carries none, and the edge its stored excerpt. `graph_edges` and `refs.to_kind` store it under the kind
 `comment_block` or `message_block` (`refs.TargetOf`, `ItemKind.BlockKind`), both of which
 `nodeLoaders` resolves through `loadCommentBlockNodes` and `loadMessageBlockNodes` to a `block` node: a build without item blocks
 skips both as unknown kinds (`resolveNodes`) where it would count a `block` row and resolve it
 through `document_blocks`, so during the roll, and after a rollback, it neither doubles a count
-nor fails a read, and lists the item's own edge as before (`itemBlocksKnown`). An edge at an item
+nor fails a read, and lists the item's own edge as before, its `heldByABlock` reading no item's
+blocks. An edge at an item
 block counts only while a current revision holds the block, as at a document's. `refs.Closure`
 reaches an item block's links through its item's own `refs` rows, so the member's `via` is the
 item, and a reference to an item block, as to its item, reaches no document.

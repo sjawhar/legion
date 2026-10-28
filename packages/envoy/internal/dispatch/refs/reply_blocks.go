@@ -55,7 +55,7 @@ func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 	if mentions {
 		located = text.ExtractAt(body, serverURL)
 	}
-	if _, _, err := IndexItem(ctx, tx, kind, itemID, body, writtenAt, located, nil); err != nil {
+	if _, err := IndexItem(ctx, tx, kind, itemID, body, writtenAt, located, nil); err != nil {
 		return false, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
 	}
 	if !mentions {

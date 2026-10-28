@@ -56,15 +56,6 @@ type CarriedEdit struct {
 	Blocks       []itemblocks.Carried
 }
 
-// IndexedBlock is one current block of the body IndexItem indexed, in body order: its id, type
-// and text (body[From:To], byte offsets), and whether its text is new, changed or restored in this
-// call's revision.
-type IndexedBlock struct {
-	ID, Type, Text string
-	From, To       int
-	Changed        bool
-}
-
 // ReplaceCountedItem indexes a comment's or an issue message's body, which the calling
 // transaction has just written: its blocks and the mentions each holds (IndexItem), then the
 // item's own references (ReplaceCountedRefs), from one extraction of body. The counted targets it
@@ -80,7 +71,7 @@ func ReplaceCountedItem(
 	carried *CarriedEdit,
 ) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(body, serverURL)
-	_, moved, err := IndexItem(ctx, tx, kind, itemID, body, at, located, carried)
+	moved, err := IndexItem(ctx, tx, kind, itemID, body, at, located, carried)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -122,8 +113,8 @@ func ReplaceCountedItem(
 // It stores the revision, the next block number and itemblocks.BodySHA256(body) and clears
 // owed_at.
 //
-// It returns the item's current blocks and the targets of the block mentions it inserted or
-// deleted, which the caller's event counts (ReplaceCountedRefs' moved).
+// It returns the targets of the block mentions it inserted or deleted, which the caller's event
+// counts (ReplaceCountedRefs' moved).
 func IndexItem(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -132,14 +123,14 @@ func IndexItem(
 	at time.Time,
 	located []text.Located,
 	carried *CarriedEdit,
-) ([]IndexedBlock, []Target, error) {
+) ([]Target, error) {
 	tables, err := kind.tables()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	state, err := lockItemState(ctx, tx, kind, tables, itemID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// An item no block-aware build indexed holds no block and no block mention: IndexItem writes
 	// them in the transaction that marks the state indexed, and a state row goes only with its
@@ -147,7 +138,7 @@ func IndexItem(
 	stored := []itemblocks.Stored{}
 	if state.indexed {
 		if stored, err = storedItemBlocks(ctx, tx, kind, tables, itemID); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	counter := state.nextBlock
@@ -162,7 +153,7 @@ func IndexItem(
 	if carried != nil && kind == ItemComment && carried.BaseRevision == state.revision {
 		spans, err := itemblocks.ReadCarried(stored, body, carried.Blocks)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		ids, counter = itemblocks.Carry(stored, next, spans, counter)
 	} else {
@@ -175,7 +166,6 @@ func IndexItem(
 	}
 	bodySum := itemblocks.BodySHA256(body)
 	changed := !state.indexed || state.bodySHA256 != bodySum
-	blocks := make([]IndexedBlock, len(next))
 	var written, kept []itemBlockRow
 	for index, block := range next {
 		row := itemBlockRow{
@@ -184,7 +174,6 @@ func IndexItem(
 		}
 		previous, held := byID[row.id]
 		delete(byID, row.id)
-		blocks[index] = IndexedBlock{ID: row.id, Type: block.Type, Text: block.Text, From: block.From, To: block.To}
 		if held && previous.Position >= 0 && previous.Hash == row.sum {
 			kept = append(kept, row)
 			if previous.Position != index || previous.Type != block.Type {
@@ -192,7 +181,6 @@ func IndexItem(
 			}
 			continue
 		}
-		blocks[index].Changed = true
 		written = append(written, row)
 		changed = true
 	}
@@ -212,17 +200,17 @@ func IndexItem(
 			madeAt = nil
 		}
 		if err := writeItemBlocks(ctx, tx, kind, tables, itemID, revision, at, madeAt, written, kept, removed); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	moved, err := replaceItemBlockRefs(ctx, tx, kind, tables, itemID, at, !state.indexed, itemBlockPairs(next, ids, located))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := storeItemState(ctx, tx, kind, itemID, revision, counter, bodySum); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return blocks, moved, nil
+	return moved, nil
 }
 
 // itemState is an item's state row as IndexItem found it: whether a block-aware build indexed

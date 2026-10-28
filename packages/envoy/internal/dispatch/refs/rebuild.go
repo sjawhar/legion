@@ -243,7 +243,7 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 	if found {
 		located := text.ExtractAt(body, serverURL)
 		if kind := ItemKind(item.Kind); kind == ItemComment || kind == ItemMessage {
-			if _, _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
+			if _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
 				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
 			}
 		}

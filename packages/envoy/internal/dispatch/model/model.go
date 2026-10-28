@@ -1384,7 +1384,8 @@ type MessageDelivery struct {
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
-// characters, ReplyBody) so a reply can render "re: <preview>" without a second lookup.
+// characters, ReplyBody), or the preview of the block it names (ReplyBlock), so a reply can
+// render "re: <preview>" without a second lookup.
 type MessageEventPayload struct {
 	Message
 	ReplyBody string `json:"reply_body,omitempty"`

@@ -121,15 +121,12 @@ type edgeRow struct {
 // heldByABlock is true of a document's, comment's or message's mention edge (graph_edges row
 // alias) when a block of that item holds a link of the same kind to the same target: that block's
 // own edge is listed and counted in its place, so each link shows once. An item the block index
-// has not reached holds no block mention, so its own edge stays; so does a comment's or message's
-// on a build that cannot address its blocks (itemBlocksKnown), whose block edges it skips.
+// has not reached holds no block mention, so its own edge stays.
 func heldByABlock(alias string) string {
 	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id")}
 	for _, item := range []ItemKind{ItemComment, ItemMessage} {
-		if itemBlocksKnown(item) {
-			tables, _ := item.tables()
-			holders = append(holders, blockHolds(alias, string(item), tables.refs, tables.item))
-		}
+		tables, _ := item.tables()
+		holders = append(holders, blockHolds(alias, string(item), tables.refs, tables.item))
 	}
 	return `(` + alias + `.kind = 'mentions' and (` + strings.Join(holders, " or ") + `))`
 }
@@ -168,12 +165,12 @@ func repliesToABlockOf(kind ItemKind, alias, param string) string {
 }
 
 // itemRead is the item whose blocks' edges a query's read lists with its own: a comment or a
-// message this build reads the blocks of (itemBlocksKnown), named by its uuid as the item's own
-// edges name it (canonical, lowercase), as every item that holds blocks is. A comment or message
-// reference whose id is no such uuid names no item with blocks.
+// message, named by its uuid as the item's own edges name it (canonical, lowercase), as every
+// item that holds blocks is. A comment or message reference whose id is no such uuid names no
+// item with blocks.
 func itemRead(query Query) (ItemKind, bool) {
 	kind := ItemKind(query.Kind)
-	if (kind != ItemComment && kind != ItemMessage) || !itemBlocksKnown(kind) {
+	if kind != ItemComment && kind != ItemMessage {
 		return "", false
 	}
 	if id, err := uuid.Parse(query.ID); err != nil || id.String() != query.ID {

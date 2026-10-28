@@ -164,14 +164,15 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 }
 
 // itemBlockReferenceNode is the block node ref, a block of a comment or a message, names (query
-// addresses it), with its whole current text. A block no current revision of its item holds
-// answers 404, as a document's does, unless ref is pinned to a revision N of its comment that held
-// it: the node then carries what N recorded (model.BlockPin, its Version the revision),
-// "unchanged" or "changed" by comparing the current text with N's, or "removed" with the revision
-// that removed it (RemovedVersion), as a node with no text or changed revision whose facts are a
-// removed block's (refs.RemovedCommentBlockNode). A pin past the comment's current revision, or to
-// one that did not hold the block, answers 404, each saying which. A message never changes, so no
-// reference pins a message's block (parseReferencesQuery refuses one).
+// addresses it), with its whole current text (refs.CurrentItemBlockText). A block no current
+// revision of its item holds answers 404, as a document's does, unless ref is pinned to a revision
+// N of its comment that held it: the node then carries what N recorded (model.BlockPin, its
+// Version the revision), "unchanged" or "changed" by comparing the current text with N's, or
+// "removed" with the revision that removed it (RemovedVersion), as a node with no text or changed
+// revision whose facts are a removed block's (refs.RemovedCommentBlockNode). A pin past the
+// comment's current revision, or to one that did not hold the block, answers 404, each saying
+// which. A message never changes, so no reference pins a message's block (parseReferencesQuery
+// refuses one).
 func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, ref text.Ref) (model.GraphNode, error) {
 	pool := s.deps.Store.Pool
 	item, found, err := refs.Node(ctx, pool, ref.Item, ref.ID, true)
@@ -184,6 +185,11 @@ func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, r
 	node, current, err := refs.Node(ctx, pool, query.Kind, query.ID, true)
 	if err != nil {
 		return model.GraphNode{}, err
+	}
+	if current {
+		if node.Text, err = refs.CurrentItemBlockText(ctx, pool, refs.ItemKind(ref.Item), query.ID); err != nil {
+			return model.GraphNode{}, err
+		}
 	}
 	if ref.Pin == 0 {
 		if !current {

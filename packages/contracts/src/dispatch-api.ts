@@ -1429,7 +1429,8 @@ export interface ChangedReference {
 }
 
 export interface MessageEventPayload extends Message, ReferenceChangesPayload {
-  /** First 160 characters of the reply target's body; empty otherwise. */
+  /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
+   *  empty otherwise. */
   readonly reply_body?: string;
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
    *  that groups a thread under its root. A session replying to a message aimed at that

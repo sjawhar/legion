@@ -74,20 +74,9 @@ export function spansFromBlocks(
   blocks: readonly Pick<ItemBlock, "from" | "id" | "text" | "to">[]
 ): BlockSpans | undefined {
   if (textareaValue(storedBody) !== value) return undefined;
-  // CR LF pairs counted with one cursor over the offsets, which rise from block to block: `pairs`
-  // is how many pairs start before `at`. An offset before the last one counts again from 0.
-  let at = 0;
-  let pairs = 0;
-  const valueOffset = (offset: number) => {
-    if (offset - 1 < at) {
-      at = 0;
-      pairs = 0;
-    }
-    for (; at < offset - 1; at += 1) {
-      if (storedBody.charCodeAt(at) === 13 && storedBody.charCodeAt(at + 1) === 10) pairs += 1;
-    }
-    return offset - pairs;
-  };
+  // A CR LF pair the stored body holds before an offset is one character fewer in the value; a CR
+  // just before the offset, its LF past it, is LF there, the same length.
+  const valueOffset = (offset: number) => textareaValue(storedBody.slice(0, offset)).length;
   const live: BlockSpan[] = [];
   for (const block of blocks) {
     if (

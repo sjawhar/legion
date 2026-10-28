@@ -17481,9 +17481,8 @@ function dispatchRefFromUrl(value, serverUrl) {
       const item = itemFromSearch(url.search);
       if (item === null)
         return;
-      if (item !== undefined) {
-        return `dispatch://${key}/${item.kind}/${item.id}${item.kind === "comment" ? blockOf() : ""}`;
-      }
+      if (item !== undefined)
+        return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "")
       return `dispatch://${key}/artifact/spec${version}`;
@@ -17521,7 +17520,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   const item = itemFromSearch(url.search);
   if (item === null)
     return;
-  return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}${item.kind === "comment" ? blockOf() : ""}`;
+  return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";

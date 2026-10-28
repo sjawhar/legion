@@ -528,10 +528,15 @@ func TestAMentionStartsAtItsBlock(t *testing.T) {
 	if len(incoming.Edges) != 1 {
 		t.Fatalf("?to= the issue lists %d edges, want the block's alone: %#v", len(incoming.Edges), incoming.Edges)
 	}
+	// The edge's block node carries no text, only the node a reference read names does; its
+	// excerpt holds the block's.
 	if source := incoming.Edges[0].Node; source.Kind != "block" || source.ID != "comment/"+once.ID+"#b2" || source.BlockID != "b2" ||
 		source.Parent == nil || source.Parent.Kind != "comment" || source.Parent.ID != once.ID ||
-		source.Ref != "dispatch://"+issue.Key+"/comment/"+once.ID+"#b-b2" || source.Text != "See "+cited+" for context." {
+		source.Ref != "dispatch://"+issue.Key+"/comment/"+once.ID+"#b-b2" || source.Text != "" {
 		t.Fatalf("?to= the issue lists the source %#v, want block b2 of comment %s", source, once.ID)
+	}
+	if excerpt := incoming.Edges[0].Excerpt; excerpt == nil || excerpt.BlockID != "b2" || excerpt.Text != "See "+cited+" for context." {
+		t.Fatalf("?to= the issue lists the excerpt %#v, want block b2's text", excerpt)
 	}
 	requireIssueBacklinkCount(t, handler, target.Key, uncited+1)
 
