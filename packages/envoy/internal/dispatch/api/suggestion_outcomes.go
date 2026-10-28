@@ -223,7 +223,7 @@ var (
 // startSuggestionCursor is what the first pass on a database reads before its rules run: the
 // highest event id, which the cursor moves to once the rules have judged every pending suggestion
 // against every event up to it, and up to $1 of the suggestions not yet swept, oldest first (all
-// of them recorded since migration 0139), which the rules judge too and the pass then marks.
+// of them recorded since migration 0140), which the rules judge too and the pass then marks.
 const startSuggestionCursor = `
 select coalesce((select max(id) from events), 0),
        array(select id::text from write_suggestions where not swept order by created_at limit $1)`

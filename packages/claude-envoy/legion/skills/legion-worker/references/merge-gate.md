@@ -289,10 +289,11 @@ reviewing until you finish.
   repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
   on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
   job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
-  Dispatch's `server.started` naming such a build, or on the build the daemon read from Dispatch at
-  its boot. The woken look's task names the event (`Dispatch's issue.deployed: run <id> completed <t>`,
+  Dispatch's `server.started` announcing that every server process serves such a build, or on the
+  build the daemon read from Dispatch at its boot. The woken look's task names the event
+  (`Dispatch's issue.deployed: run <id> completed <t>`,
   `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <t>`,
-  `the Legion daemon's boot on build <sha>`, `Dispatch's start on build <sha>`,
+  `the Legion daemon's boot on build <sha>`, `Dispatch serving build <sha> on every server process`,
   `Dispatch's build <sha>`), and its `Production:` line names it too, so the pull request carries
   the cause. Never poll for the deploy, never wait on a reply, and never ask anyone for approval
   to deploy. Open a `dispatch ask` to a person only when the instructions name nobody for that
