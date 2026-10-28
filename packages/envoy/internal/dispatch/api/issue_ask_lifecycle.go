@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -101,22 +102,25 @@ func (s *server) readOpenIssueAsks(ctx context.Context, tx pgx.Tx, issueKey stri
 func (s *server) recordWithdrawnAsksTx(ctx context.Context, tx pgx.Tx, issueKey string, open []model.Ask, actor model.Actor) ([]model.Ask, []model.Event, error) {
 	reason := withdrawnReason(issueKey)
 	withdrawn := make([]model.Ask, 0, len(open))
-	events := make([]model.Event, 0, len(open))
+	appended := make([]model.Event, 0, len(open))
 	for _, ask := range open {
 		ask, err := docs.WriteAskResolution(ctx, tx, ask, withdrawnResolution, reason, actor)
 		if err != nil {
 			return nil, nil, err
 		}
-		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event(
-			"ask.resolved", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		))
+		// Read once the resolution is in, as every ask event's thread_logins is.
+		payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+		if err != nil {
+			return nil, nil, err
+		}
+		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event("ask.resolved", actor, payload))
 		if err != nil {
 			return nil, nil, err
 		}
 		withdrawn = append(withdrawn, ask)
-		events = append(events, event)
+		appended = append(appended, event)
 	}
-	return withdrawn, events, nil
+	return withdrawn, appended, nil
 }
 
 // restoreIssueAsksTx opens again every ask of issueKey a close withdrew, as the issue's reopen
@@ -159,17 +163,19 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 	if _, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, restored, actor, false); err != nil {
 		return nil, nil, err
 	}
-	events := make([]model.Event, 0, len(restored))
+	appended := make([]model.Event, 0, len(restored))
 	for _, ask := range restored {
-		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event(
-			"ask.opened", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		))
+		payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
 		if err != nil {
 			return nil, nil, err
 		}
-		events = append(events, event)
+		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event("ask.opened", actor, payload))
+		if err != nil {
+			return nil, nil, err
+		}
+		appended = append(appended, event)
 	}
-	return restored, events, nil
+	return restored, appended, nil
 }
 
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
