@@ -2,58 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T19:08:09Z",
-  "testedHead": "4d2c525d488a665e5b9e23e4238f7d1733b00b5b",
-  "codeHead": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-  "round": 5,
-  "scope": "The PR diff changed from round 4 (c83c0851) to 4f9bd6e8 only in cmd/dispatch/main.go, docs/edit_notices.go, redeliver/sweep.go, migration 0142, their tests and docs. The intake, pglisten, embedqueue, suggestion and excerpt code is byte-identical in the PR diff. So this round drives the two new loops in full, repeats the idle count by source, and re-drives the excerpt wake, since main's refs/excerpts.go changed under it. Round 4's real-surface results for the unchanged paths stand.",
+  "completed": "2026-10-28T21:33:57Z",
+  "testedHead": "65783c21925043a36d25f9c15129b451211921a2",
+  "codeHead": "14be510457eaef081b073580305df9f43a355f62",
+  "round": 6,
+  "scope": "The review round's two fixes (823f782f: shutdown waits for the intakes before the pool closes, and a stop drains the subscription handle the bus holds after a reconnect), the cleanup (67c3d0f2: migration headers, removed pglisten/WokenLoop surface, intake_delivery.go) and the forward merge of main c24ea568 (migrations renumbered to 0137-0143). I built my own binary of 14be5104 and ran it on a database migrated from main's schema 134 straight to 143, as a deploy from main would.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "On my own build of 4f9bd6e8 (/legion/scratch/tmp/t607r3/bin/dispatch-head5) I ran two processes on one database (a copy of dispatch_seed_b4) in config B, on the round-3 harness. Idle, 10 minutes (18:53:00-19:03:01): 3,987 statements, 3.32/s per process (implementer: 3.34), with 0 edit-notice, embedding-scan, coverage, task-progress, excerpt and suggestion statements. The two processes' webhook-redelivery attempts were 10-19 s apart, with periods of 120-131 s. The edit notice was sent 20 ms after due (implementer: 10 ms). The redelivery and edit-notice tests pass."
+    "how": "Shutdown (review M1): one bound process and a fake GitHub holding a merged PR's fetch for 3 s. SIGTERM at 21:33:40.31. GitHub answered at 42.303; delivery_pull_requests row 701 was written (merged, not partial) and last_event_at was set to 42.348; the consumer showed delivered 2 = ack floor 2 with 0 pending; the process exited 2.17 s after SIGTERM. The implementer saw 3.06 s. Its negative control is that 4f9bd6e8 acknowledged with no row. The regression tests pass: TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool, TestAStopAfterTheConnectionWasReplacedDrainsTheRestoredSubscription, TestDrainSubscription*, TestAHandOverKeepsAPullRequestsMessagesInOrder and TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer. I did not re-drive the connection-replacement case (review M2) on the real binary, because the pod move cut the time short: the implementer's check3/check3b through a TCP proxy's -ERR and the regression tests above are the evidence for it."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Each loop the plan made event-driven, and now the edit-notice sweep, does nothing while nothing changes; every remaining timer is named",
-      "surface": "Two real head processes (4f9bd6e8) on one database and one NATS, every loop on, counted from the Postgres statement log",
-      "command": "python3 /legion/scratch/tmp/t607r3/count2.py <log> <offset 18:53:00> <offset 19:03:01> t5 (output /legion/scratch/tmp/t607r3/idle5.txt)",
-      "observed": "3,987 statements, or 3.32/s per process. Dispatch CPU was 0.0031 and 0.0025 cores. There were no statements from the edit-notice lease or document_edit_notices (round 4: 484 over 10 minutes) and none from the embedding scan, coverage, task progress, excerpts or suggestion outcomes. 2 delivery_settings reads remained, both the reconcile's. What is left: the server-process heartbeat (240 x4), the outbox retry (240 update + 480 locks), block-index (about 140), the standby durable reconcile (72), settlement (20), redelivery (20), the reconcile and import (about 40), and pings. The PR body's 'Notes for the reviewer' names each of these with its period and why no event replaces it.",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "Round 4's head c83c0851, under the same harness, made 240 edit-notices lease attempts, 124 unlocks and 120 due reads in 10 minutes."
+      "criterion": "Each loop the plan made event-driven, edit notices included, does nothing while nothing changes, after the cleanup removed parts of the listener and woken-loop API",
+      "surface": "Two real head processes (14be5104) on one database migrated from main's schema 134 to 143 at their boot, in config B (fake Azure embedder, fake GitHub App), counted from the Postgres statement log",
+      "command": "python3 /legion/scratch/tmp/t607r3/count2.py <log> <offset 21:23:00> <offset 21:33:01> t6 (dispatch://INFRA-607/artifact/idle-statements-round-6-txt)",
+      "observed": "4,018 statements, or 3.35/s per process (round 5: 3.32). CPU was 0.0033 and 0.0036 cores. There were no statements from the embedding scan, coverage, task progress, excerpts, suggestion outcomes, edit notices or the settings poll. What remains is the server-process heartbeat, the outbox 5 s retry, block-index, the standby durable reconcile, settlement, redelivery, the reconcile and import, and their pings, as the PR body names. Before the window, the woken embedding queue drained the seed's whole 10,000-row backlog through the fake in 3 minutes, from boot (21:17:05) to 21:20:11.",
+      "headSha": "14be510457eaef081b073580305df9f43a355f62",
+      "negativeControl": "Round 4's fork point d47dbf05 under the same harness: embedding scan 241, edit notices 484, suggestion rules 30 and settings reads 42 in 10 minutes."
     },
     {
-      "criterion": "Edit notices are sent when a notice falls due, once, by any process, also across a process exit, a listener outage, a full outage and a pushed-back due time",
-      "surface": "Two head processes, with a session spec written through POST /api/v1/issues/{key}/artifacts and a person's edit through POST /api/v1/artifacts/{id}/edits (X-Dispatch-User: sami)",
-      "command": "python3 /legion/scratch/tmp/t607r3/en.py spec|edit|watch for LGA-80 (both up), LGA-81 (editing process SIGTERMed right after the edit), LGA-82 (both processes down past due, then restarted), LGA-83 (both hub backends pg_terminate_backend'ed just before the edit), LGA-84 (a second person edit 10 s after the first, through the other process)",
-      "observed": "LGA-80: due 19:04:01.074, event 19:04:01.094. One process sent it; the other woke at due, found the lease held and retried 5 s later with nothing due. One event. LGA-81: due 19:04:50.122, sent by the surviving process at 19:04:50.144. LGA-82: due 19:05:27.133 with no process running; the restarted process's boot sweep sent it at 19:05:47.680. LGA-83: due 19:06:38.783, event 19:06:38.799. LGA-84: the due time moved from 19:07:14.800 to 19:07:25.376, and one event 1->3 was sent at 19:07:25.399. In every case the row was deleted and exactly one artifact.human_edited event was written.",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "With no notice due, the 10-minute idle window has no edit-notice statement."
-    },
-    {
-      "criterion": "The timers the plan keeps are jittered every period (the webhook redelivery sweep included)",
-      "surface": "The two head processes' webhook-redelivery lease attempts in the statement log",
-      "command": "lease attempts with $2 = 'webhook-redelivery' in the 18:53:00-19:03:01 window",
-      "observed": "Series 1: 18:53:46.2, 18:55:46.5, 18:57:53.8, 18:59:56.2, 19:02:01.9. Series 2: 18:53:56.4, 18:56:01.5, 18:58:12.4, 19:00:13.6, 19:02:21.4. Periods were 120.3-130.9 s, and the processes were 10.2-19.5 s apart. TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals passes.",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "Round 4's head c83c0851 (plain ticker): the two processes tried 16-19 ms apart in five consecutive periods."
-    },
-    {
-      "criterion": "Write-woken excerpts still wake on the merged base (main changed refs/excerpts.go)",
-      "surface": "The head binary and Postgres",
-      "command": "POST /api/v1/issues with a spec citing dispatch://LGA-1 and dispatch://LGA-2; update refs set excerpt_version = null for that document",
-      "observed": "Both excerpts were recorded again 1.82 s after they were cleared.",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "Round 1: a no-op `update refs set excerpt_version = excerpt_version` woke no pass in 5 s."
+      "criterion": "Shutdown waits for a running intake handler before the database pool closes, so its message is written and acknowledged",
+      "surface": "The head binary bound to the delivery durable, a merged-PR envelope published through the Envoy listener's /v1/messages/publish, fake GitHub (FAKE_PULL_MERGED=1) holding pulls/701 for 3 s, SIGTERM 1 s after publishing",
+      "command": "publish-pr.sh 701; kill -TERM <pid>; psql delivery_pull_requests and delivery_settings; NATS /jsz?consumers=true",
+      "observed": "The fetch was held 21:33:39.301-42.303. Commits were fetched at 42.305 and 42.306. Row loadorg/loadrepo#701 was written, merged, not partial. last_event_at = 21:33:42.348. The consumer showed delivered 2, ack_floor 2, num_ack_pending 0. Exit was 2.17 s after SIGTERM (at 21:33:40.31).",
+      "headSha": "14be510457eaef081b073580305df9f43a355f62",
+      "negativeControl": "The implementer's run of 4f9bd6e8 under the same conditions deregistered 0.6 s after the signal, logged 'closed pool' and acknowledged the message with no row and a null last_event_at (stop-path-proof-md); TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool fails on that order."
     }
   ],
-  "ci": "At 19:07Z, at 4f9bd6e8: changes, lint, typecheck and build x2 passed. The Daemon Go suite is in progress. dispatch, envoy-go, envoy-go-race, envoy-infra-go, the Dispatch and Broker Go suites, dispatch-multiprocess, dispatch-memory, broker-multiprocess, envoy-e2e-local, envoy-smoke, pi-legion, test and pr-title are queued. GitHub reports the PR MERGEABLE (BLOCKED on checks).",
+  "ci": "At 21:16Z, at 14be5104: every check queued (changes, lint, typecheck, build x2, test, the Daemon Go suite, pr-title). GitHub reports the PR MERGEABLE (BLOCKED on checks).",
   "mainReds": [
-    "recipients-claim.e2e.ts:310 (reproduced on main 2d872499 in round 4; #2324 merged and is in this head's base), TestDispatchConnectionsPerPodIsTheServers (main's CI at c27469629a) and mermaid.e2e.ts:194 (#2311) are main's, as recorded in round 4."
+    "Unchanged from round 4: recipients-claim.e2e.ts:310, TestDispatchConnectionsPerPodIsTheServers and mermaid.e2e.ts:194 are main's."
   ],
   "notes": [
-    "Wording only, not a failure: the PR body's note gives the server-process registry sweep as 'every 2 min', but processes.PruneInterval is 1 minute, and the log shows 10 deletes in 10 minutes. Fast-follow wording.",
-    "The 1x step was not re-run at 4f9bd6e8. The only code changes since c83c0851 are the edit-notice wake and the redelivery jitter, neither on a request path; round 3's 1x pairs stand.",
-    "Scratch: /legion/scratch/tmp/t607r3 (dispatch-head5, en.py, idle5.txt). I started and stopped the measure3 stack and dropped database t5."
+    "The migrations were renumbered to 0137-0143 (main added 0136_dashboard_assets). The schema_migrations table keys by version alone. A database that ran an earlier build of this branch (old 0136 = embeddings_notify) would skip main's 0136 and mis-number the rest. No deployment ran this branch, so this is a note only for test databases such as the round-4/5 seeds dispatch_seed_b4 and b5; I used a fresh copy of dispatch_seed_idx (schema 134).",
+    "I cut the round short at 21:34Z for the INFRA daemon's pod move (controller, 21:28Z). Scratch under /legion/scratch/tmp does not survive the move; the idle counts are attached as dispatch://INFRA-607/artifact/idle-statements-round-6-txt."
   ]
 }
