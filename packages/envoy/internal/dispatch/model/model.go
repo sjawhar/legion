@@ -1273,18 +1273,23 @@ type CommentEventPayload struct {
 	// candidates only: the sessions the comment's mentions deliver it to as far as its creation
 	// knows - the session the mention's lookup pinned, or the <id> of a session:<id> mention whose
 	// lookup went unanswered within its bound (that mention itself stays unpinned). The mention's
-	// send runs after the commit and can fail, so the outbox skips a candidate's copy only once
-	// comment_deliveries shows its mention was sent to it, holds the copy back while that send is
-	// still pending, and publishes it when the send failed or was abandoned.
+	// send runs after the commit and can fail, so the outbox applies one rule to each candidate's
+	// copy when it publishes: it skips the copy once comment_deliveries shows the mention was sent,
+	// holds it back while that send is still pending, and publishes it when the send failed or was
+	// abandoned. It reads an unpinned session:<id> mention's attempts as that <id>'s. A pending
+	// attempt no sender has claimed counts as abandoned once it is older than DeliveryClaimLapse,
+	// so a mention send queued behind its lane that long releases the copy, and the mention, sent
+	// later, can deliver the comment a second time.
 	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
 	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
 	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),
 	// or the route string equals a mention's target whose lookup went unanswered (SuppressedRoute
-	// alone, no session known). The outbox applies only a suppression that names a session, so a
-	// SuppressedRoute alone leaves the route copy published.
+	// alone, no session known), and the outbox then applies the rule to the mention of that
+	// target, while the route is still that string.
 	// The route copy still duplicates the mention for an unanswered role:X mention whose holder
 	// the route names under another string, and for a role:X route whose own lookup went
-	// unanswered; that session then receives two copies.
+	// unanswered while a mention of another string reaches its holder; that session then receives
+	// two copies.
 	// SuppressedAuthors names the candidates the author routes skip: on a reply, its thread's root
 	// author when mentioned; on a new comment not in an ask's thread, every candidate, since the
 	// outbox reads the document's authors only when it publishes. An author route still

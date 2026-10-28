@@ -462,7 +462,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// suppressed by that string alone, so a route later moved to that session's direct form is
 	// not. The route copy still duplicates the mention for an unanswered role:X mention whose
 	// holder the route names under another string, and for a role:X route whose own lookup went
-	// unanswered: neither names a session to compare.
+	// unanswered while a mention of another string reaches its holder: neither names a session to
+	// compare.
 	suppressRoute := false
 	suppressedRoute := ""
 	var suppressedRouteSessionID *string
@@ -484,11 +485,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// duplicates an unanswered role:X mention whose holder is the root author or a document
 	// writer: only the listener knows that holder.
 	//
-	// Either suppression holds only while the mention can still deliver: a mention whose send
-	// fails lifts what was suppressed for its session and has the outbox publish that copy then
-	// (restoreSuppressedCopy), so a session suppressed here hears the comment once - from the
-	// mention, or, when it fails, from the route or author copy. The two-copy cases above are
-	// unchanged.
+	// Either suppression names a candidate only. The outbox decides each copy when it publishes,
+	// by what the mention's attempts did (mentionDeliveryQuery in internal/dispatch/outbox): it
+	// skips the copy once the mention was sent, holds it back while the mention is pending, and
+	// publishes it once the mention failed or was abandoned. It finds an unanswered session:<id>
+	// mention's attempts by that <id>, and a route suppressed by its string alone by the mention of
+	// that target.
 	suppressedAuthors := []string{}
 	switch {
 	case replyRoot != nil:

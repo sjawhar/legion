@@ -1313,13 +1313,15 @@ records that resolution on the claimed row, sends, and records `sent` or `failed
 `comment.delivery` event in a second transaction. A session the comment's creation skipped on the
 issue's route or an author route because a mention delivers to it (`suppress_route`,
 `suppressed_authors`) hears the comment once: from the mention, or, when the mention's send
-fails, from that route or author copy. The failed attempt's settle lifts the suppression for
-that session alone and reopens `comment.created` (`restoreSuppressedCopy`); the outbox sends it
-only to destinations its `published_destinations` lacks, so only the lifted copy is new, under
-the event's own dedupe key. Nothing is lifted while another attempt to that session is sent or
-pending. The
-two-copy cases (an unanswered `role:X` mention whose holder the route or an author route names)
-are unchanged. The post-commit sender (`mentionSender`,
+fails, from that route or author copy. The outbox decides that copy when it publishes, by the
+mention rule (`attempt.leftToMention`, below), which also finds an unanswered `session:<id>`
+mention's attempt by its `<id>` before the sender resolves it, and a route suppressed by its
+string alone by the mention of that target. The two-copy cases (an unanswered `role:X` mention
+whose holder an author route, the claimant route, a follower route or the route under another
+string names; a `role:X` route whose own lookup went unanswered while a mention of another
+string reaches its holder) remain, and so does a send queued behind its lane for longer than
+`model.DeliveryClaimLapse`: the outbox counts that unclaimed attempt abandoned and publishes the
+copy, and the mention then delivers too. The post-commit sender (`mentionSender`,
 `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
 session the mention's lookup pinned, else its target as written: `role:X` shares
 `session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X`
@@ -2702,8 +2704,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   additionally published straight to each follower's `notifications.agent.<session_id>` regardless
   of `notify` and of the issue's route, so a session-authored reply on an ask reaches its followers
   even though it wakes nobody through the issue topic; the acting session is skipped, and so is a
-  follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`,
-  each `mentions[].session_id`) once the mention delivered it (the mention rule below) - the
+  follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`:
+  each `mentions[].session_id`, and the `<id>` of a `session:<id>` mention that names none) once
+  the mention delivered it (the mention rule below) - the
   comment's edit, resolution and reopening reach every follower - and a session already reached by
   the issue's route is not sent the envelope twice. A quiet `ask.edited` (a
   version move of an approval request that an earlier version already moved since it was opened or
@@ -2757,13 +2760,16 @@ the synchronous listener call records the sent or failed attempt instead of blin
   written, and the rule applies while the route still names that target or that session
   (`suppressesCurrentRoute`; `suppress_route` must be set). A comment whose route string equals
   the target of a mention whose lookup went unanswered records `suppress_route` with
-  `suppressed_route` alone, no `suppressed_route_session_id`; `suppressesCurrentRoute` applies the
-  rule only to a suppression that names a session, so that route copy is published. A mention
-  resolved at write time is a
+  `suppressed_route` alone, no `suppressed_route_session_id`; `suppressesCurrentRoute` then applies
+  the rule to that target's attempts (`attempt.leftToMentionOf`) while the route is still that
+  string. A mention resolved at write time is a
   candidate only: its send runs after the comment commits and can fail. `loadMentionDeliveries`
-  reads the comment's `comment_deliveries` once per attempt (`send`), grouped by session
-  (`mentionDeliveryQuery`), and only for a `comment.created` whose mentions resolved to a session.
-  A session with a `sent` row is skipped: the mention delivered the comment. A session with no
+  reads the comment's `comment_deliveries` in one query per attempt (`send`), grouped by session
+  and by target (`mentionDeliveryQuery`), and only for a `comment.created` that names a mentioned
+  session or suppresses its route by a mention's target. An attempt with no `session_id` whose
+  target is `session:<id>` (an unanswered mention the sender has not resolved yet) counts as
+  `<id>`'s, so its copy waits on it like a pinned one's.
+  A session (or target) with a `sent` row is skipped: the mention delivered the comment. One with no
   `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger
   than `model.DeliveryClaimLapse` (a minute) has its copy held back while every other destination
   is sent in the batch's window; the attempt then reports `errMentionPending` (`attempt.err`),
@@ -2778,8 +2784,10 @@ the synchronous listener call records the sent or failed attempt instead of blin
   stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
   One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener
-  may have delivered the mention, and a first attempt stranded `pending` past the minute may have
-  landed before its sender stopped. Either way the outbox also publishes the session's own-topic
+  may have delivered the mention, a first attempt stranded `pending` past the minute may have
+  landed before its sender stopped, and an attempt queued behind its sender's lane for more than
+  the minute is still unclaimed, so it counts as abandoned and is sent after the outbox published
+  the copy. Each way the outbox also publishes the session's own-topic
   copy, so the session receives the comment twice, under different dedupe keys (the mention's
   delivery and the outbox's event); a host treats the second copy as the same comment (same
   comment id).

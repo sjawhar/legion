@@ -741,57 +741,99 @@ func (a *attempt) err() error {
 	return nil
 }
 
-// mentionDeliveries is what a new comment's mentions did for the sessions they resolved to, read
-// from comment_deliveries when the event is published (loadMentionDeliveries). A mention resolved
-// at write time names only a candidate: its send runs after the comment commits and can fail - the
-// listener does not know the session, the receipt times out, the handler is cancelled, the session
-// lacks the delivery mode - and a session whose mention failed has no copy but the outbox's.
+// mentionDeliveries is what a new comment's mentions did, read from comment_deliveries when the
+// event is published (loadMentionDeliveries). A mention resolved at write time names only a
+// candidate: its send runs after the comment commits and can fail - the listener does not know the
+// session, the receipt times out, the handler is cancelled, the session lacks the delivery mode -
+// and a session whose mention failed has no copy but the outbox's.
 type mentionDeliveries struct {
-	// sent holds each session some attempt of a mention reached.
+	// sessions is keyed by the session each attempt went to: its session_id, or, while a
+	// session:<id> mention is unpinned (its lookup went unanswered and no sender has resolved it
+	// yet), the <id> its target names.
+	sessions mentionOutcomes
+	// targets is keyed by each attempt's target as written, for a route suppressed by that string
+	// alone (payloadSuppressedRouteTarget).
+	targets mentionOutcomes
+}
+
+// mentionOutcomes is what the attempts under each key of mentionDeliveries came to.
+type mentionOutcomes struct {
+	// sent holds each key some attempt reached.
 	sent map[string]struct{}
-	// pending holds each session no attempt reached yet whose send is still live: an attempt is
-	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
-	// model.DeliveryClaimLapse.
+	// pending holds each key with an attempt whose send is still live: it is pending and its
+	// claim, or its creation when no sender has claimed it yet, is younger than
+	// model.DeliveryClaimLapse. A key also in sent counts as sent (attempt.leftTo).
 	pending map[string]struct{}
+}
+
+// record adds what the attempts of one row of mentionDeliveryQuery came to under key.
+func (o mentionOutcomes) record(key string, sent, pending bool) {
+	switch {
+	case sent:
+		o.sent[key] = struct{}{}
+	case pending:
+		o.pending[key] = struct{}{}
+	}
 }
 
 // leftToMention is the one rule every session route of a new comment applies to a session the
 // comment's mentions resolved to: it reports whether the route leaves that session's copy to the
-// mention. A mention that reached the session delivered the comment, so the copy is skipped. A
-// mention still being sent may yet, so the copy is held back and the attempt marked deferred,
-// to be decided again on the next scan. Any other session - every attempt failed or was
-// abandoned, or none was recorded - is published to as if it had not been mentioned. Callers ask
-// only about a session their payload names as mentioned; a session no mention delivers to is in
-// neither set, so it is never skipped.
+// mention (attempt.leftTo). Callers ask only about a session their payload names as mentioned; a
+// session no mention delivers to is in neither set, so it is never skipped.
 func (a *attempt) leftToMention(sessionID string) bool {
-	if _, ok := a.mentions.sent[sessionID]; ok {
+	return a.leftTo(a.mentions.sessions, sessionID)
+}
+
+// leftToMentionOf is the same rule for a route suppressed by its string alone, keyed by the
+// mention target that string is (payloadSuppressedRouteTarget), since no session is known for it.
+func (a *attempt) leftToMentionOf(target string) bool {
+	return a.leftTo(a.mentions.targets, target)
+}
+
+// leftTo reports whether the copy of key is left to the mention. A mention that reached it
+// delivered the comment, so the copy is skipped. A mention still being sent may yet, so the copy
+// is held back and the attempt marked deferred, to be decided again on the next scan. Any other
+// key - every attempt failed or was abandoned, or none was recorded - is published to as if it
+// had not been mentioned.
+func (a *attempt) leftTo(outcomes mentionOutcomes, key string) bool {
+	if _, ok := outcomes.sent[key]; ok {
 		return true
 	}
-	if _, ok := a.mentions.pending[sessionID]; ok {
+	if _, ok := outcomes.pending[key]; ok {
 		a.deferred = true
 		return true
 	}
 	return false
 }
 
-// mentionDeliveryQuery groups a comment's mention attempts by the session each was sent to. An
-// attempt pending for longer than model.DeliveryClaimLapse - by its claim, or by its creation when
-// no sender ever claimed it - is abandoned, the same lease the API's claimLapsed gives a sender
-// (internal/dispatch/api), so it no longer holds the outbox's copy back.
+// mentionDeliveryQuery groups a comment's mention attempts by the session each was sent to and by
+// its target. An attempt with no session_id whose target is session:<id> - an unpinned mention its
+// sender has not resolved yet, or one that failed before it was - is counted under <id>, the one
+// session that target can reach (substr drops the 8 bytes of "session:"); one with neither, an
+// unpinned role:X, is counted under its target alone. An attempt pending for longer than
+// model.DeliveryClaimLapse - by its claim, or by its creation when no sender ever claimed it - is
+// abandoned, the same lease the API's claimLapsed gives a sender (internal/dispatch/api), so it no
+// longer holds the outbox's copy back. The mention sender leaves an attempt unclaimed until its
+// lane starts the send, so a send queued behind its lane for longer than that lease releases the
+// copy, and the mention, sent later, can deliver the comment a second time.
 var mentionDeliveryQuery = `
-	select session_id,
+	select coalesce(session_id, case when target like 'session:%' then substr(target, 9) end),
+	       target,
 	       bool_or(state = 'sent'),
 	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
 	from comment_deliveries
-	where comment_id = $1 and session_id is not null
-	group by session_id
+	where comment_id = $1
+	group by 1, 2
 `
 
-// loadMentionDeliveries reads what a new comment's mentions delivered (mentionDeliveries), once per
-// attempt. Only a comment.created whose mentions resolved to a session asks: every other event,
-// edits, resolutions and reopenings included, suppresses nothing, and costs no query.
+// loadMentionDeliveries reads what a new comment's mentions delivered (mentionDeliveries), in one
+// query per attempt. Only a comment.created that names a mentioned session
+// (payloadMentionedSessions) or suppresses its route by a mention's target
+// (payloadSuppressedRouteTarget) asks: every other event, edits, resolutions and reopenings
+// included, suppresses nothing, and costs no query.
 func loadMentionDeliveries(ctx context.Context, deps Deps, event model.Event) (mentionDeliveries, error) {
-	if event.Type != "comment.created" || len(payloadMentionedSessions(event.Payload)) == 0 {
+	if event.Type != "comment.created" ||
+		(len(payloadMentionedSessions(event.Payload)) == 0 && payloadSuppressedRouteTarget(event.Payload) == "") {
 		return mentionDeliveries{}, nil
 	}
 	commentID := payloadString(event.Payload, "id")
@@ -800,19 +842,21 @@ func loadMentionDeliveries(ctx context.Context, deps Deps, event model.Event) (m
 		return mentionDeliveries{}, fmt.Errorf("load mention deliveries of comment %q: %w", commentID, err)
 	}
 	defer rows.Close()
-	result := mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}}
+	result := mentionDeliveries{
+		sessions: mentionOutcomes{sent: map[string]struct{}{}, pending: map[string]struct{}{}},
+		targets:  mentionOutcomes{sent: map[string]struct{}{}, pending: map[string]struct{}{}},
+	}
 	for rows.Next() {
-		var sessionID string
+		var sessionID *string
+		var target string
 		var sent, pending bool
-		if err := rows.Scan(&sessionID, &sent, &pending); err != nil {
+		if err := rows.Scan(&sessionID, &target, &sent, &pending); err != nil {
 			return mentionDeliveries{}, fmt.Errorf("load mention deliveries of comment %q: %w", commentID, err)
 		}
-		switch {
-		case sent:
-			result.sent[sessionID] = struct{}{}
-		case pending:
-			result.pending[sessionID] = struct{}{}
+		if sessionID != nil {
+			result.sessions.record(*sessionID, sent, pending)
 		}
+		result.targets.record(target, sent, pending)
 	}
 	if err := rows.Err(); err != nil {
 		return mentionDeliveries{}, fmt.Errorf("load mention deliveries of comment %q: %w", commentID, err)
@@ -1330,22 +1374,45 @@ func payloadBool(payload any, key string) bool {
 
 // suppressesCurrentRoute applies a create-time suppression to the route that was resolved
 // alongside the mention, including a later direct route to that same resolved session. A route
-// edit to any other target must still wake its new destination. The suppression names the session
-// the route resolved to when the comment was written (suppressed_route_session_id), and holds only
-// once the mention delivered the comment to it (attempt.leftToMention): a route whose session's
-// mention failed is published to.
+// edit to any other target must still wake its new destination. A suppression that names the
+// session the route resolved to when the comment was written (suppressed_route_session_id) holds
+// only once the mention delivered the comment to that session (attempt.leftToMention). One that
+// names the route string alone, the target of a mention whose lookup went unanswered
+// (payloadSuppressedRouteTarget), holds while the route is still that string and only once the
+// mention of that target delivered the comment (attempt.leftToMentionOf). A route whose mention
+// failed is published to.
 func suppressesCurrentRoute(payload any, current *string, a *attempt) bool {
 	if !payloadBool(payload, "suppress_route") || current == nil || *current == "" {
 		return false
 	}
 	sessionID := payloadString(payload, "suppressed_route_session_id")
 	if sessionID == "" {
-		return false
+		target := payloadSuppressedRouteTarget(payload)
+		return target != "" && *current == target && a.leftToMentionOf(target)
 	}
 	if *current != payloadString(payload, "suppressed_route") && *current != "session:"+sessionID {
 		return false
 	}
 	return a.leftToMention(sessionID)
+}
+
+// payloadSuppressedRouteTarget is the mention target a comment payload suppresses the route copy
+// by, string alone: suppressed_route, when suppress_route is set, no suppressed_route_session_id
+// names a session, and one of the mentions' targets (mentions[].target) is that string - the route
+// was that mention's target and its lookup went unanswered. It is "" for every other payload.
+func payloadSuppressedRouteTarget(payload any) string {
+	route := payloadString(payload, "suppressed_route")
+	if !payloadBool(payload, "suppress_route") || route == "" || payloadString(payload, "suppressed_route_session_id") != "" {
+		return ""
+	}
+	values, _ := payload.(map[string]any)
+	mentions, _ := values["mentions"].([]any)
+	for _, entry := range mentions {
+		if payloadString(entry, "target") == route {
+			return route
+		}
+	}
+	return ""
 }
 
 func payloadStringSet(payload any, key string) map[string]struct{} {
@@ -1369,10 +1436,12 @@ func payloadStringSet(payload any, key string) map[string]struct{} {
 	return result
 }
 
-// payloadMentionedSessions reads the sessions a comment payload's mentions resolved to (each
-// mentions[].session_id), as the scan decodes the payload from JSON. A mention that resolved to no
-// session (session_id null) names none. These are candidates only: a session route skips one
-// once the mention delivered to it (attempt.leftToMention).
+// payloadMentionedSessions reads the sessions a comment payload's mentions resolved to, as the
+// scan decodes the payload from JSON: each mentions[].session_id, and, for a session:<id> mention
+// that names none (its lookup went unanswered, so the sender resolves it after the commit), the
+// <id> its target names. A role:X mention that resolved to no session names none. These are
+// candidates only: a session route skips one once the mention delivered to it
+// (attempt.leftToMention).
 func payloadMentionedSessions(payload any) map[string]struct{} {
 	values, ok := payload.(map[string]any)
 	if !ok {
@@ -1381,7 +1450,11 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 	mentions, _ := values["mentions"].([]any)
 	result := map[string]struct{}{}
 	for _, entry := range mentions {
-		if sessionID := payloadString(entry, "session_id"); sessionID != "" {
+		sessionID := payloadString(entry, "session_id")
+		if named, unpinned := strings.CutPrefix(payloadString(entry, "target"), "session:"); sessionID == "" && unpinned {
+			sessionID = named
+		}
+		if sessionID != "" {
 			result[sessionID] = struct{}{}
 		}
 	}

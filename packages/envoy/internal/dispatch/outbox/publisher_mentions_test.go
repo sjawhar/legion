@@ -28,18 +28,34 @@ func mentionsOf(sessionIDs ...string) []any {
 	return mentions
 }
 
-// seedMentionDelivery records an attempt of commentID's mention of sessionID, as the comment
-// handler leaves it, inserting the comment first when no test seeded it. outcome is the attempt's
-// state - "sent", "failed", or "pending" for a send its sender claimed just now - or "abandoned"
-// for a pending attempt whose sender's claim lapsed two minutes ago. "" records no attempt.
+// seedMentionDelivery records an attempt of commentID's mention of sessionID, pinned to it
+// (seedDelivery).
 func seedMentionDelivery(t *testing.T, database *store.Store, commentID, sessionID, outcome string) {
+	t.Helper()
+	seedDelivery(t, database, commentID, "session:"+sessionID, sessionID, outcome)
+}
+
+// seedDelivery records an attempt of commentID's mention of target, as the comment handler and
+// its sender leave it, inserting the comment first when no test seeded it. sessionID is the
+// session the attempt names, "" for none: an unanswered mention's attempt names none until its
+// sender resolves it. outcome is the attempt's state - "sent", "failed", or "pending" for a send
+// its sender claimed just now - or "abandoned" for a pending attempt whose sender's claim lapsed
+// two minutes ago, "queued" for a pending attempt created just now that no sender has claimed
+// yet, and "backlogged" for one created two minutes ago that no sender has claimed. "" records no
+// attempt.
+func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessionID, outcome string) {
 	t.Helper()
 	if outcome == "" {
 		return
 	}
-	state, age := outcome, time.Duration(0)
-	if outcome == "abandoned" {
+	state, age, claimed := outcome, time.Duration(0), true
+	switch outcome {
+	case "abandoned":
 		state, age = "pending", 2*time.Minute
+	case "queued":
+		state, claimed = "pending", false
+	case "backlogged":
+		state, age, claimed = "pending", 2*time.Minute, false
 	}
 	ctx := context.Background()
 	if _, err := database.Pool.Exec(ctx, `
@@ -51,12 +67,12 @@ func seedMentionDelivery(t *testing.T, database *store.Store, commentID, session
 	if _, err := database.Pool.Exec(ctx, `
 		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, created_at, claimed_at)
 		values (
-			$1, 'session:' || $2,
-			(select coalesce(max(attempt), 0) + 1 from comment_deliveries where comment_id = $1 and target = 'session:' || $2),
-			'steer', $2, $3, now() - $4::interval, now() - $4::interval
+			$1, $2,
+			(select coalesce(max(attempt), 0) + 1 from comment_deliveries where comment_id = $1 and target = $2),
+			'steer', nullif($3, ''), $4, now() - $5::interval, case when $6 then now() - $5::interval end
 		)
-	`, commentID, sessionID, state, age); err != nil {
-		t.Fatalf("seed %s delivery of the mention of %s: %v", outcome, sessionID, err)
+	`, commentID, target, sessionID, state, age, claimed); err != nil {
+		t.Fatalf("seed %s delivery of the mention of %s: %v", outcome, target, err)
 	}
 }
 
@@ -244,6 +260,126 @@ func TestCommentRouteSuppressionFollowsTheResolvedHolder(t *testing.T) {
 	}
 	if got, want := topicsOf(publisher.all()), []string{"notifications.dispatch.issue.T-1.comment.created"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("role-to-session publications = %#v, want %#v", got, want)
+	}
+}
+
+// TestAnUnansweredSessionMentionHoldsTheCopiesOfTheSessionItNames: a session:<id> mention whose
+// lookup went unanswered is unpinned in the payload, and its attempt names no session until the
+// sender resolves it. Its <id> is still the session it can reach, so the author and route copies
+// its creation suppressed for that session follow its attempt as a pinned mention's do: held back
+// while it is pending or queued, skipped once it was sent, published once it failed or its
+// unclaimed attempt waited past the claim lease.
+func TestAnUnansweredSessionMentionHoldsTheCopiesOfTheSessionItNames(t *testing.T) {
+	const (
+		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
+		s1Topic    = "notifications.agent.s1"
+		routeTopic = "notifications.role.reviewer"
+	)
+	ctx := context.Background()
+	database := storetest.Open(t)
+	seedIssue(t, database, "T-1", nil)
+	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "s1"}, "Root comment", nil)
+	unpinned := []any{map[string]any{"target": "session:s1", "delivery": "steer", "session_id": nil}}
+	commentNumber := 0
+	for _, tc := range []struct {
+		copy     string
+		delivery string
+		want     []string
+		wantErr  error
+	}{
+		{copy: "author", delivery: "pending", want: []string{issueTopic}, wantErr: errMentionPending},
+		{copy: "author", delivery: "queued", want: []string{issueTopic}, wantErr: errMentionPending},
+		{copy: "author", delivery: "sent", want: []string{issueTopic}},
+		{copy: "author", delivery: "failed", want: []string{issueTopic, s1Topic}},
+		{copy: "author", delivery: "backlogged", want: []string{issueTopic, s1Topic}},
+		{copy: "route", delivery: "pending", want: []string{issueTopic}, wantErr: errMentionPending},
+		{copy: "route", delivery: "sent", want: []string{issueTopic}},
+		{copy: "route", delivery: "failed", want: []string{issueTopic, routeTopic}},
+	} {
+		t.Run(tc.copy+" "+tc.delivery, func(t *testing.T) {
+			commentNumber++
+			commentID := fmt.Sprintf("00000000-0000-0000-0001-%012d", commentNumber)
+			payload := map[string]any{"id": commentID, "mentions": unpinned}
+			var route *string
+			if tc.copy == "author" {
+				payload["reply_to"] = rootID
+				payload["suppressed_authors"] = []any{"s1"}
+			} else {
+				// role:reviewer's own lookup found s1, which the unanswered mention names.
+				route = new("role:reviewer")
+				payload["suppress_route"] = true
+				payload["suppressed_route"] = "role:reviewer"
+				payload["suppressed_route_session_id"] = "s1"
+			}
+			seedDelivery(t, database, commentID, "session:s1", "", tc.delivery)
+			publisher := &recordingPublisher{}
+			err := publish(ctx, Deps{Store: database, Publisher: publisher}, model.Event{
+				ID: 103, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+				Payload: payload, Notify: true, CreatedAt: time.Now(),
+			}, "", routing{route: route}, map[string]struct{}{})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("publish returned %v, want %v", err, tc.wantErr)
+			}
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("published topics = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention: a route whose string is the
+// target of a mention whose lookup went unanswered is suppressed by that string alone, with no
+// session known. Its copy follows that target's attempt: held back while it is pending, skipped
+// once it was sent, published once it failed. A route moved to another string since is
+// published to whatever the mention did.
+func TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention(t *testing.T) {
+	const (
+		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
+		routeTopic = "notifications.role.reviewer"
+	)
+	ctx := context.Background()
+	database := storetest.Open(t)
+	seedIssue(t, database, "T-1", nil)
+	commentNumber := 0
+	for _, tc := range []struct {
+		route    string
+		delivery string
+		want     []string
+		wantErr  error
+	}{
+		{route: "role:reviewer", delivery: "pending", want: []string{issueTopic}, wantErr: errMentionPending},
+		{route: "role:reviewer", delivery: "sent", want: []string{issueTopic}},
+		{route: "role:reviewer", delivery: "failed", want: []string{issueTopic, routeTopic}},
+		{route: "session:s1", delivery: "sent", want: []string{issueTopic, "notifications.agent.s1"}},
+	} {
+		t.Run(tc.route+" "+tc.delivery, func(t *testing.T) {
+			commentNumber++
+			commentID := fmt.Sprintf("00000000-0000-0000-0002-%012d", commentNumber)
+			// The sender records the session it resolved the role to before it sends.
+			sessionID := ""
+			if tc.delivery != "pending" {
+				sessionID = "s1"
+			}
+			seedDelivery(t, database, commentID, "role:reviewer", sessionID, tc.delivery)
+			publisher := &recordingPublisher{}
+			err := publish(ctx, Deps{Store: database, Publisher: publisher}, model.Event{
+				ID: 104, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+				Payload: map[string]any{
+					"id":                 commentID,
+					"mentions":           []any{map[string]any{"target": "role:reviewer", "delivery": "steer", "session_id": nil}},
+					"suppress_route":     true,
+					"suppressed_route":   "role:reviewer",
+					"suppressed_authors": []any{},
+				},
+				Notify: true, CreatedAt: time.Now(),
+			}, "", routing{route: new(tc.route)}, map[string]struct{}{})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("publish returned %v, want %v", err, tc.wantErr)
+			}
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("published topics = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }
 
