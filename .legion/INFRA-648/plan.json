@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-648",
+  "completed": "2026-10-28T13:37:30Z",
+  "plan": "dispatch://INFRA-648/artifact/plan-md",
+  "base": "3168cd8c (main, carries INFRA-647's merge 7efe36bb)",
+  "summary": "Three changes. (1) pmdoc.ListMarks (pmdoc/find.go:793) walks with the positionless pmdoc.Walk instead of walk: measured 14-60 ms per call today on four real LINUX specs (a quarter to two thirds of a render), 0.15-0.69 ms after, identical list because Validate refuses children on the nodes walkNode skips. (2) pmdoc.yattrToMarkName (pmdoc/node.go:93) replaces its regexp with a byte check of the same semantics: pmdoc.Read 7-23 % faster, 16 % fewer allocations, fuzz-equal. (3) Two nil-outside-tests hooks in settleRoomWithin and a test (docs/settlement_read_invariant_test.go) that fails when read is changed anywhere but reconcileAskBlocks before a reused render; installed in INFRA-647's two render-once tests; two negative controls. readSettlementTree's copy, holdLive, recordedMarkRefs and the reuse condition are unchanged, with measured reasons in the plan.",
+  "tasks": [
+    "1. Code: pmdoc/find.go ListMarks -> Walk; pmdoc/node.go yattrToMarkName byte check, delete yattrMarkSuffix; reword the comment at pmdoc/marks.go:21; docs/service.go hooks afterSettleTreeRead (after readSettlementTree at :1485) and beforeSettleVersionRender (at the reuse decision :1661-1664).",
+    "2. Tests: pmdoc table test of yattrToMarkName edge cases with literal outputs; docs/settlement_read_invariant_test.go (goroutine-safe helper keyed by room, t.Errorf, settle=time.Hour, non-vacuous reuse count) also installed in TestSettlementVersionsARepairTheRoomAlreadyHolds and TestSettlementVersionsTheTreeOfAStampThatMintedNothing; negative controls (a) append a character to read's first text run after readSettlementTree, (b) changedTree() returns false; run pmdoc and docs packages on Postgres 17 + pgvector, dispatch/... and cmd/dispatch/..., go vet, -race -count=5 on settlement tests.",
+    "3. Throwaway equivalence on >=20 real LINUX specs, base vs head, deterministic (SetBlockIDGenerator counter, fixed ids, settle=time.Hour + settleCurrentGeneration, fixed s.now, UnrecordedMarkTTL small; unfixable ids/timestamps replaced by first-appearance order): reuse, sweep-after-TTL, stamp and repair settlements; dump versions, block rows, excerpts, token, ListMarks, unrecorded keys, read-tree hash; empty diff; negative control; -benchmem of ListMarks and Read base vs head.",
+    "4. Merge rule on the architect's replay (or INFRA-639's if merged): warmed dump, six alternating runs with tools/drive.sh <side>-<n> 0.3 1 27 8 at GOMAXPROCS=2; G = base ListMarks + yattrToMarkName under readSettlementTree; changed function share = sweepUnrecordedMarks + readSettlementTree cum; pass on (1) every head < every base or (2) share falls >= g/2, either when the other does not contradict (median(head) > max(base), or head share >= base share); the G<spread gate is not applied per dispatch://INFRA-512/comment/63dcf4bd; quote settleRoomWithin share, server-wide yattrToMarkName share, -lines -peek split, copy-path share, EXPLAIN of the recordedMarkRefs queries; else write-up on INFRA-512.",
+    "5. Docs: packages/envoy/AGENTS.md settlement paragraph names the tests that check the invariant; correct the 'No test enforces' bullet in docs/solutions/envoy/a-settlement-reuses-...-pr2416.md; changie new --kind Changed --custom Issue=pr<number>.",
+    "6. PR from legion/INFRA-648 with the Dispatch: INFRA-648 line only; ce-simplify-code once after the proof.",
+    "7. Production check after the merge: envoy-dispatch CPU and a live profile share, or pending deploy."
+  ],
+  "acceptance": [
+    {"criterion": "A1 Merge rule on LINUX's replay, or a write-up", "surface": "Local Dispatch server (cmd/dispatch) base and head builds on Postgres 17 + pgvector, driven by the architect's replay (infra512-replay-tools-tgz) or INFRA-639's", "check": "Task 4: six runs, G, g, spread, both measures and the outcome; otherwise a comment on dispatch://INFRA-512 and no merge"},
+    {"criterion": "A2 Settled versions and marks identical to today's", "surface": "docs package settlement on real Postgres with >=20 real-size LINUX specs", "check": "Task 3: empty base-vs-head dump diff; its negative control differs"},
+    {"criterion": "A3 INFRA-647's invariant kept with a test that fails if read is changed elsewhere before the version is rendered", "surface": "go test ./internal/dispatch/docs/ on Postgres", "check": "New test passes and counts a reuse; negative controls (a) and (b) fail on the helper's assertion"},
+    {"criterion": "A4 yattrToMarkName returns today's result for every input", "surface": "go test ./internal/dispatch/pmdoc/", "check": "Table test passes; >=60 s throwaway fuzz against the regexp finds no difference"},
+    {"criterion": "A5 No resident memory added; less allocated", "surface": "Diff; task 3 benchmark", "check": "No new field/cache/global beyond test-only hooks; -benchmem allocs/op and ns/op of ListMarks and Read at or below base on every spec"},
+    {"criterion": "A6 Removed CPU gone where it was", "surface": "Replay profiles", "check": "go tool pprof -lines -peek 'pmdoc\\.ListMarks$|pmdoc\\.yattrToMarkName$': no walkNode/nodeSize under ListMarks and no regexp under yattrToMarkName at head"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push and handoff, PR body and proof format (references/pr-body.md), conflicts on a sibling merge (references/conflicts-and-rewrites.md), production check (references/merge-gate.md)",
+      "ce-simplify-code: the one simplify pass after the proof that the PR body records",
+      "dispatch: the write-up comment on INFRA-512 if the rule fails, and any report on the issue",
+      "envoy: messages to the INFRA-512 architect for the copy-path or EXPLAIN findings and a failed rule"
+    ],
+    "test": [
+      "legion-worker: the tester's proof format, re-running the implementer's commands, and the handoff",
+      "dispatch: reading LINUX specs with dispatch doc-read for the equivalence corpus"
+    ],
+    "review": [
+      "legion-worker: review threads, approval by head SHA and the merge gate (references/review-threads.md, references/merge-gate.md)",
+      "ce-simplify-code: judging whether the simplify pass left anything the diff should not carry"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Task 3's base-vs-head diff cannot be empty as written: uuid block ids, artifact/ask ids, timestamps and timer settlements differ between processes.", "answer": "Task 3 made deterministic: SetBlockIDGenerator counter, fixed comment/ask/mark ids, settle=time.Hour with settleCurrentGeneration, fixed s.now and small UnrecordedMarkTTL; ids and timestamps the harness cannot fix are replaced by first-appearance order before the diff."},
+      {"finding": "Negative control (a) (StripServerOwnedAttrs) would likely be repaired and recorded by reconcileAskBlocks, so the helper never compares.", "answer": "Control (a) is now appending a character to read's first text run after readSettlementTree, which reconciliation never touches; it must fail on the helper's assertion, not on the reuse count."},
+      {"finding": "Docs wording claimed the test catches any writer; it checks only settlements the tests drive.", "answer": "AGENTS.md and the docs/solutions bullet are worded to what the tests check: settlements they drive that reuse the rendering."},
+      {"finding": "'Two indexed queries' for recordedMarkRefs is unsupported: the predicate matches neither the partial indexes nor the ::uuid expression indexes.", "answer": "Claim corrected and marked [INFERENCE]; task 4 runs EXPLAIN (ANALYZE, BUFFERS) on the warmed replay DB and sends sequential scans to the architect as discovered scope before merge."},
+      {"finding": "Benchmark figures inconsistent between runs and not reproducible from saved output; build per column unclear.", "answer": "Benchmarks re-run with -count=5, output saved at $TMPDIR/infra648/bench-split.txt; the table states today's code except the byte-check column, with means and min-max; percentages recomputed from that file."},
+      {"finding": "Change 2 (yattrToMarkName) goes beyond W15 into every tree read; ownership undecided.", "answer": "Decided in the plan: it is readSettlementTree's own cost Dispatch controls, so it is in this issue; G counts only its part under readSettlementTree; its server-wide share is quoted; the architect is told that INFRA-692, INFRA-645 and INFRA-649 bases move."},
+      {"finding": "Merge rule not machine-decidable: no numeric contradiction, the spec's G<spread gate silently dropped, changed function undefined.", "answer": "Contradiction defined (median(head) > max(base); head share >= base share); the G<spread gate stated as replaced by dispatch://INFRA-512/comment/63dcf4bd under ask a9a0f3d7; changed function = sweepUnrecordedMarks + readSettlementTree cumulative, with settleRoomWithin share quoted for information."},
+      {"finding": "Sequencing with INFRA-641 (#2455) undecided.", "answer": "If merged before measuring, the base includes it; if it merges after the six runs, the runs stand because the rule compares the head with its own parent; no textual conflict."},
+      {"finding": "INFRA-643 (#2453) missing from discovered scope.", "answer": "Named: no textual conflict with the hooks; the copy-path figure is the one at this change's base commit, named in the PR body."},
+      {"finding": "Dispatch: INFRA-648 in the PR body conflicts with the relayed no-key ruling.", "answer": "Kept only as the daemon's link line the legion-worker skill requires, as sjawhar/legion#2416 did; no key in title, commits, files or changelog."},
+      {"finding": "A5 had no machine check.", "answer": "Task 3 adds -benchmem -count=5 of ListMarks and Read base vs head on the corpus; head at or below base on every spec."},
+      {"finding": "Copy-path gate ambiguous: report or wait?", "answer": "At >=25 % of readSettlementTree's CPU the merge waits for the architect's answer."},
+      {"finding": "Test helper must be goroutine-safe since hooks fire on timer and copy settlements.", "answer": "Helper keyed by room, mutex-guarded, reports with t.Errorf, JSON() error counts as change; the test sets settle=time.Hour and stamps first so the reuse is reachable."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
