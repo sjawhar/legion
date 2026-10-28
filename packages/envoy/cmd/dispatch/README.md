@@ -1285,6 +1285,8 @@ Each item below names a path with its method and identity, then its purpose.
 
   Stream durable events with SSE.
   Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it.
+  A resuming connection (`since`, or `Last-Event-ID`) whose `since` is at or below the log's head is replayed every event after it before it goes live, and its response carries `X-Dispatch-Event-Replay: complete`, so a client may skip the refresh it would owe the gap;
+  a cold connect, and a `since` above the head (a log that was reset), carry no such header.
 
 - `/api/v1/artifacts/_test/quiesce` (POST; as above, plus `DISPATCH_TEST_HOOKS=1`)
 
@@ -1483,6 +1485,13 @@ Each item below names a path with its method and identity, then its purpose.
   its block is written `state="resolved"` in the live document, and no version is written.
   An ask answered or resolved before the close is left as it was, and the close records no answer and no approval.
   A reopening `status` (any but `done`) opens again exactly the asks the close withdrew, each with one `ask.opened` before `issue.updated`, and they return to the Inbox.
+
+- `/api/v1/issues/{key}/summary` (GET; cookie, trusted header, or bearer)
+
+  What a reference to an issue shows, read without the full issue:
+  `{key, project, title, status, documents}`, `documents` every artifact of the issue in the order the issue read lists them, each `{id, slug, name, kind, latest_version, primary}`, `primary` marking the spec, which a reference to a block of the spec names.
+  One query for the issue and one for its artifacts, with no version history, approval, child or open-ask read.
+  `404 NOT_FOUND` for no such issue.
 
 - `/api/v1/issues/{key}/asks` (POST; cookie, trusted header, or bearer)
 
@@ -1730,6 +1739,11 @@ Each item below names a path with its method and identity, then its purpose.
   Read an unlinked project artifact and its incoming references.
   `{slug}` is resolved within `{key}`.
 
+- `/api/v1/projects/{key}/artifacts/{slug}/summary` (GET; cookie, trusted header, or bearer)
+
+  What a reference to a project document shows, read without its versions:
+  `{id, project, slug, name, kind, latest_version}`, `{slug}` (a slug or unambiguous filename) resolved as the project document read resolves it (`404 ARTIFACT_NOT_FOUND`, `400 ARTIFACT_REFERENCE_AMBIGUOUS`).
+
 - `/api/v1/projects/{key}/artifacts/{slug}/text` (GET; cookie, trusted header, or bearer)
 
   Read an unlinked project document's live markdown.
@@ -1771,6 +1785,26 @@ Each item below names a path with its method and identity, then its purpose.
 - `/...` (GET; none)
 
   Serve the dashboard static files.
+
+An event's payload says what its write moved, so a reader can refresh only what it shows (the dashboard's rules are `packages/dispatch/web/src/api/event-refresh.ts`).
+`issue.created`, `issue.updated` and `issue.closed` carry `changed`, the fields whose value the write moved (`title`, `status`, `closed_at` for a close or a reopen, `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo`, `components`, `blocked_by`, `external_links`;
+on `issue.created` every field the new issue holds a value in), and `ancestors`, the issue's parent chain, parent first up to the root (`[]` for a root).
+`thread_logins`, every login with a Replies row on the write's thread once the write is in, is on `comment.created` and `comment.answered`, on an issue message's `message.created` and `message.answered` (a direct conversation has no Replies thread and carries none), on `ask.opened`, `ask.answered` and `ask.resolved`, and on an `issue.updated` or `issue.closed` that moved the status:
+for a close or a reopen, the logins with a row on the issue's open asks; for any other status move, `[]`.
+`user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved, or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`PUT` or `DELETE /api/v1/me/asks/{id}/snooze`, which append it only when the row moved).
+A snooze's payload is exactly `{login, changed: ["snoozed"]}`:
+every signed-in caller's event stream replays it, so it names neither the ask nor the writer's issue state, and the writer's other tabs and devices refetch their whole Inbox.
+`references_changed` names the targets whose inbound edges the write moved that a reader refreshes by name: an issue (`{kind:
+"issue", id}`), an ask (`{kind: "ask", id, issue_key?, artifact_id?}`, with the issue or document whose ask list holds its row) and a document or file (`{kind: "artifact", id, ref}`:
+its uuid, the node id `GET /api/v1/references` reports for it, and the `dispatch://` address its Referenced by panel is opened on, `ref` absent when its owner names no address), and a block of a document (`{kind: "block", id, ref, artifact_id}`:
+its node id `<document ref_key>#<block id>`, its reference and its document's uuid, whose panel lists the edges at its blocks).
+Each kind is capped on its own at 100 targets:
+past the cap of a kind the event names none of that kind, lists it in `references_changed_truncated_kinds` (of `issue`, `ask`, `artifact` and `block`), still names the targets of every other kind, and carries `references_changed_truncated: true`, which a reader that does not read the kinds takes as every kind cut.
+It also names a target whose edge the write kept but whose excerpt it moved:
+an edit of an ask's question or a comment's body that changes the head of its text names every target the text still cites, a document version names each target whose stored excerpt it changed and each target a block it changed still cites, and a retitle names the issue's parent and the issues it is blocked by, whose panels show its title.
+A document version also names each block it changed or deleted that something cites, since every link to the block shows its text.
+An issue write that adds or removes a `blocked_by` entry names each blocker it added or removed, whose `referenced_by_count` counts the edge, and an `issue.created` names every blocker the new issue holds.
+Each field is absent from an event written before it existed.
 
 ## Dispatch topics
 

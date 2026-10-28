@@ -142,6 +142,12 @@ const ALLOWED: Record<string, { words: string; reason: string }[]> = {
       reason: "enum-k8s-probe-path-tools",
     },
     { words: "chromium version [and] socat V", reason: "enum-k8s-toolchain-step-commands" },
+    {
+      words:
+        "The image is probed before it publishes [the] [image] [is] [probed] [before] [it] [publishes] is refused",
+      reason:
+        "html-block-k8s-volume-mount-refusal: in the base a line starting with `<dir>` opens a raw HTML block, whose text holds the link's destination `#the-image-is-probed-before-it-publishes` as words; the head renders that paragraph as Markdown, where a link destination is unseen",
+    },
   ],
 };
 

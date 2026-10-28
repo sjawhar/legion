@@ -545,8 +545,9 @@ test("refreshQueries neither cancels nor invalidates a live query on its first l
     expect(queryClient.getQueryState(key)?.fetchStatus).toBe("fetching");
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
     expect(subscribed).toHaveLength(1);
-    // The ordinary one is cancelled and fetched again, as before.
-    expect(ordinaryCalls).toBe(2);
+    // The ordinary one is marked stale and its first load is left to land, not cancelled.
+    expect(queryClient.getQueryState(["issues"])?.isInvalidated).toBe(true);
+    expect(ordinaryCalls).toBe(1);
 
     const { socket, sub } = await opened();
     socket.receive(snapshot(sub));

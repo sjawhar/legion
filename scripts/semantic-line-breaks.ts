@@ -28,8 +28,8 @@
 // the opens above or any block after it), and whether a list is loose (the blank lines R2 puts
 // between items). Only `--write` loads the parser, so check mode runs without `bun install`.
 // `--write` also refuses, before anything else, a file that is not valid UTF-8, and a file holding a
-// vertical tab, a form feed or a carriage return (CRLF line endings included), which GitHub's
-// cmark-gfm reads where these rules do not (ODD_WHITESPACE).
+// vertical tab, a form feed, a carriage return (CRLF line endings included) or a byte order mark
+// past the first, which GitHub's cmark-gfm reads where these rules do not (ODD_WHITESPACE).
 //
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
 import { existsSync } from "node:fs";
@@ -140,7 +140,8 @@ const YAML_DOCUMENT_END = /^\.\.\.[ \t]*\r?$/;
 
 const SENTENCE_MARKS = ".!?";
 const SENTENCE_CLOSERS = ")]\"'*_”’";
-const SENTENCE_START = /^(?:[\p{Lu}a-z0-9`["“]|\*\*)/u;
+/** A sentence start; `(` opens one only before a capital or a backtick: `(The cost is…)`. */
+const SENTENCE_START = /^(?:[\p{Lu}a-z0-9`["“]|\*\*|\([\p{Lu}`])/u;
 const ABBREVIATIONS = [
   "e.g.",
   "E.g.",
@@ -734,11 +735,12 @@ function startsBlock(text: string): boolean {
  * closers, then this one space, then a sentence start. A sentence that starts with a lowercase
  * word (`ygo's`, `envoy-dispatch`) follows only a bare `.`, maybe emphasised: after `?`, `!`, a
  * quote, a parenthesis or an ellipsis such a word goes on with the sentence (`asks "why?" and`,
- * `./... in`). A sentence may start with an inline HTML tag (`<kbd>Ctrl</kbd> opens it`). No
- * sentence starts with text `--write` may not cut before. The text may be a paragraph, its lines
- * joined with `\n`, read as `--write` reads it: a line that opens with a list marker stays a line
- * of its own, so the sentence before a mark starts no earlier than its line. Check mode reports
- * these and `--write` turns them into line breaks.
+ * `./... in`). A sentence may start with an inline HTML tag (`<kbd>Ctrl</kbd> opens it`) or with a
+ * parenthesis before a capital or a backtick (`proof. (A call's parent`). No sentence starts with
+ * text `--write` may not cut before. The text may be a paragraph, its lines joined with `\n`, read
+ * as `--write` reads it: a line that opens with a list marker stays a line of its own, so the
+ * sentence before a mark starts no earlier than its line. Check mode reports these and `--write`
+ * turns them into line breaks.
  */
 function sentenceBreaks(line: string, prose = proseMask(line)): number[] {
   const breaks: number[] = [];
@@ -1151,9 +1153,19 @@ async function readBytes(path: string): Promise<Uint8Array | undefined> {
   }
 }
 
-/** Check mode reads invalid UTF-8 as U+FFFD; `--write` refuses it, since writing would replace it. */
-const LENIENT_UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
-const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+/**
+ * Both decoders drop one leading byte order mark, as GitHub's cmark-gfm does, so no rule reads it as
+ * part of line 1; `--write` puts it back when it writes the file. Check mode reads invalid UTF-8 as
+ * U+FFFD; `--write` refuses it, since writing would replace it.
+ */
+const LENIENT_UTF8 = new TextDecoder("utf-8");
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true });
+const BYTE_ORDER_MARK = "\uFEFF";
+
+/** Whether the bytes start with UTF-8's byte order mark (EF BB BF). */
+function hasByteOrderMark(bytes: Uint8Array): boolean {
+  return bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+}
 
 async function readText(path: string): Promise<string | undefined> {
   const bytes = await readBytes(path);
@@ -1176,11 +1188,12 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
 }
 
 /**
- * Whitespace GitHub's cmark-gfm reads where this script's rules do not: a vertical tab and a form
- * feed count as spaces there, and a carriage return ends a line, while a join would leave one inside
- * the new line. A file holding any of them is not written.
+ * Characters GitHub's cmark-gfm reads where this script's rules do not: a vertical tab and a form
+ * feed count as spaces there, a carriage return ends a line, while a join would leave one inside the
+ * new line, and a byte order mark the decoder left (a second leading one, or one later in the file)
+ * is text there, where `trim()` and micromark drop it. A file holding any of them is not written.
  */
-const ODD_WHITESPACE = /[\v\f\r]/;
+const ODD_WHITESPACE = /[\v\f\r\uFEFF]/;
 
 async function writeFiles(paths: readonly string[]): Promise<number> {
   const parse = await loadParser();
@@ -1201,7 +1214,7 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
     if (odd !== null) {
       const line = text.slice(0, odd.index).split("\n").length;
       process.stderr.write(
-        `${path}: refusing to write: line ${line} holds a vertical tab, a form feed or a carriage return\n`
+        `${path}: refusing to write: line ${line} holds a vertical tab, a form feed, a carriage return or a byte order mark\n`
       );
       status = 2;
       continue;
@@ -1216,7 +1229,7 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
         ? (renderDifference(parse, text, next) ?? secondRelayoutDifference(next))
         : `the re-layout would change more than whitespace (${difference})`;
     if (refusal === undefined) {
-      await writeFile(path, next);
+      await writeFile(path, hasByteOrderMark(bytes) ? BYTE_ORDER_MARK + next : next);
     } else {
       process.stderr.write(`${path}: refusing to write: ${refusal}\n`);
       status = 2;

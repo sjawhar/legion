@@ -336,6 +336,8 @@ text deleted before a version captured it is gone (the operator's decision, LEGI
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
 the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
+It stays one measure where a rendering is reused rather than made again:
+a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, and the observer takes a published write's own rendering, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is deterministic over one state.
 Indexing an ask block fails the second half:
 it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, staling an approval pinned to what an agent had just written and closing Legion's design gate with nothing in the event stream to explain it (LEGION-273).
 Settlement's tree writes - stamping block ids, restoring an ask block's server-owned attributes - move the stored Proof state and usually render the same markdown, so a version for one of those would repeat the version before it too (LEGION-229 requirement 2);
@@ -372,7 +374,8 @@ A browser's room load takes no lock the write holds, so a room that loads while 
 Every mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading its own;
 `applyLive` lets that tree go before the one check that decodes a second copy of the state (`refuseUndecodable`);
 and a write drops its fork and rendering once it commits, before its publish loads the room (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
-The `nodeToken` hash streams the token's encoding (`pmdoc.WriteTokenJSON`) rather than holding it whole.
+A token's encoding (`pmdoc.AppendTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
+LEGION-504's concern was more copies per token and their retention, and neither holds.
 The handler ends the transaction with `ledger.Commit`, which records each settlement credit with the document content and takes each version's authors back out of that record, commits, credits the writes' actor to their rooms, releases the authors a version the transaction wrote named, then applies and broadcasts the updates, and last publishes the events its document operations appended, ahead of the handler's own;
 it defers `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser, every version and the durable document as they were.
 
@@ -582,7 +585,14 @@ A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply
 
 The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
-ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains the log, applying and rendering each update in turn and comparing each rendering with the one before it (`updateChangesMarkdown`).
+ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains the log, applying each update in turn and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
+It renders the replica for that only when it cannot know the rendering otherwise, and two cases it knows exactly.
+A published live write's update carries its operation's rendering, taken when the replica still stands at the epoch and foreign-commit count the operation's fork read found before it encoded the room:
+the replica has then consumed nothing since that read but published writes' commits, which under the writer slot are this write's own earlier updates, so after the update it is the fork the write rendered.
+ygo encodes the room's whole delete set in every update, so that holds only on the room instance the fork was read from:
+a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch.
+And an update whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first commit, so applying it changes nothing:
+a cold write's publish into the room its own publish loaded is never rendered.
 So every committed update is classified, and its authors credited, exactly once, by whichever observer reaches the log first, against the room as the commit before it left it.
 Catching the replica up to the room instead took in every commit since the last one rendered:
 when a published write's observer ran first, it counted a browser's edit in its own change, which credits no one, and the browser's own observer then found nothing changed, so the browser was on no version and in no pending row.
@@ -1721,12 +1731,28 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
 
 - A write that moves the reference graph names what it moved.
-  `refs.ReplaceCounted`, or `refs.ReplaceCountedRefs` for a document version's index (`docs.indexDocument`), which hands it the references it extracted and the targets its blocks' mentions moved, is the one way to index a body:
-  it reconciles that source's edges (`replaceRefs`, unexported, so no producer can reconcile without holding what moved) and keeps the targets whose readers carry a batched count
-  — an issue and an ask — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?}]`), with `references_changed_truncated: true` past `refs.CountedChangeLimit`.
-  A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail) instead of sweeping every list;
-  a write that cited nothing counted carries neither field.
-  `grep -rn 'refs\.ReplaceCounted' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
+  `refs.ReplaceCounted` and its two variants are the one way to index a body:
+  each reconciles that source's edges (`replaceRefs`, unexported, so no producer can reconcile without holding what moved) and keeps the targets a reader refreshes by name (`refs.CountedChanges`)
+  — an issue and an ask, whose readers carry a batched count, a document or file, whose Referenced by panel lists its edges, and a block of a document, whose own panel and every link to it read one graph read and whose document's panel lists the edges at its blocks
+  — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?, ref?}]`:
+  an issue by key; an ask by id with the issue or document whose ask list holds its row;
+  a document as `{kind: "artifact", id, ref}`, `id` its uuid, the node id `GET /api/v1/references` reports for it, and `ref` the `dispatch://` address `refs.ArtifactRef` spells, the reference its panel is opened on, absent when its owner names no address;
+  a block as `{kind: "block", id, ref, artifact_id}`, `id` its node id `<document ref_key>#<block id>`, `ref` its reference as `refs.BlockRef` spells it and `artifact_id` its document's uuid).
+  Each kind is capped on its own at `refs.CountedChangeLimit` (100) named targets, so an event carries at most 400 entries, under 100 KB, and an index citing forty documents still names every one:
+  past the cap of a kind the event names none of that kind, lists it in `references_changed_truncated_kinds` (of `issue`, `ask`, `artifact`, `block`, in that order), still names the targets of every other kind, and sets `references_changed_truncated: true`, which a reader written before the kinds falls back on for every kind (`model.ReferenceChanges.TruncatedKinds`).
+  A citation of a comment, a message or a component is not named: nothing counts it, and its panel refreshes on the graph itself.
+  `ReplaceCounted` names the targets whose edges it inserted or deleted, which is all a first write of a body moves.
+  `ReplaceCountedEdit` (an edit of an ask's question or a comment's body, through `s.replaceEditedReferences` in the API) also names every target the text still cites when the edit changes the head of its text, which every edge such a source writes shows as its excerpt.
+  `ReplaceDocumentCounted` is a document version's index (`docs.indexDocument`), handed the references it extracted, dated the version's time, and what `refs.IndexBlocks` moved:
+  the targets of the block mentions it inserted or deleted, the target of each mention it kept in a block whose text changed (that block's text is the mention's excerpt), and each block it changed or deleted that a source cites (`citedBlocks`:
+  the block's text is what every link to it shows).
+  It stores each mention's excerpt (`RecordExcerpts`, which returns the targets whose served excerpt it changed) and names those too, or marks the excerpts owed (`ClearExcerpts`) for a version with no rendering.
+  An issue's own `child_of` and `blocked_by` edges are named through `issueEdgeChanges` (`api/issue_event_fields.go`):
+  a retitle keeps those edges but moves the title they show, so `PATCH /api/v1/issues/{key}` names its parent and the issues it is blocked by;
+  a `blocked_by` change moves each added or removed blocker's `referenced_by_count`, so the PATCH names those blockers and `issue.created` names every blocker the new issue holds, merged with what its spec cites (`refs.MergeChanges`, which names each target once and keeps the per-kind cap).
+  A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail, the backlink panels, a document's panel, a block's read and its document's panel) instead of sweeping every list;
+  a write that cited nothing named carries neither field.
+  `grep -rn 'refs\.Replace\(Counted\|CountedEdit\|DocumentCounted\)(' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
 
 - Every payload family that can carry reference changes is built by a helper that takes them, so a producer that forgets does not compile:
   `artifact.*` through `api.artifactCreatedEventPayload` and `docs.ArtifactVersionEventPayload` (`writeVersionTx` returns `model.ReferenceChanges`, `SnapshotVersion` and `NamedVersion` return them on a `docs.VersionResult`, and the six producers
@@ -1734,11 +1760,31 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — each pass what their write moved); `ask.*` through `model.NewAskEventPayload` / `model.NewAskEditEventPayload`;
   `message.*` through `messageReplyThread.payload`;
   `comment.*` through `s.commentEventPayload`;
-  and `issue.*` through `model.NewIssueEventPayload`, which is how `POST /api/v1/issues` names what the spec it seeds cited.
+  and `issue.*` through `model.NewIssueEventPayload` (`issue.created`, `issue.updated` and `issue.closed` through `newIssueEventPayload` in `api/issue_event_fields.go`, which wraps it and adds `changed` and `ancestors`), which is how `POST /api/v1/issues` names what the spec it seeds cited.
   A transition that writes no text passes `model.ReferenceChanges{}` rather than omitting the argument.
   The guard is the required argument plus review, not the compiler alone:
   a struct literal (`model.AskEditEventPayload{Ask: …}`, as `outbox/publisher_test.go` builds) still compiles.
-  Re-runnable inventory: `grep -rn 'NewAskEventPayload\|NewAskEditEventPayload\|NewIssueEventPayload\|commentEventPayload\|artifactCreatedEventPayload\|ArtifactVersionEventPayload\|thread.payload(' --include=*.go internal`.
+  Re-runnable inventory: `grep -rn 'NewAskEventPayload\|NewAskEditEventPayload\|NewIssueEventPayload\|newIssueEventPayload\|commentEventPayload\|artifactCreatedEventPayload\|ArtifactVersionEventPayload\|thread.payload(' --include=*.go internal`.
+
+- An event says what its write changed, so a reader refreshes only what it shows (the dashboard's `packages/dispatch/web/src/api/event-refresh.ts`).
+  Every field is additive, read in the writer's own transaction, and absent (`omitzero`) from an event written before it, so a reader treats an absent field as "anything may have moved"; `[]` means the write names nothing.
+  `issue.created`, `issue.updated` and `issue.closed` carry `changed` (`issueChangedFields`, `api/issue_event_fields.go`:
+  every field whose value differs between the issue before and after the write, in one fixed order
+  — `title`, `status`, `closed_at` (whether the issue is closed, so a close or a reopen, which a status alone cannot say), `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo` (its own or the one it resolves to), `components` (the effective attachment, an inherited change included), `blocked_by`, `external_links`;
+  for `issue.created`, measured from `unsetIssue`, every field the new issue holds a value in) and `ancestors` (`issueAncestors`:
+  the parent chain, parent first up to the root, `[]` for a root, capped at `parentDepthCap`).
+  `thread_logins` is every login with a Replies row (`user_threads`) on the write's thread once the write is in (`events.ThreadLogins`, sorted, never nil):
+  on `comment.created` and `comment.answered` (the thread its trigger files it under:
+  its ask, else the root it replies to, else itself), an issue message's `message.created` and `message.answered` (its root up `in_reply_to`;
+  a direct conversation has no Replies thread and carries none), and `ask.opened`, `ask.answered` and `ask.resolved` (the ask's own thread);
+  an `issue.updated` or `issue.closed` that moved the status carries it too, as `events.IssueThreadLogins` (the logins with a row on one of the issue's open asks) for a close or a reopen, which moves exactly those rows, and `[]` for any other status move.
+  `user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved from the row it read (`api/state.go`), or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`askSnoozeEvent`, `api/ask_snooze.go`), whose payload is exactly `{login, changed: ["snoozed"]}`:
+  the stream has no per-viewer filter, so every signed-in person and agent replays it, and it names no ask and no `state` of the writer's (the writer's tabs refetch their whole Inbox);
+  an event without `changed` predates snooze events, so a reader takes it as any of `pinned`, `last_read_seq` and `dismissed`.
+
+- `GET /api/v1/issues/{key}/summary` and `GET /api/v1/projects/{key}/artifacts/{slug}/summary` (`api/issue_summary.go`, any authenticated caller) answer what a rendered `dispatch://` reference shows, at a cost a page linking a hundred items can pay on every event that touches them:
+  the issue's `{key, project, title, status, documents}`, each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read lists its artifacts (`primary` marks the spec, which a reference to a block of the spec names, so a pinned spec block's link opens that version under the spec's own slug without the full read), from one query for the issue and one for its artifacts (`latest_version` a `max(number)` probe of `artifact_versions` per artifact), and a project document's `{id, project, slug, name, kind, latest_version}`, its slug or unambiguous filename resolved as the project document read resolves it (`resolveDocumentReference`).
+  Neither reads a version body, an approval, a child, an open ask or a route roster, as the full reads do.
 
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target.
   Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write:
@@ -1779,11 +1825,15 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append;
   it locks them deterministically before any transaction can hold the global lock.
   This deliberately serializes concurrent event-producing transactions across every owner; do not bypass the broker with direct event inserts.
+  `GET /api/v1/events` answers `X-Dispatch-Event-Replay: complete` (`eventReplayHeader`, `api/events.go`) on a resuming connection (`since`, or `Last-Event-ID`) whose `since` is at or below the log's head when it subscribed:
+  it is replayed every event after `since` before it goes live, so the client missed nothing and may skip the refresh it owes a gap.
+  A cold connect, and a `since` above the head (an id of a log that was reset), get no header.
 
 - Project creation, repository mappings, and architecture sources own project-scoped events (`project.created`, `project.updated`, `settings.repo_project.updated`, `settings.architecture_source.updated`, and the importer's `architecture.synced` `{repo, branch, commit, components}` / `architecture.sync_failed` `{repo, branch, error}`, each naming the one source it judges (`components` is that source's count;
   events retained from before migration `0117` carry no `repo` or `branch`), authored by the system actor `{kind: "system", id: "architecture-importer"}` and emitted only on that source's state change:
   a new commit, a recovery, or an error whose text first appears or changes);
-  per-user issue-state writes emit project-owned `user_state.updated` and do not advance an issue unread sequence.
+  per-user issue-state writes, and a person's snooze or un-snooze of an Inbox row, emit project-owned `user_state.updated` (`{login, state, changed}`;
+  a snooze's is only `{login, changed: ["snoozed"]}`, owned by its ask's issue's or document's project) and do not advance an issue unread sequence.
   These events are retained on `notifications.dispatch.project.<PROJECT>.<type>` but never wake agents or take a direct agent/role route.
 
 - The architecture importer (`internal/dispatch/architecture`, migrations `0037` and `0117`) imports each architecture source of a project on its own:
@@ -1879,7 +1929,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`;
   the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency).
   `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there.
-  Neither write touches the ask, appends an event, or reaches any other login: a snooze is one viewer's view state.
+  Neither write touches the ask or reaches any other login: a snooze is one viewer's view state.
+  A write that moves the row - a `PUT` whose moment differs from the one stored (the upsert reads the previous moment from its own statement's snapshot) or a `DELETE` that removed a row - appends, in its own transaction, `user_state.updated` `{login, changed: ["snoozed"]}` owned by the ask's project (`askSnoozeEvent`, `api/ask_snooze.go`), and nothing more:
+  `GET /api/v1/events` has no per-viewer filter, so every signed-in person and agent replays it, and it names neither the ask nor any issue state of the writer's.
+  The writer's other tabs and devices refetch their whole Inbox from it; it names nobody but the writer and, like every `user_state.updated`, never notifies.
+  A write that moves nothing appends none, since each event refetches the Inbox in every tab the person has open.
   Keyed on the ask, not its issue, so a document ask snoozes exactly like an issue ask.
   `GET /api/v1/inbox` carries the caller's own `snoozed_until` (null when they have not snoozed the row) through a left join on that table and **never filters on it**
   — the row is listed either way and nothing sweeps the table, so a snooze whose moment has passed reads back as the ordinary row it is.
@@ -2907,16 +2961,26 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   the acting session is skipped, and so is a follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`, each `mentions[].session_id`) once the mention delivered it (the mention rule below) - the comment's edit, resolution and reopening reach every follower - and a session already reached by the issue's route is not sent the envelope twice.
   A quiet `ask.edited` (a version move of an approval request that an earlier version already moved since it was opened or last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed `artifact.version` reaches nobody;
   the first move after an opening or a hand-back is not quiet.
-  A notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
-  a comment reply's thread-root author and its direct parent author when different;
-  a message reply's direct parent author; for a bare resolve or reopen, the resolved comment's own root author;
+
+- A notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
+  a person's comment reply (`reply_to` set), and its edit, reaches every session that wrote a comment in its thread - the root and every reply, walked to `maxCommentThreadDepth` for legacy nested rows - and every session the thread's document credits;
+  a message reply's direct parent author; for a resolve or reopen, the resolved comment's root author only, so the reopen a reply makes in the same transaction tells no new session twice;
   and for a new comment on a document (no `reply_to`, no `ask_id`) and its edit, every session the document credits - the one that created it (`artifacts.created_by`) and every one a version lists (`artifact_versions.authors`), read in one query (`loadDocumentSessionAuthors`) - so a person's comment on a passage, on a whole document or as a suggestion reaches the agent that wrote the document.
   That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an issue's document, and the event's own for a project document;
-  a comment on an issue's conversation names no document and reaches no author.
-  An author route is skipped for a human author, who has no topic, for the event's own actor, so a session commenting on a document it wrote is never told of its own comment, and for a session the comment's mentions resolved to once the mention delivered it (`suppressed_authors`:
-  on a new comment every session a mention resolved to, so a mentioned writer hears the comment once;
-  on a reply only the thread's root author when mentioned; the mention rule below).
-  An agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
+  for a reply, it is the thread root's, since a reply carries no anchor.
+  A comment on an issue's conversation names no document.
+  A batch reads the thread sessions and the thread's document authors of all its replies in one query (`outbox/recipients.go`, `loadCommentRecipients`), keyed by the comment each reply is under.
+  A person's `comment.created` or `comment.edited` on an issue with no route and no session claimant (`routing`:
+  unclaimed, or a person holds the claim) also reaches every session the issue's primary document (`artifacts.is_primary`) credits, as `documentCreditsSQL` reads credits (`publishPrimaryDocumentAuthors`), so a session that wrote the spec without a claim still hears comments on any of the issue's threads, an ask's thread included.
+  A batch reads those sessions for all such events in one query (`loadPrimaryDocumentAuthors`), keyed by issue.
+  A routed issue, or one a session claimed, takes no primary-document route: the route's holder and the claimant (the claimant route below) hear the comment.
+  The order of an event's destinations is fixed (`publishDestinations`):
+  the owner topic, the route, the claimant, the primary document's sessions, the author routes, the ask's followers, the previous claimant; a topic is sent once.
+  The primary-document and author routes are skipped for a human, who has no topic, for the event's own actor, so a session commenting on a document it wrote is never told of its own comment, and for a session the comment's mentions resolved to once the mention delivered it (`recipientFilter`, which reads the comment's `mentions` as the claimant and follower routes do; the mention rule below).
+  An agent's comment notifies nobody (`notify` is false), so it takes no primary-document or author route at all.
+  When a batch's recipient query fails, the error is carried on each event that needed it (`recipientList.err`), not as the row's failure:
+  the attempt sends the owner topic, the route and the claimant, then ends with that error at the primary-document or author step, so `settle` backs the event off with those destinations recorded, or releases it when the process is stopping or NATS is unreachable.
+  Such an attempt is a failure, never a deferral: its error is never `errMentionPending` alone.
 
 - A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`, `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created` or `message.answered` on an issue also takes the claimant route (`publishClaimantRoute`):
   it is published to the `notifications.agent.<session_id>` of the session holding the issue's claim (`issues.claimed_by` of kind `session`;
@@ -2933,7 +2997,7 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   A project document's event names no issue and takes none.
   A claimant that is also the route, a follower or an author gets one copy: `publishDestination` publishes each topic once per event.
 
-- The mention rule (`attempt.leftToMention`) is the one rule the route, claimant, author and follower copies of a new comment apply to a session its mentions resolved to;
+- The mention rule (`attempt.leftToMention`) is the one rule the route, claimant, primary-document, author and follower copies of a new comment apply to a session its mentions resolved to;
   the route's session is `suppressed_route_session_id`, the session the route resolved to when the comment was written, and the rule applies while the route still names that target or that session (`suppressesCurrentRoute`; `suppress_route` must be set).
   A mention resolved at write time is a candidate only: its send runs after the comment commits and can fail.
   `loadMentionDeliveries` reads the comment's `comment_deliveries` once per attempt (`send`), grouped by session (`mentionDeliveryQuery`), and only for a `comment.created` whose mentions resolved to a session.

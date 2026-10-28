@@ -21,7 +21,9 @@
 //   5. each file gets the layout instruction under its title (HEAD_NOTES);
 //   6. AGENTS.md's Conventions get the layout rule (CONVENTION);
 //   7. words that pointed at a converted table, a moved sentence or a position in a list are
-//      reworded (REWORDINGS);
+//      reworded (REWORDINGS), and each line break inside a code span that starts a line with a
+//      block-level tag, which opens a raw HTML block mid-paragraph, becomes a space
+//      (HTML_BLOCK_JOINS);
 //   8. scripts/semantic-line-breaks.ts --write re-lays out the result (whitespace only);
 //   9. items still longer than one screen are split at a sentence that starts a new topic, into
 //      sibling items, or into an item nested in it when the item is a numbered step, so no step is
@@ -71,6 +73,7 @@ type Kind =
   | "head-note"
   | "conventions"
   | "rewording"
+  | "html-block"
   | "split";
 
 // ---------------------------------------------------------------------------------------------
@@ -541,6 +544,38 @@ const REWORDINGS: Rewording[] = [
     find: "a two-call baseline protocol (below). `before` captures",
     replace: "a two-call baseline protocol (the paragraph after this list). `before` captures",
     reason: "inside a list item, “below” reads as the items that follow",
+  },
+];
+
+interface HtmlBlockJoin {
+  id: string;
+  guide: Guide;
+  /** The text before the line break, matched as Rewording.find is. */
+  before: string;
+  /** The text after it, which opens the line with a block-level tag. */
+  after: string;
+}
+
+/**
+ * Step 7. A line that starts with a block-level tag such as `<dir>` opens a CommonMark HTML block
+ * (kind 6) even in the middle of a paragraph, so GitHub renders it and every line after it up to
+ * the next blank line as raw HTML, not the paragraph. Where such a line starts inside a code span,
+ * the line break before the tag becomes one space: a code span renders a line ending as a space, so
+ * its text stays the same, and the paragraph renders as prose. The re-layout never cuts inside a
+ * code span, so the tag does not return to a line start.
+ */
+const HTML_BLOCK_JOINS: HtmlBlockJoin[] = [
+  {
+    id: "html-block-k8s-workspace-init-log",
+    guide: "kubernetes",
+    before: "and its log says which (`workspace-init:",
+    after: "<dir> on legion/<KEY> from <default branch>`).",
+  },
+  {
+    id: "html-block-k8s-volume-mount-refusal",
+    guide: "kubernetes",
+    before: "`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above",
+    after: "<dir>, which every role's namespace in an issue pod covers with its own:",
   },
 ];
 
@@ -1490,6 +1525,22 @@ function applyRewordings(editor: Editor, guide: Guide, problems: Problem[]): voi
   }
 }
 
+function applyHtmlBlockJoins(editor: Editor, guide: Guide, problems: Problem[]): void {
+  for (const edit of HTML_BLOCK_JOINS.filter((candidate) => candidate.guide === guide)) {
+    const anchor = `${edit.before} ${edit.after}`;
+    const match = uniqueMatch(editor.text, anchor, edit.id, problems);
+    if (match === undefined) continue;
+    const gap = new RegExp(`^${anchorPattern(edit.before)}(\\s+)`).exec(match[0]);
+    const whitespace = gap?.[1] ?? "";
+    if (gap === null || !whitespace.includes("\n")) {
+      problems.push({ id: edit.id, anchor, message: "no line break before the tag" });
+      continue;
+    }
+    const start = match.index + gap[0].length - whitespace.length;
+    editor.replace(start, start + whitespace.length, " ", edit.id, "html-block");
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Step 9: splits.
 // ---------------------------------------------------------------------------------------------
@@ -1714,6 +1765,7 @@ async function main(argv: string[]): Promise<number> {
       addHeadNote(editor, guide, problems);
       if (guide === "agents") addConvention(editor, problems);
       applyRewordings(editor, guide, problems);
+      applyHtmlBlockJoins(editor, guide, problems);
 
       for (const table of tables) {
         process.stderr.write(

@@ -2101,7 +2101,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 - `controller`
 
   `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself:
-  its session's first user message is the start message the pi-legion extension sends once its claim succeeds (LEGION_CONTROLLER_START_MESSAGE, cmd/legion/controller.go), before it opens the live wake subscription a tick could race it on, and the model answers it, with nothing typed into its pane.
+  its session's first user message is the start message (LEGION_CONTROLLER_START_MESSAGE, cmd/legion/controller.go) that pi-legion's `/legion-controller-start`, the word `legion controller start` puts on Oh My Pi's command line, sends once Oh My Pi's startup is over, that command claiming the controller and sending it once registered, right before the role claim and the live wake subscription a tick could race it on, and the model answers it, with nothing typed into its pane.
   Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes;
   the proof's instructions have an implementer run `sleep 300` on its task line (and on a new task after a missed end) before it replies WAITING, so the end lands inside the turn even when the kill takes a minute on a loaded host, where a resumed session's short turn would otherwise end first and the daemon would rightly charge nothing.
   A kill that lands after the task's turn has ended is charged nothing, since the turn's end retired the task:
@@ -2307,7 +2307,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 Task 4b.5's acceptance for `legion controller start`, on tmux.
 The Go daemon runs on a real Postgres with this checkout's two plugins in an isolated OMP profile, against a real Envoy listener and NATS, and the command runs in real tmux panes, as an operator would.
 The pinned Oh My Pi is launched through mise.
-The run needs no model route: the controller's one model turn, which the pi-legion extension starts from LEGION_CONTROLLER_START_MESSAGE once its claim succeeds, fails against the profile's default, a static-key provider that listens nowhere, and no check reads its answer.
+The run needs no model route: the controller's one model turn, the start message (LEGION_CONTROLLER_START_MESSAGE) that pi-legion's `/legion-controller-start`, the word the command puts on Oh My Pi's command line, sends once Oh My Pi's startup is over, fails against the profile's default, a static-key provider that listens nowhere, and no check reads its answer.
 The profile names the roles the task agents use and that default, which is all the boot gate's agent-model check resolves.
 
 ```bash
@@ -3619,8 +3619,8 @@ The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0
 Each `hawk-token` run reads the hawk login from the keyring over the session bus, and the devbox's keyring daemon died serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run.
 A Stage 3 run invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before the cache.
 Every call inside the window gets the kept key.
-A key the gateway refuses before then is not re-minted:
-the proof's model turns fail, loudly, which is right for a proof. (A call's parent is a helper the Oh My Pi process starts for each call, on 18.2.9 a child of the agent's own `omp`, so the record names the agent by the Legion pane's role and generation instead.)
+A key the gateway refuses before then is not re-minted: the proof's model turns fail, loudly, which is right for a proof.
+(A call's parent is a helper the Oh My Pi process starts for each call, on 18.2.9 a child of the agent's own `omp`, so the record names the agent by the Legion pane's role and generation instead.)
 
 One call mints at a time: a wave of agents that starts as the kept key expires calls the command at once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget.
 A call that finds no kept key takes an `flock` on `<cache-dir>/hawk-token.key.lock`, looks at the cache again, and mints only when the key is still missing;

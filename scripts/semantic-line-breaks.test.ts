@@ -197,6 +197,46 @@ test("R1 finds a second sentence that opens with a parenthesis", async () => {
   expect(exitCode).toBe(1);
 });
 
+test("--write cuts before a second sentence that opens with a parenthesis", async () => {
+  const result = await written(
+    "The model turns fail, loudly, which is right for a proof. (A call's parent is a helper.)\n"
+  );
+  expect(result.text).toBe(
+    "The model turns fail, loudly, which is right for a proof.\n(A call's parent is a helper.)\n"
+  );
+  expect(result.exitCode).toBe(0);
+});
+
+test("R1 reads a parenthesis that opens with a backtick after a sentence end as a sentence start", async () => {
+  const path = await markdownFile("The gate runs first. (`make check` runs it.)\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toContain(`${path}:1: R1:`);
+  expect(exitCode).toBe(1);
+});
+
+test("R1 reads no sentence start at a parenthesis in the middle of a sentence", async () => {
+  const path = await markdownFile("Run the tests, see (Foo) for why, and then merge.\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("R1 reads no sentence start at a parenthesis after an abbreviation", async () => {
+  const text = "Name a limit, e.g. (Memory) or (CPU), for each pod.\n";
+  const path = await markdownFile(text);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+  expect((await written(text)).text).toBe(text);
+});
+
+test("R1 reads no sentence start at a parenthesis that opens with a lowercase word", async () => {
+  const path = await markdownFile("The pod restarts. (or not, if it is pinned.)\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
 test("--write refuses, writing nothing, a re-layout that would change how the file renders", async () => {
   // R2's blank line before the nested item would make its `-` an empty item, not text: whitespace
   // only, yet another rendering.
@@ -616,4 +656,34 @@ test("a <code> in a code span or a fenced block warns nothing", async () => {
     expect(stderr).toBe("");
     expect(exitCode).toBe(0);
   }
+});
+
+test("no rule reads a leading byte order mark as part of line 1", async () => {
+  // micromark and cmark-gfm drop the mark, so `<source` opens an HTML block that holds the list.
+  const text = "\uFEFF<source src=x> Some words.\n- one. two\n- three\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+  // Check mode reads the fence on line 1, so the sentences inside it are code.
+  const path = await markdownFile("\uFEFF```\nOne. Two.\n```\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("--write refuses a file that starts with two byte order marks, leaving it as it is", async () => {
+  // GitHub reads the second mark as text on line 1; trim() and micromark would drop it.
+  const text = "\uFEFF\uFEFF| a | b |\n|---|---|\n| 1 | 2 |\n2. item\n";
+  const path = await markdownFile(text);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  expect(result.stderr.toString()).toContain(`${path}: refusing to write: line 1 holds`);
+  expect(result.exitCode).toBe(2);
+  expect(await readFile(path, "utf8")).toBe(text);
+});
+
+test("--write adds no byte order mark to a file whose first character shares its first byte", async () => {
+  // U+FF01 is EF BC 81 in UTF-8.
+  const result = await written("\uFF01Some words. More words.\n");
+  expect(result.text).toBe("\uFF01Some words.\nMore words.\n");
+  expect(result.exitCode).toBe(0);
 });

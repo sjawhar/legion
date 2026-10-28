@@ -1828,7 +1828,8 @@ with no delete the second waits the full bound; with the directory deleted and r
 The install block cannot prevent that and does not claim to
 — a lock whose inode is unlinked protects nothing
 — what it does is keep the damage to that one install:
-each attempt remakes the cache directory before taking its lock and clears a non-directory left at that path, so the launch retries and succeeds instead of the issue being left with a regular file there that fails every later installing launch until a person removes it. (The 5.5 GiB a reclaim returned on this branch's own volume came out of six per-role copies under the intermediate layout above, not out of these paths.)
+each attempt remakes the cache directory before taking its lock and clears a non-directory left at that path, so the launch retries and succeeds instead of the issue being left with a regular file there that fails every later installing launch until a person removes it.
+(The 5.5 GiB a reclaim returned on this branch's own volume came out of six per-role copies under the intermediate layout above, not out of these paths.)
 The `chmod` is not caution — the go command writes every extracted module directory read-only (mode 555), so a plain `rm -rf` of a module cache exits 1 with a `Permission denied` line per file and leaves bytes behind, and what it leaves is the extracted source while what it removes is the re-downloadable `cache/download`:
 run without the `chmod` the reclaim frees the cheap half and keeps the expensive one.
 The non-zero exit is the one mercy in that shape, since a scripted remedy fails loudly rather than silently.
@@ -2235,24 +2236,16 @@ architect, planner, implementer, tester, reviewer, merger):
    nothing names a role, a generation, a lock wait, another issue's workspace, or anything the disk is expected to hold already
    — the disk is created with the pod, so every provision is the issue's first.
    The workspace starts at the issue's branch, `legion/<KEY>`, which the daemon created on GitHub at the repository's default branch, as GitHub names it (`default_branch`, `release/v7.1` as readily as `main`), before the issue's architect or planner started;
-   with no such branch it starts at that default branch, which the pod's command names (`--default-branch`), and its log says which (`workspace-init:
-   <dir> on legion/<KEY> from <default branch>`). Before any git or jj runs it removes every git
-   lock file (`<file>.lock`) in the clone's git directory and in the issue's own worktree entry of
-   it, and logs each with its path and age (`RemoveStaleGitLocks`,
-   `internal/workspace/stalelock.go`): the kubelet retries a failed init container on the pod it
-   failed in, so a first attempt killed mid-fetch leaves its locks on the same disk the retry
-   works on, and every later write of a locked file fails on it — when the retry runs before the
-   daemon replaces the pod, which it does within seconds of reading the failure (see
-   `workspace-fetch` above). No process can hold one when the
-   retry runs, since the pod's `roles` container has not started and no other pod mounts the disk.
-   Another worktree entry of the clone keeps its locks; a lock it cannot remove,
-   and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it
-   would take the removal outside the clone), fail the container naming the path. jj's own locks
-   are `flock(2)` locks, which end with their holder, so it leaves them. Under a running pod nothing
-   removes a lock, since another role's git, which a role's namespace cannot see, may hold it: the
-   `jj` the shim's working-copy adoption and a `handoff_complete` run name each lock still on disk
-   that they failed on, with its age, in their error, say not to remove it while the pod runs, and
-   that replacing the issue's pod removes it.
+   with no such branch it starts at that default branch, which the pod's command names (`--default-branch`), and its log says which (`workspace-init: <dir> on legion/<KEY> from <default branch>`).
+   Before any git or jj runs it removes every git lock file (`<file>.lock`) in the clone's git directory and in the issue's own worktree entry of it, and logs each with its path and age (`RemoveStaleGitLocks`, `internal/workspace/stalelock.go`):
+   the kubelet retries a failed init container on the pod it failed in, so a first attempt killed mid-fetch leaves its locks on the same disk the retry works on, and every later write of a locked file fails on it
+   — when the retry runs before the daemon replaces the pod, which it does within seconds of reading the failure (see `workspace-fetch` above).
+   No process can hold one when the retry runs, since the pod's `roles` container has not started and no other pod mounts the disk.
+   Another worktree entry of the clone keeps its locks;
+   a lock it cannot remove, and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it would take the removal outside the clone), fail the container naming the path.
+   jj's own locks are `flock(2)` locks, which end with their holder, so it leaves them.
+   Under a running pod nothing removes a lock, since another role's git, which a role's namespace cannot see, may hold it:
+   the `jj` the shim's working-copy adoption and a `handoff_complete` run name each lock still on disk that they failed on, with its age, in their error, say not to remove it while the pod runs, and that replacing the issue's pod removes it.
 
 3. The `roles` container's PID 1 is one `legion launcher` in multi-role mode:
    `/opt/legion/bin/legion launcher --connect tcp://<advertise_host, or bind with none
@@ -2321,29 +2314,18 @@ point's place`, and anything else in the way that is neither a link nor a direct
 role-init then starts the shim's argv unchanged as its child, cloned into a nested user namespace that maps uid and gid 1000 with no capabilities, and stays the PID namespace's init, so when a generation ends every process it started ends with it and a role's `kill -9 -1` reaches none of its siblings'.
 The isolation rests on ownership and private mounts, not on a read-only root, which a nested user namespace could undo (`docs/solutions/legion/namespace-isolation-under-gvisor-holds-on-locked-mounts-and-ownership-not-a-read-only-root-INFRA-208.md`).
 An operator mount (`runtime.kubernetes.pod.volume_mounts`) at or above `/tmp`, `/var/tmp`, `/run/lock`, `/var/lock` or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/lock`, `/run/shm`, `/var/run/shm`), is refused:
-`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above
-<dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
-A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
-above `/dev/mqueue`, `/dev/ptmx`, `/dev/pts` or `/proc` is refused (`roleReplacedPaths` in
-`internal/runtime/sandbox/manifest.go`), since role-init mounts a filesystem of the role's own
-there (a new devpts instance at `/dev/pts`, its `ptmx` bound over `/dev/ptmx`, the role's own IPC
-namespace's mqueue at `/dev/mqueue`, the role's own `/proc`) and carries nothing back onto it:
+`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above <dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
+A mount under `/tmp` and the like is allowed, and role-init carries it back.
+A mount at, under or above `/dev/mqueue`, `/dev/ptmx`, `/dev/pts` or `/proc` is refused (`roleReplacedPaths` in `internal/runtime/sandbox/manifest.go`), since role-init mounts a filesystem of the role's own there (a new devpts instance at `/dev/pts`, its `ptmx` bound over `/dev/ptmx`, the role's own IPC namespace's mqueue at `/dev/mqueue`, the role's own `/proc`) and carries nothing back onto it:
 `runtime.kubernetes.pod.volume_mounts[i].mount_path <p>
 overlaps /dev/pts, which every role's namespace in an issue pod replaces with a filesystem of its
-own and carries no mount back onto: a mount may be neither at, under, nor above /dev/pts`. A mount
-at, under or
-above `/var/run/legion/roles`, `/var/run/legion/home` or `/var/run/legion/role-probe` (the image
-probe's volume, [The image is probed before it publishes](#the-image-is-probed-before-it-publishes))
-is refused as any other path Legion mounts
-is: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
-Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`. Every one
-of these rules, and the check of the paths Legion mounts and the image owns, compares a mount
-through the worker image's links to directories (`/var/run` to `/run`, `/var/lock` to
-`/run/lock`, `/run/shm` to `/dev/shm`, and the merged `/bin`, `/sbin`, `/lib` and `/lib64`), since
-the kubelet mounts a path spelled through one where the link points: `/run/legion/roles` is
-refused as `/var/run/legion/roles` is, with the refusal naming the spelling it reached, and
-`/run/operator` is allowed as `/var/run/operator` is. A mount under `/home/legion` is allowed, and
-reaches the role at its own path.
+own and carries no mount back onto: a mount may be neither at, under, nor above /dev/pts`.
+A mount at, under or above `/var/run/legion/roles`, `/var/run/legion/home` or `/var/run/legion/role-probe` (the image probe's volume, [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)) is refused as any other path Legion mounts is:
+`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
+Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`.
+Every one of these rules, and the check of the paths Legion mounts and the image owns, compares a mount through the worker image's links to directories (`/var/run` to `/run`, `/var/lock` to `/run/lock`, `/run/shm` to `/dev/shm`, and the merged `/bin`, `/sbin`, `/lib` and `/lib64`), since the kubelet mounts a path spelled through one where the link points:
+`/run/legion/roles` is refused as `/var/run/legion/roles` is, with the refusal naming the spelling it reached, and `/run/operator` is allowed as `/var/run/operator` is.
+A mount under `/home/legion` is allowed, and reaches the role at its own path.
 
 What a role writes without being told where is not on the node's disk:
 the issue's temporary directory, its cache and data homes and bun's install cache are one set on the issue's volume, every role of the pod told the same four, and the two Go caches are one pair on that volume shared by the issue's roles (below).
@@ -3394,7 +3376,8 @@ So each bullet below carries the date of the run behind it, and a reader runs th
   resources found`, because the Job's pod does not exist the instant the apply returns;
   and the reachability block, run as published then against a listener and against a port that refuses and then listens.
   And, *not run again since*: one deliberate breakage of each **enforced** rule above, put through the namespace's own admission server-side with nothing created, each refused naming the rule
-  — the reachability label has no breakage to record, since admission does not check it, which is the whole of why that bullet is marked. (The credential-less gate and the reachability block against an address whose packets are dropped, on this list until then, were run again for dispatch://INFRA-215, above.)
+  — the reachability label has no breakage to record, since admission does not check it, which is the whole of why that bullet is marked.
+  (The credential-less gate and the reachability block against an address whose packets are dropped, on this list until then, were run again for dispatch://INFRA-215, above.)
 
 - *Refused as published, and corrected on 2026-10-25*:
   until dispatch://INFRA-234 the Service manifest above selected the Job's pods by `job-name`, and the namespace's admission refuses that, naming the rule that a Service there selects by `batch.kubernetes.io/controller-uid` at its owning Job's uid and by nothing else.
@@ -4279,7 +4262,8 @@ each issue's pod (every role of it alike) and the image probe's.
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers Secret, `legion-<project>-providers`, which the operator creates.
   Every pod mounts the keys `provider_keys` names and no other key of the Secret, each at a file named for its variable, and the shim exports each into Oh My Pi's environment, never its own.
   The one other key a pod mounts is `NATS_NKEY_SEED`, when the daemon has a NATS nkey seed:
-  the operator puts the `legion-pane` seed there, and every pod reads it through `NATS_NKEY_SEED_FILE`, which the shim does not export ([Configuration](#configuration)). (The TypeScript daemon's [providers Secret](#the-providers-secret) mounts every key; the Go runtime does not.)
+  the operator puts the `legion-pane` seed there, and every pod reads it through `NATS_NKEY_SEED_FILE`, which the shim does not export ([Configuration](#configuration)).
+  (The TypeScript daemon's [providers Secret](#the-providers-secret) mounts every key; the Go runtime does not.)
   A Secret or key the kubelet cannot mount is refused at boot by the image probe, naming the Secret and keys.
   A `provider_keys` variable that anything else in the pod sets is refused at load.
 
@@ -4729,7 +4713,10 @@ The daemon's read of either of its seeds holds a file it owns to the same rule, 
 Run `legion controller start --config controller.yaml`, where `daemon_url` (or `--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it.
 In order, and keeping nothing until the daemon has answered, the command:
 
-1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that does not resolve;
+1. reads the file and refuses as above, the operator token file others can read included;
+   then refuses a stdin that is not a terminal (``stdin is not a terminal: Oh My Pi would run headless
+   print mode, …; run `legion controller start` at a terminal``), since given step 6's positional word with no terminal Oh My Pi runs headless print mode, which would run the start command only after step 3's mint had revoked the running controller;
+   then a blank or unreadable Envoy or Dispatch token file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that does not resolve;
 
 2. reads the project's repositories from the daemon's unauthenticated `GET /legion/v1/state` (`repositories`), since the controller's addressing names them, and refuses a daemon that does not answer, a body with no `repositories` object, and a mapped entry that is not `owner/name`;
    an empty mapping, or one whose every repository the daemon leaves out, launches the controller all the same, its addressing saying `The daemon maps no repository to this project now` with each repository left out and why.
@@ -4756,7 +4743,8 @@ In order, and keeping nothing until the daemon has answered, the command:
    Before step 3 the command finds the real gh its session's `gh` wrapper runs:
    the operator's `LEGION_GH_PATH`, or the first `gh` on its PATH that is not the state directory's own wrapper, and refuses to start with neither (`gh is not on PATH`) or when that first `gh` is a script, a `gh` wrapper of the operator's machine that would answer in place of the review App;
 
-6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line, the project's repositories sentence and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`, `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion extension sends it as the session's first turn right after its role claim succeeds and before it opens the live wake subscription, so the controller's first turn runs its start procedure deterministically, with nothing typed, rather than racing a wake for the session's one first-turn slot
+6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line, the project's repositories sentence and the deployment instructions, then the one positional word `/legion-controller-start`, no `--resume`, no `--mode rpc`) with the controller's environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`, `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (Oh My Pi runs the positional word once its startup is over and its TUI listens, and pi-legion's command of that name claims the controller and sends the message as the session's first turn, which the operator sees, can type during and can interrupt with Esc;
+   it sends it once the controller is registered, right before the role claim and the live wake subscription, so the controller's first turn runs its start procedure deterministically, with nothing typed, rather than racing a card or a wake for the session's one first-turn slot
    — LEGION-392), its grant and secret files, `LEGION_GH_OWNERS_DIR` naming `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its default owner's directory (the bundle's root, empty, when the daemon has no GitHub App), `LEGION_GH_PATH` the real gh, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, so nothing inherited outranks the files, the Envoy and Dispatch endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE` (the controller is pane-side, and never gets the daemon's seed) and less `LEGION_BOOT_TOKEN` and `LEGION_BOOT_TOKEN_FILE` (a start from inside a Legion pane inherits that pane's, and the plugin takes a controller carrying one for a daemon-launched controller), and exits with Oh My Pi's exit code.
 
 A refusal before the secret is written removes the directories made for the probe, so the state directory is as it was.
