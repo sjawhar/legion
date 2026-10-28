@@ -2,38 +2,70 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-559",
-  "completed": "2026-10-27T16:50:00Z",
-  "round": 3,
-  "headTested": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
-  "handoffHead": "89d1da4d732e26021aa67953910b54d706d5bb11",
-  "scope": "Since round 2's verified head 0abd535cf749, the code changes only routes/router.go and dashboard/dashboard.go (an asset key Postgres text cannot hold is a miss), their tests, and a comment in .github/workflows/envoy-and-contracts.yaml. No web code changed, so the round-2 browser evidence for the reload budget, the notice (including the Vite dev page) and the reconnect spread stands for this head; the A1 spec and the changed server path were driven again here.",
+  "completed": "2026-10-28T16:35:00Z",
+  "round": 4,
+  "headTested": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+  "handoffHead": "d1f18007ec2108496536f32d1041562b3b6698f0",
+  "fullRound": "Fingerprints (conflicts-and-rewrites.md) differ: fc316304 f8e4e396…, 8675beea 9aaa7b7d…, 274bdf2a 47a42c0b…. The merge of main d47dbf05 (#2390 merged) took INFRA-555's commits out of the diff and changed sse.ts and router.go, and 274bdf2a adds the sign-in spec and its oidc harness mode, so every criterion was driven again at 274bdf2a.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its A1 command at fc316304 on my own database t559_e2e3: 5 passed (1.6m). Drove its /assets/%ff.js case and four more invalid UTF-8 sequences against a running head server and, side by side, a server built from an export of the round-2 head 0abd535c on the same dist and database."
+    "how": "Re-ran its A1 two-builds spec (5 passed), its sign-in spec under DISPATCH_E2E_SIGNIN=oidc (passed) and its A4 browser command (52 passed, 2 skipped) at 274bdf2a on my own databases, and drove the refused paths, the stale tab, the reload budget and the reconnect spread against the head's server independently."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "A1: the browser suite against two server processes running two builds loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
-      "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 (A entry /assets/index-Bt9tGM9a.js, B /assets/index-A2tvJ_q3.js)",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && DATABASE_URL=postgres://postgres@127.0.0.1:5433/t559_e2e3?sslmode=disable bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts",
-      "observed": "5 passed (1.6m): both cross-pinned route walks (37.5s, 53.1s), every file of both builds 200 with its bytes from A and B, both notice rows; boot logs A assets=45 written=45, B assets=45 written=30",
-      "headSha": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
-      "negativeControl": "Round 1, the same spec on an export of 47c3ba79d2e4 (no shared store): 3 of 3 failed, every page load's entry chunk answered 404"
+      "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 (A entry /assets/index-DXEslS-o.js, B /assets/index-Y6GVgVUd.js)",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && DATABASE_URL=postgres://postgres@127.0.0.1:5433/t559_e2e4?sslmode=disable DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_WEB_DIST_B=../dispatch/web/dist-b bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts two-builds.multiprocess.e2e.ts (dist and dist-b from bun run e2e:multiprocess at this head)",
+      "observed": "5 passed (1.1m): both cross-pinned route walks (30.5s, 28.4s), every file of both builds 200 with its bytes from A and B, both notice rows; boot logs A assets=47 written=47, B assets=47 written=30",
+      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "negativeControl": "Round 1, the same spec on an export of 47c3ba79d2e4 (no shared store): 3 of 3 failed, every page load's entry chunk answered 404 then net::ERR_ABORTED"
     },
     {
-      "criterion": "Round 3 finding: an asset path no Postgres text value can hold (invalid UTF-8, a NUL byte) answers 404 and never a store failure, while a valid non-ASCII name still reaches the store",
-      "surface": "the head's cmd/dispatch on 127.0.0.1:18801 with the Postgres asset store (45 assets published, database t559_probe3), via curl --path-as-is",
-      "command": "curl /assets/%ff.js, /assets/%c3%28.js, /assets/%c0%af.js, /assets/%ed%a0%80.js, /assets/%80.js, /assets/foo%00.js, /assets/caf%C3%A9.js, /assets/%F0%9F%98%80.js, /issues/%ff, the published entry chunk; then 300 concurrent requests (100 at a time) for /assets/%ff<n>.js",
-      "observed": "404 for every invalid or NUL name and for the two valid non-ASCII names (no such row), /issues/%ff 200 (the page), entry chunk 200; 300 of 300 concurrent invalid names 404 and the entry chunk 200 right after; 0 'retained asset store failed' lines in the head's log",
-      "headSha": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
-      "negativeControl": "The round-2 server (0abd535cf749 built from an export, same dist and database, port 18802): 502 for each of the five invalid UTF-8 paths and 5 log lines 'dispatch: retained asset store failed ... invalid byte sequence for encoding \"UTF8\": 0xff (SQLSTATE 22021)'"
+      "criterion": "Moved task: a sign-in started at /auth/start on Dispatch A completes at /auth/callback on Dispatch B, and the state cookie that carries it cannot be forged",
+      "surface": "Chromium and Playwright's request client on the two-process harness under DISPATCH_E2E_SIGNIN=oidc (dev OIDC issuer, both servers under one DISPATCH_SIGNING_KEY, dev sign-in off)",
+      "command": "DATABASE_URL=<t559_signin4> DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc DISPATCH_E2E_WEB_DIST_B=../dispatch/web/dist-b bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts signin.multiprocess.e2e.ts, with a throwaway row appended to the spec and restored with jj restore after the run",
+      "observed": "'a sign-in started on Dispatch A completes on Dispatch B' passed (1.7s); in the throwaway row /auth/start on A 302, the issuer 302 to the callback, the state cookie s1.<164-char payload>.<64 lowercase hex MAC>, and the genuine cookie sent to /auth/callback on B answered 302 /settings, after which /auth/whoami pinned to A answered 200 {kind:user, login:alice@example.com}",
+      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "negativeControl": "Same callback on B with the MAC's last hex digit changed, with the payload's next rewritten to /agents and the MAC kept, and with no cookie: 400 {\"error\":\"invalid or expired state — start over at /auth/start\"} each"
+    },
+    {
+      "criterion": "Item 1: every file of either build is served by every process, also after the other build's process is gone; refused names never reach the store; the boot refuses an oversized asset and the removed setting",
+      "surface": "Two processes of the head's cmd/dispatch (18801 build A with DISPATCH_TEST_HOOKS=1, 18802 build B, database t559_probe4) behind the round-robin proxy on 18800; curl with the proxy's Host and a Chromium tab",
+      "command": "curl every file of dist and dist-b from both ports and cmp with disk; curl --path-as-is /assets/%ff.js, %c0%af, %ed%a0%80, foo%00.js, a 300-character name, /assets/caf%C3%A9.js, /issues/%ff; bun stale-tab.ts <B pid> (tab of build B, SIGKILL B, six in-app routes); boots with DISPATCH_ASSET_STORE_BUCKET=x and with a 9 MiB file in dist/assets",
+      "observed": "188 of 188 requests 200 with bytes equal to disk; every refused name 404, /issues/%ff 200, 0 'retained asset store failed' lines; the tab of build B loaded AgentsPage-DHFWUQ8M.js, TargetedMessageCard-C5DkK5Jn.js, broadcast-plan-Cxr3P4jt.js, ReplyTurn-ZmfjiXNN.js, DeliveryPage-B4strIRs.js, SourceFreshness-BTi14iyI.js, PipelinePage-DmYu5peV.js, BroadcastsPage-Cus0JUFf.js, AnswersPage-CFimhoLa.js, useInfiniteQuery-CnbV8uIW.js from A after B died, all 200, 0 document loads, no failed request, no pageerror",
+      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "negativeControl": "Boot with DISPATCH_ASSET_STORE_BUCKET=x: 'DISPATCH_ASSET_STORE_BUCKET is no longer read and must be unset'; boot with a 9 MiB asset: exit 1, 'dashboard asset …/huge-X.js is 9437184 bytes, over the 8388608-byte limit the server serves'"
+    },
+    {
+      "criterion": "Item 2: recovery from a failed script, module preload or stylesheet is at most 3 reloads per tab in any 5 minutes, renews, and covers the main stylesheet",
+      "surface": "Dispatch web app in Chromium: the single-process browser suite, and a tab whose main stylesheet is aborted on every load (probe pair above)",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts delivery-live.e2e.ts doc.e2e.ts live.e2e.ts --project chromium; bun css-loop.ts",
+      "observed": "52 passed, 2 skipped (3.0m); stylesheet aborted on every load: 4 document loads (1 + 3 reloads) then stops; seed '{not json': 4 loads",
+      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "negativeControl": "Seed of three reload times in the last 5 minutes: 1 document load, no reload"
+    },
+    {
+      "criterion": "Item 3: no 'A new version is available' while two builds are live; the notice once one other build alone is live",
+      "surface": "the stale tab of build B above; A1 rows 4 and 5",
+      "command": "bun stale-tab.ts: SIGKILL B, poll GET /api/v1/dashboard/builds, focus after the minute",
+      "observed": "the route named only A 15 s after the kill; the tab's next check showed the notice; A1 row 4 (no notice while both builds live) passed",
+      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "negativeControl": "Round 2: the round-1 client on Vite's dev page showed the notice; DeploymentResilience.tsx is unchanged between fc316304 and 274bdf2a, so the round-2 dev-page result (no notice) stands"
+    },
+    {
+      "criterion": "Item 4: reconnects after a pod stops are spread out rather than all at once",
+      "surface": "20 Chromium tabs (one context each) signed in on A through the proxy; an init script records Date.now() at each fetch of /api/v1/events",
+      "command": "bun spread.ts 20 (POST /api/v1/events/_test/disconnect on A)",
+      "observed": "first reopen per tab after the disconnect answered, sorted: 79, 181, 306, 411, 457, 563, 620, 760, 770, 880, 1011, 1013, 1049, 1053, 1067, 1164, 1262, 1555, 1574, 1812 ms (13 distinct 100 ms buckets)",
+      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "negativeControl": "Round 1, 47c3ba79's dashboard build in the same drop: every tab reopened at 1048-1128 ms (2 buckets)"
     }
   ],
-  "round2ProofStands": "Round 2 (test.json at a352e6f093ce) proved at 0abd535cf749: the 52-row browser suite, a stale tab of a killed build loading its 10 chunks from the other process, the reload budget on a failing main stylesheet, no notice on the Vite dev page (the round-1 client showed it), and the 20-tab reconnect spread 178-2061 ms; the web code is byte-identical at fc316304.",
-  "ci": "Read on GitHub at fc316304: build, changes, lint, test, typecheck and pr-title queued (one earlier pr-title run cancelled). Read as queued, not waited for. GitHub reports #2323 MERGEABLE (BLOCKED on required checks).",
+  "ci": "Read on GitHub at 274bdf2a: build, changes, lint, test, typecheck and pr-title queued (one earlier pr-title run cancelled). Read as queued, not waited for. GitHub reports #2323 MERGEABLE (BLOCKED on required checks). The architect's three known reds on main (recipients-claim.e2e.ts, infra/gcp TestDispatchConnectionsPerPodIsTheServers, mermaid.e2e.ts:194) are main's if they appear.",
   "notes": [
-    "#2323 still merges only after INFRA-555's #2390, with one more forward merge then (implementer's open question)."
+    "My first two-builds run at this head failed row 2 with ENOENT on e2e/test-results/.playwright-artifacts-0: I had started the sign-in run against the same Playwright config while it ran, and that run cleared the shared output directory. The run alone, above, passed 5 of 5. Not a defect of the change.",
+    "My first forged-cookie attempt overwrote the MAC's second-to-last character with uppercase 'A' and was accepted (302). I did not log that character; the likely cause is that it was 'a', since Go's hex.DecodeString reads uppercase hex and 'A' then gives the same MAC bytes, which is no forgery. The corrected forgeries above (a different hex digit, a changed payload) are refused."
   ]
 }
