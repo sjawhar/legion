@@ -162,6 +162,13 @@ Each item below names a task and where its code is, then notes on it.
   A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again under the registry's lock before it counts as live once more (`Registration.renew`);
   beside a live process whose keys it does not share it is refused (`Registration.Lost`), stops serving after its HTTP drain, and exits 1
 
+- **Load test**: `loadtest/`
+
+  the 2-core reproduction of the 2026-10-26 outage load:
+  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`).
+  Every endpoint comes from the stack's `stack.json` (`guard.go`).
+  How to run it, every column and the differences from production: `loadtest/README.md`
+
 - **Deploy/runtime**: `deploy/`
 
   compose, rollout scripts, NATS peer setup
