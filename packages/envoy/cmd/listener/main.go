@@ -862,9 +862,12 @@ func ledgerConnected(conn *nats.Conn) func(ctx context.Context) bool {
 // newDeliveryLedger makes the delivery ledger every lane asks before it prompts a session or
 // forwards a role-lane message to it: the `delivery.` keys of the listener state bucket, shared by
 // every pod of machineID, under the lease's boot, so a pod that takes the lease over does not prompt
-// a session again for a message the pod before it delivered. A listener with no lease (its NATS
-// user lacks the grant for the bucket) is the machine's one deliverer and keeps the ledger in
-// process (dedupe.Memory), which a restart forgets.
+// a session again for a message the pod before it delivered, and prompts at once one that a former
+// lease holder (lease.FormerHolder) only attempted, so its settle hold delivers it in stream order.
+// Another pod's young attempt is otherwise deferred until it is requestLimit and
+// ledgerTakeoverMargin old. A listener with no lease (its NATS user lacks the grant for the
+// bucket) is the machine's one deliverer and keeps the ledger in process (dedupe.Memory), which a
+// restart forgets.
 //
 // A record is keyed by the envelope's dedupe key, not its event id: fan-out normalization can
 // produce envelopes with one event id and distinct dedupe keys. Each prompt is recorded as
@@ -878,6 +881,7 @@ func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time
 		Durable:       bus.ListenerDurable(machineID),
 		Boot:          deliveryLease.boot,
 		TakeoverAfter: requestLimit + ledgerTakeoverMargin,
+		GoneBoot:      deliveryLease.FormerHolder,
 	})
 }
 

@@ -160,8 +160,12 @@ standby answering `/v1`, answers as the active pod would:
 - **Delivery ledger** (`internal/dedupe`, `delivery.<durable>.<32 hex of sha256(dedupe key)>.<session>`
   in `envoy_listener`): before it prompts a session or forwards a role-lane message, a pod records
   the pair attempted, and once it lands, delivered. A pair another pod delivered is not prompted
-  again; one another pod attempted less than 35 s ago (the 30 s prompt limit and 5 s) is retried
-  later on the durable lane, and an older one is taken over, since its writer died. A ledger that
+  again. An attempt by a boot that held this machine's lease before the current holder (the lease
+  record's `former_boots`: a holder that was killed, lost the lease, or released it) is taken over
+  at once, so the settle hold delivers that message in stream order. An attempt by a pod that still
+  holds or renews a lease, or by a live pod's role or live lane, less than 35 s old (the 30 s
+  prompt limit and 5 s) is retried later on the durable lane; an older one is taken over, since its
+  writer died. A repeat with the same event id is possible after a hard take-over. A ledger that
   cannot be read NAKs the durable message for a retry; the role and live lanes then deliver
   without it and log `delivery ledger unavailable`.
 - **Delivery exceptions** carry an id derived from the event id, the recipient session and the

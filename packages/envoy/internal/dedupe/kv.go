@@ -42,6 +42,11 @@ type KVConfig struct {
 	// TakeoverAfter is the age past which another process's unresolved attempt is taken over:
 	// the longest a prompt can take (session.Deliverer.RequestLimit) and a margin.
 	TakeoverAfter time.Duration
+	// GoneBoot reports whether boot belongs to a process that no longer holds the machine's
+	// delivery lease: one the current holder took the lease over from. Its unresolved attempt is
+	// taken over at once, however young, since that process delivers nothing more. Nil treats
+	// every other boot as one that may still be prompting.
+	GoneBoot func(boot string) bool
 	// DeliveredAge and AttemptedAge are DeliveredAge and AttemptedAge when zero; a test shortens
 	// them.
 	DeliveredAge time.Duration
@@ -108,9 +113,9 @@ func (l *KV) value(state string) []byte {
 
 // Attempt writes an attempted record for the pair with Create. When the key holds a record it
 // reads it: delivered within DeliveredAge is Delivered; attempted by this boot within AttemptedAge
-// is InFlight; attempted by another boot (or a record this build cannot read) younger than
-// TakeoverAfter is Deferred until it reaches that age; anything older is taken over with Update at
-// its revision, which is Proceed.
+// is InFlight; attempted by a boot GoneBoot reports is taken over at once; attempted by another
+// boot (or a record this build cannot read) younger than TakeoverAfter is Deferred until it
+// reaches that age; anything older is taken over with Update at its revision, which is Proceed.
 func (l *KV) Attempt(dedupeKey, sessionID string) (Attempt, error) {
 	pair := Key{DedupeKey: dedupeKey, SessionID: sessionID}
 	key := l.Key(dedupeKey, sessionID)
@@ -156,6 +161,8 @@ func (l *KV) judge(entry nats.KeyValueEntry) (verdict Verdict, retryIn time.Dura
 		return Delivered, 0, age < l.cfg.DeliveredAge
 	case record.State == stateAttempted && record.Boot == l.cfg.Boot:
 		return InFlight, 0, age < l.cfg.AttemptedAge
+	case record.State == stateAttempted && record.Boot != "" && l.cfg.GoneBoot != nil && l.cfg.GoneBoot(record.Boot):
+		return Deferred, 0, false
 	default:
 		return Deferred, l.cfg.TakeoverAfter - age, age < l.cfg.TakeoverAfter
 	}

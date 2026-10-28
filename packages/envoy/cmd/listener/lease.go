@@ -59,6 +59,16 @@ const (
 	listenerStateRequestWait = 2 * time.Second
 )
 
+// A lease record names the boots that held the lease before its holder (former_boots), so the
+// delivery ledger takes a former holder's unresolved attempt over at once (FormerHolder) rather
+// than waiting out the ledger's takeover age (the 30 s prompt limit and ledgerTakeoverMargin).
+// An acquisition keeps the ones that stopped less than leaseFormerBootAge, twice that age, before
+// it, and the newest leaseFormerBootsMax of those.
+const (
+	leaseFormerBootAge  = 70 * time.Second
+	leaseFormerBootsMax = 16
+)
+
 // errListenerStateRefused marks a listener whose NATS user may not use the listener state
 // bucket: no retry opens it until the grant changes. It wraps the server's own violation.
 var errListenerStateRefused = errors.New("NATS refused KV bucket " + bus.ListenerStateBucket +
@@ -131,6 +141,13 @@ func sameLastError(a, b error) (same bool) {
 // began it; acquired_at is the server's timestamp of the holder's acquiring write (informational);
 // released marks a record its holder gave up on a graceful stop.
 //
+// former_boots names the boots that held the lease before holder, each with the server time it
+// stopped holding (formerBoots): every acquisition over a record adds that record's boot, its
+// holder taken over or released, to that record's own former_boots. A renewal, a release and a
+// resume after a lapse leave it as it stands. A former holder delivers nothing more: it was killed,
+// lost its node, lost the lease to a take-over, or released the lease after settling or cancelling
+// the message it had in hand.
+//
 // stale_binding and unsettled tell the next holder that a pod of this build may still hold
 // messages or a push binding, so that a binding it finds is not a pre-lease build's and its term
 // must settle (leaseAcquisition). stale_binding is set by a holder that subscribed while the
@@ -148,15 +165,40 @@ func sameLastError(a, b error) (same bool) {
 // taken the record, when there is none to wait for), so the deliver subject does not lose its last
 // subscriber while the server still pushes to it and another pod is about to subscribe.
 type leaseFields struct {
-	Holder         string    `json:"holder"`
-	Boot           string    `json:"boot"`
-	DeliverSubject string    `json:"deliver_subject"`
-	ServiceSince   time.Time `json:"service_since,omitzero"`
-	AcquiredAt     time.Time `json:"acquired_at,omitzero"`
-	Released       bool      `json:"released"`
-	StaleBinding   bool      `json:"stale_binding"`
-	Unsettled      bool      `json:"unsettled"`
-	Receiving      bool      `json:"receiving"`
+	Holder         string       `json:"holder"`
+	Boot           string       `json:"boot"`
+	DeliverSubject string       `json:"deliver_subject"`
+	ServiceSince   time.Time    `json:"service_since,omitzero"`
+	AcquiredAt     time.Time    `json:"acquired_at,omitzero"`
+	Released       bool         `json:"released"`
+	StaleBinding   bool         `json:"stale_binding"`
+	Unsettled      bool         `json:"unsettled"`
+	Receiving      bool         `json:"receiving"`
+	FormerBoots    []formerBoot `json:"former_boots,omitempty"`
+}
+
+// formerBoot is one entry of a lease record's former_boots: a boot that held the lease and the
+// server time it stopped, the timestamp of the acquiring write over its record.
+type formerBoot struct {
+	Boot    string    `json:"boot"`
+	Stopped time.Time `json:"stopped"`
+}
+
+// formerBoots is the former_boots of a record that boot acquires at stopped, a server time, over
+// previous: previous's own former_boots and previous's boot, stopped then, less boot itself, those
+// stopped leaseFormerBootAge or more before stopped, and all but the newest leaseFormerBootsMax.
+// It returns a new slice and leaves previous's as it is, which copies of the record may share.
+func formerBoots(previous leaseRecord, boot string, stopped time.Time) []formerBoot {
+	boots := make([]formerBoot, 0, len(previous.FormerBoots)+1)
+	for _, former := range previous.FormerBoots {
+		if former.Boot != boot && former.Boot != previous.Boot && stopped.Sub(former.Stopped) < leaseFormerBootAge {
+			boots = append(boots, former)
+		}
+	}
+	if previous.Boot != "" && previous.Boot != boot {
+		boots = append(boots, formerBoot{Boot: previous.Boot, Stopped: stopped})
+	}
+	return boots[max(0, len(boots)-leaseFormerBootsMax):]
 }
 
 // leaseRecordKeys are leaseFields' JSON keys; any other key a record carries is a newer build's,
@@ -440,11 +482,25 @@ func (l *lease) Successor() (taken, receiving bool, err error) {
 	return taken, taken && record.Receiving, nil
 }
 
+// FormerHolder reports whether boot is one of the boots that held the lease before the holder of
+// the record as this process last wrote or read it (former_boots): a process that delivers
+// nothing more, whose unresolved delivery attempt the ledger takes over at once.
+func (l *lease) FormerHolder(boot string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, former := range l.record.FormerBoots {
+		if former.Boot == boot {
+			return true
+		}
+	}
+	return false
+}
+
 // Release stops the lease and, when this process holds the record, marks it released at its
-// revision, no longer receiving, keeping service_since, stale_binding and unsettled as they
-// stand, so a standby takes it at its next poll with no TTL wait, and settles in its turn when
-// this term had not settled or handed messages back. A record another pod has already taken is
-// left as it is, and that is no error. It returns ctx.Err() when ctx ends before the loop has
+// revision, no longer receiving, keeping service_since, stale_binding, unsettled and former_boots
+// as they stand, so a standby takes it at its next poll with no TTL wait, and settles in its turn
+// when this term had not settled or handed messages back. A record another pod has already taken
+// is left as it is, and that is no error. It returns ctx.Err() when ctx ends before the loop has
 // stopped, and the write's error when the record could not be marked; either way this process no
 // longer holds the lease, and a record left unreleased is taken as an expired one.
 func (l *lease) Release(ctx context.Context) error {
@@ -660,15 +716,22 @@ func (l *lease) poll() time.Duration {
 // at that timestamp when no record was there, when it carried none, or when its last write is
 // more than two ttl older than this one, since then no pod of the machine was serving; otherwise
 // it is kept. stale_binding is carried over, unsettled is written when the term must settle
-// (leaseAcquisition), and receiving is written false until the term subscribes. The record is
-// renewed at once to store service_since and acquired_at. A write whose timestamp cannot be read
-// back is not counted as held: the record then expires as any unreleased one does, and a standby,
-// this one included, takes it after the ttl.
+// (leaseAcquisition), and receiving is written false until the term subscribes. former_boots adds
+// previous's boot to previous's own (formerBoots): the acquiring write stamps it with previous's
+// timestamp, the latest server time known before it, and once the write's own timestamp is read
+// back it is stamped with that. The record is renewed at once to store service_since, acquired_at
+// and that stamp. A write whose timestamp cannot be read back is not counted as held: the record
+// then expires as any unreleased one does, and a standby, this one included, takes it after the
+// ttl.
 func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how leaseAcquisition) time.Duration {
 	start := l.now()
 	l.mu.Lock()
 	record.DeliverSubject = l.deliverSubject
 	l.mu.Unlock()
+	before := record
+	if previous != nil {
+		record.FormerBoots = formerBoots(before, l.boot, previous.Created())
+	}
 	record.Holder, record.Boot, record.Released, record.AcquiredAt = l.instance, l.boot, false, time.Time{}
 	settle := how == leaseTakenExpired || record.StaleBinding || record.Unsettled
 	record.Unsettled, record.Receiving = settle, false
@@ -701,6 +764,9 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 		return l.cfg.standbyPoll
 	}
 	record.AcquiredAt = written.Created()
+	if previous != nil {
+		record.FormerBoots = formerBoots(before, l.boot, written.Created())
+	}
 	if previous == nil || record.ServiceSince.IsZero() || written.Created().Sub(previous.Created()) > 2*l.cfg.ttl {
 		record.ServiceSince = written.Created()
 	}

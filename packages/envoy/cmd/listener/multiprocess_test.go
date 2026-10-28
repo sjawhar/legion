@@ -1506,10 +1506,11 @@ func TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered(t *testing.T) {
 
 // An attempt, then a crash: the active pod records in the shared ledger that it is prompting
 // session S and is SIGKILLed while that prompt is unanswered (the serving port holds it). The
-// standby takes over and finds the attempt, another process's and unresolved; it waits until the
-// attempt is older than a prompt may take (30 s, and 5 s), then takes it over: S is prompted, once,
-// within 45 s of the kill (30 s + 5 s + the 6 s ack wait and the take-over's hold). Before
-// INFRA-557 the durable's 60 s ack wait keeps the message from the standby past 45 s.
+// standby takes the killed pod's expired lease, so the attempt is a former holder's: it takes the
+// attempt over at once rather than deferring it as a live pod's, and S is prompted, once, within
+// the hard take-over bound of the kill (a repeat with the same event id is allowed; the held
+// prompt was never answered). Before INFRA-557 the durable's 60 s ack wait keeps the message from
+// the standby past that bound.
 func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -1528,14 +1529,14 @@ func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
 	}
 	killed := a.kill(t)
 
-	const bound = 45 * time.Second
+	const bound = mpHardBound
 	messages := []mpMessage{m}
 	serving.awaitAll(t, messages, bound+5*time.Second)
 	serving.requireWithin(t, messages, bound, killed)
 	time.Sleep(2 * time.Second)
 	serving.requireOnce(t, messages)
-	if line := mpLineWith(b.Output.String(), `"msg":"listener delivery deferred to another pod's attempt"`, `"event_id":"`+m.event+`"`); line == "" {
-		t.Fatalf("%s prompted %s without first waiting on %s's attempt", b.instance, m.event, a.instance)
+	if line := mpLineWith(b.Output.String(), `"msg":"listener delivery deferred to another pod's attempt"`, `"event_id":"`+m.event+`"`); line != "" {
+		t.Fatalf("%s deferred %s as a live pod's attempt, though %s held the lease it took over: %s", b.instance, m.event, a.instance, line)
 	}
 }
 

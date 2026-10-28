@@ -146,6 +146,40 @@ func TestKV_AnotherBootsYoungAttemptIsDeferredUntilItCanBeTakenOver(t *testing.T
 	}
 }
 
+func TestKV_AGoneBootsYoungAttemptIsTakenOverAtOnce(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	a := newTestKV(kv, "boot-a", clock)
+	gone := map[string]bool{}
+	b := NewKV(kv, KVConfig{Durable: testDurable, Boot: "boot-b", TakeoverAfter: testTakeoverAfter, Now: clock.Now,
+		GoneBoot: func(boot string) bool { return gone[boot] }})
+
+	mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
+	key := a.Key("publish.abc", "ses_target")
+	before, err := kv.Get(key)
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	clock.Advance(time.Second)
+	mustAttempt(t, b, "publish.abc", "ses_target", Deferred)
+
+	// Boot A no longer holds the lease: boot B took it over from A.
+	gone["boot-a"] = true
+	taken := mustAttempt(t, b, "publish.abc", "ses_target", Proceed)
+	after, err := kv.Get(key)
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	if after.Revision() <= before.Revision() || taken.revision != after.Revision() {
+		t.Fatalf("revision after the take-over = %d (attempt's %d), want past boot-a's %d and the attempt's own",
+			after.Revision(), taken.revision, before.Revision())
+	}
+	if record := readRecord(t, kv, key); record.State != stateAttempted || record.Boot != "boot-b" {
+		t.Fatalf("record after the take-over = %+v, want attempted by boot-b", record)
+	}
+	mustAttempt(t, b, "publish.abc", "ses_target", InFlight)
+}
+
 func TestKV_AnotherBootsOldAttemptIsTakenOverAndItsClearLeavesTheNewOne(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
