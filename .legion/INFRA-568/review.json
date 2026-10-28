@@ -2,29 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T13:16:39Z",
-  "decision": "approved",
-  "round": 5,
-  "reviewedCodeHead": "4b1f15ff0411eea3cccd5fc3efd5541fc1107323",
+  "completed": "2026-10-28T14:22:45Z",
+  "decision": "changes_requested",
+  "round": 6,
+  "reviewedCodeHead": "6f585d3609efaf732ab4f05800ec424b36672663",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "keyFindings": [],
-  "roundFourFindings": {
-    "PRRT_kwDORFy7ds6xF_aK": "accepted: fixed in da35e400. fillRelatedItems clears Ask on every candidate when attachAskStates errors, before Related and Decision. The new test fails with the clearing loop removed (overlay) and passes 3 of 3 with it.",
-    "PRRT_kwDORFy7ds6xF_aY": "accepted: fixed in da35e400. The check prints ask states through search-answer.ts askStateLines; the old renderer is deleted; dist is a fresh build.",
-    "PRRT_kwDORFy7ds6xF_aj": "accepted: fixed in da35e400. docs/ask_row.go equals main's."
-  },
-  "architectQuestion": "The line 'Answer state not reported by this Dispatch; open the link to read the ask.' on a failed read does not mislead about whether the ask was answered. It is literally true, claims nothing about the answer, and sends the reader to the link. A failed read also clears the decision, so no 'past decision' line contradicts it. It may suggest an older server to an operator, but the reader's next step is the same. No round opened.",
-  "notDefects": [
-    "askLines' Array.isArray guard (related-check.ts:164-171) has no client test for an unknown state. The guard is correct and needed; the gap is Minor."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/dispatch.go:97 (with packages/envoy/internal/dispatch/store/pool.go:283)",
+      "description": "dispatchConnectionsPerPod is still 83, but store.ConnectionsPerProcess is now 64+4+1+12+1+3 = 85: main's issue-ask-repair lease and this branch's search-term-stats lease each add one connection. TestDispatchConnectionsPerPodIsTheServers (infra/gcp/dispatch_connections_test.go:14, CI step 'Unit test envoy-infra') fails with 'expected: 85, actual: 83'; both thermonuclear agents ran it in scratch copies. The constant sizes the Cloud SQL max_connections and proxy comments in dispatch.go. Main has the same drift (84 against 83); this pull request adds a lease, so it sets 85 and says so in the envoy fragment."
+    }
   ],
   "verified": {
-    "merge": "4b1f15ff merges main 0a921021. Its only conflict, the routes_table.go GET/POST /api/v1/issues/{key}/asks descriptions, keeps main's GET text and the branch's POST text. No semantic conflict.",
-    "ci": "Required set: lint, typecheck, test, pr-title. All four success at code head 4b1f15ff, the newest pull_request CI head. The compare from 4b1f15ff to 63c6706a changes only .legion/ (2 files).",
-    "mergeState": "GitHub reported the pull request CONFLICTING at 13:16Z, after main moved again. The implementer's next forward merge comes back to review for the fingerprint check.",
-    "thermonuclear": "deep-review APPROVE and code-quality APPROVE at 63c6706a.",
-    "threads": "All six threads are resolved, each with my accepting reply.",
-    "e2eLines": "E2E (implementer) and E2E (tester) present."
+    "fingerprint": "Last review (APPROVE) commit_id 2225954a: aed6caca...; head 6f585d36: 429ff707..., changed. New round; thermonuclear pair run again.",
+    "merge": "6f585d36 merges main 5fbd8391. pool.go keeps both leases (leasePoolSize 12, its list matches the 12 leased callers counted in the code). multiprocess_test.go's comment says five of ten loops are observable, and AGENTS.md keeps the branch's two route rows once. TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses and ./internal/dispatch/store pass (deep review, scratch copy).",
+    "withdrawnAsks": "main's withdrawn asks are resolved, so never the check's decision. They render through search-answer.ts resolutionText and stay searchable, as in search. issue-ask-repair writes no table the check writes. Migrations 0135/0136 are still next (main ends at 0134).",
+    "ci": "At code head 6f585d36: lint, typecheck and pr-title success; test in progress; envoy-infra-go queued. A request for changes does not wait.",
+    "thermonuclear": "deep-review CHANGES and code-quality CHANGES, both on the finding above.",
+    "threads": "All six earlier threads are resolved, with my replies.",
+    "workspace": "After this process died mid-fetch, its stale packed-refs.lock (unchanged for 4 minutes) was removed and a stray go.work.sum change in @ was restored; nothing of it was committed."
   }
 }
