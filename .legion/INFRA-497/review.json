@@ -2,21 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-497",
-  "completed": "2026-10-27T04:03:58Z",
-  "round": 4,
+  "completed": "2026-10-28T19:56:52Z",
+  "round": 6,
   "decision": "changes_requested",
-  "reviewedCodeHead": "5741f6785ca1",
+  "reviewedCodeHead": "5ce792cd0d15",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "requestedByArchitect": [
-    "After sjawhar/legion#2317 (main's SlottedIssues fix) and INFRA-511's #2300 both merge, merge main into legion/INFRA-497: the required `test` job is red at 5741f678 only from main's Go daemon break (run 40441626398: 'number of field descriptions must equal number of destinations, got 20 and 31'; main's runs 40441090191, 40440568722 fail the same way; #2278 changes no packages/daemon file).",
-    "Add pi-envoy's wait for INFRA-511's start mark so the startup wake runs after the controller's start turn, with its real-binary tests (A6, A13), from branch legion/INFRA-511-startup-wait.",
-    "If main then has sjawhar/legion#2316, move #2278's envoy-and-contracts.yaml edits into ci.yaml."
+  "important": 1,
+  "minor": 1,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "A3 regression from the start-turn hold: an owed startup card's wake fires right after the start turn is interrupted (Esc or RPC abort). #check's pending filter (500) keeps every startup card whatever #interrupted says, and unreadCards counts an owed card read only after a reply that follows a turn-ending reply, which an aborted start turn never has; the wake (nextTurn+triggerTurn) starts a turn with no latch check (agent-session.ts:9299-9308). Before this round the startup card's turn ran before the start turn, so no interrupt could come between. Reproduced by a scratch CardWake test (1 wake in tui and rpc mode) and by both thermonuclear passes; no test covers an interrupted start turn. The reason at 117-118 does not hold for an owed card."},
+    {"severity": "minor", "file": "packages/pi-legion/extensions/controller-start-omp.test.ts", "description": "The unsent-mark real-binary cases (around 1402) assert only that the first request contains the card, which a plain immediate steer (no pending mark) also satisfies; assert the request ends with the wake."}
   ],
-  "roundFindings": "Narrowed round (architect, review-round cap): the five round-3 findings are fixed at 5741f678 (seenIdle at session_compact/session_switch/input replaces the counter; agent_end wiring row; AGENTS.md names card-delivery-omp.test.ts; nats:2.10 pinned by the index digest the mirror serves, checked with a registry HEAD). No correctness defect found.",
-  "verification": "Reviewer ran `bun run test` in packages/pi-envoy at 5741f678 with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: 1006 pass 0 fail, then card-delivery-omp.test.ts alone 9 pass 0 fail; `bunx tsc --noEmit` exit 0.",
-  "ci": "At 5741f678: typecheck and lint success; test failure from main's Go daemon break; pi-envoy job queued.",
-  "thermonuclear": "Both run once at 5741f678: deep review APPROVE, no findings; code quality APPROVE, wiring table fails for every deleted CardWake call; two Fast-follow items (duplicate drop-path unit tests in card-wake.test.ts; the name seenIdle)."
+  "merge": "88cf80bc (main 53f39ba0): every PR-only file is byte-identical to 5741f678; the ten files both sides changed keep both, and envoy.ts joins main's replay-ledger frame with CardWake's marker (`{...frame, ...details}`, disjoint keys; the inert path is main's unchanged).",
+  "verification": "Reviewer at 5ce792cd with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: pi-envoy `bun run test` 1474 pass 0 fail then 9 pass 0 fail; pi-legion controller-start-omp.test.ts 15 pass 0 fail; pi-shared 76 pass 0 fail.",
+  "ci": "At 5ce792cd: Tests, Legion Envoy and Contracts, Docs, Worker Image queued at review time.",
+  "thermonuclear": "Both run once at 5ce792cd: deep review CHANGES (interrupt finding confirmed; interface v5 readers, mark lifetime, sessionOpen and the merge checked, no other defect); code quality CHANGES (same finding; real-binary assertion gap; Fast-follow docs and structure)."
 }
