@@ -208,3 +208,33 @@ func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 		}
 	}
 }
+
+// A list inside a footnote definition inside a typed block, with a blank line in its first item, is
+// one the browser editor reads with that item spread, as it reads the same definition outside any
+// typed block. A document write either refuses it or reads the item spread, so the blank line the
+// writer put there is kept; storing the item tight drops it, which main avoided by refusing every
+// footnote definition in a typed block (INFRA-581).
+func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused(t *testing.T) {
+	for _, markdown := range []string{
+		":::callout{}\n[^f]: - a\n\n    - b\n:::\n\nText[^f].\n",
+		":::callout{}\n[^f]:\n    - x\n      \n      note\n:::\n\nText[^f].\n",
+		":::callout{}\n[^g]:1. \n       ***\n    \n       ***\n:::\n\nText[^g].\n",
+	} {
+		doc, err := ParseForWrite(markdown, nil)
+		if errors.Is(err, ErrSchema) {
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseForWrite(%q): %v", markdown, err)
+			continue
+		}
+		item := firstNodeOfType(doc, "list_item")
+		if item == nil {
+			t.Errorf("ParseForWrite(%q) read no list item", markdown)
+			continue
+		}
+		if spread, _ := item.Attrs["spread"].(bool); !spread {
+			t.Errorf("ParseForWrite(%q) stores its first list item tight; the browser editor reads it spread, so a write must read it spread or refuse it", markdown)
+		}
+	}
+}
