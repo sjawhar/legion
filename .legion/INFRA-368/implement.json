@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T15:18:38Z",
+  "completed": "2026-10-28T15:52:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
   "proof": [
     {
@@ -126,5 +126,9 @@
     "2 (PRRT_kwDORFy7ds6xKL07) fixed in 635552d3: only the reference read's node carries an item block's whole text (refs.CurrentItemBlockText); loaders set none and split no message body.",
     "3: PR body gains '## Contract change census' with re-runnable rg searches, each hit's disposition, and the rollout line for released CLIs (accepted: '- mentions block <ref>').",
     "4 (PRRT_kwDORFy7ds6xKL1J), 5 (PRRT_kwDORFy7ds6xKL1R), 6 (PRRT_kwDORFy7ds6xKL1Y) fixed in 635552d3."
+  ],
+  "reviewRound2Answered": [
+    "1 (PRRT_kwDORFy7ds6xM3X_): packages/envoy/cmd/dispatch/README.md:1335 and :1361 now name migrations 0136-0138 (docs commit); the PR body's E2E (implementer) line says migrations 0001-0138.",
+    "2: the PR body's '## Contract change census' is rewritten with narrowed searches (one shared X filter keeping Go and TypeScript source, without tests, fixtures, node_modules or dist; a1/a2/b1/b2/c/d1/d2), each of whose hits at the head is exactly one row with its disposition; docs are out of the census and named under Change. Text only; no code changed."
   ]
 }
