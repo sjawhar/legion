@@ -215,7 +215,7 @@ interface Blocks {
    */
   owners: (ListItem | undefined)[];
   /** Where markVerbatim found the first verbatim open, if anywhere. */
-  verbatimFrom?: VerbatimFrom;
+  verbatimFrom: VerbatimFrom | undefined;
 }
 
 interface Fence {
@@ -561,9 +561,7 @@ function scanBlocks(source: readonly string[]): Blocks {
     if (!isBlank(line)) for (const item of open) item.last = index;
     owners.push(open.at(-1));
   }
-  const verbatimFrom = markVerbatim(source, lines, frontMatter + 1);
-  const blocks = { lines, items, owners };
-  return verbatimFrom === undefined ? blocks : { ...blocks, verbatimFrom };
+  return { lines, items, owners, verbatimFrom: markVerbatim(source, lines, frontMatter + 1) };
 }
 
 /**
@@ -595,7 +593,7 @@ function markVerbatim(
         if (match === null) continue;
         for (const line of lines.slice(first)) line.verbatim = true;
         const at = start + match.index;
-        const line = first + (text.slice(0, at).match(/\n/g)?.length ?? 0);
+        const line = first + text.slice(0, at).split("\n").length - 1;
         return { line, tag: `${match[0].toLowerCase()}>` };
       }
     }
@@ -604,9 +602,8 @@ function markVerbatim(
   return undefined;
 }
 
-/** Says on stderr where a verbatim element turns R1, R2 and `--write` off for the rest of `text`. */
-function warnVerbatim(path: string, text: string): void {
-  const from = scanBlocks(splitLines(text).lines).verbatimFrom;
+/** Says on stderr where a verbatim element turns R1, R2 and `--write` off for the rest of the file. */
+function warnVerbatim(path: string, from: VerbatimFrom | undefined): void {
   if (from === undefined) return;
   process.stderr.write(
     `${path}:${from.line + 1}: warning: ${from.tag} opens a verbatim element; from this block to the end of the file, R1 and R2 are not checked and --write changes nothing\n`
@@ -881,9 +878,8 @@ function needsBlankBefore(
  * The document with each paragraph re-laid out and a blank line before each list item; verbatim
  * lines stay byte for byte.
  */
-function relayout(text: string): string {
+function relayout(text: string, blocks = scanBlocks(splitLines(text).lines)): string {
   const { lines, trailingNewline } = splitLines(text);
-  const blocks = scanBlocks(lines);
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     const info = blocks.lines[index];
@@ -1084,9 +1080,8 @@ function excerpt(line: string, at: number): string {
   return `${start > 0 ? "…" : ""}${line.slice(start, end).trim()}${end < line.length ? "…" : ""}`;
 }
 
-function check(text: string): Finding[] {
+function check(text: string, blocks: Blocks): Finding[] {
   const { lines } = splitLines(text);
-  const blocks = scanBlocks(lines);
   const findings: Finding[] = [];
   for (const [index, line] of lines.entries()) {
     const info = blocks.lines[index];
@@ -1170,8 +1165,9 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
   for (const path of paths) {
     const text = await readText(path);
     if (text === undefined) return 2;
-    warnVerbatim(path, text);
-    for (const finding of check(text)) {
+    const blocks = scanBlocks(splitLines(text).lines);
+    warnVerbatim(path, blocks.verbatimFrom);
+    for (const finding of check(text, blocks)) {
       process.stdout.write(`${path}:${finding.line + 1}: R${finding.rule}: ${finding.message}\n`);
       status = 1;
     }
@@ -1210,8 +1206,9 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
       status = 2;
       continue;
     }
-    const next = relayout(text);
-    warnVerbatim(path, text);
+    const blocks = scanBlocks(splitLines(text).lines);
+    const next = relayout(text, blocks);
+    warnVerbatim(path, blocks.verbatimFrom);
     if (next === text) continue;
     const difference = foldedDifference(text, next);
     const refusal =

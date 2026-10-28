@@ -132,7 +132,8 @@ function sentenceLines(count: number, indent: string, word: string) {
 }
 
 test("R3 does not count a nested list toward its parent: a short parent passes", async () => {
-  // The 30 nested items and the blank lines between them run 60 screen rows.
+  // The 30 nested items and the 29 blank lines between them run 59 screen rows, 61 with the
+  // parent's own two lines.
   const nested = Array.from({ length: 30 }, (_, n) => `  - Nested item ${n + 1}.\n`).join("\n");
   const path = await markdownFile(`- Parent item.\n\n${nested}`);
   const { exitCode, stdout } = run([path]);
