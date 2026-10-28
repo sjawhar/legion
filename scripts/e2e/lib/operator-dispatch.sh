@@ -84,23 +84,40 @@ production_baseline() {
 # by id until a short page, and the production projects, into the caller's
 # $evidence/production-dispatch-audit.json. It fails on any event a session in the JSON array
 # SESSIONS authored or that names the caller's $project, and on a production project naming it. A
-# read that fails (a Dispatch without the log route answers 404), or a first event that is not the
-# baseline event itself (the control that the read started at the run's window), fails it too: the
-# audit cannot vouch for production. Its summary line names ENVOY, the rig sessions the caller found
-# on the production Envoy listener.
+# Dispatch that answers the log route 404 is a build from before that route, whose event stream
+# still replays every event after a since: the audit says so and reads GET /api/v1/events
+# ?since=<baseline - 1> for 25 s instead, which also carries every event whatever owns it. Any other
+# read that fails, or a first event that is not the baseline event itself (the control that the read
+# started at the run's window), fails it too: the audit cannot vouch for production. Its summary line
+# names ENVOY, the rig sessions the caller found on the production Envoy listener.
 production_dispatch_audit() {
-  local sessions=$1 envoy=$2 out=$work/production-events.jsonl header page projects events
-  local after=$((prod_baseline - 1)) complete=1 found=0
+  local sessions=$1 envoy=$2 out=$work/production-events.jsonl page=$work/production-events-page.json
+  local header status projects events after=$((prod_baseline - 1)) complete=1 found=0
   header=$(prod_header_file)
   : >"$out"
   while :; do
-    if ! page=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/events/log?after=$after&limit=1000") ||
-      ! jq -c '.[]' <<<"$page" >>"$out"; then
+    status=$(curl -sS --max-time 20 -o "$page" -w '%{http_code}' -H "@$header" \
+      "$prod_dispatch_url/api/v1/events/log?after=$after&limit=1000") || status=
+    if [ "$status" = 404 ] && [ "$after" -eq $((prod_baseline - 1)) ]; then
+      printf 'production Dispatch has no GET /api/v1/events/log (a build from before it); reading its event stream since %s instead\n' \
+        "$((prod_baseline - 1))"
+      # The stream stays open after its replay, so curl ends at its time bound (exit 28).
+      status=0
+      curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" \
+        >"$work/production-events.sse" 2>/dev/null || status=$?
+      if [ "$status" != 0 ] && [ "$status" != 28 ]; then
+        complete=
+      elif ! sed -n 's/^data: //p' "$work/production-events.sse" | jq -c . >>"$out"; then
+        complete=
+      fi
+      break
+    fi
+    if [ "$status" != 200 ] || ! jq -c '.[]' "$page" >>"$out"; then
       complete=
       break
     fi
-    [ "$(jq length <<<"$page")" -eq 1000 ] || break
-    after=$(jq '.[-1].id' <<<"$page")
+    [ "$(jq length "$page")" -eq 1000 ] || break
+    after=$(jq '.[-1].id' "$page")
   done
   if [ -z "$complete" ] || ! projects=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/projects"); then
     rm -f "$header"

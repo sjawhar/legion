@@ -4,6 +4,15 @@
 
 ### Added
 
+- Dispatch serves `GET /api/v1/events/log?after=<event id>&limit=<n>`, which pages the whole event
+  log by id, whatever owns each event (an issue, a document, a project or none): up to 1,000 events
+  a page, oldest first, each as the issue and document event lists serve it, to any signed-in
+  caller, the same audience the event stream has. A bad `after` or `limit` is `400 INVALID_QUERY`.
+  The Stage 3 production audits page it; against a Dispatch from before it, which answers it 404,
+  they read that build's event stream instead.
+- A `GET /api/v1/events` response carries `X-Dispatch-Event-Replay: complete` when its replay is
+  everything the reconnecting client lacks. A client that reconnects and finds it missing
+  refetches what it shows.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -796,6 +805,27 @@
 
 ### Changed
 
+- **Breaking for a client that relied on a full replay:** a `GET /api/v1/events` resume (`since=`
+  or `Last-Event-ID`) is replayed at most 256 events whose frames total at most 1 MiB; past either
+  bound it is replayed nothing and its response lacks `X-Dispatch-Event-Replay: complete`, so the
+  client refetches. A cold connect is replayed nothing, as before. A connection that falls 64
+  events behind now catches up from the event log within the same bounds and stays open, where it
+  was closed; past the bounds, or when the event log is reset or the server stops, its response
+  ends as before.
+- A Dispatch process with no open event stream and no open Delivery page reads nothing from the
+  event log and holds no `LISTEN` connection for it. While anything subscribes, one read per commit
+  serves every event stream and every Delivery view, and each event's frame is encoded once.
+- `POST /api/v1/issues/{key}/comments` and `POST /api/v1/artifacts/{id}/comments` with `mentions` answer
+  once the comment commits, with every mention's delivery attempt `pending`; the sends run after
+  the response, per recipient in the order the comments were accepted, and settle each attempt and
+  write its `comment.delivery` event then. Each listener lookup the comment makes is bounded at
+  250 ms, so a listener that does not answer delays the comment by one 250 ms timeout per 8
+  mentions. Every process resends attempts left pending a minute or more by a process that stopped
+  or was killed, at start and every 30 s. A client that read a mention's delivery state from the
+  create response reads it from the comment, or from its `comment.delivery` event, afterwards.
+- An agent conversation viewer (`GET /api/v1/agents/{session_id}/stream`) holds at most 8 MiB of
+  queued frames, where it held 64 whole frames; a viewer past the budget has its stream ended, as
+  before.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

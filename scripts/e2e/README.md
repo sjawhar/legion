@@ -446,8 +446,10 @@ event a rig session authored or that names the rig's project key, and on any pro
 naming that key, then reads the operator's Envoy listener (`GET /v1/sessions`,
 `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. A
 read that fails, or a first event that is not the baseline event itself (the control that the read
-started at the run's window), fails the audit; a production Dispatch without the event-log route
-answers it 404, so the audit fails as one that could not be read rather than passing unread. The
+started at the run's window), fails the audit. A production Dispatch without the event-log route
+(a build from before it) answers it 404; the audit says so and reads that build's event stream
+(`GET /api/v1/events?since=` the baseline less one, for 25 s), which still replays every event after
+its since, whatever owns it, with the same control. The
 audit writes nothing. It reads the operator's Dispatch as a command run from the operator's shell
 resolves it ([`lib/operator-dispatch.sh`](#liboperator-dispatchsh)), with the `DISPATCH_TOKEN` the
 script read at start and took out of its environment, so nothing the run starts inherits it. A file,
@@ -3049,9 +3051,10 @@ updated in the last 24 hours, through a 0600 header file under the caller's `$wo
 `GET /api/v1/events/log?after=` from the baseline id less one until a short page, so it reads every
 event at or above the baseline whatever owns it, and reads the production projects; it writes
 `$evidence/production-dispatch-audit.json` and fails on an event a rig session authored or that
-names the rig's `$project`, on a production project naming it, on a read that fails (a Dispatch
-without that route answers 404, and the audit says production Dispatch could not be read), and on a
-first event that is not the baseline event.
+names the rig's `$project`, on a production project naming it, on a read that fails, and on a
+first event that is not the baseline event. A Dispatch that answers that route 404 is a build from
+before it: the function says so and reads its event stream since the baseline less one for 25 s
+instead, which replays every event after that since; any other failure fails the audit.
 
 `operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts <bearer file>`, which resolves
 Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or
