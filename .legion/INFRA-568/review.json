@@ -2,32 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T10:06:41Z",
-  "decision": "approved",
-  "round": 3,
-  "reviewedCodeHead": "9d82a849271f06f2d623bd6dd9102d101d413d54",
+  "completed": "2026-10-28T11:16:09Z",
+  "decision": "changes_requested",
+  "round": 4,
+  "reviewedCodeHead": "62c33b1410494072d47a15f009fda1694f2ace88",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "notDefects": [
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
     {
-      "file": "packages/envoy/CHANGELOG.md, packages/envoy-client/CHANGELOG.md, packages/claude-envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md",
-      "description": "Main moved past the merge base (184897acc1, #2419): changelog entries are now fragment files, and the old [Unreleased] heading is now 'Before changelog fragments'. Main's own rule moves an open pull request's old-heading entries into fragments at its next merge of main. GitHub reports this pull request mergeable, so no merge is due. No behaviour and no gate change."
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/suggestions.go:683",
+      "description": "Since the merge, the check uses main's attachAskStates, which writes results[i].Ask row by row and then reads resolved asks' last answers from events. When that second read fails (for example the check's 5 s allowance ends during it), resolved asks keep State resolved with Answer nil. fillRelatedItems only logs and goes on, so the client prints 'Ask: closed with no answer: retracted' for an ask a person answered. The deep review reproduced this with an overlay test: events locked, a 1 s context, ask = {State:resolved Answer:<nil>}. The branch's own helper before the merge set nothing on error. Fix: on error, clear Ask on every candidate (or make the helper set states only once both reads succeed), and add a test that pins it. The comment at :666 and the contract comment on WriteSuggestion.ask must say ask is absent when it could not be read."
     },
     {
-      "file": "packages/envoy/internal/dispatch/api/related_terms.go:262-264",
-      "description": "The comment 'the title is a few words' is loose: an ask's or decision block's question is the title, and it can hold up to 2,000 characters. The cost is one to_tsvector per word, so this is wording only."
+      "severity": "important",
+      "file": "packages/envoy-client/src/related-check.ts:170",
+      "description": "The merge brought main's renderer of the same SearchAsk wire type (search-answer.ts askStateLines, #2363). The client now has two renderers that word one state differently (dispatch search: 'Closed with no answer: <kind> by <actor> at <t>: <reason>'; the check: 'Ask: closed with no answer: <kind>', with no who, when or why). The bundler had to rename one to askStateLines2 in every dist file. Export main's renderer and call it from the check's item and decision lines, then delete related-check.ts:166-203. Update the pinned strings and the envoy-client fragment."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_row.go:62",
+      "description": "DecodeAskAnswer and DecodeAskResolution were exported for the branch's own search_ask.go, which the merge dropped. Only ScanAsk in the same file calls them now. Restore main's ask_row.go, so the PR's diff for that file is empty."
     }
   ],
+  "notDefects": [
+    "related-recall.sh:113 spells dispatch:// as dispatch:/{2}; the regex is equivalent.",
+    "selected null vs []: both decode paths go through model.AskAnswer.UnmarshalJSON, which reads null or absent as []; TestRelatedCheckShowsAnAnswerWithNoOptionChosen passes.",
+    "caa83a01 touches only packages/dispatch/web and packages/proof-editor; no conflict with docs/ask_blocks.go."
+  ],
   "verified": {
-    "fingerprint": "Last review commit_id 721a2c97: 620fbdda...; head 9d82a849: 5860ba95..., changed. The diff without .legion, docs/solutions and packages/claude-envoy/dist is byte-identical at both heads (3d530098...). dist differs only by bundler identifier renames from main's Bun 1.4.4. bun scripts/build.ts --check passes ('dist/ and legion/ match a fresh build'). New round; thermonuclear pair run again.",
-    "ci": "Required set from the rulesets: lint, typecheck, test, pr-title; no branch protection. At code head 9d82a849 (CI head of the newest pull_request runs): lint success, typecheck success, test success, pr-title success (run 40659364077). The compare from 9d82a849 to ebbadc97 changes only .legion/ (2 files). Not required: envoy-go success (dispatch/api package 507.6 s), envoy-go-race, claude-envoy, envoy-client, contracts, dispatch-multiprocess, dispatch-memory all success; dispatch in progress.",
-    "architectQuestion": "The term-statistics refresh runs once at server start: RunSearchTermStatsRefresh (related_terms.go:168) calls duty.Exclusive before its first time.After(interval), and main.go:416 starts it. TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses (cmd/dispatch/multiprocess_test.go:1167) holds the search-term-stats pass inside its first write lock right after start. No round opened for it.",
-    "apiTestTime": "Locally the whole dispatch/api package took 1,161 s at the head and 1,004 s at main b295a3fb (52 new tests add 69 s, existing tests add 99 s). In CI it took 507.6 s, against 410-478 s on main after 582cb2a2. This is listed as a risk on the pull request.",
-    "thermonuclear": "deep-review and code-quality at ebbadc97: APPROVE each. No semantic conflict with main 2df3353c..b295a3fb (2,000-character questions, AskGate does not gate dispatch_related, routes, leases, migrations still end at 0134 on main). The CHANGELOG resolutions lose and duplicate nothing. dist is a fresh build. Bun suites pass: contracts 294, envoy-client 1038, pi-envoy 1382, claude-envoy 216.",
-    "threads": "PRRT_kwDORFy7ds6wuPIJ, PRRT_kwDORFy7ds6wuPIP and PRRT_kwDORFy7ds6wuPIT each carry my accepting reply and are resolved. No bot threads.",
-    "e2eLines": "E2E (implementer) and E2E (tester) present in the pull request body.",
-    "contractCensus": "Not required; the merge changes no contract of this branch."
+    "fingerprint": "Last review (APPROVE) commit_id ee774688: 5860ba95...; head 62c33b14: e89a38de..., changed. New round; thermonuclear pair run again.",
+    "fragments": "Six .changes/unreleased/pr2397-*.yaml fragments are valid against each package's .changie.yaml, and every former entry is present. The four CHANGELOG.md files equal main's.",
+    "ci": "Required checks at code head 62c33b14 (lint, typecheck, test, pr-title) were queued when read; a request for changes does not wait. The compare from 62c33b14 to 4469d89a changes only .legion/.",
+    "thermonuclear": "deep-review: CHANGES (the Medium above, reproduced). code-quality: CHANGES (the renderer duplication and the dead exports).",
+    "threads": "No new threads; my three earlier threads are answered and resolved."
   }
 }
