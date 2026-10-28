@@ -2,56 +2,29 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-653",
-  "completed": "2026-10-28T15:36:00Z",
-  "round": 2,
-  "testedHead": "7edefc8982b849034440d792699efd33eb239313",
-  "branchHead": "8845c2b521cbff6e177c087dd929a8dc9c56bfa5",
-  "testedBase": "aeeee6c029f6766d3e4b7900dd1c7ef4e6edcc3f",
-  "fingerprint": "4b7e79f9908fa62729a1ea87d23d8badd854dd425a88e2775fa974235b681efd at 7edefc89 (the skill's unchanged-diff command; equals the implementer's). After the conflict merge below, compare at the new head: equal means bare gates only.",
+  "completed": "2026-10-28T18:00:00Z",
+  "round": 3,
+  "kind": "rebase re-check 7edefc8982b849034440d792699efd33eb239313 → f6b53858836912f62cc4afda0813a90be6e19ce2: fingerprint unchanged, bare gates only",
+  "testedHead": "f6b53858836912f62cc4afda0813a90be6e19ce2",
+  "branchHead": "f6fa8ddb5ea057f06621e907461ddc0645be52f1",
+  "fingerprint": "4b7e79f9908fa62729a1ea87d23d8badd854dd425a88e2775fa974235b681efd at 7edefc89 (round 2's verified head) and at f6b53858 (the forward merge of main c44c1469 answering round 2's conflict): equal.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command, differential.sh --base aeeee6c0 --head 7edefc89, over my own fresh fetch of every LINUX issue's current spec (1204 at 14:40Z, linux.jsonl sha256 a3d4a2b8...): all 7 gates 0 over 1289 documents, base.jsonl and head.jsonl cmp identical. Drove both CPU legs myself on the read side: two interleaved load-test pairs (below), every head step below every base step. Recomputed the write leg from the implementer's raw files: window_cpu_s in runs/v2-{base,head}-[123]/run.txt (474.28/483.63/472.15 vs 440.89/424.61/433.90) and the merged-profile shares (180.07s 13.73% of 1311.19s; 94.03s 7.96% of 1181.60s), build sha256 per commit consistent across runs; and the read leg's six summary.json CPU-s (155.84/153.27/155.80 vs 139.37/144.05/141.62). All match the PR body."
+    "how": "Round 2 verified the implementer's proof at 7edefc89 (re-ran differential.sh on my own LINUX fetch, re-ran the read leg independently, recomputed the write leg from its raw files). The forward merge f6b53858 leaves the PR's diff unchanged (fingerprint above), so that verification carries; the implementer's handoff f6fa8ddb changes only .legion/."
   },
-  "failures": [
-    {
-      "criterion": "The pull request merges at the head that was proven",
-      "evidence": "While this round ran, main moved to 690c0136 (#2361, 'fix(pmdoc): read escapes and character references as CommonMark does', merged 15:06Z). `gh pr view 2427 --repo sjawhar/legion --json mergeable` → CONFLICTING at 8845c2b5 (15:28Z). `git merge-tree --write-tree 8845c2b5 690c0136` → CONFLICT (content) in packages/envoy/internal/dispatch/pmdoc/render.go only, and only in its import block: this branch adds \"slices\" beside \"regexp\", main removes \"regexp\" (its characterReference regex became characterReferenceLength). Resolution: keep \"slices\", drop \"regexp\". parse.go and render_inline.go auto-merge; #2361 touches text decoding, image and title escaping, none of asWritten, visibleMarks, emphasisParser or readsBackUnder. No defect in the change was found; this is the GitHub-reported conflict only. Needed: forward-merge main (skill: conflicts-and-rewrites), push, and post the fingerprint comment; then the tester compares fingerprints at the new head."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Rendered markdown and offsets byte-identical on every LINUX spec",
-      "surface": "pmdoc renderer, read-back and misread checks over every LINUX issue's current spec (1204, `dispatch issues --project LINUX --all` + `dispatch doc-read` at 2026-10-28T14:40Z, not committed), base build aeeee6c0 against head build 7edefc89",
-      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base aeeee6c029f6766d3e4b7900dd1c7ef4e6edcc3f --head 7edefc8982b849034440d792699efd33eb239313 --corpus $TMPDIR/t653/linux/linux.jsonl --out $TMPDIR/t653/diff; cmp diff/base.jsonl diff/head.jsonl; then the throwaway in-process harness (aeeee6c0's pmdoc copied as package pmdocbase beside 7edefc89's pmdoc in a git-archive tree, not committed): ZZ_CORPUS=linux.jsonl pmdoc.test -test.run TestZZCorpusBaseHead, comparing per spec RenderWithBlockOffsets (markdown, offsets, error), Render, RefuseMisreadDocument, ReadBack (block ids masked) and NewMisread(parsed, variant) for the parsed tree and two perturbed variants (comment anchors splitting runs mid-word, line feeds, isInline hard breaks, empty texts, empty Marks slices, U+0000 in text and a link href), and that head leaves its input unchanged",
-      "observed": "differential.sh: all 7 gates 0 over 1289 documents, dumps cmp identical. Harness: docs 1204, parsed 1204, variants 2408 (2402 render without error), failures 0 (982 s).",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
-      "negativeControl": "Harness with holdsTilde forced false (stored read skipped beside a `~`) → fails on `> _~~_<http://x.y>` (head drops the autolink's angle brackets: `*~~*http://x.y` vs `*~~*<http://x.y>`); with the divergence flag forced false → fails on `- _***<http://x.y>****`. Both edits reverted (diff against 7edefc89 empty)."
-    },
-    {
-      "criterion": "Behaviour: what people and agents see is unchanged, beyond the corpus (part C's skips under main's three readers)",
-      "surface": "Same base-vs-head harness over generated markdown: tables, code blocks, quotes, lists, task items, footnotes including a `~` in a footnote label ([^a~b] with its definition), every `*`, `_`, `~`, `~~`, `~~~`, `\\~` run and `*~`/`~*`/`_~`/`~_` adjacency, links, autolinks, entities, escapes",
-      "command": "ZZ_SEED=1..5 pmdoc.test -test.run TestZZBaseHeadRandomMarkdown (20000 + 4 x 50000 iterations); go test -fuzz '^FuzzReadBackSkips$' -fuzztime 4m",
-      "observed": "19595 + 48999 + 49040 + 49004 + 48988 = 215,626 parsed documents and as many perturbed variants, base and head equal on every output and on NewMisread; FuzzReadBackSkips 1,183,779 execs, PASS.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
-      "negativeControl": "As above: each forced skip fails seed 1 within 0.6 s."
-    },
-    {
-      "criterion": "asWritten shares the input tree: concurrent renders of one tree do not race and do not write it",
-      "surface": "RenderWithBlockOffsets, RefuseMisreadDocument and NewMisread from 6 goroutines on one shared tree, race detector",
-      "command": "CGO_ENABLED=1 GOWORK=off go test -race ./internal/dispatch/pmdoc/ -run 'TestZZConcurrentRenderOfOneTree|TestRenderAndReadBackLeaveTheirInputUntouched'",
-      "observed": "ok (53.7 s), no race.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
-      "negativeControl": "Without CGO the race build is refused (`-race requires cgo`); the pass is the instrumented build."
-    },
-    {
-      "criterion": "Merge rule of the shared context on INFRA-589's route mix for reads (independent run)",
-      "surface": "Dispatch server built from base aeeee6c0 and head 7edefc89 by packages/envoy/loadtest at legion/INFRA-639 688cab741c70, default route mix, the base-made seed at migration 134",
-      "command": "$TMPDIR/t653/trun.sh: LOADTEST_DISPATCH_COMMIT=<commit> run-step.sh t-<side>-<n> --events 4 --sessions 400 --requests 60, interleaved t-base-1 t-head-1 t-base-2 t-head-2 (15:11-15:28Z, nothing else running on the box); CPU-s = resources.cpu_cores_mean.dispatch x resources.window_s",
-      "observed": "base 161.74 / 156.14 CPU-s, head 141.01 / 140.30: every head step below every base step (median -11.1%); 719 events committed and 10,752/10,752 requests 2xx per step; step logs say `building ... from aeeee6c0...` / `from 7edefc89...`, binary sha256 33e7f4b6... (base) and 409372f3... (head), as in the implementer's build record.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
-      "negativeControl": "The load test refuses a seed newer than its checkout's migrations (`highest migration is 129 … older than the seed's 134`); seed.meta.json was set to 129 for the four steps and restored to 134 afterwards (checked)."
+      "criterion": "Conflict-forced merge leaves the change as verified (bare gates)",
+      "surface": "The unchanged-diff fingerprint (skill conflicts-and-rewrites) at the verified head and the merge head, CI on GitHub at the merge head, and the pmdoc differential as the smoke check",
+      "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <sha>)\" --to <sha> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum for 7edefc89 and f6b53858; gh api repos/sjawhar/legion/commits/f6b53858.../check-runs; bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base c44c1469e42d020f23eea89578e44445722f0879 --head f6b53858836912f62cc4afda0813a90be6e19ce2 (in-repo corpus); cmp base.jsonl head.jsonl",
+      "observed": "Fingerprints equal (4b7e79f9...). PR MERGEABLE at f6fa8ddb. CI at f6b53858: lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go, dispatch-memory, dispatch-multiprocess, build, the three Postgres 16 Go suites green; `dispatch` in progress and one pr-title queued at 17:57Z (read as running, not waited for). Smoke: 85 documents, all 7 gates 0, base and head dumps cmp identical.",
+      "headSha": "f6b53858836912f62cc4afda0813a90be6e19ce2",
+      "negativeControl": "The same fingerprint command on a SHA the workspace cannot resolve (0000…0001) exits 1 under pipefail, so it counts as a changed diff, never as unchanged."
     }
   ],
-  "ci": "Read on GitHub at 7edefc89: lint, typecheck, test, pr-title, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go green; one pr-title run queued."
+  "notes": [
+    "main has moved past the merged c44c1469 to 20ba65a6 with two pmdoc commits (#2451, #2455); GitHub reports the PR MERGEABLE, so per the reintegration rule no further merge is due."
+  ]
 }
