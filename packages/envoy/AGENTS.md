@@ -331,7 +331,7 @@ stays one measure where a rendering is reused rather than made again: a write ta
 of its fork before the operation from the room's replica or from its own previous operation, and
 the observer takes a published write's own rendering, only where each is the rendering of the very
 state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is
-deterministic over one state.
+deterministic over one state; a margin write (`applyMargin`) renders nothing before it writes.
 Indexing an ask block fails the second half: it writes an `asks` row and an `ask.opened` event
 over words the edit that wrote the block already versioned, and a settlement that versioned the
 document for that event alone would write a byte-identical version credited to nobody, staling an
@@ -348,7 +348,13 @@ An update that changes only what no rendering carries therefore versions no docu
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's
 `id` when it opens the document, and each ordered list item's `label` and `listType` on the first
 keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits
-the text it covers. Routes that write a version on request do so whatever changed, so each can write
+the text it covers. A margin record changes the marks map alone, never the text, so its
+transactional write (`applyMargin`) records `false` without rendering the document again, and the
+room's update observer keeps its rendering for the publish of one whose fork was built from that
+same room (`liveWriteOrigin.marginOnly`). One forked from the store (`coldFork`) can carry deletes
+the room never took, since ygo encodes an update with its document's whole delete set, so its
+publish is rendered as any other update is.
+Routes that write a version on request do so whatever changed, so each can write
 a version whose markdown equals the previous one's and stale an approval pinned to it: an upload to
 an existing document (`POST /api/v1/issues/{key}/artifacts`,
 `POST /api/v1/projects/{key}/artifacts`) always inserts one; `POST /artifacts/{id}/versions` and
@@ -375,12 +381,17 @@ the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the
 transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
 every document write takes its transaction from the ledger and refuses a context that was not
-joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, and every
+joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, every
 write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch,
 an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's
-anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves
-(`docs/growth.go`). An answer the document has no room for is left out of its block, which records
-who answered and when, and kept on its ask. The server writes outside `applyLive` are a rebuild,
+anchor mark - and a comment's or suggestion's margin record, which runs through `applyMargin` on
+the same steps that open and record an `applyLive` write (`openLiveOperation`,
+`recordLiveOperation`). `applyLive` weighs each of its writes by what it leaves
+(`docs/growth.go`); a margin record leaves the rendering and the anchor marks as they were, so
+`applyMargin` weighs it by the margin bound alone and reuses the rendering the transaction's last
+operation kept (`liveWrite.tree`) rather than reading and rendering the document again. An answer
+the document has no room for is left out of its block, which records who answered and when, and
+kept on its ask. The server writes outside `applyLive` and `applyMargin` are a rebuild,
 settlement's repairs, the block-id backfill and the sweep of unrecorded marks. Of those, a rebuild
 and settlement's repairs carry caller text. A rebuild's supplied markdown is weighed as a new
 document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
@@ -796,16 +807,20 @@ update log under the document's lock, before any observer of that transaction ru
 (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains
 the log, applying each update in turn and comparing the rendering it leaves with the one before it
 (`renderedReplica.changedBy`). It renders the replica for that only when it cannot know the
-rendering otherwise, and two cases it knows exactly. A published live write's update carries its
+rendering otherwise, and three cases it knows exactly. A margin write's publish into the room
+instance its fork was warm-built from changes no text (`liveWriteOrigin.marginOnly`, the margin
+record paragraph above), so it is unchanged. A published live write's update carries its
 operation's rendering, taken when the replica still stands at the epoch and foreign-commit count
 the operation's fork read found before it encoded the room: the replica has then consumed nothing
 since that read but published writes' commits, which under the writer slot are this write's own
 earlier updates, so after the update it is the fork the write rendered. ygo encodes the room's
 whole delete set in every update, so that holds only on the room instance the fork was read from:
-a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch. And an update
-whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`)
-is already in the replica, which starts from the room as of its first commit, so applying it
-changes nothing: a cold write's publish into the room its own publish loaded is never rendered.
+a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch; for the same
+reason a margin write forked cold, or published into a replaced room, is not taken as margin-only.
+And an update whose version is at or below the head the room instance's load folded
+(`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first
+commit, so applying it changes nothing: a cold write's publish into the room its own publish
+loaded is never rendered.
 So every committed update is classified, and its authors credited, exactly once, by whichever
 observer reaches the log first, against the room as the
 commit before it left it. Catching the replica up to the room instead took in every commit since
