@@ -74,9 +74,10 @@ test("--out refuses an existing directory that is not empty and leaves it as it 
   }
 }, 30_000)
 
-test("with no mode, more than one, or --out without a directory the script exits 2", async () => {
+test("with no mode, more than one, --out without a directory, or a mode that writes the package's own files the script exits 2", async () => {
   expect((await build()).exitCode).toBe(2)
-  expect((await build("--check", "--in-place")).exitCode).toBe(2)
+  expect((await build("--check", "--out", join(scratch, "two-modes"))).exitCode).toBe(2)
   expect((await build("--out")).exitCode).toBe(2)
   expect((await build("--unknown")).exitCode).toBe(2)
+  expect((await build("--in-place")).exitCode).toBe(2)
 }, 30_000)

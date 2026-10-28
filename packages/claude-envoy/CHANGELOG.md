@@ -72,9 +72,9 @@
   workflow commits them after each merge, so main's built files lag its sources by one run of
   that workflow, runner queues included, while the merge's hand-written files (`hooks/hooks.json`,
   `.mcp.json`, `bin/`) are live at once beside the previous build.
-  `scripts/build.ts` takes `--in-place`, `--check` or `--out <dir>` (a runnable copy of the plugin
-  in a new or empty directory outside the repository) and refuses a run that names no mode
-  (INFRA-630).
+  `scripts/build.ts` takes `--check` or `--out <dir>` (a runnable copy of the plugin in a new or
+  empty directory outside the repository), refuses a run that names no mode, and never writes the
+  package's own `dist/` or `legion/` (INFRA-630).
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:

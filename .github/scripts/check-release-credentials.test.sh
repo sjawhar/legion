@@ -392,6 +392,10 @@ jobs:
       - name: Build, check and pack the plugin
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
+      - name: Put the checked build into the checkout
+        run: |
+          rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
+          tar -xf "$RUNNER_TEMP/claude-envoy-built.tar" -C packages/claude-envoy --no-same-owner
       - name: Record the base and whether the build changed the tracked files
         id: state
         run: |

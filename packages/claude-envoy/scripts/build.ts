@@ -6,10 +6,10 @@
 // Legion plugin a Claude Code pane loads beside this one (`buildLegionPlugin`).
 //
 // `dist/` and `legion/` stay tracked on main, written only by main's Rebuild
-// Claude Envoy plugin workflow after each merge; a pull request never commits
-// them. Every mode builds only on the Bun the repo-root `.bun-version` pins,
-// because bundler output depends on the exact Bun build (LEGION-568):
-//   --in-place   rewrite the package's own `dist/` and `legion/` (that workflow);
+// Claude Envoy plugin workflow after each merge, from a checked `--out` build
+// (scripts/verify-build.sh); a pull request never commits them, and no mode
+// writes them. Every mode builds only on the Bun the repo-root `.bun-version`
+// pins, because bundler output depends on the exact Bun build (LEGION-568):
 //   --check      build into a scratch directory and fail when the tracked files
 //                differ from it;
 //   --out <dir>  make <dir>, a new or empty directory outside the repository, a
@@ -315,14 +315,10 @@ async function buildOut(out: string): Promise<void> {
 }
 
 const USAGE =
-  "usage: bun scripts/build.ts --check | --in-place | --out <dir>. The tracked dist/ and " +
-  "legion/ are written only by main's Rebuild Claude Envoy plugin workflow (--in-place), and a " +
-  "pull request never commits them."
+  "usage: bun scripts/build.ts --check | --out <dir>. The tracked dist/ and legion/ are written " +
+  "only by main's Rebuild Claude Envoy plugin workflow, and a pull request never commits them."
 
-type Mode =
-  | { readonly kind: "check" }
-  | { readonly kind: "in-place" }
-  | { readonly kind: "out"; readonly dir: string }
+type Mode = { readonly kind: "check" } | { readonly kind: "out"; readonly dir: string }
 
 /** The one mode `args` names, or null for none, more than one, an unknown argument, or `--out`
  *  with no directory after it. */
@@ -331,7 +327,6 @@ function parseMode(args: readonly string[]): Mode | null {
   if (rest.length > 0) return null
   if (second === undefined) {
     if (first === "--check") return { kind: "check" }
-    if (first === "--in-place") return { kind: "in-place" }
     return null
   }
   if (first === "--out" && !second.startsWith("--")) return { kind: "out", dir: second }
@@ -339,9 +334,8 @@ function parseMode(args: readonly string[]): Mode | null {
 }
 
 if (import.meta.main) {
-  // Checked before anything else touches the filesystem: --check's scratch build and --in-place's
-  // `rm` of the committed dist/ both cost real work or a real deletion for a build this process
-  // was always going to refuse.
+  // Checked before anything else touches the filesystem: --check's scratch build and --out's copy
+  // cost real work for a build this process was always going to refuse.
   assertPinnedBun(Bun.version, pinnedBunVersion)
   const mode = parseMode(process.argv.slice(2))
   const distDirectory = join(packageRoot, "dist")
@@ -361,14 +355,6 @@ if (import.meta.main) {
       process.exit(1)
     }
     process.stdout.write("dist/ and legion/ match a fresh build\n")
-  } else if (mode.kind === "in-place") {
-    await rm(distDirectory, { recursive: true, force: true })
-    await buildBundles(distDirectory)
-    await rm(legionDirectory, { recursive: true, force: true })
-    await buildLegionPlugin(legionDirectory)
-    process.stdout.write(
-      `built ${Object.keys(BUNDLE_ENTRYPOINTS).join(", ")} into dist/ and the Legion plugin into legion/\n`,
-    )
   } else {
     const refusal = await outRefusal(mode.dir)
     if (refusal !== null) {
