@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T14:30:00Z",
+  "completed": "2026-10-28T15:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "7a86169c8e4c",
-  "round": "5 (the round-2 review; the INFRA-514 architect scoped it): dispatch_memory's path filter names internal/testnats; infra/gcp dispatchConnectionsPerPod is 86, the branch's own store.ConnectionsPerProcess (64+4+1+11+2+4), with running-dispatch.md and the fragment saying 86 and 'up to 11'; a stray infra/go.work.sum rewrite from a local test run is restored; the contract change census is re-run at 7a86169c with every hit listed (PR comments 6471277745 and 6471278505), the body's census no longer names CHANGELOG.md and its rollout line points at the Rollout bullet. No outbox code change. Main's own count fix had not landed and GitHub reported no conflict, so main was not merged. The review's fast-follow items are named on the body's Fast-follow line.",
+  "head": "46d1a34527ef71289796bd8a5fbd9ec5ab17069f",
+  "round": "6 (the tester's round-5 failure: the deferred Fast-follow items): WindowUntil is the one fence (fencedSender and errFenced deleted; window.send and window.request check the deadline first); the mention deferral is a blocked outcome (deferred removed); the listener's role lane chooses its forward's MsgId (RequestCoreTo takes msgID from its caller); storetest/second.go describes the hold. Fast-follow is none. Then a forward merge of main (GitHub reported CONFLICTING; #2390's server registry): migrations renumbered 0136_duty_holds and 0137_outbox_claim, connections per process 88 (dispatchConnectionsPerPod 88), shutdown waits for the outbox before deregistering.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -86,6 +86,14 @@
       "observed": "--- PASS: TestDispatchConnectionsPerPodIsTheServers (86 = store.ConnectionsPerProcess); no package of the dispatch_memory job's set is missing from its filter",
       "headSha": "7a86169c8e4c",
       "negativeControl": "At 83dd924b the test fails with 85 against 86 (the reviewer's reading), and the same package check printed 'missing: internal/testnats' before the filter edit"
+    },
+    {
+      "criterion": "The review's cleanups land in this PR without changing behaviour, on the merged head",
+      "surface": "the outbox, bus, store, duty, cmd/dispatch and listener packages on real Postgres and NATS, the whole tagged two-process suite on real envoy-dispatch binaries, and the envoy-infra gcp connection test",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<fresh pod database> go test -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/store/ ./internal/dispatch/duty/ ./internal/bus/ ./cmd/dispatch/ ./cmd/listener/ && go test -tags multiprocess -count=1 -timeout 25m -v ./cmd/dispatch; cd infra && go test -count=1 -run TestDispatchConnectionsPerPodIsTheServers -v ./gcp/",
+      "observed": "all packages ok (outbox 216.0 s, store 171.3 s, duty 12.9 s, bus 246.1 s, cmd/dispatch 221.8 s, listener 420.7 s); whole tagged multiprocess package ok in 620.2 s with only the opt-in load steps skipped; the gcp test passes at 88; -race on outbox and bus ok at 2c1dd35c; publisher_mentions_test.go and publisher_claimant_test.go unchanged and passing",
+      "headSha": "46d1a34527ef71289796bd8a5fbd9ec5ab17069f",
+      "negativeControl": "Dropping WindowUntil's deadline fails TestAWindowSendsNothingPastItsDeadline ('answered <nil>, want ErrWindowDeadline'); a fake window ignoring the deadline fails TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore ('want it fenced after its first event'); asking the prefixed envelope for the MsgId fails TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent ('holds 2 copies ... want 1')"
     }
   ],
   "filesChanged": [
