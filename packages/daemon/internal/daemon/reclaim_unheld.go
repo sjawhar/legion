@@ -484,15 +484,20 @@ func (r *outbox) noteReclaimDelivered(token claim.Token, row int64) {
 }
 
 // noteReclaimFailed records that the listener refused row, published to token's architect, for want
-// of a holder (the publish lane's ErrNoHolder): the failure of a row noteReclaimFailedLocked reads,
-// which stops the healing clock when the row went to the current process. It does not raise
-// failedRow. That guard is for a failed-forward report, which comes in on the exception lane and can
-// be handled before the accepted publish it is about returns. This refusal comes back inside its own
-// publish call, so no acceptance of that publish follows it. The row's next publish is its retry, and
-// a row's publishes run one at a time on its lane, so the retry goes out after this refusal: accepted
-// once a relaunch has re-claimed the role, it is the evidence the clock waits for. Raising failedRow
-// here kept that retry from starting the clock, so an incident healed on the held row never ended,
-// and separate resets added up to the give-up.
+// of a holder (the publish lane's ErrNoHolder). The refusal comes back inside its own publish call, so
+// it says the role is unheld now, whichever row it is: on an open incident it stops the healing clock,
+// for a row numbered below bootRow too (one that went out of id order, reclaimTry), where a
+// failed-forward report, which is about the process a copy went to, would change nothing. Otherwise
+// the row is read as noteReclaimFailedLocked reads it: on a tombstone, a row in [bootRow, healEnd]
+// reopens the incident, and any other is left to admission, which starts a new one.
+//
+// It does not raise failedRow. That guard is for a failed-forward report, which comes in on the
+// exception lane and can be handled before the accepted publish it is about returns. This refusal
+// comes back inside its own publish call, so no acceptance of that publish follows it. The row's next
+// publish is its retry, and a row's publishes run one at a time on its lane, so the retry goes out
+// after this refusal: accepted once a relaunch has re-claimed the role, it is the evidence the clock
+// waits for. Raising failedRow here kept that retry from starting the clock, so an incident healed on
+// the held row never ended, and separate resets added up to the give-up.
 func (r *outbox) noteReclaimFailed(token claim.Token, row int64) {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
@@ -500,8 +505,14 @@ func (r *outbox) noteReclaimFailed(token claim.Token, row int64) {
 		return
 	}
 	r.pruneReclaimLocked()
-	if try, ok := r.reclaimTries[token]; ok {
-		r.noteReclaimFailedLocked(token, try, row)
+	try, ok := r.reclaimTries[token]
+	if !ok {
+		return
+	}
+	r.noteReclaimFailedLocked(token, try, row)
+	if try := r.reclaimTries[token]; !try.healed() {
+		try.deliveredAt = time.Time{}
+		r.reclaimTries[token] = try
 	}
 }
 

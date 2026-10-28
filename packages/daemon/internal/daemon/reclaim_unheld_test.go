@@ -1115,6 +1115,91 @@ func TestAReportAboutACopyPublishedAfterTheHealStartsANewIncident(t *testing.T) 
 	}
 }
 
+// A publish the listener refuses for want of a holder says the role is unheld now, whichever row it
+// is: the refusal comes back inside the publish. So it stops a running healing clock even for a row
+// numbered below bootRow, one that went out of id order. Here, through notice(), each loss is a
+// notice refused and the pane relaunched; the relaunched pane takes that notice, which starts the
+// clock; and then the role is lost again, seen as the refusal of a notice numbered below it, whose
+// transaction (outside ApplyFact's lock, as a re-hold's is) committed only after the later notice
+// went out. Admission is inside the backoff, so nothing else stops the clock. That pane never healed,
+// so its attempts add up to the give-up. Before, the refusal left the clock running, the incident
+// healed a minute later, and every loss started with fresh attempts: five relaunches and no give-up.
+func TestARefusalOfARowBelowTheBootRowStopsTheHealingClock(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: publisher, supervisor: sup, project: "legion", now: func() time.Time { return clock }, reclaimInterval: time.Nanosecond}
+	token := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+	topic := architectTopic(t, "LEGION-1")
+
+	for round := range 5 {
+		// A transaction outside ApplyFact's lock, as a re-hold's is, writes a notice and has not
+		// committed yet.
+		late := mustOutboxRow(t, "LEGION-2", reclaimNotice(), clock)
+		rehold, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rehold.Rollback(ctx) }()
+		if err := records.Enqueue(ctx, rehold, late); err != nil {
+			t.Fatal(err)
+		}
+		if err := rehold.QueryRow(ctx, "select max(id) from outbox").Scan(&late.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// The role is lost: a later-numbered notice is refused, and the pane is relaunched.
+		publisher.setAbsent(topic)
+		row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-2", reclaimNotice(), clock))
+		before := len(rt.CallsOf("Resume"))
+		if err := runner.notice(ctx, row, reclaimNotice()); !errors.Is(err, errNoticeWaits) {
+			t.Fatalf("round %d: notice() = %v, want the notice held", round, err)
+		}
+		if len(rt.CallsOf("Resume")) > before {
+			driveClaimReady(t, sup, token)
+		}
+		// The relaunched pane re-claimed the role and takes the held notice: the clock starts.
+		publisher.setAbsent()
+		if err := runner.notice(ctx, row, reclaimNotice()); err != nil {
+			t.Fatalf("round %d: the held notice's retry = %v, want it accepted", round, err)
+		}
+		if err := runner.finish(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+
+		// The role is lost again, seen as the refusal of the lower-numbered notice, which commits only now.
+		clock = clock.Add(5 * time.Second)
+		if err := rehold.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		late.LeaseToken = leaseOutboxRow(t, pool, late.ID)
+		publisher.setAbsent(topic)
+		if err := runner.notice(ctx, late, reclaimNotice()); !errors.Is(err, errNoticeWaits) {
+			t.Fatalf("round %d: notice() of the late notice = %v, want it held", round, err)
+		}
+		if try := runner.reclaimTries[token]; !try.gaveUp && !try.deliveredAt.IsZero() {
+			t.Errorf("round %d: the refusal of row %d (boot row %d) left the healing clock running", round, late.ID, try.bootRow)
+		}
+		clock = clock.Add(61 * time.Second)
+		pruneReclaims(runner)
+		if err := runner.finish(ctx, late); err != nil { // delivered later; out of the fence for the next round
+			t.Fatal(err)
+		}
+		clock = clock.Add(10 * time.Minute)
+	}
+
+	resumes, gaveUp := len(rt.CallsOf("Resume")), strings.Count(logged.String(), "gave up relaunching")
+	if resumes != 3 || gaveUp != 1 {
+		t.Fatalf("resumes = %d, give-ups = %d; want 3 and 1: a pane that loses its role again after each relaunch never healed", resumes, gaveUp)
+	}
+}
+
 // (F4, probe P2) A refund that returns after another claim was admitted leaves that claim's stagger
 // in force: it rolls the stagger back only while it is still the one this admission set.
 func TestALateRefundKeepsAnotherClaimsStagger(t *testing.T) {
