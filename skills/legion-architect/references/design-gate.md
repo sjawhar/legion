@@ -16,9 +16,12 @@ what the human decides, each as a [decision block](skill://dispatch/SKILL.md#ask
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
-On your first pass over the spec, cut each requirement whose only source is an earlier Dispatch
-issue: that issue's decisions were made for that issue. Keep a requirement when the human's own
-words in this issue support it.
+On your first pass over the spec, cut each requirement carried over from an earlier issue's spec or
+decisions that no source of this issue states: those were decided for that issue. This issue's
+sources are the words a person wrote in it, and its `Filed for` line with what that line cites: the
+answer, Slack message or direct message of a `Filed for <person> at their request:` line, or the
+evidence of a controller's `Filed for Legion from <role> on <issue>:` line
+([The `Filed for` line](skill://legion-controller/references/finding-asks.md#the-filed-for-line)).
 
 ## Which gate runs
 

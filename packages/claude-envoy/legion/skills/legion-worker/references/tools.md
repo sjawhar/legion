@@ -429,16 +429,35 @@ $ git ls-remote --tags https://github.com/sjawhar/oh-my-pi.git 'v<version>'
 Search that source by the name of a construct or a setting, never by its value: one value is
 spelled in many places, and the code that sets it may spell it in none. If the module the binary
 names is absent at that tag, the binary is the ground truth: measure it, and say the source did not
-carry it.
+carry it. In a pod the binary (`$LEGION_OMP_PATH`) is the build the worker image was made from,
+and your workspace's `.omp-pin` can name another, so the tag you read may not be the build you
+measure: compare `"$LEGION_OMP_PATH" --version` with the pin first, and say which build each
+figure came from
+(`docs/solutions/testing/a-worker-pods-oh-my-pi-is-the-fleets-pin-not-the-branchs-fetch-the-branchs-build-and-say-which-pin-each-figure-came-from-LEGION-247.md`).
 
 ## The tests your pod cannot run
 
-Your pod runs under gVisor, which does not give a test every interface the Linux kernel does, so
-some tests fail in a pod whatever your change. In `packages/envoy` those are the tests of
-`cmd/agent-secrets`, `cmd/agent-secrets-helper` and `internal/broker/helper`: the helper identifies
-its peer with `SO_PEERPIDFD`, which gVisor answers `protocol not available` (`PEER_UNIDENTIFIED` in
-the test output), and the terminal-prompt tests of `cmd/agent-secrets` also need terminal
-job-control ioctls (`inappropriate ioctl for device`) and the `SigCgt` line of `/proc/<pid>/status`.
-Their proof is CI's run at the head, never a pod run: cite that run, and do not read their failures
-in a pod as your branch's. A timing test can fail in a pod too: gVisor's coarse clock can measure
-the small input at 0 s, and a linearity test then reports `+Inf times`.
+Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
+A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
+cite that run, and name in your handoff each package the pod could not run. The cases below are
+the known ones, not every one: a failure they do not name is yours to explain.
+
+- **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
+  kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
+  and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
+  gVisor answers `protocol not available` (`PEER_UNIDENTIFIED` in the test output). The
+  terminal-prompt tests of `cmd/agent-secrets` also need terminal job-control ioctls
+  (`inappropriate ioctl for device`), and the `SigCgt` line of `/proc/<pid>/status`, which the
+  pods' gVisor lacked on 2026-10-28; upstream gVisor added that line on 2026-09-24, so a node on a
+  later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
+  tests can measure the small input at 0 s on gVisor's coarse clock and report `+Inf times`.
+- **No Docker.** The image carries no container runtime, so a test that starts one through
+  testcontainers panics `rootless Docker not found`: in `packages/envoy`, every test that uses
+  `internal/testnats` or `internal/tests3` (`internal/dispatch/files` is one), and `internal/testpg`
+  unless `DISPATCH_TEST_DATABASE_URL` names a Postgres.
+- **The rest, by package.** For the Dispatch server's suites (a Postgres whose only collation is
+  byte order, which `internal/dispatch/api` refuses, and `@legion/proof-editor` missing until
+  `bun install` has run):
+  `docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`.
+  For the daemon's:
+  `docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-and-names-the-packages-the-pod-cannot-run-LEGION-630.md`.
