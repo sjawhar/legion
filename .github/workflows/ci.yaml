@@ -877,6 +877,7 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
+              - 'packages/envoy/.changes/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/daemonpermissions/**'
@@ -2505,7 +2506,8 @@ jobs:
     # GitHub refuses a run whose calling job grants less than the called workflow's jobs declare,
     # whatever their `if:` (release.yaml's worker_image job says the same): its workflow-level block
     # (the build's packages: write) and its `attest` job's id-token and attestations: write. A pull
-    # request run still skips `attest` (its `if: github.event_name != 'pull_request'`).
+    # request run still skips `attest` (its `if:` requires `github.event_name != 'pull_request'`),
+    # and, passing no `with:`, leaves `attest_digest` empty, so the build job runs.
     permissions:
       contents: read
       packages: write

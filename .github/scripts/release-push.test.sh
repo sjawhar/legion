@@ -35,6 +35,10 @@
 # another origin and run the version step from each checkout, with a stub `npm`
 # first on PATH for the first-release fallback. The `tag` cases rewrite the
 # manifest and run `tag` against an origin that must end up without the tag.
+# The publish-job case runs `tag`, `push-tag` and `push-main` for two packages
+# from one clone, as release.yaml's publish job does, each from the run's
+# commit, then a re-run of them, and the same re-run without the detach
+# between the packages.
 # The `release` cases run against a stub `gh` first on PATH, which answers `gh
 # release view` for a release that does not exist, is a draft or is published,
 # can fail an upload, an edit or a create, and logs every call it gets. The
@@ -94,11 +98,13 @@ setup() {
   identity "$dir/b"
 }
 
-# set_version <clone> <version>: rewrite the manifest's .version with jq, as
-# the workflow's "Set release version" step does.
+# set_version <clone> <version> [<package-dir>]: rewrite the manifest's .version
+# with jq, as the workflow's "Set release version" step does; <package-dir>
+# defaults to packages/pkg.
 set_version() {
-  jq --arg v "$2" '.version = $v' "$1/packages/pkg/package.json" > "$1/tmp.json" \
-    && mv "$1/tmp.json" "$1/packages/pkg/package.json"
+  local manifest=$1/${3:-packages/pkg}/package.json
+  jq --arg v "$2" '.version = $v' "$manifest" > "$1/tmp.json" \
+    && mv "$1/tmp.json" "$manifest"
 }
 
 # bump <clone> <version>: what the workflow's "Set release version" step and
@@ -137,27 +143,41 @@ HOOK
   chmod +x "$1/hooks/pre-receive"
 }
 
-# push_main <clone> <version> [summary-file] [VAR=value...]: runs the script
-# under test from <clone> with the deploy key, a fresh TMPDIR and the GitHub URL
-# rewritten to the case's origin, <clone>/../origin.git, so git pushes locally;
-# leaves its exit code in rc, its combined output in out, what a recording hook
-# saw in seen and what TMPDIR holds afterwards in left.
-push_main() {
-  local clone=$1 v=$2 summary=${3:-} dir
+# deploy_run <clone> [VAR=value...] -- <command> <arg>...: runs `release-push.sh
+# <command> <arg>...` from <clone> with the deploy key, a fresh TMPDIR and the
+# GitHub URL rewritten to the case's origin, <clone>/../origin.git, so git
+# pushes locally, each VAR=value set after those; leaves its exit code in rc,
+# its combined output in out, what a recording hook saw in seen (nothing when
+# no push reached origin) and what TMPDIR holds afterwards in left.
+deploy_run() {
+  local clone=$1 dir vars=()
   dir=$(dirname "$clone")
-  shift 2
-  [ $# -eq 0 ] || shift
+  shift
+  while [ "$1" != -- ]; do
+    vars+=("$1")
+    shift
+  done
+  shift
   rm -rf "$dir/tmp" && mkdir "$dir/tmp"
   : > "$dir/seen"
   set +e
-  out=$(cd "$clone" && env TMPDIR="$dir/tmp" PUSH_SEEN="$dir/seen" GITHUB_STEP_SUMMARY="$summary" \
+  out=$(cd "$clone" && env TMPDIR="$dir/tmp" PUSH_SEEN="$dir/seen" \
     GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$@" "$release_push" push-main packages/pkg "$v" 2>&1)
+    "${vars[@]}" "$release_push" "$@" 2>&1)
   rc=$?
   set -e
   seen=$(<"$dir/seen")
   left=$(find "$dir/tmp" -mindepth 1 | wc -l)
+}
+
+# push_main <clone> <version> [summary-file] [VAR=value...]: deploy_run's
+# `push-main packages/pkg <version>`, with the job summary in <summary-file>.
+push_main() {
+  local clone=$1 v=$2 summary=${3:-}
+  shift 2
+  [ $# -eq 0 ] || shift
+  deploy_run "$clone" GITHUB_STEP_SUMMARY="$summary" "$@" -- push-main packages/pkg "$v"
 }
 
 # tagged <clone> <tag-prefix> [<package-dir>]: runs the script under test's
@@ -798,14 +818,15 @@ check "an unknown option: exits 2 printing nothing, with the usage" "$(is "$rc|$
 
 echo
 echo "Case 10c: tag commits the bump and tags it locally, pushing nothing"
-# tag_run <clone> <version> <tag>: sets the manifest's version as the workflow
-# does before `tag`, then runs `release-push.sh tag` from <clone>; leaves its
-# exit code in rc and its combined output in out.
+# tag_run <clone> <version> <tag> [<package-dir> <name>]: sets the manifest's
+# version as the workflow does before `tag`, then runs `release-push.sh tag`
+# from <clone>; <package-dir> and <name> default to packages/pkg and pkg.
+# Leaves its exit code in rc and its combined output in out.
 tag_run() {
-  local clone=$1 v=$2 tag=$3
-  set_version "$clone" "$v"
+  local clone=$1 v=$2 tag=$3 package_dir=${4:-packages/pkg} name=${5:-pkg}
+  set_version "$clone" "$v" "$package_dir"
   set +e
-  out=$(cd "$clone" && "$release_push" tag packages/pkg "chore: release pkg v$v [skip ci]" "$tag" 2>&1)
+  out=$(cd "$clone" && "$release_push" tag "$package_dir" "chore: release $name v$v [skip ci]" "$tag" 2>&1)
   rc=$?
   set -e
 }
@@ -823,6 +844,140 @@ check "the same version again: still nothing on origin" "$(is "$(git -C "$work/t
 tag_run "$clone" 1.0.2 pkg-v1.0.1
 check "another version under the existing tag: exits 1 naming both versions" \
   "$(is "$rc|$(contains "$out" '^::error::tag pkg-v1\.0\.1 already exists with version 1\.0\.1, not 1\.0\.2$')" '1|true')"
+
+echo
+echo "Case: one publish job releases two packages from the run's commit"
+# release.yaml's publish job releases its packages one after another from one checkout, each from
+# the run's commit: `git checkout --force --detach "$GITHUB_SHA"` and `git clean -ffdx`, then "Set
+# release version", `tag`, `push-tag` and `push-main`, here each through the script under test
+# against a bare origin standing in for GitHub. The run's commit R holds a fix for each of two
+# packages, pkg and other: pkg's bump lands on R as it is, other's is rebased onto it, and each tag
+# stays on its own un-rebased bump commit, a child of R, where a re-run's version step finds it. A
+# re-run repeats every step and changes nothing on origin. The same re-run without the detach
+# between the packages is the control: pkg's push-main pushes nothing (main holds 1.0.1), so pkg's
+# re-made bump commit stays off main, other's `tag` commits on top of it, and other's push-main
+# refuses a HEAD two commits over main. Each re-run's bump is committed at a fixed earlier date, as
+# in case 7, so it is a commit of its own, as a re-run's is.
+pj="$work/pj"
+setup "$pj"
+git -C "$pj/a" tag pkg-v1.0.0
+mkdir -p "$pj/a/packages/other"
+printf '{\n  "name": "other",\n  "version": "2.0.0"\n}\n' > "$pj/a/packages/other/package.json"
+git -C "$pj/a" add -A
+git -C "$pj/a" commit -q -m "feat: add other"
+git -C "$pj/a" tag other-v2.0.0
+change "$pj/a" packages/pkg/index.js "fix: a bug in pkg"
+change "$pj/a" packages/other/index.js "fix: a bug in other"
+run=$(git -C "$pj/a" rev-parse HEAD)
+git -C "$pj/a" push -q --tags origin main
+record_hook "$pj/origin.git"
+# from_run <clone>: what each package's hand-over check does first, putting <clone> back on the
+# run's commit.
+from_run() {
+  git -C "$1" checkout -q --force --detach "$run"
+  git -C "$1" clean -q -ffdx
+}
+# publish_package <clone> <package-dir> <name> <version> <tag>: one package's steps after its
+# hand-over check, from wherever <clone>'s HEAD is: "Set release version", `tag`, `push-tag` and
+# `push-main`, stopping at the first that fails. Leaves the failed step's name in failed (empty
+# when every step succeeded), the output of `tag` in tag_out, rc and out from the last step run,
+# and in pushed how many of its pushes reached origin.
+publish_package() {
+  local clone=$1 package_dir=$2 name=$3 v=$4 tag=$5
+  failed='' pushed=0
+  tag_run "$clone" "$v" "$tag" "$package_dir" "$name"
+  tag_out=$out
+  [ "$rc" = 0 ] || { failed=tag; return 0; }
+  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-tag "$tag"
+  [ -z "$seen" ] || pushed=$((pushed + 1))
+  [ "$rc" = 0 ] || { failed=push-tag; return 0; }
+  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main "$package_dir" "$v"
+  [ -z "$seen" ] || pushed=$((pushed + 1))
+  [ "$rc" = 0 ] || failed=push-main
+}
+# only_version <repo> <commit> <package-dir> <version>: true when <commit>'s manifest is its
+# parent's with .version set to <version> and nothing else, as JSON.
+only_version() {
+  local repo=$1 commit=$2 manifest=$3/package.json v=$4
+  is "$(git -C "$repo" show "$commit^:$manifest" | jq -S --arg v "$v" '.version = $v')" \
+    "$(git -C "$repo" show "$commit:$manifest" | jq -S .)"
+}
+# origin_refs: every ref origin holds, with the object it names.
+origin_refs() { git -C "$pj/origin.git" for-each-ref --format='%(refname) %(objectname)'; }
+o="$pj/origin.git"
+pkg_subject="chore: release pkg v1.0.1 [skip ci]"
+other_subject="chore: release other v2.0.1 [skip ci]"
+
+# The run: its build jobs read the version from the run's commit, then publish releases both.
+git clone -q "$o" "$pj/job"
+version_run "$pj/job" pkg-v --package-dir packages/pkg -- packages/pkg/
+check "the build of pkg: releases 1.0.1" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+version_run "$pj/job" other-v --package-dir packages/other -- packages/other/
+check "the build of other: releases 2.0.1" "$(is "$rc $out" "0 $(outputs 2.0.1 other-v2.0.1 false)")"
+from_run "$pj/job"
+publish_package "$pj/job" packages/pkg pkg 1.0.1 pkg-v1.0.1
+check "first attempt, pkg: every step succeeds, its tag and its bump each pushed" "$(is "$failed|$pushed" "|2")"
+from_run "$pj/job"
+publish_package "$pj/job" packages/other other 2.0.1 other-v2.0.1
+check "first attempt, other: every step succeeds, its tag and its bump each pushed" "$(is "$failed|$pushed" "|2")"
+pkg_bump=$(git -C "$o" rev-parse -q --verify 'pkg-v1.0.1^{commit}' || true)
+other_bump=$(git -C "$o" rev-parse -q --verify 'other-v2.0.1^{commit}' || true)
+check "first attempt: main holds pkg's bump, then other's, over the run's commit" \
+  "$(is "$(git -C "$o" log --format=%s "$run..main")|$(git -C "$o" rev-parse main~2)" "$other_subject"$'\n'"$pkg_subject|$run")"
+check "first attempt: main's pkg bump changes only packages/pkg/package.json's .version" \
+  "$(is "$(git -C "$o" diff --name-only main~2 main~1)|$(only_version "$o" main~1 packages/pkg 1.0.1)" "packages/pkg/package.json|true")"
+check "first attempt: main's other bump, rebased onto pkg's, changes only packages/other/package.json's .version" \
+  "$(is "$(git -C "$o" diff --name-only main~1 main)|$(only_version "$o" main packages/other 2.0.1)" "packages/other/package.json|true")"
+check "first attempt: pkg's tag names its bump commit, a child of the run's commit, which main carries as it is" \
+  "$(is "$(git -C "$o" rev-parse "$pkg_bump^")|$pkg_bump" "$run|$(git -C "$o" rev-parse main~1)")"
+check "first attempt: other's tag names its un-rebased bump commit, a child of the run's commit, not main's rebased one" \
+  "$(is "$(git -C "$o" rev-parse "$other_bump^")|$([ "$other_bump" != "$(git -C "$o" rev-parse main)" ] && echo apart)" "$run|apart")"
+check "first attempt: other's tagged bump changes only packages/other/package.json's .version" \
+  "$(is "$(git -C "$o" diff --name-only "$run" "$other_bump")|$(only_version "$o" "$other_bump" packages/other 2.0.1)" "packages/other/package.json|true")"
+refs=$(origin_refs)
+
+# A re-run: the same commit, with every tag the first attempt pushed.
+git clone -q "$o" "$pj/rerun"
+git -C "$pj/rerun" checkout -q --detach "$run"
+git -C "$pj/rerun" fetch -q --tags origin
+version_run "$pj/rerun" pkg-v --package-dir packages/pkg -- packages/pkg/
+check "re-run, the build of pkg: releases pkg-v1.0.1 again" \
+  "$(is "$rc|$out|$(contains "$err" '^Releasing pkg-v1\.0\.1, already pushed for this checkout$')" "0|$(outputs 1.0.1 pkg-v1.0.1 false)|true")"
+version_run "$pj/rerun" other-v --package-dir packages/other -- packages/other/
+check "re-run, the build of other: releases other-v2.0.1 again" \
+  "$(is "$rc|$out|$(contains "$err" '^Releasing other-v2\.0\.1, already pushed for this checkout$')" "0|$(outputs 2.0.1 other-v2.0.1 false)|true")"
+from_run "$pj/rerun"
+GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
+  publish_package "$pj/rerun" packages/pkg pkg 1.0.1 pkg-v1.0.1
+check "re-run, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+check "re-run, pkg: tag reuses its own tag" "$(contains "$tag_out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')"
+check "re-run, pkg: push-main says main already holds the version" \
+  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package\.json already holds v1\.0\.1")"
+from_run "$pj/rerun"
+GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
+  publish_package "$pj/rerun" packages/other other 2.0.1 other-v2.0.1
+check "re-run, other: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+check "re-run, other: tag reuses its own tag" "$(contains "$tag_out" '^Tag other-v2\.0\.1 already exists for version 2\.0\.1; reusing it$')"
+check "re-run, other: push-main says main already holds the version" \
+  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/other/package\.json already holds v2\.0\.1")"
+check "re-run: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
+
+# The control: the same re-run from one clone, without the detach between the packages.
+git clone -q "$o" "$pj/control"
+git -C "$pj/control" checkout -q --detach "$run"
+git -C "$pj/control" fetch -q --tags origin
+from_run "$pj/control"
+GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
+  publish_package "$pj/control" packages/pkg pkg 1.0.1 pkg-v1.0.1
+check "no detach between packages, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
+  publish_package "$pj/control" packages/other other 2.0.1 other-v2.0.1
+check "no detach between packages, other: tag commits its bump on top of pkg's, over the run's commit" \
+  "$(is "$(git -C "$pj/control" log --format=%s -2 HEAD)|$(git -C "$pj/control" rev-parse HEAD~2)" "$other_subject"$'\n'"$pkg_subject|$run")"
+check "no detach between packages, other: push-main refuses, no push reaching origin" "$(is "$failed|$pushed" "push-main|0")"
+check "no detach between packages, other: the error says HEAD carries 2 commits main does not" \
+  "$(contains "$out" '^::error::HEAD carries 2 commits main does not .* chore: release other v2\.0\.1 \[skip ci\]; [0-9a-f]* chore: release pkg v1\.0\.1 \[skip ci\]')"
+check "no detach between packages: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
 
 echo
 echo "Case 11: release creates a missing release, publishes a draft, and reuses a published one"
@@ -1067,23 +1222,11 @@ identity "$pt/a"
 git -C "$pt/a" commit -q --allow-empty -m seed
 git -C "$pt/a" tag pkg-v1.0.1
 record_hook "$pt/origin.git"
-# push_tag <tag> [VAR=value...]: runs `release-push.sh push-tag <tag>` in clone a with the deploy
-# key, a fresh TMPDIR and the rewrite to the local origin; leaves its exit code in rc, its output
-# in out, what the hook saw in seen and what TMPDIR holds afterwards in left.
+# push_tag <tag> [VAR=value...]: deploy_run's `push-tag <tag>` in clone a.
 push_tag() {
   local tag=$1
   shift
-  rm -rf "$pt/tmp" && mkdir "$pt/tmp"
-  : > "$pt/seen"
-  set +e
-  out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" PUSH_SEEN="$pt/seen" GITHUB_REPOSITORY=example/repo \
-    DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$pt/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$@" "$release_push" push-tag "$tag" 2>&1)
-  rc=$?
-  set -e
-  seen=$(<"$pt/seen")
-  left=$(find "$pt/tmp" -mindepth 1 | wc -l)
+  deploy_run "$pt/a" "$@" -- push-tag "$tag"
 }
 push_tag pkg-v1.0.1
 check "pushes: exits 0" "$(is "$rc" 0)"
