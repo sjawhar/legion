@@ -2,51 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-591",
-  "completed": "2026-10-27T14:20:00Z",
+  "completed": "2026-10-28T10:30:00Z",
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
       "surface": "Dispatch store on a real Postgres 16.2, and INFRA-589's committed load harness (#2369 at a7b5f467) with its 1 s ungranted-lock sampler",
-      "command": "go test ./internal/dispatch/events/ -run TestAppendsOnDifferentIssuesDoNotWaitForEachOther -v (DISPATCH_TEST_DATABASE_URL set); lt-runs.sh: run-step.sh at 0.5x, 1x, 2x, three runs per side, alternating base c892b97d and head 26a15dcf; lt-medians.py",
-      "observed": "T1 passes on the merged head. In all 9 after runs every sampled lock wait is a write waiting for its own issue's row, its own document's room lock, or Postgres's NOTIFY commit lock (at most 1 of 160 samples); the commit-order lock is gone.",
-      "headSha": "26a15dcf333e (forward merge onto main c892b97df887; the round's handoff commit sits above it and touches only .legion/)",
-      "negativeControl": "With `select pg_advisory_xact_lock(0x4449535041544348)` put back after lockEventOwner, T1 failed ('acquire event commit order lock: timeout'). The base build c892b97d holds the commit-order lock in 100% of samples in all three 1x runs, and a write waits on it in every 1 s sample."
+      "command": "go test ./internal/dispatch/events/ -run TestAppendsOnDifferentIssuesDoNotWaitForEachOther -v; INFRA-589's committed harness (#2369 at a7b5f467): run-step.sh at 0.5x, 1x and 2x, three runs per side, alternating base c210f10d and head 312e84c6",
+      "observed": "T1 passes. In all 9 after runs at 312e84c6 (against main c210f10d), every sampled lock wait is one of: a write waiting for its own issue's row, a write waiting for its own document's room lock, or Postgres's NOTIFY commit lock (at most 1 of 160 samples). The commit-order lock is gone.",
+      "headSha": "312e84c6f4a2 (review fixes 66e8d5c3, 8c2e6451, eadaba02, 3bcb24a5, then a forward merge onto main c210f10d). The round's code head 79cf9b708611 adds only two test waits and the CI step's package timeout",
+      "negativeControl": "With `select pg_advisory_xact_lock(0x4449535041544348)` put back after lockEventOwner, T1 failed ('acquire event commit order lock: timeout'). The base build c210f10d holds the commit-order lock in 100% of samples in all three 1x runs."
     },
     {
       "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
       "surface": "GET /api/v1/events (SSE) with and without Last-Event-ID on a local Dispatch from INFRA-589's committed harness; events.Horizon on a real Postgres",
-      "command": "smoke2369.sh after (plan 6.1): curl -N /api/v1/events open; psql begin; select pg_current_xact_id(); insert an event on LGA-108; POST /api/v1/issues/LGA-117/comments; commit; reconnect with Last-Event-ID 10004; plus the SSE, relay and horizon tests",
-      "observed": "While the LGA-108 write (id 10005) was open, the stream sent nothing for 3 s although the LGA-117 comment (id 10006) committed in 173 ms. After commit it sent 10005, then 10006. A new connection with Last-Event-ID 10004 sent 10005, then 10006. Binary built at 26a15dcf (stack.sh build-info).",
-      "headSha": "26a15dcf333e (forward merge onto main c892b97df887; the round's handoff commit sits above it and touches only .legion/)",
-      "negativeControl": "The base build c892b97d, same steps: the open stream sent 10006 at once and never 10005."
+      "command": "smoke2369.sh after2 (plan 6.1) and smoke-fresh.sh after2 (a fresh process started while a transaction in database postgres holds an xid), plus the SSE, relay and horizon tests",
+      "observed": "Out of order: while the LGA-108 write (id 10005) was open, the stream sent nothing for 3 s, although the LGA-117 comment (id 10006) committed in 239 ms. After commit it sent 10005, then 10006, and a resume from 10004 sent both in order. Fresh process: while xid 108472 was held, a stream resuming with Last-Event-ID 10004 got ': open' 1 s after Dispatch was healthy, and it received 10005 right after the holder committed. A cold stream opened after the commit, with no backlog. Binary at 312e84c6 (stack.sh build-info).",
+      "headSha": "312e84c6f4a2 (review fixes 66e8d5c3, 8c2e6451, eadaba02, 3bcb24a5, then a forward merge onto main c210f10d). The round's code head 79cf9b708611 adds only two test waits and the CI step's package timeout",
+      "negativeControl": "Base build: the open stream sent the higher id at once and never the lower (10006 without 10005). Previous head 26a15dcf on the fresh-process steps: the resuming stream got nothing, not even its headers, until the holder committed."
     },
     {
       "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
       "surface": "Each consumer's own path: SSE handler and resume, the relay across two real envoy-dispatch processes, the delivery hub, GET /api/v1/references?since=, the outbox's per-issue NATS order, per-owner readers, and the browser suite",
-      "command": "go test ./internal/dispatch/... ./internal/pglisten/... -count=1 -timeout 90m; go test -tags multiprocess ./cmd/dispatch; bunx playwright test e2e/inbox.e2e.ts e2e/live.e2e.ts e2e/board.e2e.ts e2e/approval.e2e.ts e2e/agents.e2e.ts --project=chromium",
-      "observed": "T2 (per-owner order, cache-1), T3/T4/T5 (SSE, cursor race, two processes, reset), T6 (hub never passes an open lower id; receive applies cursor+1 only once final), T7 (references since withholds an open lower mention), T8 (one issue's events on its NATS subject in seq order) pass; the multiprocess suite passes (TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent among them); browser: 89 passed, 3 skipped. 0 SSE order violations in all 18 load runs. On the merged head 26a15dcf the full suite (go test ./internal/dispatch/... ./internal/pglisten/...) passes except environmental tests, the same kinds as on the base c3d09eec: the rank test needs a non-C collation, the files test needs Docker, and pmdoc's linear-time tests fail on gVisor timing. Earlier, the full suite's failures are all environmental and outside the changed code, the same kinds as the base run on c3d09eec: the rank test needs a non-C collation, the files test needs Docker, and pmdoc's linear-time tests (and on the base, one docs residency count) fail on gVisor timing.",
-      "headSha": "26a15dcf333e for the full Go suite; 9380c4a0b8ce (code before the forward merge) for the multiprocess suite and the browser scenarios",
-      "negativeControl": "Each new test was run against its bug put back: publish and cursor move split across two lock holds -> 'the stream sent event 4 before event 3, which it skipped'; no Horizon.Reset on a reset log -> 'sent event 3 but not 1'; an outbox claim by id cursor -> 'issue TT-2's subject carried seqs [2], want [1 2]'; LockOwners removed -> TestRepoProjectOppositeMovesDoNotDeadlock 500 (40P01) 5 of 5."
+      "command": "targeted go test -run for each new test, plain and under a contention loop that holds an xid in database postgres 2 s of every 2.5 s; the api package with test2json at the head and at main c210f10d under that loop; bun e2e/run.ts -- bunx playwright test e2e/inbox.e2e.ts e2e/live.e2e.ts e2e/board.e2e.ts e2e/approval.e2e.ts e2e/agents.e2e.ts e2e/delivery-live.e2e.ts --project=chromium; go test ./internal/dispatch/... ./internal/pglisten/...",
+      "observed": "New review tests pass, and each failed on the previous code: TestSSEStreamOpensAndHeartbeatsWhileTheHorizonIsHeld, TestShutdownEndsAStreamWaitingOnTheHorizon, TestAFreshHubServesDeliveryChangesWhileATransactionHoldsTheEventHorizon, TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill, TestHorizonSafeWaitsOutAnObservationInFlightBeforeTheCall, TestHorizonFollowsContinuouslyOverlappingWrites, TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer. Every horizon-dependent api and events test passes under the contention loop. The whole api package under contention took 894.9 s at the head against 890.3 s at main. Browser suite at 312e84c6: 97 passed, 4 skipped. CI's dispatch job, Playwright included, passed at 312e84c6. 0 SSE order violations in 36 load runs. T1-T8 and the multiprocess suite pass (earlier heads). Full Go suite at 4d00a61f2e15 (79cf9b708611 changes only the one test named next, re-run under the contention loop): go test ./internal/dispatch/... ./internal/pglisten/... passes except the environmental tests (rank collation, files needs Docker, pmdoc linear-time on gVisor). TestAResetEventLogIsCaughtAndEveryViewRecomputed failed once under the suite's own load because it asserted the cursor after one catch-up; it now waits for the cursor and passes under the contention loop.",
+      "headSha": "79cf9b708611 for the contention runs; 4d00a61f2e15 for the full Go suite; 312e84c6f4a2 for the browser suite and the CI dispatch job",
+      "negativeControl": "Each new test fails on the bug it guards (outputs in the review thread replies). Under the contention loop, TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte/cold failed with its old 2 s deadline, because a cold stream on a fresh process waits for the horizon's first proof; its deadline is now a quarter of its 1-minute heartbeat."
     },
     {
       "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
       "surface": "INFRA-589's committed harness (#2369 at a7b5f467, ungranted locks sampled once a second), one 2-vCPU pod, one seed made with the base build (migration 129)",
-      "command": "lt-setup.sh (stack.sh setup/start/seed --force with the base checkout), lt-runs.sh (run-step.sh x 18: before/after at 0.5x, 1x, 2x, three runs each, alternating), lt-medians.py; dispatch://INFRA-591/artifact/load-before-after-md v4, dispatch://INFRA-591/artifact/infra591-measurements-tar-gz v3",
-      "observed": "Medians at 1x: commit-order lock held 100% -> gone. Committed 1.18 -> 2.88 events/s (0.29 -> 0.72 of offered). Comment write p50 28.0 s -> 10.7 s. NATS delivery from arrival p50 29.0 s -> 17.7 s. Requests 2xx 38% -> 58%. SSE frame after the write's response p50 21.2 s -> 49.1 s (slower; cause and INFRA-636 recorded). At 2x committed 0.28 -> 2.18. At 0.5x both commit 1.00; SSE after response p50 0 -> 225 ms.",
-      "headSha": "26a15dcf333e (forward merge onto main c892b97df887; the round's handoff commit sits above it and touches only .legion/)",
-      "negativeControl": "The base build reproduces the knee in all three 1x runs (lock held 100%, committed 0.28 to 1.84 events/s). The 20 ms lock probe collects about 3,500 samples on the base at 1x and 5,800 on the head, against about 7,300 at 0.5x, which shows how busy each Postgres was. The superseded 20 ms-sampler runs are kept apart and are not used."
+      "command": "stack.sh seed --force with main c210f10d, then run-step.sh x 18 (before/after at 0.5x, 1x, 2x, three runs each, alternating); dispatch://INFRA-591/artifact/load-before-after-md v5, dispatch://INFRA-591/artifact/infra591-measurements-tar-gz v4",
+      "observed": "Medians at 1x: the commit-order lock, held 100% before, is gone. Committed events/s 0.62 -> 2.82 (0.16 -> 0.71 of offered). Comment write p50 28.8 s -> 9.2 s. NATS delivery from arrival p50 29.0 s -> 15.5 s. Requests 2xx 31% -> 63%. SSE frame after the write's response p50 22.7 s -> 38.5 s: slower, with the cause and INFRA-636 recorded. At 2x, committed 0.26 -> 2.04. At 0.5x both commit 1.00, and SSE after the response p50 goes 6 -> 147 ms.",
+      "headSha": "312e84c6f4a2 (review fixes 66e8d5c3, 8c2e6451, eadaba02, 3bcb24a5, then a forward merge onto main c210f10d). The round's code head 79cf9b708611 adds only two test waits and the CI step's package timeout",
+      "negativeControl": "The base build reproduces the knee in all three 1x runs: lock held 100%, committed 0.37 to 1.01 events/s."
     },
     {
       "criterion": ".dispatch/architecture/dispatch-events.md says what is now true.",
       "surface": "The architecture doc",
       "command": "rg -n 'global advisory lock' .dispatch/architecture/; read .dispatch/architecture/dispatch-events.md",
       "observed": "No match; the doc names the owner-row-only append, the xid-before-nextval and CACHE 1 invariants, the horizon rule (observation, later-snapshot proof, why one snapshot is not enough), every global-id reader, the costs, the horizon's own pool and the primary-only constraint.",
-      "headSha": "26a15dcf333e (forward merge onto main c892b97df887; the round's handoff commit sits above it and touches only .legion/)",
+      "headSha": "312e84c6f4a2 (review fixes 66e8d5c3, 8c2e6451, eadaba02, 3bcb24a5, then a forward merge onto main c210f10d). The round's code head 79cf9b708611 adds only two test waits and the CI step's package timeout",
       "negativeControl": "The same rg on the base c3d09eec version of the file finds 1 match ('orders commits with a global advisory lock')."
     }
   ],
   "filesChanged": [
     ".dispatch/architecture/dispatch-events.md",
+    ".github/workflows/envoy-and-contracts.yaml",
     "packages/envoy/AGENTS.md",
     "packages/envoy/CHANGELOG.md",
     "packages/envoy/cmd/dispatch/AGENTS.md",
@@ -61,6 +62,7 @@
     "packages/envoy/internal/dispatch/api/event_stream_relay.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
     "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/events_test.go",
     "packages/envoy/internal/dispatch/api/references.go",
     "packages/envoy/internal/dispatch/api/references_test.go",
     "packages/envoy/internal/dispatch/api/replies.go",
@@ -72,6 +74,7 @@
     "packages/envoy/internal/dispatch/docs/approval_review.go",
     "packages/envoy/internal/dispatch/docs/copied_asks.go",
     "packages/envoy/internal/dispatch/docs/copied_asks_test.go",
+    "packages/envoy/internal/dispatch/docs/edit_notices.go",
     "packages/envoy/internal/dispatch/docs/persistence.go",
     "packages/envoy/internal/dispatch/docs/service.go",
     "packages/envoy/internal/dispatch/duty/exclusive.go",
@@ -84,8 +87,7 @@
     "packages/envoy/internal/dispatch/outbox/window_test.go",
     "packages/envoy/internal/dispatch/refs/graph.go",
     "packages/envoy/internal/dispatch/store/pool.go",
-    "packages/envoy/internal/dispatch/store/pool_test.go",
-    "packages/envoy/internal/dispatch/docs/edit_notices.go"
+    "packages/envoy/internal/dispatch/store/pool_test.go"
   ],
   "trickyParts": [
     "events.Horizon: an observation is safe only once a LATER snapshot's xmin is above the observer's own xid; one snapshot cannot prove its own max(id) (xmax hole). Await waits for an observation that started after the call.",
@@ -99,13 +101,17 @@
     "LockOwners skips ownerless events (no row to lock), so the xid is taken once, in Append.",
     "Live SSE frames are slower after the change: 1x p50 after write response 21.2 s -> 49.1 s, 0.5x 0 -> 225 ms. Cause: the horizon waits for every write transaction holding an xid when an event's id was handed out, and write transactions hold xids for seconds during document work. INFRA-514's architect accepted it for this PR (option a); dispatch://INFRA-636 moves document work and write advice out of write transactions and must bring 0.5x back to no slower than before.",
     "Re-measured on #2369's committed harness after INFRA-589's implementer found that this round's first 20 ms lock sampler loaded Postgres; the first report's 1x/2x numbers (0.69 -> 3.07) are superseded.",
-    "Forward merge 26a15dcf onto main c892b97d resolved conflicts with #2210 (block nodes in the link graph) in refs/graph.go, api/references.go, routes_table.go, cmd/dispatch/AGENTS.md and README.md, and corrected docs/edit_notices.go's comment (from #2137) that cited the removed lock. Fingerprint 66a04394\u2026 -> 6f9bb528\u2026, changed; PR comment posted."
+    "Forward merge 26a15dcf onto main c892b97d resolved conflicts with #2210 (block nodes in the link graph) in refs/graph.go, api/references.go, routes_table.go, cmd/dispatch/AGENTS.md and README.md, and corrected docs/edit_notices.go's comment (from #2137) that cited the removed lock. Fingerprint 66a04394\u2026 -> 6f9bb528\u2026, changed; PR comment posted.",
+    "Review round: a cold SSE stream (no since) still sends its headers only once its subscription is in place, unlike the reviewer's literal suggestion. The browser refreshes when the headers arrive (web/src/api/live.ts:142, sse.ts:768-776), so opening first would lose events at or below the start cursor. Resuming streams open at once, and every waiting handler ends at request end or shutdown.",
+    "Review round: a second forward merge (312e84c6 onto main c210f10d), resolving changelog and route-doc conflicts with #2389. Fingerprint 1ef32544... -> 93317245..., changed; PR comment posted.",
+    "envoy-go timed out at 312e84c6 by deadline, not by hang: at the timeout the test running was TestQuiesceDocumentsHookIsGatedByTestHooksEnabled. internal/dispatch/api already takes 410-572 s on main's CI against go test's 600 s default. Under contention the package time at head and main is the same locally (895 vs 890 s), but the horizon tests add about 80 s of waits. The unit step now passes -timeout 20m (.github/workflows/envoy-and-contracts.yaml).",
+    "The dashboard unit test AgentName.test.tsx timed out in CI at 26a15dcf; the controller routed it to dispatch://INFRA-523 (ask dispatch://INFRA-49/ask/465e5680-fe98-460b-a818-d0b91137de2e). At 312e84c6 the dispatch job passed."
   ],
   "openQuestions": [
     "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
   ],
   "discoveredComplexity": [
     "Under this production write mix, write transactions hold their xid for seconds (idle in transaction during document work), so the horizon delays live frames by that much: see deviations and INFRA-636.",
-    "Measurement environment for the tester: INFRA-589's committed harness under LOADTEST_ROOT=/legion/scratch/tmp/infra591/lt (Postgres 15432 seeded with template dispatch_seed, proxy 15433, NATS 14222, listener 19120; Dispatch stopped). Checkouts with the harness copied in: /legion/scratch/tmp/infra591/lt-before (c892b97d) and lt-after (26a15dcf); run with LOADTEST_SRC=<checkout> <checkout>/packages/envoy/loadtest/run-step.sh, one run at a time (lt-runs.sh is the 18-run series). Test Postgres for go test is 127.0.0.1:15532."
+    "The load harness and its stack were on the issue's scratch volume, which was lost with the workspace recreation on 2026-10-28; the bundle dispatch://INFRA-591/artifact/infra591-measurements-tar-gz holds every run's summary and the scripts to rebuild it (stack.sh setup/start/seed --force from INFRA-589's #2369 harness)."
   ]
 }
