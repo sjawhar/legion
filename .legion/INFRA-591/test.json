@@ -2,21 +2,64 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T16:31:32Z",
-  "headTested": "2fa32e09165026bb6586bf5f3e2e00f50aab8fa2 (code 84299bf5af3b; 2fa32e09 adds only .legion/)",
+  "completed": "2026-10-28T22:25:26Z",
+  "headTested": "fcf51b3eee4f7037be5accb78764578bba39d884 (code 8f4a1d329e3f: merge da99c4f8 of main e82b013b, fixes 76d0396e and 26ae7d16, test-only 8f4a1d32; fcf51b3e adds only .legion/)",
+  "rebaseCheck": "The fingerprint changed (forward merge of main e82b013b plus code fixes), so this was a full round against main e82b013b built the same way.",
   "implementerProof": {
-    "verdict": "verified",
-    "how": "84299bf5 changes only docs/site/src/content/docs/dispatch/running-dispatch.md. I read its new count against store/pool.go:167-314 at the head: 64 requests + 12 periodic work + 4 documents + 1 health + 1 outbox + 2 event horizon = 84, plus 4 held open (3 permanent listeners + 1 registry) = 88 = ConnectionsPerProcess = infra/gcp dispatchConnectionsPerPod. That is the review's finding, fixed. The code is unchanged since round 7 (1adb786e), whose real-surface proof stands for it."
+    "verdict": "rejected",
+    "how": "I drove the same surface independently, on a local Dispatch built at 8f4a1d32 and on main e82b013b, each on a Postgres 16.2 and a NATS of the tester's own. Everything the proof names holds on that surface except one claim, the first-cursor fix (76d0396e). The commit message says 'a cold event stream misses nothing a relay start ... would have put below its cursor'. firstRelayCursor's comment (event_stream_relay.go:254-264) rests that on 'the delivery hub proves a horizon at boot'. The hub runs nothing until its first subscriber (delivery_live_hub.go:335, newDeliveryHub: 'Nothing runs until the first Subscribe'), and nothing else proves a horizon at boot. So on a fresh process Horizon.Proven() is 0, firstRelayCursor falls back to awaitEventCursor, and an event that commits while the first start waits never reaches the connection. The implementer's own test, TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts, proves a horizon first with a references since read, so it does not exercise boot."
   },
   "failures": [
     {
-      "criterion": "The head that merges is the head tested, and CI is green on it.",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2392 -> mergeable false, mergeable_state dirty, head 2fa32e09. git merge-tree --write-tree 2fa32e09 e82b013b (main@origin) conflicts in packages/envoy/internal/dispatch/api/events.go, packages/envoy/internal/dispatch/api/references.go and packages/envoy/AGENTS.md. The conflicting main commit is e82b013b66ff (#2324, 'a tab fetches again only what an event changes'). check-runs at 84299bf5: total_count 0, since GitHub runs no pull_request workflow on a conflicting head. The events.go conflict is in the SSE handler. #2324 adds the response header X-Dispatch-Event-Replay: complete (eventReplayHeader) on a resuming connection whose since is at or below the head when it subscribed. That header tells the browser it missed nothing, so it may skip the refresh it owes a gap. The resolution must keep that promise under this PR's horizon semantics. Send the header only when since <= head, including on the stream that opens early before its subscription arrives (this PR's resuming path). Send no header on a cold connect, or on a since above the log's newest id (a replaced log). Keep 'ends the stream on a reset found while it subscribed'. The browser then reconnects instead of trusting a 'complete' replay of a log that no longer exists. references.go: #2324 adds replaceEditedReferences next to this PR's since/Through doc comment. Fix: forward-merge main into legion/INFRA-591 and resolve the three files. The next round re-drives the SSE resume, the reset and the replay header on the merged code."
+      "criterion": "Every consumer of the event stream keeps the order it relies on (the first cold connection of a process misses no event committed while the relay's first start waits; review round 5's first-cursor case, as INFRA-514's architect named it for this round).",
+      "evidence": "Red test e7bbbc50de53: TestSSEFirstColdConnectionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts in packages/envoy/internal/dispatch/api/server_test.go. It is the implementer's test without the references read that proves a horizon first. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16432/postgres?sslmode=disable go test ./internal/dispatch/api/ -run 'TestSSEFirstColdConnectionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts|TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts' -count=1 -v. Result: the implementer's test PASS (6.08 s), the new one FAIL with 'server_test.go:3074: the stream sent no ... (\"id: 3\") within 12s'. On the real surface (adv.py firstcursor <settle>), each run used a newly started head process. A transaction in database postgres held an id; the first cold GET /api/v1/events waited; a comment POST committed id 123; then the holder committed. The stream opened 0.26 s after that and sent nothing; 123 was never delivered. The same happened with the holder taken 3 s and 10 s after /healthz. Main e82b013b sent 123 at once in all three runs. A browser loses the update: a page's first connection does not refresh on open (packages/dispatch/web/src/api/sse.ts:255-279, onOpen calls refreshEverything only when anAttemptEnded), so an event committed after the page's own reads and below the stream's first cursor never reaches that page. That last point is from reading the code; I did not drive it in a browser. Any transaction holding an id anywhere on the Cloud SQL instance at boot opens the window, and every deploy restarts the process, under D2 at one replica. Fix direction (the implementer's choice): give the relay's first start a horizon proven before the request, for example by proving one at boot, or by a cursor that cannot pass an event committing during the wait. Then correct the comment at event_stream_relay.go:259."
     }
   ],
   "failed": 1,
-  "ci": "Read at about 16:35Z, recorded here only. No runs at 84299bf5 (conflicting). At 1adb786e (round 7's code) the Worker Image workflow's build failed in 'Build and push'. The image's TLS probe refused emSign/AAA test hosts ('CERT_REVOKED', 'CertDistrusted'). This PR changes no Dockerfile or worker-image file, and a branch fix/legion-819-tls-probe-browser-cold-start is open on that probe. My inference is that the failure is not this PR's; it is recorded here for the architect. The other Envoy lanes at 1adb786e were still queued.",
-  "risks": [
-    "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. This is the implementer's recorded deviation; it is unchanged since round 7."
-  ]
+  "proof": [
+    {
+      "criterion": "#2324's X-Dispatch-Event-Replay: complete keeps its promise under the horizon (architect's ask for this round).",
+      "surface": "GET /api/v1/events response headers and frames, on the ordinary and the early-opening paths",
+      "command": "adv.py replay; adv.py fresh_replay (newly started process with a foreign id held); adv.py replay_reset",
+      "observed": "Header 'complete' on a resume at the head, at head-5 (5 frames), at 0 (all 122 rows), and on the early-opening path (opened in 18 ms with an id held). No header on a cold connect, on a resume above the head, or on a resume with an old since after the log was replaced. A resume with the header while id 123 was open and 124 committed sent nothing, then 123 and 124 after the commit, so nothing after since was missed.",
+      "headSha": "8f4a1d329e3f",
+      "negativeControl": "Main e82b013b, with a writer that takes no commit-order lock (as every writer does after this change): header 'complete', yet the stream sent 124 and never 123."
+    },
+    {
+      "criterion": "Reset cases (architect's ask): a cold or resuming stream subscribing while the relay is still on a reset log waits for the reset and opens on the new log.",
+      "surface": "GET /api/v1/events across `truncate events restart identity cascade`",
+      "command": "adv.py replay_reset",
+      "observed": "With the relay still on the old log, a resume with the old since, a cold stream and a resume from 0 each answered 200. The open stream from before the reset was ended. After a POST on the new log, all three received id 1 and stayed open. Only resume(0) carried the header.",
+      "headSha": "8f4a1d329e3f",
+      "negativeControl": "Main e82b013b: the three streams opened on the old cursor and were closed by the relay's reset without receiving id 1."
+    },
+    {
+      "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id.",
+      "surface": "GET /api/v1/events, one and two processes",
+      "command": "adv.py ooo commit|rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py stall; adv.py lastid",
+      "observed": "123 open and 124 committed: nothing was sent, then 123 and 124, and a resume sent the same. 3 streams and a mid-run resume got exactly the 92 committed ids in order, on one process and across two. A foreign 8 s hold delayed the frame until 43 ms after the commit. Bad Last-Event-ID values are refused 400, and a resume from 0 equals the database.",
+      "headSha": "8f4a1d329e3f",
+      "negativeControl": "Main e82b013b (round 8's base and this round's): 124 sent at once, never 123."
+    },
+    {
+      "criterion": "The global serialization is gone.",
+      "surface": "REST API",
+      "command": "adv.py lock",
+      "observed": "POST on a third issue: 201 in 18 ms with the old lock held and another issue's write open.",
+      "headSha": "8f4a1d329e3f",
+      "negativeControl": "Main: no answer within 8 s (rounds 4 to 7, same driver)."
+    },
+    {
+      "criterion": "Connection budget re-derived on the merged code (architect's ask).",
+      "surface": "store/pool.go, infra/gcp/dispatch.go, the operator page; a running process's backends",
+      "command": "grep the constants; adv.py conns 15",
+      "observed": "64 + 4 + 1 + 12 + 1 + 1 + 2 (horizon) + 3 listeners = 88 = ConnectionsPerProcess (pool.go:314) = dispatchConnectionsPerPod (infra/gcp/dispatch.go:97) = running-dispatch.md:347. Under 150 concurrent clients and 5 streams one process peaked at 73 backends.",
+      "headSha": "8f4a1d329e3f",
+      "negativeControl": "Round 7 on main 25ef8cd2: sum 86 with no horizon pool, peak 72."
+    }
+  ],
+  "notRun": [
+    "Load pairs, because the round fails on the first-cursor defect, which the fix will touch. They run in the next round."
+  ],
+  "ci": "No CI was read on this round's code beyond its being queued at 8f4a1d32 when the round began. Main's recorded reds stay main's: recipients-claim route-close (#2324, now merged), TestDispatchConnectionsPerPodIsTheServers on main (#2464), mermaid.e2e.ts:194, and pmdoc reanchor_test.go:387 (#2448, fixed by #2481)."
 }
