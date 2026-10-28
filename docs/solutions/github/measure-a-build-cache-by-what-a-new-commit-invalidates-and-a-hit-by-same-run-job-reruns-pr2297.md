@@ -12,7 +12,6 @@ date: 2026-10-28
 status: active
 module: .github/workflows
 related_issues:
-  - "INFRA-522"
   - "sjawhar/legion#2297"
 ---
 
@@ -43,7 +42,7 @@ Extends docs/solutions/daemon/a-file-built-from-the-final-images-own-state-is-a-
 - `packages/envoy/docker/Dockerfile:76-84` passes `LEGION_COMMIT` (the run's `github.sha`) into
   the `go build -ldflags` RUN of the `build` stage, which copies from the `web` stage
   (`Dockerfile:56,62`). With round 2's `type=gha,scope=envoy-<arch>,mode=min` cache, a push to
-  `main` would have rebuilt both stages every time; spec v5 of INFRA-522 removed the cache.
+  `main` would have rebuilt both stages every time, so the pull request removed the cache.
 - Same-commit re-runs hit every step (41 `CACHED`): amd64 2.00 min and arm64 1.60 min, jobs
   122722922008 and 122716488972 of run 40521465193 (temporary commit `d2605357`, reverted by
   `99da66ef`). The cold legs took 4.2–5.3 min (runs 40546893651 and 40666030478).
