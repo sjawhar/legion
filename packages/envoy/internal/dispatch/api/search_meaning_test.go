@@ -139,6 +139,35 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 	}
 }
 
+// TestSearchAskStateRidesAMeaningMatch proves an ask hit the meaning query serves
+// (searchQueryMeaning, the response not degraded) carries where the ask stands, as a keyword hit
+// does: the query shares no word with the ask, whose embedded text (question, a space, the
+// answer's text) cosine-matches it.
+func TestSearchAskStateRidesAMeaningMatch(t *testing.T) {
+	embedder := &fakeEmbedder{vectors: map[string][]float32{
+		"Which lubricant for the bearings? Clock oil, sparingly.": angledVector(0.9, 2),
+		"wibbleflorp": queryVector(),
+	}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	issue := createInteractionIssue(t, handler, "MEAN", "Bearing upkeep", "Routine upkeep notes.")
+	askID := createSearchAsk(t, handler, issue.Key, "Which lubricant for the bearings?", "Clock oil", "Grease")
+	given := answerSearchAsk(t, handler, askID, map[string]any{"text": "Clock oil, sparingly."})
+	processAllPending(t, database, embedder)
+
+	response := searchRequest(t, handler, "q=wibbleflorp")
+	if degraded := decodeBody[model.SearchResponse](t, response).Degraded; degraded != "" {
+		t.Fatalf("Degraded = %q, want empty: the embedder is configured and did not fail", degraded)
+	}
+	ask := rawHitAsk(t, rawSearchHit(t, rawSearchResults(t, response), "ask", askID))
+	if state := rawString(t, ask["state"]); state != "answered" {
+		t.Fatalf("state = %q, want answered", state)
+	}
+	answer := rawAnswer(t, ask)
+	if answer.User != "alice" || !answer.At.Equal(given.At) || answer.Text == nil || *answer.Text != "Clock oil, sparingly." {
+		t.Fatalf("answer = %#v, want alice's answer %#v", answer, given)
+	}
+}
+
 // TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled proves a live
 // query embedding priority over background work: cmd/dispatch wires embedqueue's own Embedder
 // behind embed.RateLimitedEmbedder and never wraps the one api.Deps holds, so a live search

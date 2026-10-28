@@ -25,6 +25,10 @@ it: what to run, what a pod cannot run at all, and what the run costs.
 - **A layout change is proven by the whole project, never by `-g` on the row you wrote.** A row
   you add measures the element you were thinking about; a layout change touches every row of the
   page. Run the project.
+  **Note 2026-10-27 (INFRA-521):** the `iphone` project now runs only the tests tagged `@phone`
+  (`packages/dispatch/AGENTS.md`, "Phone acceptance"), not every spec. A layout change is proven
+  at phone width by the tagged tests that check it, so tag the row you add for the phone layout,
+  confirm `--project=iphone --list` shows it, and still run `chromium` and `iphone` whole.
 - **A page assertion names a rendered box, not text.** `toHaveText` and `toHaveAttribute` both
   succeed on an element rendered at zero width, where nothing is painted and no hover can reach
   it. Assert `toBeVisible`, a `boundingBox()` width, and `assertWhole` (`e2e/unclipped.ts`) where
