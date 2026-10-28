@@ -10,10 +10,10 @@ import (
 
 // frozenYTextRanges and frozenYFragmentShapeChildren are yTextRanges and yFragmentShapeChildren as
 // they stood before yTextRanges located its texts in the traversal that finds them (commit
-// 59f6647d), copied verbatim but for their names and for walking with frozenWalk: the oracle the
-// one-pass version must agree with, entry for entry and refusal for refusal. yFragmentLocations
-// shares walk's position rules (isOpaqueNodeType, opaqueNodeSize, boundaryTokens), so an oracle
-// reading the production walk would move with a change to them.
+// 59f6647d), copied verbatim but for their names and for walking with referenceWalk (walk_test.go): the
+// oracle the one-pass version must agree with, entry for entry and refusal for refusal.
+// yFragmentLocations shares walk's position rules (isOpaqueNodeType, opaqueNodeSize,
+// boundaryTokens), so an oracle reading the production walk would move with a change to them.
 func frozenYTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	var texts []yTextNode
 	children, err := frozenYFragmentShapeChildren(frag, "", 1, &texts)
@@ -22,7 +22,7 @@ func frozenYTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	}
 	doc := &Node{Type: "doc", Children: children}
 	var locations []textLocation
-	frozenWalk(doc, func(node *Node, _ []int, pos, end int) bool {
+	referenceWalk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type == "text" {
 			locations = append(locations, textLocation{pos: pos, end: end})
 		}
@@ -64,114 +64,25 @@ func frozenYTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	return ranges, nil
 }
 
-// frozenWalk, frozenWalkNode and frozenNodeSize are walk, walkNode and nodeSize as they stood before
-// their rules moved into isOpaqueNodeType, opaqueNodeSize and boundaryTokens (commit 59f6647d),
-// copied verbatim but for their names: the position model walk and yFragmentLocations must keep.
-func frozenWalk(doc *Node, visit func(n *Node, path []int, pos, end int) bool) {
-	if doc == nil || visit == nil {
-		return
-	}
-	frozenWalkNode(doc, nil, 0, visit)
-}
-
-func frozenWalkNode(node *Node, path []int, pos int, visit func(n *Node, path []int, pos, end int) bool) bool {
-	end := pos + frozenNodeSize(node)
-	if !visit(node, path, pos, end) {
-		return false
-	}
-	if node.Type == "text" || isLeafNodeType(node.Type) {
-		return true
-	}
-
-	childPos := pos
-	if node.Type != "doc" {
-		childPos++
-	}
-	for index, child := range node.Children {
-		if !frozenWalkNode(child, append(path, index), childPos, visit) {
-			return false
-		}
-		childPos += frozenNodeSize(child)
-	}
-	return true
-}
-
-func frozenNodeSize(node *Node) int {
-	if node == nil {
-		return 0
-	}
-	if node.Type == "text" {
-		return len16(node.Text)
-	}
-	if isLeafNodeType(node.Type) {
-		return 1
-	}
-	size := 0
-	if node.Type != "doc" {
-		size = 2
-	}
-	for _, child := range node.Children {
-		size += frozenNodeSize(child)
-	}
-	return size
-}
-
-// walkVisit is one node walk visited, with its path and range.
-type walkVisit struct {
-	node     *Node
-	path     string
-	pos, end int
-}
-
-func walkVisits(doc *Node, walker func(*Node, func(*Node, []int, int, int) bool)) []walkVisit {
-	var visits []walkVisit
-	walker(doc, func(node *Node, path []int, pos, end int) bool {
-		visits = append(visits, walkVisit{node: node, path: fmt.Sprint(path), pos: pos, end: end})
-		return true
-	})
-	return visits
-}
-
-// assertWalkMatchesFrozen checks walk and nodeSize over doc against the frozen copies. Its failures
-// name node types, paths and positions, none of which holds the document's text.
-func assertWalkMatchesFrozen(t *testing.T, name string, doc *Node) {
-	t.Helper()
-	if got, want := nodeSize(doc), frozenNodeSize(doc); got != want {
-		t.Errorf("%s: nodeSize %d, the frozen nodeSize %d", name, got, want)
-	}
-	got, want := walkVisits(doc, walk), walkVisits(doc, frozenWalk)
-	for index := range min(len(got), len(want)) {
-		if got[index] != want[index] {
-			t.Errorf("%s: visit %d: walk %s at %s %d..%d, the frozen walk %s at %s %d..%d", name, index,
-				got[index].node.Type, got[index].path, got[index].pos, got[index].end,
-				want[index].node.Type, want[index].path, want[index].pos, want[index].end)
-			return
-		}
-	}
-	if len(got) != len(want) {
-		t.Errorf("%s: walk visited %d nodes, the frozen walk %d", name, len(got), len(want))
-	}
-}
-
-// The hand-built tree reaches shapes no parse makes, which a fragment a peer wrote can read as: an
-// element named doc below the document, leaves and a text holding children, and an empty text.
-func TestWalkMatchesFrozenWalk(t *testing.T) {
+// The hand-built tree reaches shapes no parse makes, which a fragment a peer wrote can read as and
+// walkTestTrees does not build: an element named doc below the document, which adds no positions
+// of its own, beside leaves and a text holding children and an empty text.
+func TestWalkMatchesTheReferenceWalkOnHandBuiltShapes(t *testing.T) {
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	node := func(nodeType string, children ...*Node) *Node { return &Node{Type: nodeType, Children: children} }
-	assertWalkMatchesFrozen(t, "hand-built", node("doc",
+	tree := node("doc",
 		node("paragraph", text("a😀"), node("hardbreak"), node("image"), text(""), node("footnote_reference")),
 		node("hr", node("paragraph", text("inside a leaf"))),
 		node("html"),
 		node("blockquote", node("doc", node("paragraph", text("x"))), node("paragraph")),
 		&Node{Type: "text", Children: []*Node{node("paragraph", text("inside a text"))}},
 		node("table", node("table_row", node("table_cell", node("paragraph", text("cell"))))),
-	))
-	for _, document := range corpusMarkdown(t) {
-		tree, err := Parse(document.markdown)
-		if err != nil {
-			t.Fatalf("%s: %v", document.name, err)
-		}
-		assertWalkMatchesFrozen(t, document.name, tree)
+	)
+	want, wantPanicked := recordWalk(referenceWalk, tree, 0)
+	got, gotPanicked := recordWalk(walk, tree, 0)
+	compareVisits(t, "hand-built", got, want, gotPanicked, wantPanicked)
+	if got, want := nodeSize(tree), referenceNodeSize(tree); got != want {
+		t.Errorf("hand-built: nodeSize %d, the reference %d", got, want)
 	}
 }
 
