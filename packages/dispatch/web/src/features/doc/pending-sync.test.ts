@@ -636,6 +636,12 @@ for (const refusal of [
     notice:
       "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.",
   },
+  {
+    name: "needing a rebuild",
+    reason: "DOC_NEEDS_REBUILD",
+    notice:
+      "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.",
+  },
 ]) {
   test(`a real provider closed as ${refusal.name} drops the refused edit's row and stops for the host`, async () => {
     const artifact = artifactId();

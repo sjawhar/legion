@@ -1,6 +1,7 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import {
   DOCUMENT_BUSY_CLOSE_CODE,
+  DOCUMENT_NEEDS_REBUILD_CLOSE_REASON,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_TOO_LARGE_CLOSE_CODE,
   DOCUMENT_TOO_TANGLED_CLOSE_REASON,
@@ -64,13 +65,20 @@ export function connectionLabel(
 /**
  * The sentence the editor shows for an edit the server refused with
  * `DOCUMENT_TOO_LARGE_CLOSE_CODE`, by the close's reason: an edit the server could not merge into
- * the document quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), or one that would make the
- * document too large.
+ * the document quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), one the document cannot take
+ * until it is rebuilt (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`: its edit history has used up what the
+ * server lets it scan, or this browser held a history a rebuild replaced), or one that would make
+ * the document too large.
  */
 export function refusedEditNotice(reason: string): string {
-  return reason === DOCUMENT_TOO_TANGLED_CLOSE_REASON
-    ? "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept."
-    : "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.";
+  switch (reason) {
+    case DOCUMENT_TOO_TANGLED_CLOSE_REASON:
+      return "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
+    case DOCUMENT_NEEDS_REBUILD_CLOSE_REASON:
+      return "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
+    default:
+      return "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.";
+  }
 }
 
 export interface DocumentConnection {
@@ -89,11 +97,12 @@ export interface ConnectionCallbacks {
   onOutsideSchema(): void;
   /**
    * Fires when the server refused this browser's edit with `DOCUMENT_TOO_LARGE_CLOSE_CODE`, with
-   * the close's reason: the edit would take the document past its size bound, or the server could
-   * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`). The connection has stopped
-   * reconnecting and the refused edit's saved row is gone; the refused text is still in this
-   * connection's document, so the host rebuilds it from a fresh read rather than let a reconnect
-   * send it again.
+   * the close's reason: the edit would take the document past its size bound, the server could
+   * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), or the document must be
+   * rebuilt before it can take it (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`). The connection has
+   * stopped reconnecting and the refused edit's saved row is gone; the refused text is still in
+   * this connection's document, so the host rebuilds it from a fresh read rather than let a
+   * reconnect send it again.
    */
   onTooLarge(reason: string): void;
   /**
@@ -212,8 +221,9 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         // later attempt finds what it has freed, so the edits it refused wait to go with it. The
         // other two are the server's decision about the document itself, so the provider stops:
         // a document outside the Proof schema the host reads again, and an edit past the
-        // document's size bound, or one the server could not merge quickly enough, is dropped
-        // before the host rebuilds the document without it.
+        // document's size bound, one the server could not merge quickly enough, or one the
+        // document cannot take until it is rebuilt, is dropped before the host rebuilds the
+        // document without it.
         switch (event.code) {
           case DOCUMENT_SCHEMA_CLOSE_CODE:
             provider.disconnect();

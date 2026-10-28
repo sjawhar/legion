@@ -23,6 +23,7 @@ type API interface {
 	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error
 	SetRoomBudgetForTest(bytes int64) int64
 	RoomLiveForTest(artifactID string) bool
+	UseUpScanTotalForTest(ctx context.Context, artifactID string) error
 	Text(ctx context.Context, artifactID string) (string, error)
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)

@@ -2127,6 +2127,34 @@ func TestRoomLiveHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+// The used-up hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with them
+// it leaves the document's history near enough a room's scan total that the rebuild it refused
+// before takes it, the re-scan of its history named as why.
+func TestUsedUpHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/used-up", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("used-up hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	hooked, _, _ := newTestServer(t, testServerOptions{testHooks: true})
+	issue := createInteractionIssue(t, hooked, "TEST", "Used up", "A spec.")
+	rebuildPath := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/rebuild"
+	if refused := dispatchRequest(t, hooked, http.MethodPost, rebuildPath, map[string]any{}, "alice"); refused.Code != http.StatusConflict {
+		t.Fatalf("rebuild before the hook: status=%d body=%s, want %d", refused.Code, refused.Body.String(), http.StatusConflict)
+	}
+	used := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/_test/used-up", nil, "alice")
+	if used.Code != http.StatusNoContent {
+		t.Fatalf("used-up hook: status=%d body=%s, want %d", used.Code, used.Body.String(), http.StatusNoContent)
+	}
+	rebuilt := dispatchRequest(t, hooked, http.MethodPost, rebuildPath, map[string]any{}, "alice")
+	if rebuilt.Code != http.StatusOK {
+		t.Fatalf("rebuild after the hook: status=%d body=%s, want 200", rebuilt.Code, rebuilt.Body.String())
+	}
+	if why := decodeBody[docs.RebuildReport](t, rebuilt).ValidationError; !strings.Contains(why, "re-scan of the document's live state scans") {
+		t.Fatalf("the rebuild after the hook names %q as why, want the re-scan of the document's history", why)
+	}
+}
+
 // TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
 // client through its reconnect-from-lastId path without seeding thousands of events
 // to trip the replay cap: the same recovery path useEventStream exercises after any

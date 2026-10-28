@@ -16,18 +16,30 @@ import {
   documentTransport,
   openSpec,
   paste,
+  placeCaret,
   typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // What a person sees when the document server refuses an edit: as too large for the document
-// (DOCUMENT_TOO_LARGE_CLOSE_CODE, permanent: the edit is dropped), or for want of room for open
-// documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit waits and saves once room frees).
+// (DOCUMENT_TOO_LARGE_CLOSE_CODE, permanent: the edit is dropped), as one the document cannot take
+// until it is rebuilt (the same code with DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is
+// offered), or for want of room for open documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit
+// waits and saves once room frees).
 
 const TOO_LARGE = "Your last edit was not saved: it would make this document larger";
+const NEEDS_REBUILD =
+  "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
 const OUT_OF_ROOM = "Dispatch is out of room for open documents right now.";
 const ROOM_BUDGET = "/api/v1/artifacts/_test/room-budget";
+/** The sentence both browsers of the used-up row write after, the end of its paragraph's text. */
+const MEETING_POINT = "Both browsers write after this sentence.";
+/** What one browser types before its caret, each keystroke at the same place: digits in turn, so
+ * no two neighbours are equal and the editor's diff inserts each where it was typed. A hundred of
+ * them are a hundred items between the place and the end of its text, more than the 64 a used-up
+ * room lets one browser's apply scan (usedUpScanBudget). */
+const TYPED_IN_PLACE = Array.from({ length: 100 }, (_, index) => String(index % 10)).join("");
 
 /** The most markdown one document may hold (pmdoc.MaxDocumentBytes). */
 const MAX_DOCUMENT_BYTES = 1 << 20;
@@ -315,5 +327,93 @@ test("a full room budget turns a document away and holds an editor's typing unti
     // The budget is the server's, and every later row shares it.
     await postAsPage(page, ROOM_BUDGET, { bytes: 0 });
     await alice.close();
+  }
+});
+
+test("a used-up document refuses a larger merge as needing a rebuild, and saves after the rebuild it offers", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  await createProject({ key: "USED", name: "Used-up documents" });
+  const issue = await createIssue({
+    project: "USED",
+    spec: `${MEETING_POINT}\n\nThe tangle follows.\n`,
+    title: "Rebuild a used-up document",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const offline = await alice.newPage();
+    const transport = await documentTransport(offline);
+    // The hook appends a tangle to the stored history whose re-scan uses up a room's scan total
+    // (docs.Service.UseUpScanTotalForTest), at the end of the last paragraph: the room every
+    // browser opens below is used up, as a real one is only past about fifteen honest long
+    // sessions.
+    const usedUp = await postAsPage(offline, `/api/v1/artifacts/${artifactId}/_test/used-up`);
+    expect(usedUp.status(), await usedUp.text()).toBe(204);
+
+    // Alice goes offline and pastes at the end of the meeting point's text: one edit, one saved
+    // row, made while the server holds nothing after that place.
+    await openSpec(offline, issue.key, MEETING_POINT);
+    transport.hold();
+    await transport.sever();
+    await placeCaret(offline, "after", MEETING_POINT);
+    await paste(offline, { html: "", text: "offline paste" });
+    await expect.poll(() => pendingEditCount(offline, artifactId)).toBe(1);
+    await offline.close();
+
+    // Bob types in place there, each keystroke before the last: typing goes on in a used-up room.
+    const typing = await bob.newPage();
+    await openSpec(typing, issue.key, MEETING_POINT);
+    await placeCaret(typing, "after", MEETING_POINT);
+    for (const character of TYPED_IN_PLACE) {
+      await typing.keyboard.type(character);
+      await typing.keyboard.press("ArrowLeft");
+    }
+    const typedInPlace = [...TYPED_IN_PLACE].reverse().join("");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain(`${MEETING_POINT}${typedInPlace}`);
+
+    // Alice comes back: her saved paste merges past every one of Bob's keystrokes, a larger apply
+    // than the used-up room takes, so it is dropped with its reason and the rebuild is offered.
+    const page = await alice.newPage();
+    const sockets = await recordDocumentSockets(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(page.getByText(NEEDS_REBUILD)).toBeVisible();
+    const offer = page.getByRole("button", { name: "Rebuild this document" });
+    await expect(offer).toBeVisible();
+    await expect(connectedDot(page)).toHaveText("connected");
+    // Bob's cursor label sits between the meeting point and his keystrokes in Alice's editor.
+    await expect(documentEditor(page)).toContainText(typedInPlace);
+    await expect(documentEditor(page)).not.toContainText("offline paste");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    expect((await getArtifactText(artifactId)).markdown).not.toContain("offline paste");
+
+    let confirmation: string | undefined;
+    page.once("dialog", (dialog) => {
+      confirmation = dialog.message();
+      void dialog.accept();
+    });
+    await offer.click();
+    await expect(page.getByText(NEEDS_REBUILD)).toHaveCount(0);
+    expect(confirmation).toContain(
+      "Every browser connected to it, this one included, drops the edits it has not sent yet."
+    );
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText(typedInPlace);
+
+    await typeAtEnd(page, "saved after the rebuild");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain("saved after the rebuild");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    // One refusal: the editor closed its connection before the rebuild, so it handed the replaced
+    // history to no rebuilt room.
+    expect((await sockets()).closes.filter((code) => code === 4413)).toHaveLength(1);
+  } finally {
+    await alice.close();
+    await bob.close();
   }
 });

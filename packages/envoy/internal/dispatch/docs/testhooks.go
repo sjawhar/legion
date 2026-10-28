@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -38,6 +39,120 @@ func (s *Service) SetRoomBudgetForTest(bytes int64) int64 {
 // Dispatch's test-hook route.
 func (s *Service) RoomLiveForTest(artifactID string) bool {
 	return s.srv.GetDoc(artifactID) != nil
+}
+
+// The tangle UseUpScanTotalForTest appends: a chain of usedUpChain one-character items, each of a
+// client of its own from usedUpChainClient on, and items of client usedUpScanClient that each scan
+// the chain to its end. A browser's client ID is a random 32-bit number, so these few collide
+// with one no more often than any two browsers' do.
+const (
+	usedUpChain       = 2_000
+	usedUpChainClient = 1_000
+	usedUpScanClient  = 4_000_000
+)
+
+// UseUpScanTotalForTest closes artifactID's room if this server holds it and appends to its stored
+// history one update whose structs make a re-scan of the history pass roomScanTotal: after the
+// last character of the document's last text, a chain of usedUpChain one-character items, each of
+// a client of its own so none merges with its neighbour, and then items of one client each naming
+// the chain's first as its left origin and no right origin, so each scans the chain to its end
+// (Item.integrate, sjawhar/ygo v1.51.3-sami.7, crdt/item.go:117-192). The room the next load
+// makes counts its scan total from that re-scan (servicePersistenceAdapter.LoadDoc), so it is
+// used up: typing in place goes on within usedUpScanBudget, a larger apply is refused
+// DOC_NEEDS_REBUILD, and a rebuild takes the document (nearACap). A real document reaches that
+// only past about fifteen honest long sessions (roomScanTotal), which no browser test can type.
+// The document reads the chain's "a"s and the scanners' "k"s at the end of its last text. It
+// refuses to return without error unless the stored history's re-scan reaches roomScanTotal. It
+// is mounted only through Dispatch's test-hook route.
+func (s *Service) UseUpScanTotalForTest(ctx context.Context, artifactID string) error {
+	if err := s.Evict(ctx, artifactID); err != nil {
+		return err
+	}
+	loaded, err := s.persistence.Load(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		return err
+	}
+	text := lastWrittenText(doc.GetXmlFragment(fragmentName))
+	if text == nil {
+		return fmt.Errorf("document %s holds no text to chain onto", artifactID)
+	}
+	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
+	if last == nil {
+		return fmt.Errorf("document %s's last text has no item for its last character", artifactID)
+	}
+	// Each scanner passes the chain after its first item and stops at the scanner before it, of
+	// its own client and naming the same origins: about usedUpChain scans each.
+	scanners := roomScanTotal/usedUpChain + 2
+	frame := encoding.NewEncoder()
+	frame.WriteVarUint(usedUpChain + 1) // client groups: the chain's, then the scanners'
+	origin := *last
+	for i := range usedUpChain {
+		client := uint64(usedUpChainClient + i)
+		frame.WriteVarUint(1) // structs in the group
+		frame.WriteVarUint(client)
+		frame.WriteVarUint(0) // first clock
+		writeOriginString(frame, origin, "a")
+		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
+	}
+	frame.WriteVarUint(uint64(scanners))
+	frame.WriteVarUint(usedUpScanClient)
+	frame.WriteVarUint(0)
+	for range scanners {
+		writeOriginString(frame, crdt.ID{Client: usedUpChainClient, Clock: 0}, "k")
+	}
+	frame.WriteVarUint(0) // no delete set
+	if _, err := NewPgVersioned(s.store).AppendUpdate(ctx, artifactID, frame.Bytes()); err != nil {
+		return fmt.Errorf("persist the tangle: %w", err)
+	}
+	stored, err := s.persistence.Load(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	scans, err := rescan(stored.Update)
+	if err != nil {
+		return err
+	}
+	if scans < roomScanTotal {
+		return fmt.Errorf("document %s's history re-scans %d items with the tangle, short of the %d scan total", artifactID, scans, roomScanTotal)
+	}
+	return nil
+}
+
+// writeOriginString writes one string item of content naming origin as its left origin and no
+// right origin, so its parent is its origin's and the wire does not name it (crdt/update.go:942-965).
+func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) {
+	frame.WriteUint8(byte(structString) | infoHasOrigin)
+	frame.WriteVarUint(uint64(origin.Client))
+	frame.WriteVarUint(origin.Clock)
+	frame.WriteVarString(content)
+}
+
+// lastWrittenText is the last text under node that holds a character, or nil.
+func lastWrittenText(node any) *crdt.YXmlText {
+	switch node := node.(type) {
+	case *crdt.YXmlText:
+		if node.Len() > 0 {
+			return node
+		}
+	case *crdt.YXmlFragment:
+		return lastWrittenChild(node.Children())
+	case *crdt.YXmlElement:
+		return lastWrittenChild(node.Children())
+	}
+	return nil
+}
+
+func lastWrittenChild[N any](children []N) *crdt.YXmlText {
+	for i := len(children) - 1; i >= 0; i-- {
+		if text := lastWrittenText(children[i]); text != nil {
+			return text
+		}
+	}
+	return nil
 }
 
 // AppendRenderOnlySchemaViolationForTest appends to artifactID's stored history a tree the

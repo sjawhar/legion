@@ -1410,3 +1410,28 @@ func (s *server) artifactRoomLive(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, map[string]bool{"live": s.deps.Docs.RoomLiveForTest(artifact.ID)})
 }
+
+// useUpArtifactScanTotal gives the document a stored history whose re-scan uses up a room's scan
+// total, closing its room first, so the next room it loads is used up
+// (docs.Service.UseUpScanTotalForTest). Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a browser test can drive the editor's handling of
+// DOC_NEEDS_REBUILD and the rebuild it offers without typing the 506,000 scans a real room takes.
+func (s *server) useUpArtifactScanTotal(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	if err := s.deps.Docs.UseUpScanTotalForTest(r.Context(), artifact.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

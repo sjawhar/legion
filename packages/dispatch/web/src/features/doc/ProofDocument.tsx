@@ -1,3 +1,4 @@
+import { DOCUMENT_NEEDS_REBUILD_CLOSE_REASON } from "@legion/contracts";
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -100,6 +101,19 @@ function admissionBlock(error: unknown): AdmissionBlock {
  * refusal is normally followed by the repair message, never by an endless reconnect. */
 const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
 
+/** What the rebuild a document refused as needing one asks before it runs: the rebuild closes the
+ * document's room, and every browser connected to it drops the edits it has not sent. */
+const NEEDS_REBUILD_CONFIRMATION =
+  "Rebuild this document from its current text? Every browser connected to it, this one included, drops the edits it has not sent yet.";
+
+/** An edit the server refused, as the editor tells the person about it: the sentence that says
+ * why, and whether the document must be rebuilt before it takes such an edit, which the page then
+ * offers. */
+interface RefusedEdit {
+  readonly notice: string;
+  readonly needsRebuild: boolean;
+}
+
 /** The document chrome reports its state upward so an issue can place its controls in the active
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
@@ -189,9 +203,10 @@ export function ProofDocument({
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   // The server refused this browser's last edit, as one that would take the document past its size
-  // bound or one it could not merge quickly enough: the sentence that says which. The edit is gone
-  // and the notice stays until the person dismisses it.
-  const [refusedEdit, setRefusedEdit] = useState<string | undefined>(undefined);
+  // bound, one it could not merge quickly enough, or one the document cannot take until it is
+  // rebuilt: the sentence that says which. The edit is gone and the notice stays until the person
+  // dismisses it or rebuilds the document.
+  const [refusedEdit, setRefusedEdit] = useState<RefusedEdit | undefined>(undefined);
   // The server is out of room for open documents: the connection keeps trying, and the edits it
   // could not send wait in this browser.
   const [busy, setBusy] = useState(false);
@@ -230,6 +245,9 @@ export function ProofDocument({
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.
   const readmitRef = useRef<(() => void) | undefined>(undefined);
+  // Set while the editor effect runs: closes the live connection for a rebuild of the document and
+  // returns what admits the editor again once the rebuild has answered.
+  const suspendRef = useRef<(() => () => void) | undefined>(undefined);
   const repairError = admission?.kind === "repair" ? admission : undefined;
   const rebuildError = admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
@@ -389,6 +407,9 @@ export function ProofDocument({
     // Sockets the server refused in a row, since this editor last synced or a repair re-admitted it.
     let refusals = 0;
     let refusalTimer: number | undefined;
+    // Counts the admissions begun and the suspensions for a rebuild: an admission whose read
+    // answers after a later one began, or after a suspension, opens nothing.
+    let admissions = 0;
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
@@ -484,7 +505,8 @@ export function ProofDocument({
       };
     };
     // Each admission - this mount, a socket the server refused as outside the Proof schema, an
-    // edit it refused as too large for the document, and a blocked admission's re-admission -
+    // edit it refused (`onTooLarge`), a blocked admission's re-admission and the one after a
+    // rebuild the page asked for (`suspendRef`) -
     // opens a connection only once its own fresh `/text` read succeeds, and that read alone
     // decides: a browser editor normalizes a tree it cannot represent and writes the result back.
     // A read that fails closes nothing already open, since only an admission opens anything, so a
@@ -493,6 +515,8 @@ export function ProofDocument({
     // A blocked admission waits for the next successful read of the text, which a repair upload
     // or a rebuild brings about, and is admitted again (`readmitRef`).
     const admit = () => {
+      admissions += 1;
+      const attempt = admissions;
       const textRead = queryClient
         .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
         .then(
@@ -516,7 +540,7 @@ export function ProofDocument({
         );
       void Promise.all([textRead, loadTransport()])
         .then(([block, connect]) => {
-          if (!mounted) {
+          if (!mounted || attempt !== admissions) {
             return;
           }
           if (block !== undefined) {
@@ -565,7 +589,10 @@ export function ProofDocument({
               // the document afresh from the server, then replays the rows that are left.
               teardown();
               setBusy(false);
-              setRefusedEdit(refusedEditNotice(reason));
+              setRefusedEdit({
+                notice: refusedEditNotice(reason),
+                needsRebuild: reason === DOCUMENT_NEEDS_REBUILD_CLOSE_REASON,
+              });
               setConnection("connecting");
               admit();
             },
@@ -645,11 +672,32 @@ export function ProofDocument({
         .catch(reportLoadFailure);
     };
     admit();
+    // A rebuild of a document the server refused an edit as needing one replaces the history this
+    // connection's document holds, which a connection left open would hand back to the rebuilt
+    // room on its reconnect, to be refused for it in turn. So the connection closes before the
+    // rebuild is asked for, and the editor is admitted again from a fresh read once the rebuild
+    // has answered, whichever way: rebuilt, or refused and left as it was. The rows this browser
+    // had not sent stay saved, and the admission after a rebuild drops them as rows of a rebuilt
+    // document (pending-sync.ts).
+    suspendRef.current = () => {
+      admissions += 1;
+      window.clearTimeout(refusalTimer);
+      readmitRef.current = undefined;
+      teardown();
+      setBusy(false);
+      setConnection("connecting");
+      return () => {
+        if (mounted) {
+          admit();
+        }
+      };
+    };
 
     return () => {
       mounted = false;
       window.clearTimeout(refusalTimer);
       readmitRef.current = undefined;
+      suspendRef.current = undefined;
       teardown();
     };
   }, [artifact.id, blockSchema, createEditor, loadTransport, queryClient]);
@@ -689,15 +737,52 @@ export function ProofDocument({
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {refusedEdit !== undefined ? (
-        <div className="flex flex-wrap items-center gap-3" role="alert">
-          <p className={dangerText}>{refusedEdit}</p>
-          <button
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-            onClick={() => setRefusedEdit(undefined)}
-            type="button"
-          >
-            Dismiss
-          </button>
+        <div className="space-y-3" role="alert">
+          <div className="flex flex-wrap items-center gap-3">
+            <p className={dangerText}>{refusedEdit.notice}</p>
+            <button
+              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              onClick={() => setRefusedEdit(undefined)}
+              type="button"
+            >
+              Dismiss
+            </button>
+          </div>
+          {/* The rebuild route is human-only (requireHuman), and every person the dashboard signs
+          in is a user, so the offer goes to everyone the refusal reaches; a refusal of the
+          rebuild itself, a 409 for a document no longer near its caps among them, shows below. */}
+          {refusedEdit.needsRebuild ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p>
+                Rebuilding replaces the document's edit history with its current text, so it can
+                take edits again.
+              </p>
+              <button
+                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                disabled={rebuild.isPending}
+                onClick={() => {
+                  if (!window.confirm(NEEDS_REBUILD_CONFIRMATION)) {
+                    return;
+                  }
+                  const resume = suspendRef.current?.();
+                  rebuild.mutate(undefined, {
+                    onSuccess: () => setRefusedEdit(undefined),
+                    onSettled: () => resume?.(),
+                  });
+                }}
+                type="button"
+              >
+                {rebuild.isPending ? "Rebuilding…" : "Rebuild this document"}
+              </button>
+              {rebuild.isError ? (
+                <p className={dangerText}>
+                  {rebuild.error instanceof Error
+                    ? rebuild.error.message
+                    : "Could not rebuild this document."}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {busy ? (
