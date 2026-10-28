@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { act, renderHook } from "@testing-library/react";
 
 import {
+  RECONNECT_SPREAD_MS,
   readEventStream,
   reconnectDelayMs,
   type StreamEvent,
@@ -81,12 +82,45 @@ test("readEventStream rejects on a non-OK response before calling onOpen", async
   }
 });
 
-test("reconnectDelayMs doubles from a 1s base and caps at 30s", () => {
-  expect(reconnectDelayMs(0)).toBe(1_000);
-  expect(reconnectDelayMs(1)).toBe(2_000);
-  expect(reconnectDelayMs(2)).toBe(4_000);
-  expect(reconnectDelayMs(3)).toBe(8_000);
-  expect(reconnectDelayMs(10)).toBe(30_000);
+test("the first reconnect is spread over [0, 2 s); later ones back off within [d/2, d), capped at 30 s", () => {
+  expect(reconnectDelayMs(0, () => 0)).toBe(0);
+  expect(reconnectDelayMs(0, () => 0.5)).toBe(1_000);
+  expect(reconnectDelayMs(0, () => 0.999)).toBeCloseTo(1_998);
+  // d = min(1 s × 2^attempt, 30 s): the lowest draw waits d/2, the highest just under d.
+  for (const [attempt, d] of [
+    [1, 2_000],
+    [2, 4_000],
+    [3, 8_000],
+    [4, 16_000],
+    [5, 30_000],
+    [10, 30_000],
+  ] as const) {
+    expect(reconnectDelayMs(attempt, () => 0)).toBe(d / 2);
+    expect(reconnectDelayMs(attempt, () => 0.999)).toBeCloseTo(d / 2 + 0.999 * (d / 2));
+    expect(reconnectDelayMs(attempt, () => 0.999)).toBeLessThan(d);
+  }
+});
+
+test("first reconnects drawn from a seeded source spread evenly over the 2 s window", () => {
+  // mulberry32: a small seeded generator, so the draw is the same on every run.
+  let state = 0x5eed;
+  const seeded = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+  const buckets = new Array<number>(RECONNECT_SPREAD_MS / 100).fill(0);
+  for (let draw = 0; draw < 1_000; draw += 1) {
+    const delay = reconnectDelayMs(0, seeded);
+    expect(delay).toBeGreaterThanOrEqual(0);
+    expect(delay).toBeLessThan(RECONNECT_SPREAD_MS);
+    const bucket = Math.floor(delay / 100);
+    buckets[bucket] = (buckets[bucket] ?? 0) + 1;
+  }
+  // A uniform spread puts about 50 of the 1,000 in each 100 ms bucket; a fixed delay, or one
+  // bunched near any moment, puts far more than 100 in one.
+  expect(Math.max(...buckets)).toBeLessThanOrEqual(100);
 });
 
 test("readEventStream persists the last event id across frames that omit their own id", async () => {

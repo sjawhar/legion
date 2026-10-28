@@ -132,6 +132,9 @@ type Deps struct {
 	// than sharing the process's five-second copy, so a test that changes the listener's sessions
 	// sees the change at its next read. A deployment leaves it false.
 	ListenerRosterUncached bool
+	// DashboardEntry is the entry chunk (`/assets/index-*.js`) of the dashboard build this process
+	// serves, "" when it serves none; GET /api/v1/dashboard/builds answers it as serving.
+	DashboardEntry string
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -182,6 +185,8 @@ type DepsInput struct {
 	// ListenerRosterUncached is for end-to-end test processes only; see
 	// Deps.ListenerRosterUncached.
 	ListenerRosterUncached bool
+	// DashboardEntry is this process's dashboard entry chunk; see Deps.DashboardEntry.
+	DashboardEntry string
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -244,6 +249,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Admission:              input.Admission,
 		ReadDeadline:           input.ReadDeadline,
 		ListenerRosterUncached: input.ListenerRosterUncached,
+		DashboardEntry:         input.DashboardEntry,
 	}, nil
 }
 

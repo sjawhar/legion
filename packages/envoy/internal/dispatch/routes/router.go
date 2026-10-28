@@ -24,10 +24,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/admission"
@@ -43,6 +45,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -79,9 +82,13 @@ type AppContext struct {
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey     auth.SigningKeys
-	WebDistDir     string
-	AssetStore     AssetStore
+	SigningKey auth.SigningKeys
+	WebDistDir string
+	AssetStore AssetStore
+	// DashboardEntry is the entry chunk of the dashboard build at WebDistDir, which main read
+	// when it published the build (dashboard.Publish); "" when it serves none. See
+	// api.DepsInput.
+	DashboardEntry string
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -173,6 +180,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		TestHooksEnabled:       opts.TestHooksEnabled,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
 		Admission:              opts.Admission,
+		DashboardEntry:         opts.DashboardEntry,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
@@ -214,15 +222,22 @@ const oauthStateTTL = oauthStateMaxAge * time.Second
 
 type router struct {
 	ctx *AppContext
-	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
-	// maxRetainedBytesHeld (serveRetainedAsset).
+	// retainedHeld counts the bytes of store reads held by responses in flight, and by the reads
+	// abandoned requests left running, up to maxRetainedBytesHeld (serveRetainedAsset).
 	retainedHeld *semaphore.Weighted
+	// assets keeps what the asset store answered, for every request of the process
+	// (serveRetainedAsset).
+	assets *assetCache
 }
 
 // New returns an http.Handler that serves all dispatch routes, and a wait that returns once the
 // delivery hub and its sockets have ended after the process lifetime is cancelled.
 func New(ctx *AppContext) (http.Handler, func()) {
-	r := &router{ctx: ctx, retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
+	r := &router{
+		ctx:          ctx,
+		retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld),
+		assets:       newAssetCache(maxCachedAssetBytes),
+	}
 	mux := http.NewServeMux()
 	// Every route the server itself answers writes one access-log line (accesslog.Handler); the
 	// dashboard's own files, served by staticHandler, write none.
@@ -520,11 +535,14 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		serveFile(w, req, candidate)
 		return
 	}
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !isMissingFile(err) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
-	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil {
+	// The store's key is a Postgres text parameter, which cannot carry a NUL byte or invalid UTF-8
+	// (a path such as /assets/%ff.js): asking it would take a reservation and answer a store
+	// failure for a name no build can hold, so such a path is a plain miss.
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil && text.Storable(normalized) {
 		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
 		return
 	}
@@ -535,32 +553,53 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
 }
 
+// isMissingFile reports whether os.Stat's err means no file is there: the path does not exist,
+// or the path itself is one no file can have — a NUL byte in it (EINVAL), a name too long
+// (ENAMETOOLONG), or a file where a directory must be (ENOTDIR). Those are a request's own
+// spelling, answered as a miss; any other error (EACCES, EIO) is the filesystem failing.
+func isMissingFile(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ENOTDIR)
+}
+
 // isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
-// the retained-asset store is asked for, never a page or an asset root itself.
+// the asset store is asked for, never a page or an asset root itself.
 func isRetainedAssetPath(normalized string) bool {
 	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
 }
 
-// serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
-// read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
-// is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
-// bytes read is not bounded by that timeout. A read that instead runs out of that shared bound
-// (errors.Is(err, context.DeadlineExceeded), most often because most of it was already spent
-// waiting for memory-cap room) is answered the same way the cap's own refusal is, a 503, not a 502
-// store failure: the store was never actually unhealthy, only asked too late to answer in time.
+// serveRetainedAsset answers a local asset miss — a file of another build than this process's —
+// from the asset store, through the process's cache of what the store has answered (r.assets). A
+// cached object is served at once, with no reservation below: it is in memory whichever request
+// holds it. On a miss the whole object is read under retainedAssetFetchTimeout before anything is
+// written, so a slow or failed read is an uncached 502 and never a 200 carrying the immutable
+// header; the browser's download of the bytes read is not bounded by that timeout. A read that
+// instead runs out of that shared bound (errors.Is(err, context.DeadlineExceeded), most often
+// because most of it was already spent waiting for memory-cap room) is answered the same way the
+// cap's own refusal is, a 503, not a 502 store failure: the store was never actually unhealthy,
+// only asked too late to answer in time.
 //
-// An object stays in memory until its client has read it, so the bytes held at once are capped at
-// maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
-// waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
-// tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
-// store nothing. A request whose context ends because its client went away while still queued for
-// that room logs nothing more than a debug line and writes no response, since the cap was never
-// the reason and nobody is left to answer. Once the object is read the request keeps only its size
-// until its response is written or its client goes away.
+// An object stays in memory until its client has read it, so the bytes misses hold at once are
+// capped at maxRetainedBytesHeld. Before asking the store a miss reserves the most one object can
+// hold, waiting within the same bound for earlier requests to give theirs back, so a burst of a
+// stale tab's chunks is served in turn and a request that cannot reserve in time is a 503 that
+// asks the store nothing. A request whose context ends because its client went away, while still
+// queued for that room or while waiting for the store's answer (a navigation cancels the chunks
+// still loading), logs nothing more than a debug line and writes no response, since neither the
+// cap nor the store was the reason and nobody is left to answer. Once the object is read the
+// request keeps only its size until its response is written or its client goes away. A request
+// that stops waiting for the store's answer (its client went away, or its bound ran out) leaves
+// the read running for the requests after it (readRetainedAsset), and its reservation outlives
+// the request until that read ends: a client that abandons each request the moment it reaches
+// the store cannot hold more store reads at once than the cap has room for.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	if asset, ok := r.assets.get(key); ok {
+		writeRetainedAsset(w, req, key, asset)
+		return
+	}
 	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
 	defer cancel()
-	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
+	if err := r.retainedHeld.Acquire(ctx, MaxRetainedAssetSize); err != nil {
 		if errors.Is(err, context.Canceled) {
 			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
 			return
@@ -568,11 +607,25 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 		refuseRetainedAssetAtCap(w, key)
 		return
 	}
-	held := maxRetainedAssetSize
-	// Release reads held when the handler returns: the object's size once it is read.
+	held := MaxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read, or nothing
+	// once the reservation is handed to a read the request stopped waiting for.
 	defer func() { r.retainedHeld.Release(held) }()
 
-	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
+	asset, pending, err := r.readRetainedAsset(ctx, key)
+	if pending != nil {
+		go func(held int64) {
+			<-pending
+			r.retainedHeld.Release(held)
+		}(held)
+		held = 0
+	}
+	// The read itself runs on a context no request cancels (readRetainedAsset), so a cancellation
+	// is this request's own client going away.
+	if errors.Is(err, context.Canceled) {
+		slog.Debug("dispatch: retained asset request canceled while the store read it", "key", key)
+		return
+	}
 	if errors.Is(err, ErrAssetNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -588,7 +641,45 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 	}
 	r.retainedHeld.Release(held - int64(len(asset)))
 	held = int64(len(asset))
+	writeRetainedAsset(w, req, key, asset)
+}
 
+// readRetainedAsset reads key from the asset store into the cache, once however many requests
+// miss it at the same moment: the first starts the read and the rest wait for its answer, each
+// within its own ctx. The read is bounded by retainedAssetFetchTimeout from its start and not by
+// the first request's context, so that request's client going away fails none of the others. A
+// failed read caches nothing, and the next miss asks the store again. When ctx ends before the
+// read answers, it returns ctx's error and the channel the read will still answer on, so the
+// caller can keep the read's reservation until it does; it returns no channel otherwise.
+func (r *router) readRetainedAsset(ctx context.Context, key string) ([]byte, <-chan singleflight.Result, error) {
+	read := r.assets.reads.DoChan(key, func() (any, error) {
+		// A read that finished between this request's cache miss and its flight answers it.
+		if asset, ok := r.assets.get(key); ok {
+			return asset, nil
+		}
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retainedAssetFetchTimeout)
+		defer cancel()
+		asset, err := r.ctx.AssetStore.GetAsset(readCtx, key)
+		if err != nil {
+			return nil, err
+		}
+		r.assets.put(key, asset)
+		return asset, nil
+	})
+	select {
+	case result := <-read:
+		if result.Err != nil {
+			return nil, nil, result.Err
+		}
+		return result.Val.([]byte), nil, nil
+	case <-ctx.Done():
+		return nil, read, ctx.Err()
+	}
+}
+
+// writeRetainedAsset answers a whole object the asset store holds. Its key names content-hashed
+// build output, so the browser may keep it for a year.
+func writeRetainedAsset(w http.ResponseWriter, req *http.Request, key string, asset []byte) {
 	w.Header().Set("Cache-Control", assetCacheControl)
 	w.Header().Set("Content-Type", contentType(key))
 	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))

@@ -36677,7 +36677,6 @@ function dispatchToolSchema(spec, z, opts) {
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 var BOARD_NEIGHBOUR_REFUSAL = "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
-var WRITE_REFUSAL_RETRY = "OVERLOADED (the server had no room for the request) and EDIT_QUEUE_FULL (too many writes " + "already waiting for the same document; any write to a document can get it) are refusals sent " + "before anything ran: wait the Retry-After they name and send the same call again.";
 var ASK_QUESTION_CONTRACT = "The question names the concrete case first: which machines, files, sessions or people, and the " + "numbers. It asks the choice in those terms, saying what happens to whom under each option " + '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' + 'proceed?" or "Which option?", because a reader cannot work back from a general question to ' + "the case. It carries every fact the reader needs to decide and nothing " + "that does not change the decision. Generalize only after the specifics, if at all. Then give " + "your recommendation and its reason.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
 var HUMAN_AGREED_TO_DOCUMENT = "the human has agreed to every point in the document";
@@ -36870,7 +36869,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${WRITE_REFUSAL_RETRY} ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -36963,7 +36962,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${WRITE_REFUSAL_RETRY} ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37020,7 +37019,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read. " + `${WRITE_REFUSAL_RETRY} ` + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37053,7 +37052,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -39726,15 +39725,6 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
-function answerPayload(response, text) {
-  if (!text || !isJson(response))
-    return text;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
 function isNoRoute(error) {
   return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
 }
@@ -39743,44 +39733,6 @@ var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-}
-var RETRIES = 2;
-var DEFAULT_RETRY_AFTER_SECONDS = 1;
-var RETRY_JITTER_MS = 250;
-var systemClock = {
-  now: () => performance.now(),
-  sleep: (ms, signal) => {
-    const { promise, resolve, reject } = Promise.withResolvers();
-    if (signal.aborted) {
-      reject(signal.reason);
-      return promise;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-    return promise;
-  }
-};
-function isDispatchRefusal(value) {
-  return typeof value.error === "string";
-}
-function refusalError(status, refusal, message = refusal.error) {
-  return new DispatchServiceError(refusal.code ?? `HTTP_${status}`, status, message, refusal.candidates, refusal.current, refusal.mismatches);
-}
-function waitsOut(method, status, code) {
-  if (status === 429)
-    return code === "OVERLOADED" || code === "EDIT_QUEUE_FULL";
-  return status === 503 && (method === "GET" || method === "HEAD") && (code === "DATABASE_BUSY" || code === "REQUEST_TIMEOUT");
-}
-function retryAfterSeconds(response) {
-  const value = response.headers.get("Retry-After")?.trim();
-  return value !== undefined && /^\d+$/.test(value) ? Number(value) : DEFAULT_RETRY_AFTER_SECONDS;
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
@@ -39869,15 +39821,11 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
-  #clock;
-  #deadline;
-  constructor(baseUrl, token, fetchImpl = fetch, signal, clock = systemClock) {
+  constructor(baseUrl, token, fetchImpl = fetch, signal) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
-    this.#clock = clock;
-    this.#deadline = clock.now() + DISPATCH_TOOL_DEADLINE_MS;
   }
   async issue(input) {
     return this.#json("POST", ["api", "v1", "issues"], input);
@@ -40128,8 +40076,10 @@ class DispatchClient {
   }
   async fileVersion(id, version) {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.#fetch("GET", url, {
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` }
+    const response = await this.fetchImpl(url, {
+      method: "GET",
+      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
+      signal: this.#signal
     });
     if (!response.ok)
       return this.#response("GET", url, response);
@@ -40168,8 +40118,8 @@ class DispatchClient {
   async resolveComment(id, actor) {
     return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
   }
-  async getComments(issue, artifact) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], undefined, artifact ? { artifact } : undefined);
+  async getComments(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
   async getIssueReferences(issue) {
     return this.#json("GET", [
@@ -40215,8 +40165,10 @@ class DispatchClient {
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
     const url = this.#url(path, query);
-    const response = await this.#fetch(method, url, {
+    const response = await this.fetchImpl(url, {
+      method,
       headers,
+      signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
     return { status: response.status, payload: await this.#response(method, url, response) };
@@ -40235,37 +40187,13 @@ class DispatchClient {
   }
   async#form(method, path, body) {
     const url = this.#url(path);
-    const response = await this.#fetch(method, url, {
+    const response = await this.fetchImpl(url, {
+      method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body
+      body,
+      signal: this.#signal
     });
     return this.#response(method, url, response);
-  }
-  async#fetch(method, url, init) {
-    for (let attempt = 1;; attempt++) {
-      const response = await this.fetchImpl(url, { ...init, method, signal: this.#signal });
-      if (response.status !== 429 && response.status !== 503)
-        return response;
-      const text = await response.text();
-      const refusal = asErrorShape(answerPayload(response, text));
-      if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
-        return new Response(text, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers
-        });
-      }
-      const seconds = retryAfterSeconds(response);
-      const wait = seconds * 1000 + Math.random() * RETRY_JITTER_MS;
-      const refused = `${refusal.error}; Dispatch refused ${attempt === 1 ? "1 attempt" : `${attempt} attempts`} ` + `with ${response.status} ${refusal.code}`;
-      if (attempt > RETRIES) {
-        throw refusalError(response.status, refusal, `${refused}, waiting out its Retry-After between them, so wait ${seconds} s ` + "(Retry-After) and try again");
-      }
-      if (this.#clock.now() + wait >= this.#deadline) {
-        throw refusalError(response.status, refusal, `${refused}, and waiting the ${seconds} s it asks for (Retry-After) would pass this ` + `call's ${DISPATCH_TOOL_DEADLINE_MS / 1000} s deadline, so wait ${seconds} s and try again`);
-      }
-      await this.#clock.sleep(wait, this.#signal);
-    }
   }
   #url(path, query) {
     const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -40283,11 +40211,19 @@ class DispatchClient {
   }
   async#response(method, url, response) {
     const text = await response.text();
-    const payload = answerPayload(response, text);
+    let payload = text;
+    if (text && isJson(response)) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
     if (!response.ok) {
       const error = asErrorShape(payload);
-      if (isDispatchRefusal(error))
-        throw refusalError(response.status, error);
+      if (typeof error.error === "string") {
+        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
+      }
       const quoted = excerpt(text, this.token);
       let body;
       if (quoted !== "") {
@@ -42156,22 +42092,64 @@ function messageSummary({ message, replies }, graph) {
   ].join(`
 `);
 }
-async function openArtifactMarks(client, resolved) {
+async function openAnchoredThreads(client, resolved) {
   const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
-  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "");
   const commentsResultPromise = commentsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
-  const asks = await asksPromise;
-  const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
+  const asks = (await asksPromise).filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id);
   const commentsResult = await commentsResultPromise;
-  if (commentsResult.status === "rejected") {
-    if (dispatchAnswered(commentsResult.reason, 404))
-      return marks;
+  if (commentsResult.status === "rejected" && !dispatchAnswered(commentsResult.reason, 404)) {
     throw commentsResult.reason;
   }
-  return [
-    ...marks,
-    ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
-  ];
+  const comments = commentsResult.status === "fulfilled" ? commentsResult.value : [];
+  const askReplies = new Map(asks.map((ask) => [ask.id, []]));
+  for (const comment of comments) {
+    if (comment.ask_id)
+      askReplies.get(comment.ask_id)?.push(comment);
+  }
+  const askThreads = asks.map((ask) => [
+    `ask ${ask.id} \xB7 ${actorText(ask.author)} \xB7 ${ask.created_at}`,
+    ...anchorLines(ask),
+    `Question: ${ask.question}`,
+    ...threadReplyLines(askReplies.get(ask.id) ?? [])
+  ].join(`
+`));
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const roots = comments.filter((comment) => comment.reply_to === null && !comment.ask_id && !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id);
+  const replies = new Map(roots.map((root) => [root.id, []]));
+  for (const comment of comments) {
+    const root = comment.reply_to === null ? undefined : threadRootId(comment, byId);
+    if (root !== undefined)
+      replies.get(root)?.push(comment);
+  }
+  const commentThreads = roots.map((root) => [
+    `comment ${root.id} \xB7 ${actorText(root.author)} \xB7 ${root.created_at}`,
+    ...anchorLines(root),
+    `Body: ${root.body}`,
+    ...threadReplyLines(replies.get(root.id) ?? [])
+  ].join(`
+`));
+  return [...askThreads, ...commentThreads];
+}
+function threadReplyLines(replies) {
+  return replies.flatMap((reply) => [
+    `reply ${reply.id} \xB7 ${actorText(reply.author)} \xB7 ${reply.created_at}`,
+    `Body: ${reply.body}`
+  ]);
+}
+function threadRootId(comment, byId) {
+  const seen = new Set;
+  let current = comment;
+  while (current.reply_to !== null) {
+    if (seen.has(current.id))
+      return;
+    seen.add(current.id);
+    const parent = byId.get(current.reply_to);
+    if (parent === undefined)
+      return;
+    current = parent;
+  }
+  return current.id;
 }
 async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
@@ -43136,24 +43114,27 @@ Document token: ${listed.token}`,
         } : { issue: resolved.issue?.key }, version, resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue, shown);
       }
       const documentPromise = client.docRead(resolved.artifact.id, version);
-      const marksPromise = openArtifactMarks(client, resolved);
-      const marksResultPromise = marksPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
+      const threadsPromise = openAnchoredThreads(client, resolved);
+      const threadsResultPromise = threadsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
       const document = await documentPromise;
-      const marksResult = await marksResultPromise;
-      if (marksResult.status === "rejected")
-        throw marksResult.reason;
-      const marks = marksResult.value;
+      const threadsResult = await threadsResultPromise;
+      if (threadsResult.status === "rejected")
+        throw threadsResult.reason;
+      const threads = threadsResult.value;
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
-        ...marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`],
         ...approval === undefined ? [] : [approval]
       ];
       return {
-        text: trailer.length === 0 ? document.markdown : `${document.markdown}
+        text: [
+          document.markdown,
+          ...trailer.length === 0 ? [] : [trailer.join(`
+`)],
+          ...threads.length === 0 ? [] : ["Open anchored threads:", ...threads]
+        ].join(`
 
-${trailer.join(`
-`)}`,
+`),
         details: resolved.owner.kind === "project" ? {
           project: resolved.artifact.project,
           document: `${resolved.artifact.project}/${resolved.artifact.slug}`
@@ -48854,7 +48835,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 40
+  daemonApiVersion: 41
 };
 
 // src/channel-forwarder.ts

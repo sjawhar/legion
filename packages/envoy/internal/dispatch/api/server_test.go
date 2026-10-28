@@ -109,6 +109,9 @@ type testServerOptions struct {
 	// browserPeers lets the document service admit a browser peer by the X-Dispatch-User header,
 	// as connectBrowserPeer connects one; without it the document websocket refuses every peer.
 	browserPeers bool
+	// dashboardEntry is the entry chunk of the dashboard build the server serves; empty is a
+	// server with no dashboard, as the Go test rigs are.
+	dashboardEntry string
 }
 
 // testSigningKey is the one-key set the package's session cookies are signed with.
@@ -233,6 +236,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		AgentStream:      options.agentStream,
 		Embedder:         options.embedder,
 		Files:            options.files,
+		DashboardEntry:   options.dashboardEntry,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
