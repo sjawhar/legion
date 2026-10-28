@@ -15,9 +15,7 @@ import {
   shellQuote,
 } from "./local-instance-support";
 import { sqlAt } from "./psql";
-import { resetDatabase } from "./seed";
 import { sessionIds } from "./session-ids";
-import { seedWorkspace, workspaceSessionIds } from "./workspace";
 
 const dispatchPackage = fileURLToPath(new URL("..", import.meta.url));
 const envoyPackage = fileURLToPath(new URL("../../envoy", import.meta.url));
