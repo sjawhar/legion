@@ -2,10 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T13:44:25Z",
+  "completed": "2026-10-28T14:40:17Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+  "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
   "proof": [
+    {
+      "criterion": "Review round 4, thread PRRT_kwDORFy7ds6xKae8: the live test's hub servers get distinct ports, and a start that finds a port taken retries on new ones, so the natslive lane cannot fail at random on a port collision.",
+      "surface": "TestClusteredNatsHubCluster: three nats-server v2.15.1 processes with the real reloader and exporter on the helm render",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ ; the same run under go test -overlay with envoy-nats-0's client port held on 0.0.0.0 for the whole test",
+      "observed": "ok (31.2 s). With the port held, envoy-nats-0 retried and came up on three new ports, and the whole test passed. A throwaway test made 5,000 nine-port draws: bind-and-release repeated a port 2 times, loopbackPorts 0 times.",
+      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+      "negativeControl": "The same held port with the 253b920c live test -> 'envoy-nats-0 did not start (attempt 10)', 'bind: address already in use'."
+    },
+    {
+      "criterion": "Review round 4, thread PRRT_kwDORFy7ds6xKafG: the hub's pods are held to GKE Autopilot's floor for their own shape (250m CPU, 512Mi, no pod anti-affinity or safe-to-evict), and the refusal names that rule.",
+      "surface": "The component's resolver under Pulumi mocks; the README sizing text",
+      "command": "cd packages/envoy/infra && go test -count=1 -run 'TestClusteredNatsHubTakesPodsAboveTheirOwnAutopilotFloor|TestClusteredNatsHubResolverRefusesInvalidInputs' ./gcp/",
+      "observed": "natsCpu 300m (a 400m pod) and tailnet.listener.cpu 150m (a 450m pod) are taken. natsCpu 100m (a 200m pod) is refused naming natsCpu: 'at least 150m ... less than 250m, below which Autopilot raises a pod with neither pod anti-affinity nor the safe-to-evict annotation'. GKE's autopilot-resource-requests page (read 2026-10-28) gives 250m CPU and 512 MiB for clusters without bursting. The whole unit lane passes (TestDispatchConnectionsPerPodIsTheServers is skipped: it is main's, 83 vs 84).",
+      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+      "negativeControl": "At 253b920c the same natsCpu 300m was refused with 'must be at least 400m ... less than 500m, below which Autopilot raises it'."
+    },
     {
       "criterion": "#2371 merges cleanly into legion/INFRA-546 (which carries main and #2228), with its changelog entries as changie fragments carrying no Dispatch key and CHANGELOG.md as the base has it, and the unit lane, the helm render test and the three-server natslive test pass on the merged tree.",
       "surface": "The merged tree at 253b920c: the module's unit lane, the helm v3.20.2 render of the vendored chart, and three nats-server v2.15.1 processes with the real reloader and exporter on that render",
@@ -88,7 +104,8 @@
     "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, clusteredhub_tailnet.go, testdata/clustered-hub-tailnet-pod.golden: store-limit annotation, live phase (f), grace comment (round 3)",
     "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md: what rolls the pods; the listener build INFRA-557's take-over requires (round 3)",
     "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md, gcp/clusteredhub_kube.go (comment), gcp/clusteredhub_kube_test.go, gcp/clusteredhub_live_test.go: review round 2 text fixes and the no-session-user depends-on pin (round 4)",
-    "Round 5 (merge only): packages/envoy/.changes/unreleased/pr2371-Added-*.yaml (changie fragments; CHANGELOG.md as the base's), gcp/clusteredhub_autopilot.go (the clustered hub's Autopilot size and priority-class rules, moved out of dispatch.go, which is now the base's), gcp/clusteredhub_live_test.go (loopbackPort replaces the removed cmdtest.FreeTCPPort), infra/AGENTS.md layout row, the workflow comment."
+    "Round 5 (merge only): packages/envoy/.changes/unreleased/pr2371-Added-*.yaml (changie fragments; CHANGELOG.md as the base's), gcp/clusteredhub_autopilot.go (the clustered hub's Autopilot size and priority-class rules, moved out of dispatch.go, which is now the base's), gcp/clusteredhub_live_test.go (loopbackPort replaces the removed cmdtest.FreeTCPPort), infra/AGENTS.md layout row, the workflow comment.",
+    "Round 6: gcp/clusteredhub_live_test.go (loopbackPorts pool, servers' args built per start, ports redrawn on retry), gcp/clusteredhub_autopilot.go (clusteredHubPodMinCPU 250m), gcp/clusteredhub.go (comment), gcp/clusteredhub_refusals_test.go, gcp/clusteredhub_test.go, README.md sizing text."
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -108,6 +125,6 @@
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 5,
-  "reviewRound": 2
+  "round": 6,
+  "reviewRound": 4
 }
