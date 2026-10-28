@@ -5,8 +5,19 @@ import (
 	"unicode/utf16"
 )
 
+// len16 is how many UTF-16 units value takes, which is the length of utf16.Encode([]rune(value)),
+// counted without building either slice. Ranging over a string decodes it exactly as []rune does:
+// each invalid byte becomes one U+FFFD, and no rune is a surrogate or above U+10FFFF, so every rune
+// is one unit and only one above U+FFFF adds a second.
 func len16(value string) int {
-	return len(utf16.Encode([]rune(value)))
+	units := 0
+	for _, r := range value {
+		units++
+		if r > 0xFFFF {
+			units++
+		}
+	}
+	return units
 }
 
 // units16 is how many UTF-16 units runes take, counted as ygo counts a text's length: a character

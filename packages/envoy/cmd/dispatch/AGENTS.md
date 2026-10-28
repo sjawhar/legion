@@ -400,7 +400,13 @@ write identity errors with `identity.WriteError`.
   only switch `New` reads, so no caller can mount the route without that check.
   The signing key is then
   `auth.NewSigningKey`, generated per process and never the data-dir file, so a
-  cookie it mints dies with the process. While it is on, the whole router
+  cookie it mints dies with the process, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY`
+  is set (refused without the flag): every process given one value then signs
+  with the base64url of HMAC-SHA256 keyed by it over the label
+  `dispatch dev sign-in` (`devSignInSharedSigningKey`), never the value itself,
+  so the browser suite's two-process mode keeps a person signed in across its
+  two servers and a production key pasted there mints nothing production
+  accepts. While it is on, the whole router
   answers a request whose `Host` is not the dashboard origin's
   `421 HOST_MISMATCH` (`requireHost`), and the route serves only a loopback peer
   with no forwarding header and logs every mint at WARN.
@@ -488,19 +494,30 @@ to the SPA shell. Every page the static handler serves (`index.html` and that fa
 server holds, and gets this server's page in place of any other, since the servers behind one load
 balancer can hold different builds whose pages' file times say nothing about which is newer (a
 rollback serves the older file). A file under `/assets`, Vite's content-hashed output, carries
-`public, max-age=31536000, immutable`. With `DISPATCH_ASSET_STORE_BUCKET` set, a local miss below an
-asset root (`isRetainedAssetPath`) asks the bucket for the same key through the AWS SDK default
-credential chain (`routes/assets.go`). `AssetStore.GetAsset` returns the whole object as bytes, read
-within three seconds and refused over 8 MiB or when its body is not the length S3 declared; only
-then does `serveRetainedAsset` set the immutable header and write it through `http.ServeContent`,
-so a failed or short read is a 502 with no cache header, and the browser's download is not held to
-the three seconds. A `NoSuchKey` is a 404 without caching. S3 answers one only to a role that also
-holds `s3:ListBucket` on the bucket and otherwise answers 403, a 502 like any other store failure.
-Every 502 logs `dispatch: retained asset store failed` at ERROR with the key and the error, and the
-SDK's own log lines go through slog, its debug lines below the default level. An object is read
-into one buffer of its declared size, and it stays in memory until its client has read it while the
-server sets no write timeout, so the router's `retainedHeld` semaphore caps the bytes held at once
-at `maxRetainedBytesHeld` (64 MiB). A request reserves 8 MiB before it asks the store, waiting
+`public, max-age=31536000, immutable`. Every server process publishes its web dist's assets into
+Postgres at boot, before it listens (`publishDashboard` in `main.go`, `internal/dispatch/dashboard`,
+migration `0136`): one transaction under a shared advisory lock stores each file not yet stored
+under its key (`assets/<relative path>`), the build's row and its links, so a restart on a stored
+build writes no bytes. A publish that fails, a file over `routes.MaxRetainedAssetSize` (8 MiB)
+among them, exits the boot before the process is ready; a dist with no `index.html` (the Go test
+rigs) publishes nothing and serves no dashboard. The prune that follows, under the same lock held
+exclusive, keeps every build a live server process serves (`processes.Live`) and the
+`dashboard.KeepNewest` (20) started most recently, then deletes every asset no build links; a failed
+prune is logged and the boot goes on. A local miss below an asset root (`isRetainedAssetPath`) — a
+chunk of another build, asked for by a page another process served while a rolling update or a
+rollback runs two builds — is answered from the database (`dashboard.Store`, the router's
+`AssetStore`). `serveRetainedAsset` first looks in the process's `assetCache` (`routes/assets.go`),
+which keeps up to `maxCachedAssetBytes` (64 MiB) of what the store answered, least recently used
+evicted first, an object larger than the whole cache not kept; a cached object is served at once.
+On a miss, concurrent requests for one key share one store read (singleflight), bounded by three
+seconds from its start and not by the first request's context, so that client going away fails
+none of the others; a failed read caches nothing. Only once the whole object is read does it set
+the immutable header and write it through `http.ServeContent`, so a failed read is a 502 with no
+cache header, and the browser's download is not held to the three seconds. A path no build
+published is a 404 without caching. Every 502 logs `dispatch: retained asset store failed` at
+ERROR with the key and the error. An object stays in memory until its client has read it while the
+server sets no write timeout, so the router's `retainedHeld` semaphore caps the bytes misses hold
+at once at `maxRetainedBytesHeld` (64 MiB). A miss reserves 8 MiB before it asks the store, waiting
 within its three seconds for earlier requests to give theirs back, so a stale tab's burst of chunks
 is served in turn; it keeps only its object's size once it is read, and gives that back when its
 response is written, its client goes away or the read fails. A request that cannot reserve room, or
@@ -509,10 +526,11 @@ because most of the bound was already spent waiting for room), is a 503 with `Ca
 no-store` and `Retry-After: 1`, logs `dispatch: retained asset refused at the memory cap` at WARN
 with its key, and — for the room refusal — asks the store nothing: the shared bound expiring is
 never presented as a store failure, since the store was only asked too late to answer in time. A
-request whose own client disconnects while still queued for room is a different case: the cap was
-never the reason, there is nobody left to answer, and the handler logs nothing above a debug line
-and writes no response at all. It never reads a page or another path from the bucket. Unset, the
-setting leaves every local asset miss a 404. Any other file (the favicon) carries no cache header.
+request whose own client disconnects while still queued for room or while the store reads is a
+different case: the cap was never the reason, there is nobody left to answer, and the handler logs
+nothing above a debug line and writes no response at all. It never asks the store for a page or
+another path. A router with no `AssetStore` leaves every local asset miss a 404. Any other file
+(the favicon) carries no cache header.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.
@@ -545,6 +563,7 @@ the table says human only.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | Everyone who has signed in (`people`), as `{users: [{login}]}` sorted by email: the assignee picker's options. |
 | `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/dashboard/builds` | GET | user or bearer | Which dashboard builds are served (`api/dashboard_builds.go`): `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (`processes.Live` joined to `dashboard_builds` on the build id), sorted. The dashboard's "A new version is available" notice offers itself only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match; a repeated, blank, non-integer or out-of-range value, or `cursor`, is `400 INVALID_QUERY` naming the parameter. Each listing row carries `blocked_by`, the sorted keys the issue waits on, `primary_artifact_id`, and `repo` and `resolved_repo` as the issue read below describes them. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation takes the issue's own `repo` (`owner/name`, canonicalised as a mapping's is): one that is not `owner/name` is `400 INVALID_ISSUE`, and one not mapped to the issue's project `400 REPO_NOT_MAPPED`. A `parent` that would put the new issue more than 32 links (`parentDepthCap`) below its root is `409 PARENT_INPUT`. A title over `contracts.IssueTitleMax` (1,000) UTF-16 units, counted after trimming, is `400 CAP_EXCEEDED` before the duplicate check reads the project's titles. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. A spec whose markdown makes more than 65,536 elements, or whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements, is `413 CAP_EXCEEDED`. `blocked_by` names at most `contracts.MaxIssueBlockers` same-project issue keys before deduplication: an over-limit list or unknown key is `400 BLOCKED_BY_INPUT`, another project's issue `400 BLOCKED_BY_OUTSIDE_PROJECT`, and a wait cycle through `blocked_by` and parent links `409 DEPENDENCY_CYCLE`. Non-empty blocker lists and a `parent` take a per-project dependency advisory lock before allocating the number or rank; creation with neither takes no dependency lock, and no creation takes an explicit parent-row lock. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind is ranked on its own list and the lists are merged by reciprocal rank fusion (`README.md`, "Search"), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` is 1–50 (default 20) and `offset` 0 or more (default 0); `total` counts every match and `reachable` the hits the pages can return, each kind's best `contracts.SearchKindDepth` (100). An under-two-character query returns `400 INVALID_QUERY`, while a stop-word-only query returns `200` with no results; a query over `contracts.SearchQueryMax` (1,000) UTF-16 units, counted after trimming, returns `400 CAP_EXCEEDED` before anything runs, a project that is not a project key returns `400 INVALID_PROJECT` (an empty one searches every project), a repeated, blank, non-integer, or out-of-range limit returns `400 INVALID_LIMIT`, and the same for offset returns `400 INVALID_OFFSET`. They ride in the URL; `packages/contracts/AGENTS.md` "Search limits" owns what keeps it under the load balancer's limit. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only (`README.md` "Search"). |
 | `/api/v1/search/coverage` | GET | user or bearer | Meaning search's coverage (`api/search_coverage.go`, `embedqueue.Coverage`, one statement over `coverageSources`): `{identity, place, model, total, kinds}`, the embedder search embeds its queries with (all three null with none), then in total and per kind `items`, `current`, `lacking`, `failed` and `oldest_lacking_seconds`, as `model.SearchCoverageCounts` defines them. |
@@ -663,12 +682,14 @@ conventions) says what keeps it current.
 The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-555) start two real Dispatch servers on one
 Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
 across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, a live event stream fed from the other process, a document room closed when
-the other process writes it, a sign-in started on one process completed on the other, people
-kept signed in across a key rotation, a process whose key set a live peer does not share refused
-at boot, and `server.started` published once per fleet-wide build. They build only under the `multiprocess` tag and run in their own CI
-job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
-and their NATS take minutes rather than seconds:
+published once, a live event stream fed from the other process, a document room closed when the
+other process writes it, a sign-in started on one process completed on the other, people kept
+signed in across a key rotation, a process whose key set a live peer does not share refused at
+boot, `server.started` published once per fleet-wide build, every dashboard asset of either of two
+builds served by both processes, and the builds `GET /api/v1/dashboard/builds` names as live. They
+build only under the `multiprocess` tag and run in their own CI job (`dispatch-multiprocess` in
+`.github/workflows/envoy-and-contracts.yaml`), because two servers and their NATS take minutes
+rather than seconds:
 
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch
