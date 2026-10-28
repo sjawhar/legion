@@ -2,58 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-28T09:53:30Z",
+  "completed": "2026-10-28T13:25:00Z",
+  "round": "review round 1 (changes requested at d8613619): eight items",
   "proof": [
     {
-      "criterion": "Items 1-6 and D10: edits, awareness and room state reach every process with no disconnect (finding 7 included); close/reopen changes every process's rooms and read-only follows; ask author durable; agent write, lost-edit check and participants see every process; reads never older than the store; rebuild, resumption, conditional-edit cap and cold writes across processes; each document socket names its serving process",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc websockets with the processes' own logs and test hooks (go test -tags multiprocess ./cmd/dispatch)",
+      "criterion": "Items 1-6 and D10 across two processes, at the head after the review fixes and the forward merge of main",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc websockets with the test hooks (go test -tags multiprocess ./cmd/dispatch)",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 542.724s; every test passed, including TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive (17.22s), TestClosingAndReopeningAnIssueChangesEveryProcessesRooms (10.38s), TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt (67.39s), TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess (16.65s), TestAReadOnTheOtherProcessIsNeverOlderThanTheStore (11.87s), TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses (123.74s), TestEachDocumentSocketNamesItsServingProcess (9.48s)",
-      "headSha": "9952be5aaf5a",
-      "negativeControl": "The same seven tests at the test-support commit aa50b68c (no fix; exported with git archive, GOWORK=off) all FAIL (252.571s), each on its bug: 'alice on A's keystroke 1 did not reach bob on B live within 1s: the peer's connection closed', 'finding 7: 200 alternating keystrokes ... on A 34 room failures and 34 lock-waiting compactions', 'closing the issue through B left alice's tab on A connected ... the socket stayed open 1s later', 'A's resumed settlement made the ask of bob's block with author alice, want bob', 'the agent's edit through A of a paragraph bob had already deleted on B answered 200', 'the document socket's upgrade on A carries no X-Dispatch-Process header'"
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 544.938s, every test passed: TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive (14.81s), TestClosingAndReopeningAnIssueChangesEveryProcessesRooms (8.14s), TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt (67.05s), TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess (15.09s), TestAReadOnTheOtherProcessIsNeverOlderThanTheStore (12.09s), TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses (104.79s), TestEachDocumentSocketNamesItsServingProcess (8.09s). Also at this head: docs ok 836.196s, api ok 1108.777s, plain cmd/dispatch ok 156.979s, store ok 248.103s, pglisten ok, duty ok; infra/gcp TestDispatchConnectionsPerPodIsTheServers passes (85 == store.ConnectionsPerProcess).",
+      "headSha": "9788cdedf0f3",
+      "negativeControl": "The same seven tests at the test-support commit aa50b68c (no fix) all FAIL (252.571s), each on its bug, e.g. 'finding 7: 200 alternating keystrokes ... on A 34 room failures and 34 lock-waiting compactions' and 'closing the issue through B left alice's tab on A connected ... the socket stayed open 1s later'."
     },
     {
-      "criterion": "Browser suite against two server processes: two readers on different processes see each other's edits, cursors and presence within one second, with no reconnect",
-      "surface": "Dispatch's Playwright browser suite in Chromium on INFRA-559's two-process harness (two envoy-dispatch processes behind the round-robin proxy, alice pinned to A, bob to B), on a throwaway tree merging this branch (ef1efb43) with origin/legion/INFRA-559 (a0f877c5), since the harness is not on main yet",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e_after?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess (spec packages/dispatch/e2e/coedit.multiprocess.e2e.ts; runs quoted at https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)",
-      "observed": "1 passed (10.1s) and 1 passed (8.5s) on two runs: each person's typing and the other's .proof-collab-cursor__label visible on the other page within 1 s of the keystroke, one /ws/doc socket per page (A for alice, B for bob) open from start to end, connection dot never offline",
-      "headSha": "ef1efb435dfe (spec committed unchanged at 66622bd1; later commit 9952be5a is a refactor of room-sync internals covered by the multiprocess proof above)",
-      "negativeControl": "The same spec on the BEFORE tree a0f877c5 (main + harness, without this change, database infra556_e2e_before) fails after setup passed: alice's document socket on A reads open:false, 'bob's page on B shows alice's typing within 1 s' received the text without her edit, 'bob's page on B shows alice's cursor within 1 s' element(s) not found, and the same for bob's typing and cursor on alice's page"
+      "criterion": "Review item 3: closing an issue keeps the edits its rooms took while it was open; finding 1 still holds",
+      "surface": "docs package against Postgres: two Services with room sync on their listener hubs, a real browser socket (docstest peer) on A, the issue closed through B by SQL and B's trigger handler",
+      "command": "cd packages/envoy && go test -count=3 -run 'TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter|TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification' -v ./internal/dispatch/docs/",
+      "observed": "both pass 3 of 3: A's persistence held 3 s, alice types, the issue closes through B, her socket ends with the keystroke unstored, then the keystroke is stored and she reconnects read-only seeing it; a keystroke taken closeMargin + 30 s after the close is refused and not stored, the room closed rather than failed",
+      "headSha": "0feef4966704",
+      "negativeControl": "at the review head (before the fix) the first test fails 4 of 4: 'the keystroke alice typed while the issue was open was dropped by its close: the store holds \"before\\n\"'"
     },
     {
-      "criterion": "Stored history is never torn (D3.8)",
-      "surface": "docs package against Postgres: peers on two Services and agent live writes interleaved on one document, the stored history loaded after every commit",
-      "command": "cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=<url> go test -race -count=1 -timeout 30m -run TestStoredHistoryIsNeverTorn ./internal/dispatch/docs",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 157.740s (200 rounds, PendingStats zero after every commit)",
-      "headSha": "7d6dedc0ebe3",
-      "negativeControl": "With the store-ahead step disabled (temporary if true ||): FAIL round 0: 'the stored history through version 3 holds 1 item(s) and 2 delete range(s) waiting for updates it does not hold: a state the document never held'"
+      "criterion": "Review item 4: a document's conditional-edit admissions hold at most one shared connection while they wait on the queue lock",
+      "surface": "docs package against Postgres: a Service on its own pool, another connection holding the document's queue advisory lock, 20 concurrent AcquireConditionalEdit calls",
+      "command": "cd packages/envoy && go test -count=1 -run 'Conditional' -v ./internal/dispatch/docs/ && go test -count=2 -run TestConditionalEditFloodDoesNotStarveSmallPool ./internal/dispatch/api/",
+      "observed": "1 waiter on the lock and Pool.Stat().AcquiredConns() == 1; a cancelled admission returns context.Canceled; all 20 complete after the lock is released; the api flood test on a pool of 2 passes twice",
+      "headSha": "b34ba080d230",
+      "negativeControl": "with mutation.go reverted and the test kept: '20 of the service's connections wait on the document's queue lock, want 1'"
+    },
+    {
+      "criterion": "Browser suite against two server processes: two readers see each other's edits, cursors and presence within one second, no reconnect",
+      "surface": "Chromium on the two-process harness of #2323, on a throwaway merge of this branch (ef1efb43) with that branch (a0f877c5)",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e_after?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess (runs at https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)",
+      "observed": "1 passed twice. Not re-run this round: this round's code changes touch the close gate, the edit queue, test hooks and docs, none of which the spec drives; the tester re-ran it at 9952be5a with --repeat-each=3 (3 passed).",
+      "headSha": "ef1efb435dfe",
+      "negativeControl": "on a0f877c5 (harness without the fix) the spec fails after setup: alice's socket reads open:false, and neither page shows the other's typing or cursor within 1 s"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs: room_sync.go (replaces stale_room.go), room_query.go, awareness_relay.go, testhooks_rooms.go (new); pending_authors.go, persistence.go, websocket.go, service.go, livewrite.go, lostedit.go, mutation.go, rebuild.go, resume.go, ask_authors.go, ask_blocks.go, ledger.go, roomstate.go, room_server.go, tree.go, marks.go and their tests",
-    "packages/envoy/internal/pglisten: hub.go (new), listener.go (dead wake hook removed)",
-    "packages/envoy/internal/dispatch/store: pool.go (Dedicated, leasePoolSize 11), migrations 0135_issue_open_notify, 0136_doc_ask_block_authors, 0137_doc_conditional_edit_queue",
-    "packages/envoy/internal/dispatch/api: document_test_hooks.go (new), routes_table.go, issue_patch.go, tests",
-    "packages/envoy/cmd/dispatch: main.go (one listener hub, leased resumption), multiprocess_test.go (seven new tests), shutdown_test.go",
-    "packages/dispatch/e2e/coedit.multiprocess.e2e.ts",
-    "docs: packages/envoy/cmd/dispatch/README.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/CHANGELOG.md"
+    "merge of main aeeee6c0: packages/envoy/CHANGELOG.md taken from main; store/pool.go permanentListeners 4; infra/gcp/dispatch.go dispatchConnectionsPerPod 85",
+    "docs/pending_authors.go, persistence.go, websocket.go, roomstate.go, service.go, issue_open_test.go: closeMargin rule for closed-issue browser appends (gate takes the observed time)",
+    "docs/mutation.go, conditional_edit_queue_test.go: per-document in-memory admit lock before Pool.Begin; gate.write taken before the member and sum queries",
+    "docs/testhooks_rooms.go, room_server.go, service.go, resume.go, testhooks_rooms_test.go, api/document_test_hooks.go, api/routes_table.go, cmd/dispatch/multiprocess_test.go: room_closes and settlement_resumptions counters replace log-text checks",
+    "packages/envoy/.changes/unreleased/pr2414-*.yaml (ten fragments); README, AGENTS.md, cmd/dispatch/AGENTS.md, running-dispatch.md corrected; Dispatch keys removed from added lines in code, tests and migrations"
   ],
   "trickyParts": [
-    "Lock order: document advisory lock (only when the caller already holds it) -> instance catch-up mutex -> state.mu; the follower takes the advisory lock only to confirm a replaced-history verdict, never while holding the catch-up mutex.",
-    "A live write stores the room's not-yet-stored updates in its own transaction ahead of its row (storeRoomUpdatesAhead), so the stored history is never a state the document did not hold; storedAt compares bytes because a rolled-back version number can be reused.",
-    "A browser append refused because the history was replaced fails the room (reload), not only a catch-up request: a catch-up request lost the edit wherever no room-sync lane runs (regression seed 1793084442294211495 added to twoProcessRegressionSeeds).",
-    "A cold agent write loads no room (finding 11); Shutdown may load a room only for a document whose settle timer was armed when it scanned, so a SIGTERM inside the settle delay still settles it."
+    "closeMargin compares two durations on two clocks (the issue's close age from now() - closed_at, the update's age from the process's monotonic clock), so no clock sync is needed.",
+    "The admission fix exposed a lock-order deadlock: a release held gate.write and waited on the queue row an admission had deleted; gate.write now comes right after the advisory lock."
   ],
   "deviations": [
-    "Plan D2 named a room-sync listener of its own; on the INFRA-63 architect's rule (one listener connection per process) it is a shared pglisten.Hub (Handle/Wake/OnConnected/OnDisconnected/Run, agreed with INFRA-605 and INFRA-607); membership is its connection's application_name 'dispatch-listener <uuid>'.",
-    "A new notification channel dispatch_doc_head {r,v,p} is sent beside the bare-id dispatch_doc_changed (agreed with INFRA-605); the gate has the agreed shape queueAppendGate/gateAppend(room, through, appendKind).",
-    "Awareness queries ride dispatch_doc_awareness ({s,r,q:true}), not dispatch_doc_query, because nobody waits on their answers.",
-    "Migrations are 0135-0137 after the merge with main (main took 0121-0134); INFRA-559's branch also takes 0135-0136, and whichever merges second renumbers, and sets leasePoolSize 12 (both lease a new loop).",
-    "doc_ask_block_authors keys on block_id_key(block_id) (main's 0127 key), since main allows ask block ids past the index bound.",
-    "The browser spec skips unless DISPATCH_E2E_PROCESSES=2 because the harness (#2323) is not on main; its proof ran on a throwaway merge with legion/INFRA-559 (architect agreed 2026-10-27T15:49Z).",
-    "TestConditionalEditAdmissionBoundsQueuedRequests waits roomWait(t) for its 31 queued admissions, since each admission is now a short transaction (it flaked at 1 s)."
+    "The gate signature gained an observed time.Time parameter; #2445's implementer accepted it (Envoy, 2026-10-28T11:27Z).",
+    "The PR body keeps the 'Dispatch: INFRA-556' line the worker skill requires for the daemon's link; every other key is gone from the body."
   ],
   "openQuestions": [
-    "The dispatch-browser-multiprocess CI run of the spec exists only once #2323 is on main; whichever of #2323 and #2414 merges second makes it run and quotes it (INFRA-63 architect)."
+    "The browser spec's run in dispatch-browser-multiprocess waits on #2323 reaching main; whichever of #2323 and #2414 merges second renumbers migrations, sets leasePoolSize 12 and dispatchConnectionsPerPod to match, and quotes that run."
   ]
 }
