@@ -1653,6 +1653,8 @@ export interface ReferenceMember {
   readonly via: ReferenceVia;
 }
 
+// IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
+// each member's `artifact.versions` holds only its latest version.
 export interface IssueReferences {
   readonly members: ReferenceMember[];
   readonly truncated: boolean;
