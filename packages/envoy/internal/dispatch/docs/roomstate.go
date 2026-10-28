@@ -780,8 +780,10 @@ func (s *Service) releaseRoom(room string) {
 
 // roomLoaded counts a load of room among the resident rooms (residentRooms) and among the room
 // cap's places, where it takes the place a socket reserved for the room, if one did, rather than
-// a second one.
+// a second one, and holds room's head-tracker entry (headTracker.hold) for the room's evictor
+// decisions (staleRoomEvictor.roomHolds).
 func (s *Service) roomLoaded(room string) {
+	s.heads.hold(room)
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	slot := s.roomSlots.rooms[room]
@@ -790,9 +792,10 @@ func (s *Service) roomLoaded(room string) {
 	s.residentRooms.Add(1)
 }
 
-// roomUnloaded takes back what roomLoaded counted for a load of room. The room keeps its place
-// while a socket still holds a reservation on it.
+// roomUnloaded takes back what roomLoaded counted for a load of room, and its hold on room's
+// head-tracker entry. The room keeps its place while a socket still holds a reservation on it.
 func (s *Service) roomUnloaded(room string) {
+	s.heads.release(room)
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	slot := s.roomSlots.rooms[room]

@@ -299,10 +299,9 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 // its sender, so processes that heard the same ping or notice do not ping together: the first
 // holder whose window ends pings, and its ping resets every other window. A deployment therefore
 // sends about one ping a second - one per headPingAfter plus the least of its holders' jitters -
-// while some process holds a room, a cached read, a preload or a tracker entry and no document
-// write is announced, and none otherwise. While any process holds something, the longest gap
-// between deliveries is a holder's window, under two seconds, plus the ping's own delivery: inside
-// headTrustWindow.
+// while some process holds a room, a cached read or a preload and no document write is announced,
+// and none otherwise. While any process holds something, the longest gap between deliveries is a
+// holder's window, under two seconds, plus the ping's own delivery: inside headTrustWindow.
 //
 // The ping goes through a connection of the shared pool, never the LISTEN connection, which would
 // prove only itself, and waits for it at most headPingAfter: a pool too busy to lend a connection
@@ -349,12 +348,14 @@ func (e *staleRoomEvictor) ping(ctx context.Context) {
 }
 
 // holdsWhatTheTrackerProtects is whether this process holds anything the head tracker's trust
-// answers without the database: a resident room, a cold read's cached rendering, a cold socket's
-// preload, or a tracker entry, which a read's token or a heard notice made. Each is a counter or a
-// map's length under its lock, and the preloads a sync.Map whose first entry ends the look, so the
-// ping asks it every window without walking the rooms or reading the store.
+// answers without the database: a resident room, a cold read's cached rendering, or a cold
+// socket's preload. Tracker entries are not counted: beside those holders the tracker keeps one
+// only for a cold read in flight, which ends as a cached rendering or as nothing, and for a write
+// of this process, during which nothing about the document is trusted (headTracker). Each is a
+// counter or a map's length under its lock, and the preloads a sync.Map whose first entry ends the
+// look, so the ping asks it every window without walking the rooms or reading the store.
 func (s *Service) holdsWhatTheTrackerProtects() bool {
-	if s.residentRooms.Load() > 0 || s.reads.figures().Entries > 0 || s.heads.figures().Entries > 0 {
+	if s.residentRooms.Load() > 0 || s.reads.figures().Entries > 0 {
 		return true
 	}
 	held := false

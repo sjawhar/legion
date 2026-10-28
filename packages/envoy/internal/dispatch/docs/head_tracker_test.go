@@ -565,11 +565,11 @@ func TestHearingAnotherProcesssWriteAloneStartsNoPing(t *testing.T) {
 	if _, err := listen.Exec(ctx, "listen "+documentPingChannel); err != nil {
 		t.Fatalf("listen on %s: %v", documentPingChannel, err)
 	}
-	runProbedEvictor(t, listener, nil)
+	probe := runProbedEvictor(t, listener, nil)
 	seedServiceText(t, writer, artifactID, "Write 0.\n")
-	waitFor(t, roomWait(t), "the listening service's tracker to hear the other service's write", func() bool {
-		return listener.RoomFigures().HeadTracker.Entries > 0
-	})
+	// The listening service holds nothing, so its tracker keeps no entry for the write it hears;
+	// the evictor deciding a notification sent after the write proves the write's notice arrived.
+	probe.awaitDecided(t, database)
 
 	window := headTrustWindow + 2*headPingAfter
 	deadline := time.Now().Add(window)
@@ -788,6 +788,7 @@ func TestTheHeadTrackerStopsTrustingAListenConnectionThatHasDeliveredNothingForT
 	tracker.now = func() time.Time { return clock }
 	tracker.connected()
 	tracker.delivered()
+	tracker.hold(room)
 	tracker.observe(room, head)
 	trusts := func(when string, want bool) {
 		t.Helper()
@@ -823,4 +824,196 @@ func TestTheHeadTrackerStopsTrustingAListenConnectionThatHasDeliveredNothingForT
 	}
 	clock = clock.Add(headTrustWindow)
 	trusts("the trust window after that delivery", false)
+}
+
+// The head tracker keeps an entry only for a document this process holds or writes: a notice of
+// any other document makes none, an entry goes with its last holder, and a token taken under an
+// entry that has gone never matches again, not even once a new holder makes the entry anew. A
+// write of this process keeps its document's entry, and keeps it untrusted, until the tracker sees
+// the write's end, or, for a write whose end it cannot see, until the document's next notice. No
+// database: the tracker's clock is the test's.
+func TestATrackerEntryGoesWithItsLastHolderAndItsTokensNeverMatchAgain(t *testing.T) {
+	const room, written, unseen = "room", "written", "unseen"
+	clock := time.Unix(1_000_000, 0)
+	tracker := newHeadTracker()
+	tracker.now = func() time.Time { return clock }
+	tracker.connected()
+	entries := func(when string, want int) {
+		t.Helper()
+		if got := tracker.figures().Entries; got != want {
+			t.Errorf("%s: %d tracker entries, want %d", when, got, want)
+		}
+	}
+
+	tracker.observe("unheld", 3)
+	tracker.invalidate("unheld")
+	entries("after a notice and a bare id of a document nothing here holds", 0)
+	if token := tracker.token("unheld"); token.trusted {
+		t.Error("a token of a document with no entry is trusted")
+	}
+	if _, trusted := tracker.head("unheld"); trusted {
+		t.Error("the head of a document with no entry is trusted, want the store read")
+	}
+
+	tracker.hold(room) // a cached read, say
+	tracker.hold(room) // and a cold read in flight
+	tracker.observe(room, 4)
+	token := tracker.token(room)
+	if !token.trusted || !tracker.unchanged(room, token) {
+		t.Fatalf("a token of a held document is not unchanged with nothing written (%+v)", token)
+	}
+	if head, trusted := tracker.head(room); !trusted || head != 4 {
+		t.Errorf("head of a held document = %d, %v, want 4, true", head, trusted)
+	}
+	tracker.release(room)
+	entries("with one of two holders gone", 1)
+	if !tracker.unchanged(room, token) {
+		t.Error("a token is not unchanged while its document is still held and nothing wrote it")
+	}
+	tracker.release(room)
+	entries("with the last holder gone", 0)
+	if tracker.unchanged(room, token) {
+		t.Error("a token taken under an entry that has gone is unchanged")
+	}
+	if _, trusted := tracker.head(room); trusted {
+		t.Error("the head of a document whose entry has gone is trusted")
+	}
+	tracker.release(room)
+	entries("after a release with no hold to end", 0)
+
+	tracker.observe(room, 5)
+	tracker.hold(room)
+	if tracker.unchanged(room, token) {
+		t.Error("a token taken under an entry that has gone is unchanged once a new holder makes the entry anew")
+	}
+	if _, trusted := tracker.head(room); trusted {
+		t.Error("an entry made anew trusts a head it heard before it was made")
+	}
+	if fresh := tracker.token(room); !tracker.unchanged(room, fresh) {
+		t.Error("a token taken under the entry made anew is not unchanged with nothing written since")
+	}
+	tracker.release(room)
+	entries("with the new holder gone", 0)
+
+	write := tracker.beginOwnWrite(written)
+	entries("with a write of this process in flight to a document nothing holds", 1)
+	tracker.hold(written)
+	if overlapping := tracker.token(written); overlapping.trusted {
+		t.Error("a token taken while a write of this process is in flight is trusted")
+	}
+	tracker.release(written)
+	entries("with the write still in flight and its reader gone", 1)
+	if _, trusted := tracker.head(written); trusted {
+		t.Error("the head of a document with a write of this process in flight is trusted")
+	}
+	write.end(true, 9)
+	entries("once the write has ended with nothing holding the document", 0)
+
+	untracked := tracker.beginOwnWrite(unseen)
+	untracked.untrack()
+	tracker.hold(unseen)
+	if token := tracker.token(unseen); token.trusted {
+		t.Error("a token taken after a write whose end the tracker cannot see, before its notice, is trusted")
+	}
+	tracker.release(unseen)
+	entries("with a write whose end the tracker cannot see, before its notice", 1)
+	tracker.observe(unseen, 2)
+	entries("once that write's notice has been heard", 0)
+}
+
+// foldGateStore holds a cold read's fold back after it has loaded the stored state and before the
+// rendering is cached, once gate is set, and counts the stamp reads cold reads make.
+type foldGateStore struct {
+	VersionedStore
+	gate    atomic.Bool
+	folded  chan struct{}
+	release chan struct{}
+	stamps  atomic.Int64
+}
+
+func (s *foldGateStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	loaded, err := s.VersionedStore.LoadDocument(ctx, room)
+	if s.gate.CompareAndSwap(true, false) {
+		s.folded <- struct{}{}
+		<-s.release
+	}
+	return loaded, err
+}
+
+func (s *foldGateStore) DocumentStamp(ctx context.Context, room string) (DocumentStamp, error) {
+	s.stamps.Add(1)
+	return s.VersionedStore.DocumentStamp(ctx, room)
+}
+
+// A notice heard while a cold read folds - after the read took its token and loaded the store,
+// before it cached the rendering - leaves that rendering to be checked against the store on the
+// next read: the read's own hold kept the document's entry, so the notice moved the generation
+// on. The next read reads the stamp and returns the other process's write, and the read after it
+// is served from the cache again with no stamp read.
+func TestANoticeDuringAColdReadsFoldMakesTheNextReadCheckTheStore(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	writer, _ := newTestServiceInstance(t, database)
+	seedServiceText(t, writer, artifactID, "Write 0.\n")
+	readerStore := storetest.SecondProcess(t, database)
+	persistence := &foldGateStore{
+		VersionedStore: NewPgVersioned(readerStore),
+		folded:         make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	reader := newReadCacheService(t, readerStore, persistence)
+	probe := runProbedEvictor(t, reader, nil)
+	probe.awaitDecided(t, database)
+
+	persistence.gate.Store(true)
+	type reading struct {
+		text string
+		err  error
+	}
+	first := make(chan reading, 1)
+	go func() {
+		text, err := reader.Text(ctx, artifactID)
+		first <- reading{text, err}
+	}()
+	select {
+	case <-persistence.folded:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the cold read never reached its fold")
+	}
+	if entries := reader.RoomFigures().HeadTracker.Entries; entries != 1 {
+		t.Errorf("%d tracker entries while the cold read folds, want 1: the read holds its document", entries)
+	}
+	if _, err := joinedApplyOps(writer, artifactID, []model.EditOp{
+		{Op: "replace", Find: "Write 0.", With: "Write 1."},
+	}, model.Actor{Kind: "session", ID: "agent"}, nil); err != nil {
+		t.Fatalf("write on the other service: %v", err)
+	}
+	probe.awaitDecided(t, database)
+	close(persistence.release)
+	if got := <-first; got.err != nil || got.text != "Write 0.\n" {
+		t.Fatalf("the cold read held in its fold = %q (%v), want the text it loaded before the write", got.text, got.err)
+	}
+	cached := cacheEntry(t, reader, artifactID)
+	if cached == nil {
+		t.Fatal("the cold read cached nothing, so nothing here is tested")
+	}
+	if reader.heads.unchanged(artifactID, cached.heads) {
+		t.Fatal("the rendering cached after a notice heard during its fold is still trusted")
+	}
+
+	stamps := persistence.stamps.Load()
+	if text, err := reader.Text(ctx, artifactID); err != nil || text != "Write 1.\n" {
+		t.Fatalf("the read after the fold = %q (%v), want the other service's write", text, err)
+	}
+	if read := persistence.stamps.Load() - stamps; read != 1 {
+		t.Errorf("the read after the fold read the stamp %d times, want once", read)
+	}
+	stamps = persistence.stamps.Load()
+	if text, err := reader.Text(ctx, artifactID); err != nil || text != "Write 1.\n" {
+		t.Fatalf("the read after that = %q (%v), want the other service's write", text, err)
+	}
+	if read := persistence.stamps.Load() - stamps; read != 0 {
+		t.Errorf("the read after the store was checked read the stamp %d times, want none: the cache is trusted again", read)
+	}
 }

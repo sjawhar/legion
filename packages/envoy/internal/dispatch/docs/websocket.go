@@ -193,12 +193,14 @@ type preloadedDocument struct {
 // keeps both the head and the state. The head is the head tracker's when it trusts itself
 // (headTracker.head), which costs no read, and otherwise read from the store. A stale or absent
 // preload is no answer, and the caller loads the room itself. Either way the entry gives up the
-// state it held: the socket that offered it holds the entry until it ends (offerPreload).
+// state it held: the socket that offered it holds the entry until it ends (offerPreload). The
+// preload's hold on room's head-tracker entry ends once the head is read.
 func (s *Service) takePreload(room string) (persistence.LoadResult, *pmdoc.Node, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
 		return persistence.LoadResult{}, nil, false
 	}
+	defer s.heads.release(room)
 	preload := value.(*preloadedDocument)
 	loaded, tree := preload.loaded, preload.tree
 	preload.loaded, preload.tree = persistence.LoadResult{}, nil
@@ -369,17 +371,26 @@ func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func
 // (LoadOrStore): every offer is of a state the load checks against the head before it takes it,
 // and a socket whose offer lost keeps no reference to it, so its whole history is released at
 // once rather than when the socket ends, which can be hours later. It returns what the socket's
-// end runs: withdraw its own offer if no load took it.
+// end runs: withdraw its own offer if no load took it. An offer that stands holds room's
+// head-tracker entry (headTracker.hold) from before it is stored until a load takes it or the
+// socket withdraws it, so the head the load checks it against is one the tracker heard of while
+// the offer stood, or else one read from the store.
 func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, tree *pmdoc.Node) (withdraw func()) {
 	preload := &preloadedDocument{loaded: *loaded, tree: tree}
+	s.heads.hold(room)
 	_, lost := s.preloads.LoadOrStore(room, preload)
 	if s.afterSocketPreload != nil {
 		s.afterSocketPreload(room, loaded)
 	}
 	if lost {
+		s.heads.release(room)
 		return func() {}
 	}
-	return func() { s.preloads.CompareAndDelete(room, preload) }
+	return func() {
+		if s.preloads.CompareAndDelete(room, preload) {
+			s.heads.release(room)
+		}
+	}
 }
 
 // authorize is ygo's authorization of a document socket ServeHTTP admitted. It registers the
