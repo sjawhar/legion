@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 )
 
@@ -113,4 +114,65 @@ func publishedToSession(t *testing.T, deps Deps, issueKey, commentID, sessionID 
 		t.Fatalf("read destinations: %v", err)
 	}
 	return false
+}
+
+// A process stopped (or killed) with a comment's mention send queued leaves its attempt pending
+// with no claim. Once it has waited a lease, the outbox counts it abandoned and publishes the route
+// copy it had held back, and the next process's stranded pass may also send it. The two must be
+// exclusive for one (comment, session): here the outbox acts first, and the session still ends up
+// with exactly one copy, whichever of the two delivers it.
+func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth(t *testing.T) {
+	listener, state := newMentionListener(t)
+	stopping, stop := context.WithCancel(t.Context())
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
+	issue := createInteractionIssue(t, handler, "TEST", "A stopped process's mention", "before")
+	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"route": "session:s1",
+	}, "alice"); patched.Code != http.StatusOK {
+		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+
+	// The process is stopping: the comment commits and its send never starts.
+	stop()
+	stranded := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Accepted while stopping.", "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	if !unclaimedPending(t, database, stranded.ID, "session:s1") {
+		t.Fatal("the attempt of a comment accepted while the process stopped was taken")
+	}
+	ageAttempts(t, database, stranded.ID)
+
+	// The outbox reaches the comment first.
+	routeCopy := publishedToSession(t, deps, issue.Key, stranded.ID, "s1")
+
+	// Then the next process's stranded pass runs.
+	passes := make(chan struct{}, 1)
+	lifetime, end := context.WithCancel(t.Context())
+	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
+	next.start()
+	awaitPasses(t, passes, 3)
+	waitForCommentDeliveries(t, database, stranded.ID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
+		for _, attempt := range attempts {
+			if attempt.State == "pending" {
+				return false
+			}
+		}
+		return true
+	})
+	end()
+	next.wait()
+
+	copies := 0
+	if routeCopy {
+		copies++
+	}
+	for _, send := range state.sent() {
+		if send.session == "s1" {
+			copies++
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("s1 received %d copies of the comment (route copy published: %v, mention sends: %#v), want exactly 1",
+			copies, routeCopy, state.sent())
+	}
 }
