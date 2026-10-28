@@ -156,9 +156,12 @@ func escaped(char rune) string {
 	}
 }
 
-// textEscape is how the text writer spells an escaped character: a tilde as its numeric
-// reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
-// a backslash escapes it, and anything else as escaped spells it.
+// textEscape is how the text writer spells an escaped character: a tilde as its numeric reference,
+// and anything else as escaped spells it. Both delimiter rules read a `~` run after the reference
+// as they read one after any punctuation, where a run right after `\~` may open or close by the
+// browser editor's rules and is text by goldmark's, and the writer takes first a spelling both read
+// back (inlineWithEscapes). The writer has also always written the reference, and writing anything
+// else would change the bytes of every stored document that holds an escaped tilde.
 func textEscape(char rune) string {
 	if char == '~' {
 		return numericEntity(char)
@@ -799,9 +802,18 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // each line feed written as a character reference, which both parsers read back as the
 // character. That is kept only if it reads back, so an alt that fails for another
 // reason keeps the bytes it had, as inlineWithEscapes does.
+//
+// It reads back where Parse reads it so (altReadsBack), and it is kept first where storedMarkdown
+// reads it so as well: the written alt if it reads back under both, else the escaped one if that
+// does, else the written alt if it reads back under Parse, else the escaped one if that does, else
+// the written alt. Main wrote the written alt if it read back under its Parse, which read by
+// storedRules, else the escaped one if that did, else the written alt; each of those steps is a
+// step here with Parse added to what an alt must read back under, so wherever the alt main wrote
+// reads back under Parse it is written here too, as inlineWithEscapes argues for a run.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
-	if altReadsBack(written, alt, context) {
+	writtenReads, writtenStored := altReadsBack(written, alt, context)
+	if writtenStored {
 		return written
 	}
 	var out strings.Builder
@@ -816,26 +828,33 @@ func imageAlt(alt string, context inlineContext) string {
 			out.WriteByte(alt[index])
 		}
 	}
-	if fallback := escapeTablePipes(out.String(), context.tableCell); altReadsBack(fallback, alt, context) {
+	fallback := escapeTablePipes(out.String(), context.tableCell)
+	fallbackReads, fallbackStored := altReadsBack(fallback, alt, context)
+	switch {
+	case fallbackStored:
+		return fallback
+	case writtenReads:
+		return written
+	case fallbackReads:
 		return fallback
 	}
 	return written
 }
 
-// altReadsBack reports whether an image label written as written reads back as the alt text alt,
-// read in the block it is written in: a table cell, where the cell takes its escaped pipes first
-// and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
-// line of the label can open a block. In a table cell a label holding a `|` after an even run of
-// backslashes does not: Parse reads that pipe as escaped, while the browser editor's parser, which
-// pairs backslashes before a pipe, ends the cell there.
-func altReadsBack(written, alt string, context inlineContext) bool {
+// altReadsBack reports whether an image label written as written reads back as the alt text alt
+// under Parse (reads), and if so whether it also does under storedMarkdown (stored). Parse reads it
+// in the block it is written in: a table cell, where the cell takes its escaped pipes first and a
+// line ending ends the row; a heading, which a line ending ends; or a paragraph, where a line of
+// the label can open a block. storedMarkdown reads the image alone, as inline markdown: once Parse
+// reads the block as one holding only the image, the block is the same block under storedRules,
+// which change only how delimiter runs pair, and the cell's pipes come out as inline markdown
+// reads their escapes. `![\~b\~\~](u)`, written while Dispatch read by storedRules, stays as it
+// was, where `![~b~~](u)` reads back only under Parse.
+func altReadsBack(written, alt string, context inlineContext) (reads, stored bool) {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
 	case context.tableCell:
-		if pipeAfterEvenBackslashes(written) {
-			return false
-		}
 		markdown = "| h |\n| - |\n| " + image + " |\n"
 	case context.heading:
 		markdown = "# " + image + "\n"
@@ -844,32 +863,29 @@ func altReadsBack(written, alt string, context inlineContext) bool {
 	}
 	doc, err := Parse(markdown)
 	if err != nil || len(doc.Children) != 1 {
-		return false
+		return false, false
 	}
 	block := doc.Children[0]
 	if context.tableCell {
 		if block.Type != "table" || len(block.Children) != 2 {
-			return false
+			return false, false
 		}
 		block = block.Children[1].Children[0].Children[0]
 	}
-	nodes := block.Children
+	if !isAlt(block.Children, alt) {
+		return false, false
+	}
+	nodes, err := readInline(image, storedMarkdown.run, nil)
+	return true, err == nil && isAlt(nodes, alt)
+}
+
+// isAlt reports whether nodes are only an image whose alt text is alt.
+func isAlt(nodes []*Node, alt string) bool {
 	if len(nodes) != 1 || nodes[0].Type != "image" {
 		return false
 	}
 	got, _ := nodes[0].Attrs["alt"].(string)
 	return got == alt
-}
-
-// pipeAfterEvenBackslashes reports whether value holds a `|` the browser editor's parser ends a
-// table cell at (escapedByBackslashes).
-func pipeAfterEvenBackslashes(value string) bool {
-	for index := range len(value) {
-		if value[index] == '|' && !escapedByBackslashes(value, index) {
-			return true
-		}
-	}
-	return false
 }
 
 // escapedByBackslashes reports whether the character at index stands after an odd run of

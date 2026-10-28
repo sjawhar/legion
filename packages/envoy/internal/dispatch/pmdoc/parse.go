@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"html"
 	"reflect"
 	"regexp"
 	"slices"
@@ -19,21 +18,23 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-// markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
+// markdownReader is a goldmark configuration Dispatch reads markdown with. Its only way in is
+// parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
 // ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
 // (emptyItemGuard).
 type markdownReader struct {
 	md goldmark.Markdown
 }
 
+// blockReader is the configuration every document is read with, its delimiter runs read by
+// editorRules.
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
 		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
+		parser.WithInlineParsers(inlineParsers(editorRules)...),
 		parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
 	)),
-	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, strikethrough{}, taskList{}, footnotes{}),
+	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
@@ -246,17 +247,16 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
 // list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
-// delimiter runs read by emphasis.
-func inlineParserOptions(emphasis emphasisParser) []parser.Option {
+// delimiter runs read by rules, `~` runs among them (tildeParser).
+func inlineParserOptions(rules delimiterRules) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000),
 		),
-		parser.WithInlineParsers(inlineParsers(emphasis)...),
+		parser.WithInlineParsers(inlineParsers(rules)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(newStrikethroughGuard(), 500),
 		),
 		parser.WithInlineParsers(linkifyParsers()...),
 	}
@@ -269,16 +269,18 @@ type inlineReader struct {
 	run, withDefinitions parser.Parser
 }
 
-func newInlineReader(emphasis emphasisParser) inlineReader {
+func newInlineReader(rules delimiterRules) inlineReader {
 	return inlineReader{
-		run:             parser.NewParser(inlineParserOptions(emphasis)...),
-		withDefinitions: parser.NewParser(append(inlineParserOptions(emphasis), footnoteParserOptions()...)...),
+		run:             parser.NewParser(inlineParserOptions(rules)...),
+		withDefinitions: parser.NewParser(append(inlineParserOptions(rules), footnoteParserOptions()...)...),
 	}
 }
 
-// inlineMarkdown reads inline markdown as Parse does; flankingOnlyMarkdown reads it with its
-// delimiter runs judged by CommonMark's flanking rules alone (emphasisParser.flankingOnly).
-var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{flankingOnly: true})
+// inlineMarkdown reads inline markdown as Parse does (editorRules). storedMarkdown and
+// flankingMarkdown read it with its delimiter runs read as Parse read them before (storedRules and
+// flankingRules), the rules most stored markdown was written under, which the renderer keeps
+// writing a run's bytes to read back under where it can (inlineWithEscapes, altReadsBack).
+var inlineMarkdown, storedMarkdown, flankingMarkdown = newInlineReader(editorRules), newInlineReader(storedRules), newInlineReader(flankingRules)
 
 // parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
 // does, after a definition for each of labels, the footnote labels it refers to. It is the
@@ -661,7 +663,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string, depth in
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": decodeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes, depth)
 	case *extensionast.Table:
@@ -822,6 +824,10 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	return &Node{Type: nodeType, Children: children}, nil
 }
 
+// parseImage converts image. Its alt text is its label's plain text as the browser editor's parser
+// takes it (mdast-util-to-string): every text in the label, marked or not, and the alt text of an
+// image in it. inlineNesting holds images within maxInlineNesting of one another, so each alt
+// text is copied into at most that many others.
 func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
 	alt, err := parseInline(image, source, nil, footnotes)
 	if err != nil {
@@ -829,12 +835,16 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}
 	var text strings.Builder
 	for _, child := range alt {
-		if child.Type == "text" {
+		switch child.Type {
+		case "text":
 			text.WriteString(child.Text)
+		case "image":
+			nested, _ := child.Attrs["alt"].(string)
+			text.WriteString(nested)
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
-		"src":   unescapeMarkdownText(image.Destination),
+		"src":   decodeMarkdownText(image.Destination),
 		"alt":   text.String(),
 		"title": titleOrNil(image.Title),
 	}}, nil
@@ -884,21 +894,23 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
 		switch current := child.(type) {
 		case *ast.Text:
-			value := parseTextValue(current.Value(source), active)
+			// Goldmark's text stops before its line's ending, so only what the break trims is taken
+			// off, and off the text as written: a reference to a line feed or a space before the
+			// break is text to both parsers.
+			raw := current.Value(source)
 			hard, soft := current.HardLineBreak(), current.SoftLineBreak()
 			if hard || soft {
 				if _, run, backslash := lineSuffix(current, source); backslash {
-					value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
+					raw = bytes.TrimSuffix(raw, []byte("  "))
 				} else {
 					// The browser editor's parser reads the spaces and tabs a line ends with, which
 					// trimLineSuffixes took off, as a hard break only where they are two spaces
 					// or more and no tab; goldmark breaks hard at any two spaces ending the line.
-					value = strings.TrimSuffix(value, "\n")
 					hard = len(run) >= 2 && !strings.Contains(run, "\t")
 					soft = !hard
 				}
 			}
-			children = appendTextPiece(children, value, active)
+			children = appendTextPiece(children, parseTextValue(current, raw, active), active)
 			if hard {
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
@@ -913,7 +925,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				}
 			}
 		case *ast.String:
-			children = appendTextPiece(children, parseTextValue(current.Value, active), active)
+			children = appendTextPiece(children, parseTextValue(current, current.Value, active), active)
 		case *ast.Emphasis:
 			var marks []Mark
 			if current.Level >= 2 {
@@ -938,9 +950,9 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.Link:
-			// A destination's backslash escapes are decoded, as the browser editor's parser decodes
-			// them; its character references are kept as written (escapeLinkDestination).
-			href := string(util.UnescapePunctuations(current.Destination))
+			// A destination's escapes and character references are decoded, as the browser editor's
+			// parser decodes them (escapeLinkDestination writes it back).
+			href := decodeMarkdownText(current.Destination)
 			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
 				return nil, nil, err
@@ -979,8 +991,8 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			// matches a reference to its definition by the label as written. Both labels are
 			// stored decoded and written from that, so one matching only as written, before
 			// decoding (`[^&AUML;]` beside `[^&auml;]: `), would not match once written.
-			decoded := unescapeMarkdownText([]byte(label))
-			if definition := unescapeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
+			decoded := decodeMarkdownText([]byte(label))
+			if definition := decodeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
 				return nil, nil, fmt.Errorf("%w: footnote reference %q matches its definition %q only as written, before their character references are decoded, which the document's markdown cannot keep", ErrSchema, decoded, definition)
 			}
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
@@ -1006,17 +1018,22 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	return joinTexts(children), ended, nil
 }
 
-func unescapeMarkdownText(value []byte) string {
-	return html.UnescapeString(string(util.UnescapePunctuations(value)))
-}
-
-func parseTextValue(value []byte, marks []Mark) string {
+// parseTextValue is the text value of node, under marks, as the browser editor reads it:
+// code as written, and other text decoded (decodeMarkdownText) with each line feed it holds a
+// space, as that editor's import reads every line feed in text (remarkSoftBreakAsSpace in
+// packages/proof-editor/src/dispatch-soft-breaks.ts), a decoded `&#10;` included. An image's alt
+// text keeps its line feeds: that import reads the alt as an attribute, as written.
+func parseTextValue(node ast.Node, value []byte, marks []Mark) string {
 	for _, mark := range marks {
 		if mark.Type == "inlineCode" {
 			return string(value)
 		}
 	}
-	return unescapeMarkdownText(value)
+	decoded := decodeMarkdownText(value)
+	if strings.IndexByte(decoded, '\n') < 0 || insideImage(node) {
+		return decoded
+	}
+	return strings.ReplaceAll(decoded, "\n", " ")
 }
 
 func appendInline(target *[]*Node, nodes []*Node) {
@@ -1094,7 +1111,7 @@ func titleOrNil(title []byte) any {
 	if len(title) == 0 {
 		return nil
 	}
-	return unescapeMarkdownText(title)
+	return decodeMarkdownText(title)
 }
 
 func parseAnchorMark(value string) (Mark, bool) {

@@ -362,17 +362,23 @@ a {
 }
 
 /* A decision block is a card inside prose. Its first/last child would otherwise carry the
-   prose paragraph margins into the card (a 20px gap under a 12px header). */
+   prose paragraph margins into the card (a 20px gap under a 12px header). The repeated attribute
+   selector lifts these rules to (0,5,0): a decision inside a reply drawn in another decision's
+   footer thread is also matched by the footer's `prose-sm` rules below — `[data-dispatch-ask-footer]
+   .dispatch-markdown :is(p, ul, ol, blockquote, pre)` (0,4,1) and `[data-dispatch-ask-footer] li
+   .dispatch-markdown :is(ul, ol)` (0,4,2) — and these must outrank both so the nested card's
+   question and source list sit flush too. They touch only a hole's own first/last child, so a
+   reply's own paragraphs and lists keep the footer's spacing. */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  > [data-proof-block-content]
+  > [data-proof-block-content][data-proof-block-content]
   > :first-child {
   margin-top: 0;
 }
 
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  > [data-proof-block-content]
+  > [data-proof-block-content][data-proof-block-content]
   > :last-child {
   margin-bottom: 0;
 }
@@ -434,6 +440,21 @@ a {
   display: block;
 }
 
+/* A malformed decision shows its source list, the only place its options show. A blank item in
+   that list (`-` alone: an empty item, an empty paragraph, or the editor's trailing break) is no
+   option, so it shows no bullet where nothing is edited: in a body (`.dispatch-markdown`, a reply
+   under a document's decision included) and in a read-only document. In an editable document the
+   blank item is where the caret is, the option a human is typing (Enter after the question, then
+   `- `), so it shows there and the typed text lands in it. The child combinators keep the rule to
+   the decision's own list, never a typed block inside a reply or answer note its card renders. */
+:is(.dispatch-markdown, .dispatch-doc[data-read-only="true"])
+  .proof-typed-block-ask[data-dispatch-ask-malformed="true"]
+  > [data-proof-block-content]
+  > :is(ul, ol)
+  > li:is(:empty, :has(> p:empty), :has(> p > br:only-child)) {
+  display: none;
+}
+
 /* On touch screens the library docks the selection bar at the viewport bottom.
    An expanded margin sheet owns that space, so it suppresses the bar. */
 @media (max-width: 1279px) {
@@ -462,7 +483,8 @@ a {
    `text-xs` metadata line like a resolution reason), so `.dispatch-markdown` overrides
    body/heading/bold/quote/lead/caption text and font size to inherit from the surrounding
    element and caps headings to a bold version of that inherited size; code keeps its own
-   accent color and links keep the app's link blue rather than prose's own near-black default. */
+   accent color and links keep the app's link blue (sky-700, sky-400 in dark) rather than
+   prose's own near-black default. */
 .dispatch-markdown {
   font-size: inherit;
   line-height: inherit;
@@ -482,6 +504,15 @@ a {
   --tw-prose-invert-links: #00bcff; /* sky-400 */
 }
 
+/* `dark:prose-invert` would flip links by setting `--tw-prose-links` to the invert value, but it
+   does so inside a Tailwind cascade layer, and the unlayered rule above always beats a layered
+   one, so without this the links stay sky-700 on a dark card. */
+@media (prefers-color-scheme: dark) {
+  .dispatch-markdown {
+    --tw-prose-links: var(--tw-prose-invert-links);
+  }
+}
+
 .dispatch-markdown :where(h1, h2, h3, h4, h5, h6) {
   font-size: inherit;
   font-weight: 600;
@@ -494,6 +525,88 @@ a {
   color: var(--tw-prose-links);
   font-weight: 500;
   text-decoration: underline;
+}
+
+/* A body's drawn Mermaid diagram (features/refs/mermaid-diagrams.ts). The SVG's inline style reads
+   `--bg:var(--bg-color);--fg:var(--text-color)`, and custom properties inherit into the preview's
+   shadow root, so these give it the values documents use: no fill behind it, and the card's own
+   text colour, which follows dark mode. They sit on the figure, never on `.dispatch-markdown`,
+   which also sits inside documents (the ask block's footer), where the editor's own values rule.
+   The preview scrolls sideways when the diagram is wider than the body. */
+.dispatch-mermaid {
+  --bg-color: transparent;
+  --text-color: currentColor;
+  margin-block: 1em;
+  margin-inline: 0;
+}
+
+.dispatch-mermaid-preview {
+  overflow-x: auto;
+}
+
+.dispatch-mermaid-source > summary {
+  cursor: pointer;
+}
+
+/* A task item in a `MarkdownBody` (`- [x] done`) shows the disabled checkbox
+   `features/refs/task-checkboxes.ts` draws in place of its bullet; a plain item in the same list
+   keeps its bullet. The box is sized in `em` of the surrounding text (`font-size: inherit` undoes
+   the 1rem the compact layouts above give every `input`), centred on the first line of the item,
+   and pulled back by its negative start margin into the space the bullet stood in. With its end
+   margin the item's words then start where a plain item's do: `prose-sm` indents an item's text
+   2em, its `ul`/`ol` padding plus its `li` padding, and the ask footer's rules below keep that
+   sum. No ask-footer twin is needed: the footer's `li` rule sets only margin and padding, and its
+   `ul` list-style-type reaches the item by inheritance, which the item's own `list-style`
+   overrides. The box is read-only, so it takes no pointer events: a click on it lands on the list
+   item beneath, as a click on the item's text does (in a margin thread it selects the card), and
+   never toggles it.
+   The box is drawn here (`appearance: none`) rather than by the browser, which paints a disabled
+   native box pale grey, its tick hard to see on a light card. It stays a native disabled
+   checkbox (role, checked state, no tab stop); only its look changes. An unticked box is an empty
+   outline in a muted mix of the text colour; a ticked one is filled in the app's link blue
+   (`--tw-prose-links`, so it follows the scheme as the links do: sky-700 in light, sky-400 in
+   dark) with the tick cut out of the fill by a mask. The tick is a hole showing the card behind
+   the box, so it contrasts with the fill in either scheme with no colour of its own (the mask's
+   SVG paints only mask alpha). It is a mask, not a pseudo-element, since Firefox draws none on an
+   `input`; `opacity: 1` keeps any engine from dimming the disabled box.
+   Under forced colors (Windows High Contrast) the browser forces the fill to the system
+   background, which would leave a ticked box looking like an unticked one, so there the system
+   draws the box (`appearance: auto`, no mask). */
+.dispatch-markdown li[data-item-type="task"] {
+  list-style: none;
+}
+
+.dispatch-markdown [data-markdown-task-checkbox] {
+  appearance: none;
+  background-color: transparent;
+  block-size: 0.9375em;
+  border: 1px solid color-mix(in srgb, currentColor 55%, transparent);
+  border-radius: 0.1875em;
+  font-size: inherit;
+  inline-size: 0.9375em;
+  margin-block: 0;
+  margin-inline: -1.375em 0.4375em;
+  opacity: 1;
+  pointer-events: none;
+  vertical-align: middle;
+}
+
+.dispatch-markdown [data-markdown-task-checkbox]:checked {
+  background-color: var(--tw-prose-links);
+  border-color: var(--tw-prose-links);
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='tick'%3E%3Crect width='16' height='16' fill='white'/%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/mask%3E%3Crect width='16' height='16' fill='white' mask='url(%23tick)'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+}
+
+@media (forced-colors: active) {
+  .dispatch-markdown [data-markdown-task-checkbox] {
+    appearance: auto;
+  }
+
+  .dispatch-markdown [data-markdown-task-checkbox]:checked {
+    mask: none;
+  }
 }
 
 /* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card

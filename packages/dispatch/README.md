@@ -143,21 +143,22 @@ Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it
 `127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
 every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
 starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
-That script refuses a `dispatch-pg` on any image but its pinned pgvector one, since Dispatch's
-migrations need the `vector` extension, and prints the commands that move the container's data
-volume onto that image, quoted so they paste as they read. The harness ports
-(`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
-`FAKE_BROKER_PORT`) are unset unless you need a fixed one: unset, the OS chooses each, so two
-instances never collide; set, the port is used as given, and an occupied one fails with
-`address already in use`. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a
-psql in flight too.
+That script runs the container from its pinned image, pgvector on PostgreSQL 18, the version
+Dispatch's tests and dev databases run; Dispatch's migrations need its `vector` extension. It
+refuses a `dispatch-pg` on any other image or major and prints the commands that dump its
+databases and restore them into a new container on the pinned image, quoted so they paste as they
+read. The harness ports (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`,
+`FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`) are unset unless you need a fixed one: unset, the OS
+chooses each, so two instances never collide; set, the port is used as given, and an occupied one
+fails with `address already in use`. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C
+ends a psql in flight too.
 
 A spec runs against the instance with the printed command, which sets
 `DISPATCH_E2E_REUSE_SERVERS=1`, the five ports and the same `DATABASE_URL`; each spec empties the
 database and the
 fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
-SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
-container and every database in it.
+SPA, which the server reads from `web/dist` on each request. `docker rm -f -v dispatch-pg` removes
+the container, its anonymous data volume and every database in it.
 
 ## Acceptance drivers
 
@@ -167,27 +168,46 @@ agent sees it, through the HTTP API and the real `dispatch` CLI
 shell's Dispatch URL, token file and Envoy configuration never reach it). It covers a comment
 citing a block and the block's backlinks, a deleted and restored block, a pinned block reference
 that changes and is removed, `GET /api/v1/block-links` between the blocks of two documents, each
-block's changed version, every block `part_of` its document, a link in a list item, and the older
-`GET /api/v1/artifacts/{id}/references` route. Each passing check prints
-`PASS: <section> <what>`; the first failure prints `FAIL: <section> <what>: <observed>` and exits 1.
-Its three inputs:
+block's changed version, every block `part_of` its document, a link in a list item, the six facts
+every node carries (`made_by`, `made_at`, `changed_by`, `changed_at`, `parent`, `parent_version`)
+for an issue, a document, a file, a picture, a block, a removed pinned block, an ask, a comment, a
+message, a session and a component, read by its own reference, as an edge's other end and on the
+`Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. Each
+passing check prints `PASS: <section> <what>`; the first failure prints
+`FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
 
 - `DISPATCH_URL`, the server;
 - `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
   reads itself and never prints;
-- `PROJECT`, an existing project key.
+- `PROJECT`, an existing project key;
+- `COMPONENT_SOURCE`, optional, where the component nodes come from (unset, the script reads no
+  component node and prints one
+  `SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; …` line):
+  - `fixture` seeds the harness's fake GitHub on `FAKE_GITHUB_PORT` (9022 under
+    `bun run dispatch:local`) with a two-component model in `acme/r12-arch` (`web`, part of
+    `platform`), replacing every repository the fake served, adds that repository as an
+    architecture source of `PROJECT`, syncs it, and removes the source on exit, also when a check
+    fails;
+  - `existing` reads the first project whose architecture holds a component with a parent, and
+    writes nothing to it; a server with none is a `FAIL`;
+  - `none` proves `GET /api/v1/settings/architecture-sources` is `[]` and prints
+    `PASS: R12 component: this server has no architecture source, so it holds no component node`;
+    a source present is a `FAIL` naming `COMPONENT_SOURCE=existing`.
 
-It writes one issue in `PROJECT` (its spec, comments and the documents `cites.md`, `decisions.md`,
-`changes.md` and `list.md`) and closes it, also when a check fails. Against
-`bun run dispatch:local`:
+It writes two issues in `PROJECT`: the first holds the spec, comments and the documents `cites.md`,
+`decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an ask the
+script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
+uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
+fails. Against `bun run dispatch:local`:
 
 ```bash
 DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
+  COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 \
   bash packages/dispatch/e2e/acceptance/block-graph.sh
 ```
 
-`e2e/acceptance/block-coverage.sh` takes the same inputs, with `PROJECT` optional (unset, every
-project), and only reads. For every document it can list (each project's documents and each
+`e2e/acceptance/block-coverage.sh` takes the first three inputs, with `PROJECT` optional (unset,
+every project), and only reads. For every document it can list (each project's documents and each
 issue's documents), it counts the document as not indexed when `GET /api/v1/artifacts/{id}/blocks`
 lists blocks while `GET /api/v1/references?to=<document>&kind=part_of` lists none, and prints
 `documents=<n> indexed=<n> not_indexed=<n>`, then each not-indexed document's reference. A document
@@ -212,7 +232,9 @@ wrong sessions (`e2e/preflight.ts`). `e2e:deployed` runs Playwright through `e2e
 with `PLAYWRIGHT_BASE_URL` set starts only the fake Envoy and the plain-HTTP proxy, the latter on a
 port the OS chooses. The fake Envoy makes subscriber, Agents-page, and fixture-hook rows exercise
 the deployed server instead of a real session. Fake GitHub rows still skip because the acceptance
-service does not configure that listener.
+service does not configure that listener. Its Postgres is PostgreSQL 18 on the volume
+`dispatch-acceptance-pg18`; a volume `dispatch-acceptance-pg` left from before holds PostgreSQL 16
+data no longer used, and `docker volume rm <project>_dispatch-acceptance-pg` removes it.
 
 ```bash
 cd packages/envoy/deploy/compose
@@ -237,15 +259,23 @@ docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has six projects. `chromium` and `iphone` run every spec except the two plain-HTTP specs;
-the iPhone project uses Chromium with iPhone 13 viewport, touch, and user-agent emulation. `webkit`
-runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor differs by
-engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
-mishandles text typed over what follows a block's last line break; both also run
-`e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
-`webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts`, and the
-rows of `e2e/phone-conversation.e2e.ts` that check what the Conversation's floating pills cover, in
-WebKit with the iPhone 13 profile, since iOS Safari is the engine those layouts exist for.
+The suite has seven projects. `chromium` runs every spec except the two plain-HTTP specs. `iphone`
+runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or
+its `test.describe`'s title); which tests take the tag is in `packages/dispatch/AGENTS.md`, "Phone
+acceptance". An untagged test drops out of `iphone` with no failure. The iPhone project uses
+Chromium with iPhone 13 viewport, touch, and user-agent emulation. A deployed run
+(`bun run e2e:deployed`) uses the same projects, so its `iphone` project also runs only the
+`@phone` tests. `webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a
+collaborator's cursor differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since
+Firefox's own editing mishandles text typed over what follows a block's last line break; both also
+run `e2e/deep-links.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
+`e2e/keyboard-session-pickers.e2e.ts` and `e2e/offline-edits.e2e.ts`, and `firefox` runs
+`e2e/picture-link-click.e2e.ts` too. `firefox-download-navigation` runs the one row of
+`e2e/shell.e2e.ts` that follows a Download link before a chunk fails. `webkit-iphone` runs the
+phone-layout rows of `e2e/agent-view.e2e.ts`, `e2e/agent-view-settings.e2e.ts` and
+`e2e/delivery-live.e2e.ts`, and the rows of `e2e/phone-conversation.e2e.ts` that check what the
+Conversation's floating pills cover, selected by title, in WebKit with the iPhone 13 profile, since
+iOS Safari is the engine those layouts exist for.
 `chromium-plain-http` runs `e2e/plain-http-origin.e2e.ts` and `e2e/plain-http-proxy.e2e.ts`, with
 the page opened at `http://dispatch-e2e.test:<PLAIN_HTTP_PORT>` (Chromium maps that name to the
 local proxy), a plain-HTTP origin that is not loopback and so not a secure context. The proxy

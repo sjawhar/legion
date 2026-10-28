@@ -2,7 +2,6 @@ package pmdoc
 
 import (
 	"bytes"
-	"html"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -677,7 +676,7 @@ func linkRun(run []ast.Node, source []byte) {
 	pieces := make([]textPiece, len(run))
 	var decoded strings.Builder
 	for index, node := range run {
-		pieces[index] = textPiece{node: node, start: decoded.Len(), value: unescapeMarkdownText(rawValue(node, source))}
+		pieces[index] = textPiece{node: node, start: decoded.Len(), value: decodeMarkdownText(rawValue(node, source))}
 		decoded.WriteString(pieces[index].value)
 		if text, ok := node.(*ast.Text); ok && (text.SoftLineBreak() || text.HardLineBreak()) {
 			decoded.WriteByte('\n')
@@ -1020,75 +1019,32 @@ func (o *pieceOffsets) at(piece textPiece, offset int) (*ast.Text, int, bool) {
 	return text, text.Segment.Start + max(0, int(o.decoded[offset])-text.Segment.Padding), true
 }
 
-// decodedOffsets maps each offset of what unescapeMarkdownText decodes raw to, and its end, to the
-// offset in raw it begins at, or -1 inside what one escape or character reference decodes to:
-// backslash escapes are decoded first, then character references in what they leave, each as
-// html.UnescapeString reads it (referenceLength).
+// decodedOffsets maps each offset of what decodeMarkdownText decodes raw to, and its end, to the
+// offset in raw it begins at, or -1 inside what one escape or character reference decodes to. It
+// reads raw as decodeMarkdownText does, in one pass from the left: a backslash before ASCII
+// punctuation is that character, so an escaped `&` opens no reference, and a character reference
+// (characterReferenceAt) is the characters it names.
 func decodedOffsets(raw []byte) []int32 {
-	unescaped := make([]byte, 0, len(raw))
-	from := make([]int32, 0, len(raw)+1)
+	decoded := make([]int32, 0, len(raw)+1)
 	for at := 0; at < len(raw); at++ {
-		from = append(from, int32(at))
-		if at+1 < len(raw) && raw[at] == '\\' && util.IsPunct(raw[at+1]) {
-			at++
-		}
-		unescaped = append(unescaped, raw[at])
-	}
-	from = append(from, int32(len(raw)))
-	decoded := make([]int32, 0, len(unescaped)+1)
-	for at := 0; at < len(unescaped); {
-		length := 1
-		if unescaped[at] == '&' {
-			length = referenceLength(unescaped[at:])
-			reference := string(unescaped[at : at+length])
-			if character := html.UnescapeString(reference); character != reference {
-				decoded = append(decoded, from[at])
-				for range len(character) - 1 {
+		switch raw[at] {
+		case '\\':
+			if at+1 < len(raw) && util.IsPunct(raw[at+1]) {
+				decoded = append(decoded, int32(at))
+				at++
+				continue
+			}
+		case '&':
+			if length, characters, ok := characterReferenceAt(raw, at); ok {
+				decoded = append(decoded, int32(at))
+				for range len(characters) - 1 {
 					decoded = append(decoded, -1)
 				}
-				at += length
+				at += length - 1
 				continue
 			}
 		}
-		for end := at + length; at < end; at++ {
-			decoded = append(decoded, from[at])
-		}
+		decoded = append(decoded, int32(at))
 	}
-	return append(decoded, from[len(unescaped)])
-}
-
-// referenceLength is how much of value, which opens with `&`, html.UnescapeString reads as one
-// character reference, whether or not it names one: `&#` and decimal digits, or `&#x` and
-// hexadecimal ones, with a `;` after them if there is one, two characters at least after the `&#`;
-// or `&` and letters and digits, with a `;` after them if there is one; or 1 where there is no
-// such reference.
-func referenceLength(value []byte) int {
-	at := 1
-	if len(value) > 1 && value[1] == '#' {
-		if len(value) <= 3 {
-			return 1
-		}
-		at = 2
-		hex := value[at]|0x20 == 'x'
-		if hex {
-			at++
-		}
-		for at < len(value) && (util.IsNumeric(value[at]) || hex && util.IsHexDecimal(value[at])) {
-			at++
-		}
-		if at < len(value) && value[at] == ';' {
-			at++
-		}
-		if at <= 3 {
-			return 1
-		}
-		return at
-	}
-	for at < len(value) && isASCIIAlphaNumeric(value[at]) {
-		at++
-	}
-	if at < len(value) && value[at] == ';' {
-		at++
-	}
-	return at
+	return append(decoded, int32(len(raw)))
 }

@@ -2,10 +2,11 @@ package pmdoc
 
 import (
 	"encoding/json"
-	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -209,6 +210,13 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		{"heading text with a www domain spoiled by underscores", texts("# a\n", "_www.1.2.3.4__;b"), "# \\_www.1.2.3.4__;b\n"},
 		{"paragraph text with a www domain spoiled by a trailing underscore", texts("a\n", "www.a.b_;x"), "www.a.b_;x\n"},
 		{"cell text with a www domain spoiled by an underscore before its last dot", cellText(table, "www.a_.b"), "| h |\n| --- |\n| www.a_.b |\n"},
+		// 12. A `|` in a cell's code after an odd run of backslashes has no spelling in a cell, where
+		// `\\|` ends the cell, so it is written as text after the code: the cell keeps every
+		// character, that one no longer code.
+		{"code holding a backslash before a pipe in a body cell", cells(table, cellChange{row: 1, inline: "`a\\|b`\n"}), "| h |\n| --- |\n| `a\\`\\|`b` |\n"},
+		{"code holding a backslash before a pipe in a header cell", cells(table, cellChange{row: 0, inline: "`a\\|b`\n"}), "| `a\\`\\|`b` |\n| --- |\n| c |\n"},
+		{"bold code holding a backslash before a pipe", cells(table, cellChange{row: 1, inline: "**`a\\|b`**\n"}), "| h |\n| --- |\n| **`a\\`\\|`b`** |\n"},
+		{"a grep alternation's code", cells(table2, cellChange{row: 1, cell: 1, inline: "`grep -n 'one\\|two' notes.txt`\n"}), "| h1 | h2 |\n| --- | --- |\n| c1 | `grep -n 'one\\`\\|`two' notes.txt` |\n"},
 	}
 	rendered := make([]string, len(rows))
 	for index, row := range rows {
@@ -406,8 +414,12 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 		{"`www.e.test_\n", false},
 		// A www address inside a link label that never forms a link (INFRA-534's corpus).
 		{"y [.a www.a.com/x]\\(u) z\n", false},
-		// An explicit link's destination, its backslash escapes decoded (INFRA-531).
+		// An explicit link's destination, its escapes and character references decoded.
 		{"[a](<x\\>y\\\\>) [b](x\\_y) [c](<\\<z>) d\n", false},
+		{"[x](https://x.test/one&amp;amp;two) [y](u&copy;v) [z](u\\&amp;v)\n", false},
+		// A www address in a link label that does not close where the label first seems to.
+		{"[[www.a.com/~x[\\![ *.](u)\n", false},
+		{"[_~www.a.com/~x\\![**www.a.com/~x](u)\n", false},
 		// A name that is a character reference only with its `;` (`&copy`, `&amp`) is text to the
 		// engine, inside an address the transform reads as anywhere else (INFRA-531 testing).
 		{"see http\\://x.test/?a=1&copy=2 b\n", false},
@@ -476,29 +488,315 @@ func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 	}
 }
 
-// readingSummary names each textblock of doc and its inline nodes, with every mark they carry.
-func readingSummary(doc *Node) string {
-	var blocks []string
-	Walk(doc, func(node *Node) bool {
-		if len(node.Children) == 0 || len(node.Children[0].Children) != 0 {
-			return true
+// referenceRows are escapes and character references at the edges of what CommonMark decodes: an
+// escaped `&` and an escaped backslash before a reference, a reference missing its `;`, the most
+// digits a numeric one takes and one past them, code points the parser replaces (NUL, controls,
+// surrogates, noncharacters, past U+10FFFF) beside their neighbours it keeps, a line feed in each
+// spelling, named ones HTML decodes without a `;` (`&notit;`), in other cases or not at all, ones
+// Go's HTML table lacks (`&nGt;`, `&nLt;`), and empty ones.
+var referenceRows = []string{
+	`Plain \&amp; end.`, `x\&#65; y`, `AT&T &copy 2024`, `x &amp y`, `x &#38 y`, `&#00000065;`,
+	`&#x0000041;`, `&#128;`, `&#127;`, `&#xFFFF;`, `&notit;`, `\\&amp;`, `&#0000065;`, `&#x10FFFF;`,
+	`&#x;`, `&#;`, `&;`, `&#1;`, `&#13;`, `&#159;`, `&#160;`, `&#xFDD0;`, `&#x1FFFE;`, `&semi;`,
+	`&Abreve;`, `&AMP;`, `&Amp;`, `&ngE;`, `&foo;`, `&#0;`, `&#xD800;`, `&#x110000;`, `&#9;`,
+	`&#10;`, `&#xA;`, `&NewLine;`, `a&#10;b`, `&nGt;`, `&nLt;`,
+}
+
+// parseAsTheEngine reads each markdown with Parse and with the engine (engineReadings) and reports
+// each that Parse fails on, with the engine's tree, or reads otherwise, with both trees. It returns
+// Go's trees, nil where Go's reading failed or parted from the engine's.
+func parseAsTheEngine(t *testing.T, markdowns []string) []*Node {
+	t.Helper()
+	readings := engineReadings(t, markdowns)
+	trees := make([]*Node, len(markdowns))
+	for index, markdown := range markdowns {
+		doc, err := Parse(markdown)
+		if err != nil {
+			engine, _ := readings[index].JSON()
+			t.Errorf("Parse(%q) = %v; the engine reads %s", markdown, err, engine)
+			continue
 		}
-		var parts []string
-		for _, child := range node.Children {
-			part := fmt.Sprintf("%s %q", child.Type, child.Text)
-			for _, mark := range child.Marks {
-				part += " " + mark.Type
-				if href, ok := mark.Attrs["href"].(string); ok {
-					part += " " + href
-				}
-			}
-			parts = append(parts, part)
+		if readings[index] == nil || !doc.Equal(readings[index]) {
+			got, _ := doc.JSON()
+			engine, _ := readings[index].JSON()
+			t.Errorf("%q:\nGo reads %s\nthe engine reads %s", markdown, got, engine)
+			continue
 		}
-		blocks = append(blocks, node.Type+": "+strings.Join(parts, " | "))
-		return true
-	})
-	if len(blocks) == 0 {
-		return "no text"
+		trees[index] = doc
 	}
-	return strings.Join(blocks, " / ")
+	return trees
+}
+
+// rendersBackInBothParsers renders each tree and reads each rendering back with Parse and with the
+// engine (engineReadings), and reports, under the tree's name, each that does not read back as the
+// tree in either, with the rendering and both trees.
+func rendersBackInBothParsers(t *testing.T, names []string, trees []*Node) {
+	t.Helper()
+	rendered := make([]string, len(trees))
+	for index, doc := range trees {
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", names[index], err)
+		}
+		rendered[index] = markdown
+	}
+	readings := engineReadings(t, rendered)
+	for index, doc := range trees {
+		if back, err := Parse(rendered[index]); err != nil || !back.Equal(doc) {
+			got, _ := back.JSON()
+			want, _ := doc.JSON()
+			t.Errorf("%s: Go reads the rendering %q back as %s (%v), want %s", names[index], rendered[index], got, err, want)
+		}
+		if engine := readings[index]; engine == nil || !engine.Equal(doc) {
+			got, _ := engine.JSON()
+			want, _ := doc.JSON()
+			t.Errorf("%s: the engine reads the rendering %q back as %s, want %s", names[index], rendered[index], got, want)
+		}
+	}
+}
+
+// An agent reads a document as Go reads its markdown, and the user sees it as the browser editor's
+// engine reads it, so where Go decodes an escape or a character reference otherwise the agent
+// quotes and writes back text the user never wrote: Go read `Plain \&amp; end.` as `Plain & end.`
+// where the editor shows `Plain &amp; end.`. Each row is read at every place markdown decodes one
+// - paragraph text, a link's and an image's title, an image's address and alt text, a footnote
+// label and a table cell - and Go must read it as the engine does.
+func TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt(t *testing.T) {
+	sites := []struct {
+		name  string
+		place func(row string) (string, bool)
+	}{
+		{"paragraph", func(row string) (string, bool) { return row + "\n", true }},
+		{"link title", func(row string) (string, bool) { return `[a](u "` + row + "\")\n", true }},
+		{"image title", func(row string) (string, bool) { return `![a](u "` + row + "\")\n", true }},
+		{"image address", func(row string) (string, bool) {
+			if strings.Contains(row, " ") {
+				return "![a](<u " + row + " v>)\n", true
+			}
+			return "![a](u" + row + "v)\n", true
+		}},
+		{"image alt", func(row string) (string, bool) { return "![" + row + "](u)\n", true }},
+		// A footnote label ends at a space or a `]`, so a row holding one makes no footnote.
+		{"footnote label", func(row string) (string, bool) {
+			return "x[^" + row + "]\n\n[^" + row + "]: d\n", !strings.ContainsAny(row, " ]")
+		}},
+		{"table cell", func(row string) (string, bool) { return "| h |\n| - |\n| " + row + " |\n", true }},
+	}
+	var markdowns []string
+	for _, row := range referenceRows {
+		for _, site := range sites {
+			if markdown, ok := site.place(row); ok {
+				markdowns = append(markdowns, markdown)
+			}
+		}
+	}
+	trees := parseAsTheEngine(t, markdowns)
+	const plain = "Plain \\&amp; end.\n"
+	index := slices.Index(markdowns, plain)
+	if index < 0 {
+		t.Fatalf("no row places the paragraph %q", plain)
+	}
+	if doc := trees[index]; doc != nil {
+		if text := doc.Children[0].Children; len(text) != 1 || text[0].Text != "Plain &amp; end." {
+			t.Errorf("Go reads %q as %s, want the text %q", plain, inlineSummary(doc.Children[0]), "Plain &amp; end.")
+		}
+	}
+	t.Logf("%d rows at %d sites: %d markdowns", len(referenceRows), len(sites), len(markdowns))
+}
+
+// The browser editor's import reads every line feed in text as a space, a decoded `&#10;` as much
+// as a soft break, but keeps one in code and in an image's alt text, which it reads as written.
+// Go read `a&#10;b` as `a\nb` where the editor shows `a b`, and took a decoded line feed, or two
+// decoded spaces, before a break for the line's own ending. Each row places a reference to a line
+// feed beside a break, at a paragraph's end, in marked, linked, heading and table text, in code and
+// in an alt text, and Go must read it as the engine does.
+func TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt(t *testing.T) {
+	markdowns := []string{
+		"a&#10;b\n",
+		"a&#10;\nb\n",
+		"a&#10;  \nb\n",
+		"a&#10;\\\nb\n",
+		"a&#10;&#32;&#32;\\\nb\n",
+		"a&#32;&#32;\\\nb\n",
+		"a&#10;\n",
+		"*a&#10;b*\n",
+		"*a&#10;*\nb\n",
+		"[a&#10;b](u)\n",
+		"# a&#10;b\n",
+		"| h |\n| - |\n| a&#10;b |\n",
+		"`a&#10;b`\n",
+		"![a&#10;b](u)\n",
+		"![a&#10;\nb](u)\n",
+		"a&#xA;b &NewLine;c\n",
+	}
+	parseAsTheEngine(t, markdowns)
+}
+
+// The rows above are the cases someone thought of; a reading that parts from the engine's on a
+// sequence nobody listed shows the same wrong text to an agent. Each generated paragraph strings
+// together backslashes, `&`, `&#`, `&#x`, `;`, digits, entity names the engine knows, ones it does
+// not and ones HTML decodes without their `;`, and words and punctuation that open no link and no
+// block, and Go must read it as the engine does. The seeds are fixed, so a failure reproduces.
+func TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem(t *testing.T) {
+	words := []string{"a", "x", "Plain", "end", "AT", "T", "2024", " ", " "}
+	pieces := [][]string{
+		{`\`, `\\`, "&", "&#", "&#x", "&#X", ";"},
+		{`\`, "&", "&#", "&#x", ";", ";"},
+		{"0", "1", "6", "9", "00000", "65", "128", "1114111"},
+		{"a", "f", "A", "F", "41", "FFFF", "10FFFF", "D800", "110000"},
+		{"amp", "copy", "not", "Abreve", "semi", "AMP", "ngE", "foo", "ampx", "notit", "copyx"},
+		words,
+		{",", ".", "!", "?", "'", `"`, "(", ")", "/", "-", "+", "%"},
+	}
+	random := rand.New(rand.NewPCG(20261027, 536))
+	markdowns := make([]string, 2000)
+	for index := range markdowns {
+		var paragraph strings.Builder
+		// A paragraph opens on a word, so no list, heading or other block opens on its first line.
+		paragraph.WriteString(words[random.IntN(4)])
+		for range 2 + random.IntN(18) {
+			group := pieces[random.IntN(len(pieces))]
+			paragraph.WriteString(group[random.IntN(len(group))])
+		}
+		paragraph.WriteString("\n")
+		markdowns[index] = paragraph.String()
+	}
+	parseAsTheEngine(t, markdowns)
+	t.Logf("%d generated paragraphs", len(markdowns))
+}
+
+// Go decodes a named reference from HTML's table and the engine from the `character-entities`
+// package, so a name one knows and the other does not would read in the agent's copy as written
+// and in the editor as its character. Every name the engine itself loads (gen/entity-names.ts) is
+// read as a paragraph of its own, and Go must read it as the engine does, which decodes each.
+func TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt(t *testing.T) {
+	raw := genResult(t, "entity-names.ts")
+	names := strings.Fields(string(raw))
+	if len(names) <= 2000 {
+		t.Fatalf("entity-names.ts wrote %d names, want the more than 2,000 of character-entities", len(names))
+	}
+	markdowns := make([]string, len(names))
+	for index, name := range names {
+		markdowns[index] = "&" + name + ";\n"
+	}
+	for index, doc := range parseAsTheEngine(t, markdowns) {
+		if doc == nil {
+			continue
+		}
+		markdown := markdowns[index]
+		if text := doc.Children[0].Children; len(text) == 1 && text[0].Text == strings.TrimSuffix(markdown, "\n") {
+			t.Errorf("%q reads as written in both, where the engine knows the name", markdown)
+		}
+	}
+	t.Logf("%d names", len(names))
+}
+
+// A value holding `&` or a backslash must be written so that it reads back as itself: a title or
+// an image's address written as it stands would read back decoded, `&amp;` as `&`, in the editor
+// and in Go alike, and each write would decode it again. Each value is held in paragraph text, a
+// link's and an image's title, an image's address and alt text and a footnote label, outside a
+// table and in a cell; its rendering must read back as the tree in both parsers. Markdown whose
+// title and address hold an escaped reference must likewise render to markdown that reads back as
+// its own reading.
+func TestReferencesInEveryValueRenderAndReadBackInBothParsers(t *testing.T) {
+	values := []string{"&amp;", "&copy x", "&#38 y", "&#128;", `a\&amp;b`, "&#00000065;", "&foo;"}
+	parsed := func(markdown string) *Node {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", markdown, err)
+		}
+		return doc
+	}
+	// inline is the paragraph holding a template's content: its table's body cell's, or its first.
+	inline := func(doc *Node) *Node {
+		if cell := firstNodeOfType(doc, "table_row"); cell != nil {
+			return cell.Children[0].Children[0]
+		}
+		return doc.Children[0]
+	}
+	holders := []struct {
+		name, content, after string
+		set                  func(doc *Node, value string)
+	}{
+		{"paragraph text", "a", "", func(doc *Node, value string) { inline(doc).Children[0].Text = value }},
+		{"link title", `[a](u "t")`, "", func(doc *Node, value string) { inline(doc).Children[0].Marks[0].Attrs["title"] = value }},
+		{"image title", `![a](u "t")`, "", func(doc *Node, value string) { inline(doc).Children[0].Attrs["title"] = value }},
+		{"image address", "![a](u)", "", func(doc *Node, value string) { inline(doc).Children[0].Attrs["src"] = value }},
+		{"image alt", "![a](u)", "", func(doc *Node, value string) { inline(doc).Children[0].Attrs["alt"] = value }},
+		{"footnote label", "x[^l]", "\n[^l]: d\n", func(doc *Node, value string) {
+			firstNodeOfType(inline(doc), "footnote_reference").Attrs["label"] = value
+			doc.Children[len(doc.Children)-1].Attrs["label"] = value
+		}},
+	}
+	var names []string
+	var trees []*Node
+	for _, holder := range holders {
+		for _, value := range values {
+			// A footnote label ends at a space, so markdown has no label holding one.
+			if holder.name == "footnote label" && strings.Contains(value, " ") {
+				continue
+			}
+			for _, form := range []struct{ name, before, after string }{{"", "", "\n"}, {" in a table cell", "| h |\n| --- |\n| ", " |\n"}} {
+				doc := parsed(form.before + holder.content + form.after + holder.after)
+				holder.set(doc, value)
+				names = append(names, holder.name+form.name+" holding "+value)
+				trees = append(trees, doc)
+			}
+		}
+	}
+	addressWithASpace := parsed("![a](u)\n")
+	addressWithASpace.Children[0].Children[0].Attrs["src"] = "u &amp; v"
+	names = append(names, "image address holding a space and &amp;")
+	trees = append(trees, addressWithASpace)
+	for _, markdown := range []string{"[a](u \"\\&amp;\")\n", "![a](u\\&amp;v)\n"} {
+		names = append(names, "the reading of "+markdown)
+		trees = append(trees, parsed(markdown))
+	}
+	rendersBackInBothParsers(t, names, trees)
+	t.Logf("%d trees rendered and read back", len(trees))
+}
+
+// A stored document whose markdown already reads back as its tree must render to the same bytes,
+// so a write that changes nothing changes no byte: a name the engine does not know in a title and
+// an address, an `&` opening no reference in a title, and text whose `&amp;` spells `&amp;` keep
+// their spelling.
+func TestReferenceSpellingsThatReadBackRenderUnchanged(t *testing.T) {
+	for _, markdown := range []string{"[a](u \"&foo;\")\n", "![a](u&foo;)\n", "[a](u \"AT&T\")\n", "Plain &amp;amp; end.\n"} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", markdown, err)
+		}
+		if rendered, err := Render(doc); err != nil || rendered != markdown {
+			t.Errorf("Render(Parse(%q)) = %q (%v), want it unchanged", markdown, rendered, err)
+		}
+	}
+}
+
+// An image's address that ends in a backslash is written with that backslash doubled, so it does
+// not escape the `)` or `>` that closes the address. Each markdown holds such an address, outside a
+// table and in a cell, in the plain and the angle form; Go must read it as the engine does, a write
+// of it must be accepted, and its rendering must read back as its reading in both parsers.
+func TestAnImageAddressEndingInABackslashRendersAndReadsBack(t *testing.T) {
+	markdowns := []string{
+		"![a](u\\\\)\n",
+		"![a](u\\\\\\\\)\n",
+		"![a](u\\\\ \"t\")\n",
+		"![a](<u v\\\\>)\n",
+		"| h |\n| --- |\n| ![a](u\\\\) |\n",
+		"| h |\n| --- |\n| ![a](<u v\\\\>) |\n",
+	}
+	trees := parseAsTheEngine(t, markdowns)
+	var names []string
+	var read []*Node
+	for index, doc := range trees {
+		if doc == nil {
+			continue
+		}
+		if err := RefuseMisreadDocument(doc); err != nil {
+			t.Errorf("a write of %q is refused: %v", markdowns[index], err)
+		}
+		names = append(names, "the reading of "+markdowns[index])
+		read = append(read, doc)
+	}
+	rendersBackInBothParsers(t, names, read)
 }

@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -782,15 +781,28 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
-// escapeLinkDestination writes href as a link or image destination that both readers, which decode
-// a destination's backslash escapes, read back as href: a backslash before ASCII punctuation or
-// ending href, which would escape what follows it, is escaped, and so is a pipe in a table cell.
-// An href holding a space or a parenthesis is written between angle brackets, a `<` or `>` in it
-// escaped; any other is written bare, a `<` opening it escaped. Character references are written as
-// they are: Go keeps a link's as written, where the browser editor decodes them.
+// escapeLinkDestination writes a link's href as its destination (escapeDestination), an ampersand
+// that would open a character reference written as `&amp;`, so a stored destination such as
+// `x?a=1&amp;amp;b=2` keeps its bytes.
 func escapeLinkDestination(href string, escapePipes bool) string {
+	return escapeDestination(href, escapePipes, "&amp;")
+}
+
+// escapeImageSource writes an image's address as its destination (escapeDestination), an
+// ampersand that would open a character reference written as `\&`.
+func escapeImageSource(src string, escapePipes bool) string {
+	return escapeDestination(src, escapePipes, `\&`)
+}
+
+// escapeDestination writes href as a destination that both readers, which decode a destination's
+// escapes and character references, read back as href: a backslash before ASCII punctuation or
+// ending href, which would escape what follows it, is escaped, an ampersand where it would open a
+// character reference (characterReferenceAt) is written as ampersand, and a pipe in a table cell
+// is escaped. An href holding a space or a parenthesis is written between angle brackets, a `<` or
+// `>` in it escaped; any other is written bare, a `<` opening it escaped.
+func escapeDestination(href string, escapePipes bool, ampersand string) string {
 	angle := strings.ContainsAny(href, " ()")
-	if !angle && !strings.Contains(href, "\\") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) {
+	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) {
 		return href
 	}
 	var written strings.Builder
@@ -806,6 +818,11 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 			char == '<' && (angle || index == 0),
 			char == '>' && angle:
 			written.WriteByte('\\')
+		case char == '&':
+			if _, _, ok := characterReferenceAt(href, index); ok {
+				written.WriteString(ampersand)
+				continue
+			}
 		}
 		written.WriteByte(char)
 	}
@@ -815,13 +832,31 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 	return written.String()
 }
 
+// titleSuffix writes a link or image title, quoted, so that the browser editor's parser, which
+// decodes a title's escapes and character references, reads it back: a backslash and a quote are
+// escaped, an ampersand only where it would open a character reference (characterReferenceAt),
+// and in a table a pipe as well.
 func titleSuffix(title string, escapePipes bool) string {
 	if title == "" {
 		return ""
 	}
-	title = strings.ReplaceAll(title, "\\", "\\\\")
-	title = strings.ReplaceAll(title, "\"", "\\\"")
-	return " \"" + escapeTablePipes(title, escapePipes) + "\""
+	var written strings.Builder
+	written.Grow(len(title) + len(` ""`))
+	written.WriteString(` "`)
+	for index := range len(title) {
+		char := title[index]
+		switch {
+		case char == '\\' || char == '"' || char == '|' && escapePipes:
+			written.WriteByte('\\')
+		case char == '&':
+			if _, _, ok := characterReferenceAt(title, index); ok {
+				written.WriteByte('\\')
+			}
+		}
+		written.WriteByte(char)
+	}
+	written.WriteByte('"')
+	return written.String()
 }
 
 func escapeTablePipes(value string, escapePipes bool) string {
@@ -840,8 +875,9 @@ func escapeTableHTMLPipes(value string, escapePipes bool) string {
 
 // escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's
 // escapes and character references, reads it back: a bracket, a pipe, and a backslash before ASCII
-// punctuation or at the label's end are escaped, an ampersand only where it would open a character
-// reference, and white space, which no label holds as written, is a numeric character reference.
+// punctuation or at the label's end are escaped, an ampersand only where it opens a run shaped as a
+// character reference (characterReferenceLength), and white space, which no label holds as written,
+// is a numeric character reference.
 // A label that reads back as written stays as it is.
 func escapeFootnoteLabel(label string) string {
 	var written strings.Builder
@@ -852,7 +888,7 @@ func escapeFootnoteLabel(label string) string {
 			written.WriteByte('\\')
 		case char == '\\' && (index+1 == len(label) || isASCIIPunctuation(label[index+1])):
 			written.WriteByte('\\')
-		case char == '&' && characterReference.MatchString(label[index:]):
+		case char == '&' && characterReferenceLength(label, index) > 0:
 			written.WriteByte('\\')
 		case unicode.IsSpace(char):
 			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
@@ -862,10 +898,6 @@ func escapeFootnoteLabel(label string) string {
 	}
 	return written.String()
 }
-
-// characterReference is a character reference opening text: a named one, or a decimal or
-// hexadecimal numeric one.
-var characterReference = regexp.MustCompile(`^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});`)
 
 func holdsHardBreak(nodes []*Node) bool {
 	for _, n := range nodes {
