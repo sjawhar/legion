@@ -2,26 +2,21 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T12:46:00Z",
-  "headTested": "ae2991fc8bd67bd97e1397de03dc5d66dddc9003 (code 64c7b2350484; ae2991fc adds only .legion/)",
+  "completed": "2026-10-28T12:52:08Z",
+  "headTested": "e6b6698ad80fae9d38d7fdc7f176b92d225fce15 (code 8e7111478fb3; e6b6698a adds only .legion/)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at 64c7b235, with main 4e55b2e0 as the negative control, on a Postgres 16.2 and a NATS of the tester's own. Covered: the out-of-order steps, the newly-started-process steps, the lock check, and the review round's failing-observation case. For that case I took every free Postgres connection slot (max_connections 60, superuser_reserved_connections 0, 51 idle psql sessions) on a newly started process, so the horizon pool could not dial. A resuming stream opened in 12 ms and ended after 10.2 s, and the warning 'event horizon observation failed ... too many clients already' was logged. After the slots were freed, a new stream got the next event. On round 4's head b923561b the same steps kept the stream open 25 s with nothing logged. Load: two 1x after-steps at this head committed 3.99 of 3.99 with 100% answered 2xx. Between them, round 4's head committed 3.56 (box busy before: 41%, 10%, 3%), so 1x on this pod varies more run to run than between the two heads."
+    "how": "Round 5's independent drive at 64c7b235 (identical Go diff) stands. At 8e711147: a smoke of envoy-dispatch built from the head (out-of-order commit, 3 streams under 80 concurrent posts and 16 slow writes, lock check, resuming stream on a newly started process with a foreign id held), all as in round 5. The fragment renders with `go run github.com/miniscruff/changie@v1.26.0 batch 9.9.9 --dry-run` in a copy of packages/envoy's changie files. Its name pr2392-Changed-20261028-124735.yaml matches .changie.yaml's fragmentFileFormat."
   },
-  "failures": [
-    {
-      "criterion": "No Dispatch key reaches sjawhar/legion's main from this branch (the controller's ruling relayed on this issue: dispatch://INFRA-591/comment/ee39aadb-6840-4da3-a565-9881d0237d91, dispatch://INFRA-591/comment/e031c856-d31e-4ae0-9a41-00389a6383ee; interim rule of dispatch://INFRA-472).",
-      "evidence": "jj diff --from 'fork_point(\"main\"@origin | 64c7b2350484)' --to 64c7b2350484 '~.legion' | grep -E '^\\+.*INFRA-[0-9]+' finds three added lines. (1) The file name packages/envoy/.changes/unreleased/INFRA-591-Changed-20261028-101132.yaml. (2) Its field 'Issue: INFRA-591'. (3) In .github/workflows/envoy-and-contracts.yaml, the added comment '# delivery-hub tests wait for the event log's safe horizon (INFRA-591), which any open'. The ruling asks for the fragment to be made with `changie new ... --custom Issue=pr2392`, which names it pr2392-<kind>-<time>.yaml, and for no key in its body. The comment should name the change without the key. A note for the architect: commit 52791346 renamed the fragment from pr2392 to INFRA-591 after my round-4 handoff wrongly recommended it, reading main's AGENTS.md line 151 without the ruling. That recommendation is withdrawn. The four new commit subjects since the ruling (05ac50b1, 8e42e8a8, 52791346, 64c7b235) also end in '(INFRA-591)'. The ruling forbids rewriting pushed commits, so that is for the architect and the merge, not this fix."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
       "surface": "Local Dispatch built from the head's code, through the REST API; INFRA-589's harness with its 1 s lock sampler",
       "command": "adv.py lock; run-step.sh tester5-after-1x and tester5b-new-1x --events 4 --sessions 400 --requests 60",
       "observed": "POST on a third issue: 201 in 17 ms while the old lock was held and another issue's write was open. Commit-order lock held 0% in both 1x steps.",
-      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b",
+      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b (Go diff identical at 8e7111478fb37de55556d6a6330d667fa256307a; smoke re-run there)",
       "negativeControl": "Main 4e55b2e0: no answer within 8 s."
     },
     {
@@ -29,7 +24,7 @@
       "surface": "GET /api/v1/events (SSE) cold and with Last-Event-ID, on one and two processes; newly started processes with the horizon held or failing; an event log reset",
       "command": "adv.py ooo commit|rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py reset; adv.py fresh resume|cold; adv.py heartbeat; adv.py shutdown <pid>; adv.py dialfail <log>; adv.py churn 15; adv.py stall; adv.py lastid",
       "observed": "Out of order: 123 open, 124 committed. Nothing was sent, then 123 and 124 after the commit, and a resume sent the same; on rollback only 126, 38 ms after. Concurrency: 3 streams and a mid-run resume each got exactly the 92 committed ids in order, on one process and across two. Reset: the open stream was ended and a resume went on with the new log. Newly started process with a foreign id held: a resuming stream opened in 22 ms, sent 2 heartbeats in 35 s, and got the held-back event 233 ms after the commit; SIGTERM exited in 0.05 s. Horizon pool unable to dial: the stream opened, then ended at 10.2 s with the failure logged, and the process recovered once slots were free. Overlapping 2 s holders delayed frames 1.7 to 2.0 s. Bad Last-Event-ID values are refused 400. 0 SSE order violations in both 1x load steps.",
-      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b",
+      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b (Go diff identical at 8e7111478fb37de55556d6a6330d667fa256307a; smoke re-run there)",
       "negativeControl": "Main 4e55b2e0: 124 was sent at once and never 123, and each concurrency stream missed 10 committed ids. Round 4's head b923561b with the horizon pool unable to dial: the stream stayed open 25 s with nothing logged."
     },
     {
@@ -37,12 +32,24 @@
       "surface": "SSE and relay (above), GET /api/v1/references?since=, the outbox's per-issue NATS subject",
       "command": "adv.py refs_quiet (newly started process); adv.py refs_open; adv.py nats",
       "observed": "References: the first since read on a quiet process listed the just-committed mention in 53 ms. With a foreign id held, or a lower id open, a read answered in about 1 s without the newer mention, and listed it after the holder or the lower write ended. NATS: 30 concurrent comments on TSB-51 reached its subject in seq order, equal to the database. The delivery hub has no reachable surface on this stack, so it rests on its Go tests; envoy-go was queued at ae2991fc when read.",
-      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b",
+      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b (Go diff identical at 8e7111478fb37de55556d6a6330d667fa256307a; smoke re-run there)",
       "negativeControl": "Main 4e55b2e0, round 4 with the same driver: the since read listed the mention above the open lower id."
+    },
+    {
+      "criterion": "Every consumer of the event stream keeps the order it relies on (smoke at the head that merges).",
+      "surface": "GET /api/v1/events on a local Dispatch built at 8e711147",
+      "command": "adv.py ooo commit; adv.py concurrent; adv.py lock; adv.py fresh resume (r6-head.log in dispatch://INFRA-591/artifact/infra591-tester-evidence-tar-gz v5)",
+      "observed": "123 open and 124 committed: nothing was sent, then 123 and 124 after the commit, and a resume sent the same. 3 streams and a mid-run resume each got exactly the 92 committed ids in order. POST on a third issue: 201 in 20 ms with the old lock held. On a newly started process with a foreign id held, a resuming stream opened in 15 ms and got the held-back event 130 ms after the commit.",
+      "headSha": "8e7111478fb37de55556d6a6330d667fa256307a",
+      "negativeControl": "Main 4e55b2e0, round 5, same driver: 124 was sent at once and never 123, each concurrency stream missed 10 committed ids, and the POST got no answer in 8 s with the old lock held."
     }
   ],
-  "ci": "Read at about 12:44Z, recorded here only. The workflows at ae2991fc (Tests, Legion Envoy and Contracts, Docs, Worker Image) were queued. None runs at 64c7b235 itself, since it was pushed together with ae2991fc, which carries no skip-checks trailer.",
+  "ci": "Read at about 12:52Z, recorded here only. At e6b6698a, build, changes, lint, test and typecheck were queued. The runs at ae2991fc were cancelled by the newer push, so no CI has completed on this round's code yet. Nothing is red.",
   "risks": [
     "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. It opened 44 ms after the commit, against 15 ms on main. This is the implementer's recorded deviation."
+  ],
+  "rebaseCheck": "No rebase. 8e711147 changes only a comment in .github/workflows/envoy-and-contracts.yaml and the changelog fragment. The fingerprint of the Go diff over packages/envoy/**/*.go against fork point 4e55b2e0 is equal at 64c7b235 (round 5) and at 8e711147: c095a437.... So round 5's real-surface proof stands for the code. This round re-ran a smoke on a binary built at 8e711147 and checked the two changed files.",
+  "resolved": [
+    "Round 5's Dispatch-key item. In the branch's diff against fork point 4e55b2e0 outside .legion/, `grep -E '^\\+.*INFRA-[0-9]+'` and a check of the added file names find nothing. The fragment is pr2392-Changed-20261028-124735.yaml with Issue: pr2392, and its body names no key and no dispatch:// link. The workflow comment no longer names one. The commit subjects written after the ruling (05ac50b1, 8e42e8a8, 52791346, 64c7b235) still end in '(INFRA-591)'. The ruling forbids rewriting them, so they are left to the architect and the merge; 8e711147's own subject names no key."
   ]
 }
