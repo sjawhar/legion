@@ -76,16 +76,22 @@ func (e ErrRefusedByHolder) Error() string {
 	return fmt.Sprintf("the role's holder %q does not advertise the delivery mode", e.Holder)
 }
 
-// ErrPublishDenied is a role publish the listener answered 403 without reason "capability": the
-// NATS server refused the forward under the listener's own publish permissions, so the listener
-// forwarded nothing (writeBusUnavailable and publishDeniedPrefix,
-// packages/envoy/cmd/listener/api.go). Message is the error the listener's body gives, which names
-// the subject its grant does not cover; it is bounded by refusalBodyLimit as the refusal is. Sending
-// it again changes nothing until an operator changes the listener's grant. A 403 whose body is not
-// that JSON stays a plain refusal.
+// ErrPublishDenied is a role publish the listener answered 403 because the NATS server refused the
+// forward under the listener's own publish permissions, so the listener forwarded nothing: its body's
+// error opens with publishDeniedPrefix (writeBusUnavailable, packages/envoy/cmd/listener/api.go).
+// Message is that error, which names the subject the grant does not cover; it is bounded by
+// refusalBodyLimit as the refusal is. Sending it again changes nothing until an operator changes the
+// listener's grant. Any other 403 (one whose error does not open with the prefix, or whose body is
+// not JSON, as a proxy in front of the listener could write) stays a plain refusal, retried.
 type ErrPublishDenied struct {
 	Message string
 }
+
+// publishDeniedPrefix mirrors the listener's publishDeniedPrefix (packages/envoy/cmd/listener/api.go),
+// the opening of every answer it gives a publish its own NATS grant denies. A listener of main before
+// this daemon's release writes the same prefix, so a daemon that takes the release first reads its
+// denials too.
+const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
 
 func (e ErrPublishDenied) Error() string {
 	return fmt.Sprintf("the listener's NATS grant denied the forward (%s)", e.Message)
@@ -189,7 +195,7 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID})
 		case response.StatusCode == http.StatusForbidden && answer.Reason == "capability":
 			return fmt.Errorf("%w: %w", refusal, ErrRefusedByHolder{Holder: answer.Holder})
-		case response.StatusCode == http.StatusForbidden:
+		case response.StatusCode == http.StatusForbidden && strings.HasPrefix(answer.Error, publishDeniedPrefix):
 			return fmt.Errorf("%w: %w", refusal, ErrPublishDenied{Message: answer.Error})
 		}
 		return refusal

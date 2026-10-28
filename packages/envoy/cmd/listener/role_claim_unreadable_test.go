@@ -82,7 +82,7 @@ func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 	}
 }
 
-// A role-lane publish answers the same record as the lookup does, and records it under its own
+// A role send through the publish route answers the same record as the lookup does, and records it under its own
 // outcome rather than bus_unavailable, at WARN as every refusal is.
 func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 	const role = "reviewer"

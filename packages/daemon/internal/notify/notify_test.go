@@ -143,7 +143,7 @@ func TestHTTPPublisherTellsTheConfirmedSendAnswersApart(t *testing.T) {
 		{"a gateway timeout that is not JSON", http.StatusGatewayTimeout, `upstream request timeout`, nil, nil, nil},
 		{"a gateway timeout with no reason", http.StatusGatewayTimeout, `{"error":"gateway timeout"}`, nil, nil, nil},
 		{"a gateway timeout with another reason", http.StatusGatewayTimeout, `{"error":"not confirmed","reason":"not_confirmed"}`, nil, nil, nil},
-		{"a forbidden publish with no reason", http.StatusForbidden, `{"error":"forbidden"}`, nil, nil, &ErrPublishDenied{Message: "forbidden"}},
+		{"a forbidden answer the listener does not write", http.StatusForbidden, `{"error":"forbidden"}`, nil, nil, nil},
 		{"a forbidden answer that is not JSON", http.StatusForbidden, `forbidden`, nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

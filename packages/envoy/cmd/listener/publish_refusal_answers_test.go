@@ -97,7 +97,7 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	t.Logf("lost claim race: %s", refusal.Error)
 }
 
-// GET /v1/roles/<role> resolves its holder exactly as a role-lane publish does, so it can lose the
+// GET /v1/roles/<role> resolves its holder exactly as a role send through the publish route does, so it can lose the
 // same race, and it answers it as the publish route does: the 503 and the Retry-After that ask for
 // the retry a fresh lookup wins, and a body that names the race in a lookup's words. Every bus read
 // answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
@@ -173,7 +173,7 @@ func (kv stalledRoleKV) Delete(key string, opts ...nats.DeleteOpt) error {
 	return kv.KeyValue.Delete(key, opts...)
 }
 
-// A role-lane publish resolves its role's holder within sendRequestBudget of the request's own
+// A role send through the publish route resolves its role's holder within sendRequestBudget of the request's own
 // context, so a role-bucket call that does not answer - the claim read, or the conditional release
 // of a claim whose holder is gone, neither of which takes a context in nats.go - is reported inside
 // the caller's attempt (the client gives each 5 s, packages/envoy-client/src/transport.ts) rather

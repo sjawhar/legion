@@ -342,8 +342,8 @@ func laneHolderFresh(entry session.SessionEntry) bool {
 // no_holder/delivery_failed outcome itself and reporting ok=false when there is nobody to deliver
 // to. An unclaimed role is no_holder; a lapsed holder and every failed read are delivery_failed,
 // each under a log line that names which it was. Role delivery answers no caller, so it resolves
-// under context.Background(), as store.Registry.RoleHolder reads for such a caller: the holder's
-// session read keeps roleHolderReadTimeout (roleHolderSession's bound) as its own cap.
+// under context.Background(): the holder's session read keeps roleHolderReadTimeout
+// (roleHolderSession's bound) as its own cap.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
 	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, laneHolderFresh)
 	sessionID := resolved.holder
