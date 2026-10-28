@@ -3,7 +3,7 @@
   "phase": "test",
   "issue": "INFRA-558",
   "round": 2,
-  "completed": "2026-10-28T23:33:00Z",
+  "completed": "2026-10-28T23:42:00Z",
   "codeHead": "07b79a109da39ee7a6e13b0206135d95686ca554",
   "implementerProof": {
     "verdict": "verified",
@@ -37,7 +37,7 @@
       "negativeControl": "A plain document's socket stays open for 5s; kind=\"warning\" on the staged build answers 201; backfill-files with both processes stopped passes the gate and reaches the bucket check (S3 403 for the placeholder bucket)."
     }
   ],
-  "ci": "GitHub ran no workflow for the round-1 code. The push's head 29c7e379 carried 'skip-checks: true' although the push held code commits (bbfff9c8, c01c8161, 32f979a0, 0d2dba72, 07b79a10), so actions/runs?head_sha= and commits/<sha>/check-runs returned 0 for 07b79a10 and 29c7e379 at 23:15Z. On the architect's instruction, this handoff commit is pushed without the trailer, so GitHub runs CI at it. It differs from 07b79a10 only in .legion/ (compare 07b79a10...<this head> on GitHub), so its checks stand for the code. I reported the missing CI to the architect at 23:15Z.",
+  "ci": "GitHub has run no workflow for the round-1 code. (1) The push that ended in 29c7e379 carried 'skip-checks: true' although it held code commits (bbfff9c8, c01c8161, 32f979a0, 0d2dba72, 07b79a10). (2) On the architect's instruction I pushed this handoff, b8b5bb63, without the trailer; compare 07b79a10...b8b5bb63 is .legion/ only. GitHub still created no run within 4 minutes, because PR #2461 conflicts with main (mergeStateStatus DIRTY, 9 commits behind origin/main 571f729b; git merge-tree names packages/proof-editor/AGENTS.md), and GitHub runs no pull_request workflow on a pull request that conflicts. Lint, types and the unit, integration and two-build CI lanes are therefore unread at this code. They run once the implementer merges main; the next test round compares the fingerprint and reads them. I reported both facts to the architect.",
   "notes": [
     "Not reached on a real surface: proof-editor's paste and import creation gate and the abortable no-route wait. Every element of the shipped manifest is creatable, so the gate has nothing to refuse in a real build. Both are covered by bun tests that CI runs.",
     "I did not re-run round 1's SIGKILL/SIGSTOP, stream-generation and reconnect probes. Since round 1, intake.go changed in the take-over start (driven above) and in the lenient payload members (driven above). internal/bus changed only in the shared publishDenied predicate (bus/confirm.go, nats.go). The harness's message test passed at 07b79a10."
