@@ -38,10 +38,11 @@ router guide for its own workflows; this page covers this repository only.
 4. **The job in `ci-ok`'s `needs:`.** A job that is not there can fail and still let `ci-ok`
    pass.
 5. **The job in `ci-ok`'s `SELECTED_BY`**, mapped to the output its `if:` tests
-   (`"<job>": "<filter>"`), and in `PULL_REQUEST_ONLY` too when its `if:` also admits only
-   `github.event_name == 'pull_request'`. `ci-ok` fails a needed job `SELECTED_BY` does not name,
-   and `check-ci-filters.sh` fails when the map is not exactly what the `if:`s test (the section on
-   `ci-ok` below says why).
+   (`"<job>": "<filter>"`), in `PULL_REQUEST_ONLY` too when its `if:` also admits only
+   `github.event_name == 'pull_request'`, and in `NOT_ON_PUSH` when it holds
+   `github.event_name != 'push'`. `ci-ok` fails a needed job `SELECTED_BY` does not name, and
+   `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test (the
+   section on `ci-ok` below says why).
 6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
@@ -59,13 +60,24 @@ job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `cha
 `ci-ok`, and `changes` can succeed while the jobs it now selects stay skipped: a `ci-ok` that
 accepted those skips would pass with nothing tested. So `ci-ok.sh` decides what `changes`
 selected from its outputs, through `SELECTED_BY`: a job is selected when the output it maps to is
-`'true'` and, for a job in `PULL_REQUEST_ONLY`, the run is a pull request's. A re-run that leaves
-a selected job skipped fails naming the job; re-run the whole workflow instead.
+`'true'`; for a job in `PULL_REQUEST_ONLY` the run must also be a pull request's, and for a job in
+`NOT_ON_PUSH` (docs, whose main build is docs-pages.yaml's) it must not be a push. A re-run that
+leaves a selected job skipped fails naming the job; re-run the whole workflow instead.
 
 `check-ci-filters.sh` fails when `SELECTED_BY` is not exactly {job: the output its `if:` tests}
-for every job in `ci-ok`'s `needs:` but `changes` and lint, or when `PULL_REQUEST_ONLY` is not
-exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`. A wrong entry
-would fail a job its `if:` rightly skipped, or pass one a re-run left skipped.
+for every job in `ci-ok`'s `needs:` but `changes` and lint, when `PULL_REQUEST_ONLY` is not
+exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`, or when
+`NOT_ON_PUSH` is not exactly the jobs whose `if:` holds `github.event_name != 'push'`. A wrong
+entry would fail a job its `if:` rightly skipped, or pass one a re-run left skipped.
+
+A job whose main half must run in push order, as the docs site's Pages deploy must, cannot be a
+job of the router: each push to main is a router run of its own, and a job-level concurrency group
+takes jobs as their needs end, not in push order. Its main half is a push-only workflow of its own
+with a workflow-level group (`queue: max`, `cancel-in-progress: false`), whose `on.push.paths`
+equals the job's filter; the router job admits no push (`github.event_name != 'push'`, so it is in
+`NOT_ON_PUSH`), and `ci_job_reads.py`'s `PUSH_WORKFLOWS` pairs the filter with that workflow, so
+`check-ci-filters.sh` fails naming each pattern one list has and the other lacks.
+docs-pages.yaml is the one such workflow.
 
 ## Build the filter by the method, not by guessing
 
@@ -136,14 +148,18 @@ fails the pull request that adds it.
 
 - `GATES`: per filter, the job, its go commands and its other steps' reads. Each go command is a
   `Run` pinned to its text: `step_run` for a `run:` step of the job, `script_run` for a script the
-  job runs. The check fails when a job's `run:` step starts a go command (`go test`, `vet`,
-  `build`, `run`, `list`, `install`, `generate`) no `Run` claims, or one that is not exactly its
-  `Run`: a positional argument that is not a flag, a flag's value or one of the `Run`'s packages (a
-  package appended by path, import path or on a backslash-continued line), a last `-tags` other
-  than the `Run`'s tags, or a subcommand of another mode; it then also checks the closure the line
-  compiles. It fails too when a pinned text is gone, and
-  when a job or step is gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go
-  commands still gets a gate with its reads.
+  job runs, pinned to the script's whole line. The check fails when a job's `run:` step starts a
+  go command (`go test`, `vet`, `build`, `run`, `list`, `install`, `generate`) no `Run` claims.
+  It reduces a claimed command only in its simple form: one uncontinued line of
+  `go test|vet|build`, relative package paths and only `-v`, `-race`, `-count=N`, `-timeout D`,
+  `-buildvcs=false` and one `-tags T`, with no `GO*` or `CGO_*` variable in the workflow's, job's
+  or step's `env:`, whose packages, tags and mode must then be exactly the `Run`'s; a script's
+  line must be exactly the pinned text. Any other claimed command (`GOFLAGS=...`, another flag,
+  a pipe, a quote, a continuation) counts as reading every Go file of its module and the module
+  files, and fails naming the command unless its filter selects them all: the check fails wide
+  rather than parse further. It fails too when a pinned text is gone, and when a job or step is
+  gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go commands still gets a
+  gate with its reads.
 - `RULES`: per source file, what a test does outside its package: a go command it starts, or a
   file it reads through `..`. Add one in the change that makes a test do it.
 - `EXCLUDED`: `worker_image`, whose image inputs `check-image-trigger-paths.sh` proves instead.
@@ -191,10 +207,11 @@ group's `base_sha..head_sha` diff, what the queued change touches against the qu
 `ci-ok` reports on the group's commit, so the required checks pass on the merged tree before
 anything lands. A new job needs nothing extra for it. But a job whose `if:` names
 `github.event_name` must admit `merge_group`, or it skips on the group while its output selects
-it, and `ci-ok` fails there. What skips a group does so on purpose: the cache saves and
-docs-deploy (push only, and not in `ci-ok`), lint's pull-request text check (pr-title.yaml checks
-the text on the group), and worker-image (pull request only, so it is in `PULL_REQUEST_ONLY`;
-main's image builds are release.yaml's).
+it, and `ci-ok` fails there. What skips a group does so on purpose: the cache saves (push only),
+lint's pull-request text check (pr-title.yaml checks the text on the group), and worker-image
+(pull request only, so it is in `PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The
+docs job runs on a group and on a pull request but on no push (`NOT_ON_PUSH`): docs-pages.yaml
+builds and publishes main's site.
 
 ## Drafts run no test job
 

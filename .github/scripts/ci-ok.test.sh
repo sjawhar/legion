@@ -3,9 +3,10 @@
 # selected succeeded, and every job it did not select succeeded or was skipped.
 #
 # ci-ok.sh reads only its environment, so each case hands it a `toJSON(needs)` built here and the
-# SELECTED_BY and PULL_REQUEST_ONLY its ci.yaml step sets, shrunk to three jobs: typecheck and
-# envoy-plugin, each selected by its own output, and worker-image, which also runs only on a pull
-# request. The script under test is the file CI runs.
+# SELECTED_BY, PULL_REQUEST_ONLY and NOT_ON_PUSH its ci.yaml step sets, shrunk to four jobs:
+# typecheck and envoy-plugin, each selected by its own output, worker-image, which also runs only
+# on a pull request, and docs, which also runs on no push. The script under test is the file CI
+# runs.
 #
 # Run from anywhere: .github/scripts/ci-ok.test.sh
 # CI runs it in ci.yaml's test job.
@@ -17,8 +18,9 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
 
-selected_by='{"typecheck": "typecheck", "envoy-plugin": "envoy_plugin", "worker-image": "worker_image"}'
+selected_by='{"typecheck": "typecheck", "envoy-plugin": "envoy_plugin", "worker-image": "worker_image", "docs": "docs"}'
 pull_request_only='["worker-image"]'
+not_on_push='["docs"]'
 
 # needs <changes result> <changes outputs> <lint result> [<job>=<result>]...: the toJSON(needs)
 # GitHub hands ci-ok, every other job with no outputs.
@@ -33,27 +35,29 @@ needs() {
   echo "$doc"
 }
 
-# The outputs of a `changes` that selected typecheck and worker-image and not envoy-plugin.
-selects='{"typecheck": "true", "envoy_plugin": "false", "worker_image": "true"}'
+# The outputs of a `changes` that selected typecheck and worker-image and not envoy-plugin or docs.
+selects='{"typecheck": "true", "envoy_plugin": "false", "worker_image": "true", "docs": "false"}'
+# The same with docs selected too.
+selects_docs='{"typecheck": "true", "envoy_plugin": "false", "worker_image": "true", "docs": "true"}'
 
 # run_ci_ok <needs> [<event>] [<draft>]: sets out and status. The event defaults to pull_request.
 run_ci_ok() {
   set +e
   out=$(NEEDS=$1 EVENT=${2:-pull_request} DRAFT=${3:-false} SELECTED_BY=$selected_by \
-    PULL_REQUEST_ONLY=$pull_request_only "$script_dir/ci-ok.sh" 2>&1)
+    PULL_REQUEST_ONLY=$pull_request_only NOT_ON_PUSH=$not_on_push "$script_dir/ci-ok.sh" 2>&1)
   status=$?
   set -e
 }
 
 echo "case: a failed-only re-run left a selected job skipped"
-run_ci_ok "$(needs success "$selects" success typecheck=skipped envoy-plugin=skipped worker-image=success)"
+run_ci_ok "$(needs success "$selects" success typecheck=skipped envoy-plugin=skipped worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names the job, its result and why" \
   "$(contains "$out" "^::error::typecheck ended skipped, but changes selected it (needs.changes.outputs.typecheck is true)")"
 check "prints its selection" "$(contains "$out" '^typecheck: skipped (selected: needs.changes.outputs.typecheck is true)$')"
 
-echo "case: every selected job succeeded and the unselected one was skipped"
-run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=success)"
+echo "case: every selected job succeeded and the unselected ones were skipped"
+run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=success docs=skipped)"
 check "passes" "$(is "$status" 0)"
 check "prints every job's result" "$(contains "$out" '^changes: success$')"
 check "and lint's" "$(contains "$out" '^lint: success$')"
@@ -64,61 +68,88 @@ check "says why it passed" "$(contains "$out" 'changes and lint succeeded, every
 check "reports no error" "$(is "$(contains "$out" '::error::')" false)"
 
 echo "case: a job changes did not select, skipped, beside a selected one that succeeded"
-run_ci_ok "$(needs success '{"typecheck": "true", "envoy_plugin": "false", "worker_image": "false"}' success \
-  typecheck=success envoy-plugin=skipped worker-image=skipped)"
+run_ci_ok "$(needs success '{"typecheck": "true", "envoy_plugin": "false", "worker_image": "false", "docs": "false"}' success \
+  typecheck=success envoy-plugin=skipped worker-image=skipped docs=skipped)"
 check "passes" "$(is "$status" 0)"
 check "prints worker-image unselected" \
   "$(contains "$out" '^worker-image: skipped (not selected: needs.changes.outputs.worker_image is false)$')"
 
 echo "case: a selected job was cancelled"
-run_ci_ok "$(needs success "$selects" success typecheck=cancelled envoy-plugin=skipped worker-image=success)"
+run_ci_ok "$(needs success "$selects" success typecheck=cancelled envoy-plugin=skipped worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" '^::error::typecheck ended cancelled, but changes selected it')"
 
 echo "case: an unselected job failed"
-run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=failure worker-image=success)"
+run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=failure worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" '^::error::envoy-plugin ended failure; a job changes did not select must succeed or be skipped')"
 
 echo "case: worker-image's output is true on a push, where its if: admits only pull_request"
-run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=skipped)" push
+run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=skipped docs=skipped)" push
 check "passes" "$(is "$status" 0)"
 check "prints why it is not selected" \
   "$(contains "$out" '^worker-image: skipped (not selected: it runs only on pull_request, and this run is push)$')"
 
 echo "case: worker-image's output is true on a pull request, and it was skipped"
-run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=skipped)"
+run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=skipped docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it" \
   "$(contains "$out" "^::error::worker-image ended skipped, but changes selected it (needs.changes.outputs.worker_image is true on a pull_request)")"
 
+echo "case: docs' output is true on a push, where its if: admits no push, and it was skipped"
+run_ci_ok "$(needs success "$selects_docs" success typecheck=success envoy-plugin=skipped worker-image=skipped docs=skipped)" push
+check "passes" "$(is "$status" 0)"
+check "prints why it is not selected" \
+  "$(contains "$out" '^docs: skipped (not selected: it runs on no push, and this run is push)$')"
+check "reports no error" "$(is "$(contains "$out" '::error::')" false)"
+
+echo "case: docs' output is true on a pull request, and it was skipped"
+run_ci_ok "$(needs success "$selects_docs" success typecheck=success envoy-plugin=skipped worker-image=success docs=skipped)"
+check "fails" "$(is "$status" 1)"
+check "names it" \
+  "$(contains "$out" "^::error::docs ended skipped, but changes selected it (needs.changes.outputs.docs is true on a pull_request)")"
+
+echo "case: docs' output is true on a merge group, and it was skipped"
+run_ci_ok "$(needs success "$selects_docs" success typecheck=success envoy-plugin=skipped worker-image=skipped docs=skipped)" merge_group
+check "fails" "$(is "$status" 1)"
+check "names it" \
+  "$(contains "$out" "^::error::docs ended skipped, but changes selected it (needs.changes.outputs.docs is true on a merge_group)")"
+
 echo "case: changes failed"
-run_ci_ok "$(needs failure '{}' success typecheck=success envoy-plugin=skipped worker-image=skipped)"
+run_ci_ok "$(needs failure '{}' success typecheck=success envoy-plugin=skipped worker-image=skipped docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it and why" "$(contains "$out" '^::error::changes ended failure; it selects the jobs from this head')"
 check "prints the jobs it could not select" "$(contains "$out" '^envoy-plugin: skipped (not selected: needs.changes.outputs.envoy_plugin is unset)$')"
 
 echo "case: lint was skipped"
-run_ci_ok "$(needs success "$selects" skipped typecheck=success envoy-plugin=skipped worker-image=success)"
+run_ci_ok "$(needs success "$selects" skipped typecheck=success envoy-plugin=skipped worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it and why" "$(contains "$out" '^::error::lint ended skipped; lint runs on every change')"
 
 echo "case: a draft pull request"
-run_ci_ok "$(needs skipped '{}' skipped typecheck=skipped envoy-plugin=skipped worker-image=skipped)" pull_request true
+run_ci_ok "$(needs skipped '{}' skipped typecheck=skipped envoy-plugin=skipped worker-image=skipped docs=skipped)" pull_request true
 check "fails" "$(is "$status" 1)"
 check "says to mark it ready" \
   "$(contains "$out" '^::error::Draft pull request: no test job runs. Mark it ready for review to start them.$')"
 check "and only that" "$(is "$(grep -c '::error::' <<<"$out")" 1)"
 
 echo "case: a needed job SELECTED_BY does not name"
-run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=success docs=skipped)"
+run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=success docs=skipped \
+  contracts=skipped)"
 check "fails" "$(is "$status" 1)"
-check "names it, its result and why" "$(contains "$out" '^::error::docs ended skipped, and ci-ok does not know what selects it')"
+check "names it, its result and why" "$(contains "$out" '^::error::contracts ended skipped, and ci-ok does not know what selects it')"
 
 echo "case: a job SELECTED_BY maps that ci-ok does not need"
-run_ci_ok "$(needs success "$selects" success typecheck=success worker-image=success)"
+run_ci_ok "$(needs success "$selects" success typecheck=success worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it as absent" "$(contains "$out" '^::error::envoy-plugin is absent from ci-ok.s needs')"
 check "prints it" "$(contains "$out" '^envoy-plugin: absent ')"
+
+echo "case: NOT_ON_PUSH names a job SELECTED_BY does not map"
+not_on_push='["pages"]'
+run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=success docs=skipped)"
+not_on_push='["docs"]'
+check "fails" "$(is "$status" 1)"
+check "names the list" "$(contains "$out" '^::error::NOT_ON_PUSH is not a JSON array of jobs SELECTED_BY names')"
 
 summary "ci-ok.sh fails unless every job changes selected succeeded"

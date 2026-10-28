@@ -13,17 +13,16 @@ import atexit
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
-from workflow_paths import PathsFilter, glob_regex, unread_filter_patterns
+from workflow_paths import PathsFilter, events, glob_regex, unread_filter_patterns
 
 WORKFLOW = ".github/workflows/ci.yaml"
 REPO = Path.cwd().resolve()
@@ -261,6 +260,22 @@ def apply_rules(session: Session, rules: dict, source: str, seen: set) -> list:
     return reads
 
 
+def module_reads(session: Session, files: list, run_: Run) -> tuple:
+    """What a claimed command this check does not reduce counts as reading: every Go file of its
+    module (the nearest directory at or above the Run's workdir holding a go.mod, any nested
+    module's subtree aside), that module's go.mod and go.sum, and its workspace's module files.
+    Returns (the module's directory, those paths)."""
+    root = (REPO / run_.workdir).resolve()
+    while root != REPO and not (root / "go.mod").is_file():
+        root = root.parent
+    prefix = "" if root == REPO else f"{rel(str(root))}/"
+    nested = [f.removesuffix("go.mod") for f in files
+              if os.path.basename(f) == "go.mod" and f.startswith(prefix) and f != f"{prefix}go.mod"]
+    paths = [f for f in files if f.endswith(".go") and f.startswith(prefix) and not f.startswith(tuple(nested))]
+    paths += [f"{prefix}go.mod", f"{prefix}go.sum"] + [read.glob for read in session.module_files(run_)]
+    return prefix.rstrip("/") or ".", paths
+
+
 # ---------------------------------------------------------------- files and filters
 def repo_files() -> list:
     """Tracked files and untracked ones git does not ignore, so an uncommitted new file counts
@@ -342,81 +357,79 @@ def squash(text: str) -> str:
 
 
 def go_lines(text: str) -> list:
-    """The logical lines of a run: script that start a go command, comments aside. A line ending in
-    a backslash continues on the next, as the shell reads it, so a package on a continuation line is
-    part of the command."""
-    joined = re.sub(r"\\\n", " ", text)
-    return [line.strip() for line in joined.splitlines()
+    """The physical lines of a run: script that hold a go command, comments aside, each with
+    whether it is part of a backslash continuation (it ends in one or follows a line that does)."""
+    lines = text.splitlines()
+    return [(line.strip(), continued(lines, i)) for i, line in enumerate(lines)
             if not line.strip().startswith("#") and GO_COMMAND.search(line)]
 
 
-# The go subcommands GO_COMMAND finds, and the flags of `go build|test|vet|list|run|install|generate`
-# that take their value as the next word (`-o out`); any other flag is a word of its own (`-v`) or
-# carries its value after `=` (`-count=1`). An unknown flag taking a separate value fails closed: its
-# value reads as a package the Run does not name.
-GO_SUBCOMMANDS = {"test", "vet", "build", "run", "list", "install", "generate"}
-VALUE_FLAGS = {
-    "-C", "-o", "-tags", "--tags", "-timeout", "-run", "-skip", "-count", "-p", "-parallel", "-cpu", "-ldflags",
-    "-gcflags", "-asmflags", "-overlay", "-mod", "-modfile", "-exec", "-bench", "-benchtime",
-    "-coverprofile", "-covermode", "-coverpkg", "-shuffle", "-vet", "-pkgdir", "-toolexec",
-    "-installsuffix", "-buildmode", "-compiler", "-f", "-pgo", "-outputdir", "-blockprofile",
-    "-cpuprofile", "-memprofile", "-mutexprofile", "-trace", "-fuzz", "-fuzztime",
-}
-SHELL_BREAKS = {"|", "||", "&&", ";", "&", ")", "(", "|&"}
+def continued(lines: list, i: int) -> bool:
+    return lines[i].rstrip().endswith("\\") or (i > 0 and lines[i - 1].rstrip().endswith("\\"))
 
 
-def line_command(line: str) -> tuple:
-    """What decides the closure of the go commands on one logical line: (packages, tags, mode).
-    Packages are every positional argument after a go subcommand, up to the shell's next `|`, `&&`,
-    `;` or `)`, that is neither a flag nor a flag's value. Tags are the last `-tags x` or `-tags=x`
-    on the line (go reads the last), as a set; none when absent. The mode is "test" when a command on
-    the line is `go test`, else "vet" for `go vet`, else "build" (build, run, install, list,
-    generate). A Run claims a line only when all three are exactly its own, so nothing appended to a
-    claimed command (a package however spelled, a later -tags, another subcommand) is left out of the
-    closure the check computes."""
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    try:
-        words = list(lexer)
-    except ValueError:
-        return {f"<unparsed: {line}>"}, frozenset(), "<unparsed>"
-    found, tags, subcommands, index = set(), frozenset(), set(), 0
+# The one form of a go command this check reduces: `go test|vet|build`, then relative package paths
+# and only these flags. Any other claimed command counts as reading every Go file of its module.
+NOT_SIMPLE = "$'\"`|&;()<>*?\\"
+PACKAGE = re.compile(r"\.\.?(/[A-Za-z0-9_./-]*)?")
+FLAG = re.compile(r"-v|-race|-count=[0-9]+|-timeout=[0-9]+[smh]|-buildvcs=false")
+DURATION = re.compile(r"[0-9]+[smh]")
+TAGS = re.compile(r"[A-Za-z0-9_,]+")
+
+
+def reduce_line(line: str) -> tuple:
+    """A go line in the one form this check reduces as (packages, tags, mode, ""), any other as
+    (None, None, None, the first reason it is not that form)."""
+    unreduced = (None, None, None)
+    special = next((c for c in line if c in NOT_SIMPLE), None)
+    if special:
+        return *unreduced, f"it has `{special}`"
+    words = line.split()
+    if words[0] != "go":
+        return *unreduced, f"it starts with `{words[0]}`, not go"
+    if len(words) < 2 or words[1] not in ("test", "vet", "build"):
+        return *unreduced, f"`{' '.join(words[:2])}` is not go test, vet or build"
+    pkgs, tags, index = set(), None, 2
     while index < len(words):
-        if words[index] != "go":
+        word, value = words[index], words[index + 1] if index + 1 < len(words) else ""
+        if PACKAGE.fullmatch(word):
+            pkgs.add(word)
+        elif word == "-timeout" and DURATION.fullmatch(value):
             index += 1
-            continue
+        elif word == "-tags" or word.startswith("-tags="):
+            given = value if word == "-tags" else word.removeprefix("-tags=")
+            if tags is not None or not TAGS.fullmatch(given):
+                return *unreduced, f"`-tags {given}` is not its one plain -tags"
+            tags, index = given, index + (word == "-tags")
+        elif not FLAG.fullmatch(word):
+            return *unreduced, f"`{word}` is neither a relative package path nor a flag this check reduces"
         index += 1
-        if index + 1 < len(words) and words[index] == "-C":
-            index += 2
-        if index >= len(words) or words[index] not in GO_SUBCOMMANDS:
-            continue
-        subcommands.add(words[index])
-        index += 1
-        while index < len(words) and words[index] not in SHELL_BREAKS:
-            word = words[index]
-            if word.startswith("-") and len(word) > 1:
-                name, has_value, value = word.partition("=")
-                if not has_value and name in VALUE_FLAGS:
-                    index += 1
-                    value = words[index] if index < len(words) else ""
-                if name in ("-tags", "--tags"):
-                    tags = tag_set(value)
-            else:
-                found.add(word)
-            index += 1
-    mode = "test" if "test" in subcommands else "vet" if "vet" in subcommands else "build"
-    return found, tags, mode
+    return pkgs, tag_set(tags or ""), words[1], ""
+
+
+def env_reason(document: dict, job: dict, steps: list) -> str:
+    """The first env: block of the workflow, the job or one of the steps that can change what a go
+    command compiles (a GO* or CGO_* variable, or an expression), or ''."""
+    blocks = [("the workflow's", document.get("env")), ("the job's", job.get("env"))]
+    blocks += [(f'step "{step_label(s)}"\'s', s.get("env")) for s in steps]
+    for where, env in blocks:
+        if env is not None and not isinstance(env, dict):
+            return f"{where} env is an expression"
+        for name in env or {}:
+            if str(name).startswith(("GO", "CGO_")):
+                return f"{where} env sets {name}"
+    return ""
 
 
 def tag_set(tags: str) -> frozenset:
-    """A -tags value as the set of tags go reads from it (comma- or space-separated)."""
-    return frozenset(t for t in re.split(r"[,\s]+", tags) if t)
+    return frozenset(t for t in tags.split(",") if t)
 
 
 # ---------------------------------------------------------------- the check
 def check_table(document: dict, data, filters: dict, files: set, problems: list) -> dict:
     """The table must say what ci.yaml says: every gate a real filter on a real job, every go
-    command a job's run: steps start listed, every pin and citation still found."""
+    command a job's run: steps start listed, every pin and citation still found. Returns, per
+    filter, each claimed command it does not reduce: (Run, the command as the job runs it, why)."""
     jobs = document.get("jobs") or {}
     gates = {g.filter: g for g in data.GATES}
     excluded = dict(data.EXCLUDED)
@@ -453,11 +466,13 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::EXCLUDED names filter {name}, which "
                             f"the changes job does not have")
 
-    # Every go command line of a run: step must be claimed by a pinned Run of a gate on that job.
+    # Every go command line of a run: step must be claimed by a pinned Run of a gate on that job. A
+    # claimed line is reduced only in its one simple form, whose packages, -tags and mode must then
+    # be exactly the Run's; any other claimed command is unreduced and falls to its whole module.
     skipped = {j for j, names in gated.items() if names and names <= set(excluded)}
     claims = defaultdict(list)  # (job, step label) -> pinned texts
     owner = {}  # id(Run) -> the gate's filter
-    derived = defaultdict(list)  # filter -> Runs read off a line that is not its Run's
+    unreduced = defaultdict(list)  # filter -> (Run, the command as the job runs it, why it is not reduced)
     for g in data.GATES:
         for r in g.runs:
             if not (r.step or r.source) or not r.text:
@@ -473,18 +488,19 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             if "run" not in step:
                 continue
             mine = [r for (j, ref), rs in claims.items() if j == job_id and step_matches(step, ref) for r in rs]
-            for line in go_lines(str(step["run"])):
+            for line, joined in go_lines(str(step["run"])):
+                where = f"job {job_id} step \"{step_label(step)}\" runs `{line}`"
                 pinned = [r for r in mine if squash(r.text) in squash(line)]
                 if not pinned:
-                    problems.append(f"::error file={WORKFLOW}::job {job_id} step \"{step_label(step)}\" runs `{line}`, "
-                                    f"which no Run in ci_job_reads.py lists; add it to the job's gate so its closure "
-                                    f"is checked")
+                    problems.append(f"::error file={WORKFLOW}::{where}, which no Run in ci_job_reads.py lists; add it "
+                                    f"to the job's gate so its closure is checked")
                     continue
-                # The pin finds the line; its packages, -tags and subcommand decide the closure, so
-                # each must be exactly the Run's: anything appended to a claimed command would
-                # otherwise go unchecked.
-                named, tags, mode = line_command(line)
+                reason = env_reason(document, job, [step]) or ("it is part of a backslash continuation" if joined else "")
+                named, tags, mode, reason = reduce_line(line) if not reason else (None, None, None, reason)
                 for r in pinned:
+                    if reason:
+                        unreduced[owner[id(r)]].append((r, where, reason))
+                        continue
                     parts = []
                     extra = sorted(named - set(r.pkgs))
                     missing = sorted(set(r.pkgs) - named)
@@ -497,17 +513,11 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                                      f"{','.join(sorted(tag_set(r.tags))) or '(none)'}")
                     if mode != r.mode:
                         parts.append(f"its go command is a {mode} run, the Run a {r.mode} run")
-                    if parts and mode != "<unparsed>":
-                        # Check the closure the line compiles too, so its uncovered files are named.
-                        derived[owner[id(r)]].append(replace(
-                            r, pkgs=tuple(sorted(named)), tags=",".join(sorted(tags)), mode=mode,
-                            why=f"{r.why} (as the line runs it: `{line}`)"))
                     if parts:
-                        problems.append(f"::error file={WORKFLOW}::job {job_id} step \"{step_label(step)}\" runs "
-                                        f"`{line}`, which is not the Run's ({' '.join(r.pkgs)}): {'; '.join(parts)}; "
-                                        f"make the Run in ci_job_reads.py name exactly the packages, tags and mode the "
-                                        f"line does, so the closure checked against the job's filter is the one it "
-                                        f"compiles")
+                        problems.append(f"::error file={WORKFLOW}::{where}, which is not the Run's "
+                                        f"({' '.join(r.pkgs)}): {'; '.join(parts)}; make the Run in ci_job_reads.py "
+                                        f"name exactly the packages, tags and mode the line does, so the closure "
+                                        f"checked against the job's filter is the one it compiles")
     for (job_id, ref), rs in claims.items():
         steps = [s for s in (jobs.get(job_id) or {}).get("steps") or [] if step_matches(s, ref)]
         text = squash(" ".join(str(s.get("run", "")) for s in steps))
@@ -515,11 +525,28 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             if not steps or squash(r.text) not in text:
                 problems.append(f"::error file=.github/scripts/ci_job_reads.py::job {job_id} step \"{ref}\" no longer "
                                 f"runs `{r.text}`; update or remove the Run")
+    # A script's go command is held exact rather than reduced: the line holding the pinned text is
+    # that text alone, uncontinued, and no env: of the job or any of its steps (the check does not
+    # know which starts the script) names a variable go reads. Its variables are the Run author's.
     for g in data.GATES:
         for r in g.runs:
-            if r.source and not (r.source in files and squash(r.text) in squash((REPO / r.source).read_text())):
+            if not r.source:
+                continue
+            if not (r.source in files and squash(r.text) in squash((REPO / r.source).read_text())):
                 problems.append(f"::error file={r.source}::{r.source} no longer holds `{r.text}`, the go command "
                                 f"gate {g.filter} lists; update or remove the Run")
+                continue
+            job = jobs.get(g.job) or {}
+            lines = (REPO / r.source).read_text().splitlines()
+            held = [i for i, line in enumerate(lines) if r.text in line]
+            reason = env_reason(document, job, job.get("steps") or []) or ("" if held else "its text spans lines")
+            for i in held:
+                if not reason and lines[i].strip() != r.text:
+                    reason = f"its line is `{lines[i].strip()}`, not the text alone"
+                elif not reason and continued(lines, i):
+                    reason = "it is part of a backslash continuation"
+            if reason:
+                unreduced[g.filter].append((r, f"{r.source}, which job {g.job} runs, runs `{r.text}`", reason))
     for source in data.RULES:
         if source not in files:
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::RULES names {source}, which is not "
@@ -528,18 +555,24 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
         if not any(step_matches(s, ref) for s in (jobs.get(job_id) or {}).get("steps") or []):
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::a why cites step \"{ref}\" of job "
                             f"{job_id}, which {WORKFLOW} does not have")
-    return derived
+    return unreduced
 
 # The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.
 ALWAYS_RUN = ("changes", "lint")
-PULL_REQUEST_ONLY = re.compile(r"github\.event_name\s*==\s*'pull_request'")
+# ci-ok.sh's lists of SELECTED_BY jobs whose if: admits only some events: per list, the if: term
+# that puts a job on it, what that term admits, and the events where ci-ok.sh accepts its skip.
+EVENT_LISTS = {
+    "PULL_REQUEST_ONLY": (re.compile(r"github\.event_name\s*==\s*'pull_request'"),
+                          "admits only pull_request", "github.event_name == 'pull_request'", "every other event"),
+    "NOT_ON_PUSH": (re.compile(r"github\.event_name\s*!=\s*'push'"),
+                    "admits no push", "github.event_name != 'push'", "a push"),
+}
 
 
 def check_ci_ok(document: dict, problems: list) -> None:
     """ci-ok.sh fails a job its SELECTED_BY says `changes` selected unless the job succeeded, so
     SELECTED_BY must be exactly {job: the output its if: tests} for every job ci-ok needs but
-    changes and lint, and PULL_REQUEST_ONLY exactly the jobs whose if: also admits only
-    pull_request."""
+    changes and lint, and each EVENT_LISTS list exactly the jobs whose if: holds its term."""
     jobs = document.get("jobs") or {}
     ci_ok = jobs.get("ci-ok")
     if ci_ok is None:
@@ -552,19 +585,21 @@ def check_ci_ok(document: dict, problems: list) -> None:
         return
     try:
         selected_by = json.loads(str(envs[0]["SELECTED_BY"]))
-        pull_request_only = json.loads(str(envs[0].get("PULL_REQUEST_ONLY", "")))
+        listed = {name: json.loads(str(envs[0].get(name, ""))) for name in EVENT_LISTS}
     except json.JSONDecodeError as error:
-        problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY or PULL_REQUEST_ONLY is not JSON: {error}")
+        problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY, {' or '.join(EVENT_LISTS)} is missing or not "
+                        f"JSON: {error}")
         return
     if not (isinstance(selected_by, dict) and all(isinstance(v, str) for v in selected_by.values())):
         problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY is not a JSON object of job to output name")
         return
-    if not (isinstance(pull_request_only, list) and all(isinstance(j, str) for j in pull_request_only)):
-        problems.append(f"::error file={WORKFLOW}::ci-ok's PULL_REQUEST_ONLY is not a JSON array of job names")
-        return
+    for name, jobs_listed in listed.items():
+        if not (isinstance(jobs_listed, list) and all(isinstance(j, str) for j in jobs_listed)):
+            problems.append(f"::error file={WORKFLOW}::ci-ok's {name} is not a JSON array of job names")
+            return
     needs = ci_ok.get("needs") or []
     needed = [j for j in ([needs] if isinstance(needs, str) else needs) if j not in ALWAYS_RUN]
-    expected, pr_expected = {}, set()
+    expected, list_expected = {}, {name: set() for name in EVENT_LISTS}
     for job_id in needed:
         condition = str((jobs.get(job_id) or {}).get("if", ""))
         outputs = sorted(set(GATE_REF.findall(condition)))
@@ -574,8 +609,9 @@ def check_ci_ok(document: dict, problems: list) -> None:
                             f"SELECTED_BY cannot say what selects it")
             continue
         expected[job_id] = outputs[0]
-        if PULL_REQUEST_ONLY.search(condition):
-            pr_expected.add(job_id)
+        for name, (term, _, _, _) in EVENT_LISTS.items():
+            if term.search(condition):
+                list_expected[name].add(job_id)
     for job_id in sorted(set(needed) | set(selected_by)):
         want, have = expected.get(job_id), selected_by.get(job_id)
         if job_id not in needed:
@@ -589,12 +625,47 @@ def check_ci_ok(document: dict, problems: list) -> None:
         else:
             problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id} to {have}, but its if: tests "
                             f"needs.changes.outputs.{want}")
-    for job_id in sorted(pr_expected - set(pull_request_only)):
-        problems.append(f"::error file={WORKFLOW}::ci-ok's PULL_REQUEST_ONLY lacks {job_id}, whose if: admits only "
-                        f"pull_request, so ci-ok.sh fails its skip on every other event")
-    for job_id in sorted(set(pull_request_only) - pr_expected):
-        problems.append(f"::error file={WORKFLOW}::ci-ok's PULL_REQUEST_ONLY lists {job_id}, whose if: does not "
-                        f"restrict it to github.event_name == 'pull_request', so ci-ok.sh accepts its skip there")
+    for name, (_, admits, text, where) in EVENT_LISTS.items():
+        for job_id in sorted(list_expected[name] - set(listed[name])):
+            problems.append(f"::error file={WORKFLOW}::ci-ok's {name} lacks {job_id}, whose if: {admits}, so ci-ok.sh "
+                            f"fails its skip on {where}")
+        for job_id in sorted(set(listed[name]) - list_expected[name]):
+            problems.append(f"::error file={WORKFLOW}::ci-ok's {name} lists {job_id}, whose if: has no {text} term, so "
+                            f"ci-ok.sh accepts its skip on {where} even when changes selected it")
+
+
+def check_push_workflows(data, filters: dict, problems: list) -> list:
+    """A PUSH_WORKFLOWS workflow does on a push to main what its filter's job does on a pull request
+    and a merge group, so its on.push.paths must name exactly the filter's patterns: a pattern only
+    the filter has lets a change pass the pull request's build and never reach main's, and one only
+    the paths have runs main's for a change no pull request built. Returns the report lines."""
+    report = []
+    for name, path in data.PUSH_WORKFLOWS.items():
+        if name not in filters:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::PUSH_WORKFLOWS names filter {name}, which "
+                            f"the changes job does not have")
+            continue
+        if not (REPO / path).is_file():
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::PUSH_WORKFLOWS names {path} for filter "
+                            f"{name}, which is not in the repository")
+            continue
+        push = events(yaml.safe_load((REPO / path).read_text()) or {}).get("push")
+        paths = push.get("paths") if isinstance(push, dict) else None
+        if not (isinstance(paths, list) and paths and all(isinstance(p, str) for p in paths)):
+            problems.append(f"::error file={path}::{path} has no on.push.paths list, which must equal {WORKFLOW}'s "
+                            f"filter {name}")
+            continue
+        missing = [p for p in dict.fromkeys(filters[name]) if p not in paths]
+        extra = [p for p in dict.fromkeys(paths) if p not in filters[name]]
+        for p in missing:
+            problems.append(f"::error file={path}::{path}'s on.push.paths lacks {p}, which {WORKFLOW}'s filter {name} "
+                            f"has, so a push to main that changes only a file it matches never runs {path}")
+        for p in extra:
+            problems.append(f"::error file={path}::{path}'s on.push.paths has {p}, which {WORKFLOW}'s filter {name} "
+                            f"lacks; add it to the filter or drop it here")
+        verdict = "differs from" if missing or extra else "equals"
+        report.append(f"{path}: on.push.paths {verdict} filter {name} ({len(set(paths))} patterns)")
+    return report
 
 
 def main() -> int:
@@ -604,7 +675,7 @@ def main() -> int:
 
     filters, quantifiers = changes_filters(document, problems)
     files = repo_files()
-    derived = check_table(document, data, filters, set(files), problems)
+    unreduced = check_table(document, data, filters, set(files), problems)
     check_ci_ok(document, problems)
     expander = Expander(files)
     session = Session()
@@ -622,11 +693,21 @@ def main() -> int:
                             f"a brace picomatch expands and this check does not read")
         whys = defaultdict(list)
         seen: set = set()
-        for r in list(g.runs) + derived.get(g.filter, []):
+        for r in g.runs:
             for read in closure(session, data.RULES, r, seen):
                 whys[read.glob].append(read.why)
         for read in g.reads:
             whys[read.glob].append(read.why)
+        # An unreduced command counts as reading every Go file of its module, and fails naming the
+        # command when its filter misses one.
+        held = []
+        for r, command, why_not in unreduced.get(g.filter, []):
+            module, paths = module_reads(session, files, r)
+            why = (f"{command}, which this check does not reduce ({why_not}), so it counts as reading every Go "
+                   f"file of module {module}")
+            for path in paths:
+                whys[path].append(why)
+            held.append((f"::error file={WORKFLOW}::{why}; filter {g.filter} must select it on any Go change", paths))
         reason = {}
         for glob, why in whys.items():
             for f in expander.expand(glob):
@@ -641,7 +722,9 @@ def main() -> int:
         if len(uncovered) > SHOWN:
             problems.append(f"::error file={WORKFLOW}::{where} reads {len(uncovered) - SHOWN} more files its filter "
                             f"{g.filter} does not match")
+        problems += [message for message, paths in held if not set(paths).isdisjoint(uncovered)]
     problems += session.problems
+    report += check_push_workflows(data, filters, problems)
     for line in report:
         print(line)
     problems = list(dict.fromkeys(problems))
@@ -650,5 +733,6 @@ def main() -> int:
     if problems:
         print(f"::error::{len(problems)} CI filter problem(s)")
         return 1
-    print(f"every ci.yaml filter matches every file its job reads ({len(data.GATES)} gates)")
+    print(f"every ci.yaml filter matches every file its job reads ({len(data.GATES)} gates), and every "
+          f"PUSH_WORKFLOWS workflow's on.push.paths equals its filter ({len(data.PUSH_WORKFLOWS)})")
     return 0

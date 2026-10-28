@@ -5,29 +5,32 @@ name: CI
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
 # failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
-# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed.
+# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
+# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
+# workflow of its own whose header says why; its paths are held to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
 # output, an entry in `ci-ok`'s `needs:`, an entry in `ci-ok`'s SELECTED_BY mapping the job to
-# that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request), and a gate in
-# .github/scripts/ci_job_reads.py. The ci-filters job's .github/scripts/check-ci-filters.sh holds
-# the filter to that gate and SELECTED_BY to the `if:`s.
+# that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request, or in NOT_ON_PUSH
+# when it admits no push), and a gate in .github/scripts/ci_job_reads.py. The ci-filters job's
+# .github/scripts/check-ci-filters.sh holds the filter to that gate and SELECTED_BY to the `if:`s.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
 # here (`cache: false` on every step). The jobs that cache Go restore one of five families with
-# actions/cache/restore: go-daemon (typecheck, test, pi-legion), go-docs (docs), go-envoy
-# (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each
-# family keeps one entry, keyed on the Go version its job's setup-go installed, so it is refreshed
-# only when Go is bumped. A go.sum change downloads only the changed modules, and Go's build cache
-# is content-addressed, so a stale entry costs a run only what changed; a key on the go.sum files
-# left a whole entry, up to a gigabyte, per change for seven days. Only a run off main falls back,
-# when the exact key misses, to the family's newest entry by its prefix; a run on main restores by
-# the exact key only, so the entry it saves after a Go bump holds nothing the older Go built. Each
-# saves its family with actions/cache/save as its last step, and only on a push to main whose job
-# succeeded and whose restore missed the exact key. setup-bun reads and writes its cache only on
-# main (.github/actions/setup-bun).
+# actions/cache/restore: go-daemon (typecheck, test, pi-legion), go-docs (docs, and the build job of
+# docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and
+# go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its job's
+# setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads only the
+# changed modules, and Go's build cache is content-addressed, so a stale entry costs a run only
+# what changed; a key on the go.sum files left a whole entry, up to a gigabyte, per change for
+# seven days. Only a run off main falls back, when the exact key misses, to the family's newest
+# entry by its prefix; a run on main restores by the exact key only, so the entry it saves after a
+# Go bump holds nothing the older Go built. Each family is saved with actions/cache/save as the
+# last step of a job that runs on main, and only on a push to main whose job succeeded and whose
+# restore missed the exact key. setup-bun reads and writes its cache only on main
+# (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -59,8 +62,8 @@ concurrency:
 
 # Read-only: the token clones, downloads pinned tools, and, in `changes`, reads the pull request's
 # file list, which this public repository serves without `pull-requests: read`. The jobs that need
-# more declare it in blocks of their own: lint (what check-pr-text.sh reads), docs-deploy (GitHub
-# Pages) and worker-image (the image push and its attestation's scopes).
+# more declare it in blocks of their own: lint (what check-pr-text.sh reads) and worker-image (the
+# image push and its attestation's scopes). docs-pages.yaml publishes the site to GitHub Pages.
 permissions:
   contents: read
 
@@ -411,9 +414,12 @@ jobs:
               - 'packages/pi-legion/.changie.yaml'
               - 'packages/pi-legion/CHANGELOG.md'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
-            # generators and its screenshot harness read.
+            # generators and its screenshot harness read. docs-pages.yaml builds and publishes main's
+            # site on the pushes this same list selects: its on.push.paths, which check-ci-filters.sh
+            # holds equal to this filter, so it names docs-pages.yaml too.
             docs:
               - '.github/workflows/ci.yaml'
+              - '.github/workflows/docs-pages.yaml'
               - *bun_install
               - *biome
               - *go_workspace
@@ -456,10 +462,6 @@ jobs:
               # server on the socket scripts/e2e/lib/held-port.py holds (run-server.sh:37).
               - 'packages/dispatch/**'
               - 'scripts/e2e/lib/held-port.py'
-              # The newest step reads this filter from ci.yaml through the check's filter reader
-              # and path model.
-              - '.github/scripts/ci_filter_coverage.py'
-              - '.github/scripts/workflow_paths.py'
               - 'packages/proof-editor/src/**'
               - 'packages/contracts/src/**'
               # generators/dispatch-tools.ts:12 imports envoy-client's dispatch-command.ts;
@@ -806,11 +808,13 @@ jobs:
               - 'packages/envoy/daemonpermissions/*'
               # envoy-infra's host live tests and its plugin build, in packages/envoy/infra's own
               # workspace; the docker provider step reads pulumitest.DockerPluginVersion, under
-              # infra/internal.
+              # infra/internal. The plugin build's line (-ldflags, `&&`, a pipe) is one
+              # check-ci-filters.sh does not reduce, so every Go file of the infra module is here.
               - 'packages/envoy/infra/go.mod'
               - 'packages/envoy/infra/go.sum'
               - 'packages/envoy/infra/go.work'
               - 'packages/envoy/infra/go.work.sum'
+              - 'packages/envoy/infra/**/*.go'
               - 'packages/envoy/infra/aws/**'
               - 'packages/envoy/infra/cmd/pulumi-resource-envoy-infra/*'
               - 'packages/envoy/infra/core/**'
@@ -907,13 +911,16 @@ jobs:
               - '!packages/envoy/infra/**'
             # lint's notices step: the Go packages it loads for every release target (`legion`,
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
-            # workspaces they build in, the target lists and the notices script.
+            # workspaces they build in, the target lists and the notices script. Its go build lines
+            # sit in backslash-continued subshells, which check-ci-filters.sh does not reduce, so
+            # every Go file of the envoy and envoy-infra modules they build in is here too.
             go_notices:
               - '.github/workflows/ci.yaml'
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
               - 'scripts/go-third-party-notices.sh'
+              - 'packages/envoy/**/*.go'
               - *go_workspace
               - *legion_command
               - 'packages/envoy/cmd/agent-secrets/*'
@@ -956,6 +963,8 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
+              # The check holds docs-pages.yaml's on.push.paths equal to the docs filter.
+              - '.github/workflows/docs-pages.yaml'
               - '**/*.go'
               - '**/go.mod'
               - '**/go.sum'
@@ -1379,18 +1388,16 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # Builds the documentation site (docs/site) on every change that could change it, and
-  # docs-deploy publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on a push to main
-  # that builds it, unless a later main commit also selects docs (its own run publishes then). The
-  # site's reference pages are generated from packages/ and skills/ at build time,
-  # scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes, and the built
-  # site is checked with the private-name guard; the docs filter names all of them.
+  # Builds the documentation site (docs/site) on every pull request and merge group that could
+  # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
+  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order,
+  # with these same steps. The site's reference pages are generated from packages/ and skills/ at
+  # build time, scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes,
+  # and the built site is checked with the private-name guard; the docs filter names all of them.
   docs:
     needs: changes
-    if: needs.changes.outputs.docs == 'true'
+    if: github.event_name != 'push' && needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-24.04
-    outputs:
-      newest: ${{ steps.newest.outputs.newest }}
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.
     services:
@@ -1422,7 +1429,8 @@ jobs:
           cache: false
       # go-docs: docs builds the daemon's legion and envoy's dispatch, broker and agent-secrets
       # commands, which envoy-e2e-local's go-envoy entry (listener and natsd only) does not hold;
-      # sharing one key let whichever job saved first own it.
+      # sharing one key let whichever job saved first own it. docs-pages.yaml's build job, on
+      # main, saves it; this job, which runs on no push, only restores it.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1479,70 +1487,6 @@ jobs:
       # checks the sources.
       - name: Check the built site has no private name, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh docs/site/dist
-      # Each push to main is a CI run of its own, so two docs builds can finish out of commit order.
-      # Only the build of the newest main commit that selects docs is published: this step reads
-      # main's tip now, and when a file the docs filter matches changed between this commit and it,
-      # a later run builds and publishes that tree, so this run's docs-deploy is skipped. A skipped
-      # job never enters the `pages` group, so the deploys that do enter it arrive in commit order,
-      # and a newer arrival only ever replaces an older pending one. docs/site/README.md says so.
-      - name: Find whether a later main commit selects docs
-        id: newest
-        if: github.event_name == 'push'
-        run: |
-          git fetch --no-tags --depth=1 origin main
-          git diff --name-only "$GITHUB_SHA" FETCH_HEAD > "$RUNNER_TEMP/later-changes"
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 - "$RUNNER_TEMP/later-changes" \
-            >> "$GITHUB_OUTPUT" <<'PY'
-          import sys
-          import yaml
-          from ci_filter_coverage import changes_filters
-          from workflow_paths import PathsFilter
-          problems = []
-          filters, quantifiers = changes_filters(yaml.safe_load(open(".github/workflows/ci.yaml")), problems)
-          if problems or "docs" not in filters:
-              sys.exit(f"::error::cannot read the docs filter: {problems}")
-          docs = PathsFilter(filters["docs"], quantifiers["docs"])
-          later = [path for path in open(sys.argv[1]).read().split() if docs.covers(path)]
-          if later:
-              print(f"main's tip changed {later[0]} (and {len(later) - 1} more docs input(s)) after this "
-                    "commit; its run publishes the site", file=sys.stderr)
-          print(f"newest={'false' if later else 'true'}")
-          PY
-      - if: github.event_name == 'push'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: docs/site/dist
-      - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ steps.go-cache.outputs.cache-primary-key }}
-
-  docs-deploy:
-    needs: docs
-    # Skipped when a later main commit selects docs (the docs job's newest step), so an older
-    # commit's site never replaces a newer one, and only the newest build enters the group.
-    if: github.event_name == 'push' && needs.docs.outputs.newest == 'true'
-    runs-on: ubuntu-24.04
-    # One deployment at a time, and a running one is never cancelled half-way; a newer arrival
-    # replaces a pending one, which is always older, since only newest builds arrive.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    # Publishes the built site to GitHub Pages: pages: write performs the deployment, id-token:
-    # write is the OIDC token actions/deploy-pages exchanges for it.
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      - id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   contracts:
     needs: changes
@@ -2520,9 +2464,9 @@ jobs:
   # job it did not select succeeded or was skipped. A selected job's skip fails: a skipped job
   # reports success, and a failed-only re-run of a run whose `changes` failed can make `changes`
   # succeed and leave the jobs it selects skipped. SELECTED_BY maps every needed job but `changes`
-  # and lint to the output its `if:` tests, and PULL_REQUEST_ONLY lists the jobs whose `if:` also
-  # admits only pull_request; check-ci-filters.sh holds both to those `if:`s. docs-deploy
-  # publishes and tests nothing, so it is not here.
+  # and lint to the output its `if:` tests, PULL_REQUEST_ONLY lists the jobs whose `if:` also
+  # admits only pull_request, and NOT_ON_PUSH those whose `if:` admits no push; check-ci-filters.sh
+  # holds all three to those `if:`s.
   ci-ok:
     needs:
       - changes
@@ -2584,4 +2528,5 @@ jobs:
               "worker-image": "worker_image"
             }
           PULL_REQUEST_ONLY: '["worker-image"]'
+          NOT_ON_PUSH: '["docs"]'
         run: .github/scripts/ci-ok.sh

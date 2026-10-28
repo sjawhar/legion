@@ -6,7 +6,9 @@ header says what is proved).
             the files its other steps read. Each go command is pinned to the text that starts it:
             `step=` a step of the job whose run: holds `text`, or `source=` a script that holds it.
             The check fails when a run: step of a ci.yaml job starts a go command no Run claims,
-            and when a pin's text is gone, so the table cannot drift from ci.yaml silently.
+            and when a pin's text is gone, so the table cannot drift from ci.yaml silently. A
+            claimed command the check does not reduce (check-ci-filters.sh's header says which it
+            does) counts as reading every Go file of its module; a script's pin is its whole line.
   RULES     a source file -> what it does when a test run compiles it: a go command it starts (a
             Run, whose closure is added) or a file it reads outside its package (a Read). A
             _test.go file counts when go list lists it in a tested package under the job's tags;
@@ -17,6 +19,9 @@ header says what is proved).
             build, whose every input .github/scripts/check-image-trigger-paths.sh proves its
             filter covers. (envoy_smoke's image inputs are that check's too, but its job's go
             commands and other step reads are a gate here.)
+  PUSH_WORKFLOWS  filter -> a workflow that runs that filter's job's work on a push to main in a
+            workflow of its own, selected by its `on.push.paths`, which must equal the filter: the
+            filter decides the pull request's and merge group's run, the paths main's.
 
 A Read's glob is expanded over the repository's files; a why cites the step (at()) or the
 source line that reads it. The Read lists of the jobs without Go steps (the Bun packages) are
@@ -281,8 +286,12 @@ def envoy_pack_runs():
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
 BUILD_BINARIES = "docs/site/scripts/build-binaries.sh"
-DISPATCH_SERVER_BUILD = "go build -o ./dispatch-e2e ./cmd/dispatch"
+DISPATCH_SERVER_BUILD = "flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch"
 CHECK_STEP = "Check every CI filter matches every file its job reads"
+
+# docs-pages.yaml builds and publishes main's site in a workflow of its own (its header says why),
+# so its on.push.paths stands in for the docs filter on main.
+PUSH_WORKFLOWS = {"docs": ".github/workflows/docs-pages.yaml"}
 
 GATES = [
     gate("typecheck", "typecheck", runs=[
@@ -297,7 +306,7 @@ GATES = [
                  DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"]),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
-        script_run("scripts/e2e/lib/held-port.test.ts", '["go", "build", "-o", listener, "./cmd/listener"]',
+        script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
     ], reads=reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
@@ -363,8 +372,6 @@ GATES = [
         (BUILD_BINARIES, f"docs/site/scripts/generate.ts:116 runs it ({at('docs', 'Build the docs site')})"),
         (RUN_SERVER, f"packages/dispatch/e2e/harness-listeners.ts:74 runs it ({at('docs', 'Take the screenshots')})"),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
-        (".github/scripts/ci_filter_coverage.py", f"{at('docs', 'Find whether a later main commit selects docs')}: reads the docs filter with changes_filters"),
-        (".github/scripts/workflow_paths.py", f"{at('docs', 'Find whether a later main commit selects docs')}: PathsFilter"),
         # broker-refgen (docs/site/generators/broker-reference.sh:14) parses these at run time.
         (f"{ENVOY}/internal/broker/api/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:15,173)"),
         (f"{ENVOY}/internal/broker/config/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/config.go:11,36)"),
@@ -429,7 +436,8 @@ GATES = [
     ) + install_jj("pi-envoy") + install_omp("pi-envoy") + biome(at("pi-envoy", "Lint pi-envoy")) + bun_job("pi-envoy") + CI_SELF),
 
     gate("pi_legion", "pi-legion", runs=[
-        script_run("packages/pi-legion/scripts/skill-scenarios/daemon-pane.ts", '["go", "run", "-overlay", overlay, "./cmd/daemon-pane"',
+        script_run("packages/pi-legion/scripts/skill-scenarios/daemon-pane.ts",
+                   'const result = Bun.spawnSync(["go", "run", "-overlay", overlay, "./cmd/daemon-pane", ...args], {',
                    f"daemon-pane.test.ts, run by {at('pi-legion', 'Test pi-legion')}", DAEMON, ["./cmd/daemon-pane"], mode="build",
                    overlay={f"{DAEMON}/cmd/daemon-pane/main.go": "packages/pi-legion/scripts/skill-scenarios/daemon-pane.go"}),
     ], reads=reads(
@@ -621,7 +629,9 @@ GATES = [
         (GO_TARGETS, "ci_job_reads.py expands the notices and pack runs over it"),
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),
-    ) + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),
+    ) + reads(*((path, f"check-ci-filters.sh holds its on.push.paths equal to the {name} filter (PUSH_WORKFLOWS)")
+                for name, path in PUSH_WORKFLOWS.items()))
+      + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),
 ]
 
 EXCLUDED = {

@@ -19,16 +19,20 @@
 #                      'true'. check-ci-filters.sh holds it to ci.yaml.
 #   PULL_REQUEST_ONLY  a JSON array of the SELECTED_BY jobs whose `if:` also admits only
 #                      pull_request: one is selected only when EVENT is pull_request too.
+#   NOT_ON_PUSH        a JSON array of the SELECTED_BY jobs whose `if:` also admits no push (the
+#                      docs job: docs-pages.yaml builds main's site): one is selected only when
+#                      EVENT is not push. check-ci-filters.sh holds both arrays to ci.yaml.
 # A needed job SELECTED_BY does not name fails (ci-ok does not know what selects it), and so does a
 # SELECTED_BY job that is absent from NEEDS. It prints every job's result and whether it was
 # selected, and an `::error::` for each failure naming the job, its result and why.
 #
-# Run from anywhere: NEEDS=... DRAFT=... EVENT=... SELECTED_BY=... PULL_REQUEST_ONLY=... .github/scripts/ci-ok.sh
+# Run from anywhere:
+#   NEEDS=... DRAFT=... EVENT=... SELECTED_BY=... PULL_REQUEST_ONLY=... NOT_ON_PUSH=... .github/scripts/ci-ok.sh
 # CI runs it in ci.yaml's ci-ok job, its tests in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
-for input in NEEDS DRAFT EVENT SELECTED_BY PULL_REQUEST_ONLY; do
+for input in NEEDS DRAFT EVENT SELECTED_BY PULL_REQUEST_ONLY NOT_ON_PUSH; do
   if [ -z "${!input:-}" ]; then
     echo "::error::ci-ok.sh needs $input in its environment"
     exit 1
@@ -42,11 +46,13 @@ if ! jq -e 'type == "object" and all(.[]; type == "string")' <<<"$SELECTED_BY" >
   echo "::error::SELECTED_BY is not a JSON object of job to output name: $SELECTED_BY"
   exit 1
 fi
-if ! jq -e --argjson map "$SELECTED_BY" 'type == "array" and all(.[]; type == "string" and (. as $job | $map | has($job)))' \
-  <<<"$PULL_REQUEST_ONLY" >/dev/null 2>&1; then
-  echo "::error::PULL_REQUEST_ONLY is not a JSON array of jobs SELECTED_BY names: $PULL_REQUEST_ONLY"
-  exit 1
-fi
+for list in PULL_REQUEST_ONLY NOT_ON_PUSH; do
+  if ! jq -e --argjson map "$SELECTED_BY" 'type == "array" and all(.[]; type == "string" and (. as $job | $map | has($job)))' \
+    <<<"${!list}" >/dev/null 2>&1; then
+    echo "::error::$list is not a JSON array of jobs SELECTED_BY names: ${!list}"
+    exit 1
+  fi
+done
 
 # One row per line, tab-separated: `info` and the line to print, or `error` and the ::error:: text.
 # Every job is printed in NEEDS order, after `changes` or lint if NEEDS lacks them and before each
@@ -57,11 +63,14 @@ read -r -d '' program <<'JQ' || true
     $map[$job] as $output
     | ($out[$output] // "unset") as $value
     | ($pr | any(. == $job)) as $pr_only
+    | ($not_push | any(. == $job)) as $no_push
     | if $value != "true" then {selected: false, why: "needs.changes.outputs.\($output) is \($value)"}
       elif $pr_only and $event != "pull_request" then
         {selected: false, why: "it runs only on pull_request, and this run is \($event)"}
+      elif $no_push and $event == "push" then
+        {selected: false, why: "it runs on no push, and this run is push"}
       else {selected: true,
-            why: "needs.changes.outputs.\($output) is true\(if $pr_only then " on a pull_request" else "" end)"}
+            why: "needs.changes.outputs.\($output) is true\(if $pr_only or $no_push then " on a \($event)" else "" end)"}
       end;
   def rows($job; $result):
     if $job == "changes" then
@@ -92,7 +101,8 @@ read -r -d '' program <<'JQ' || true
     ($map | keys_unsorted[] | select(. as $job | $needs | has($job) | not) | rows(.; "absent"))
 | @tsv
 JQ
-rows=$(jq -r --arg event "$EVENT" --argjson map "$SELECTED_BY" --argjson pr "$PULL_REQUEST_ONLY" "$program" <<<"$NEEDS")
+rows=$(jq -r --arg event "$EVENT" --argjson map "$SELECTED_BY" --argjson pr "$PULL_REQUEST_ONLY" \
+  --argjson not_push "$NOT_ON_PUSH" "$program" <<<"$NEEDS")
 
 errors=()
 while IFS=$'\t' read -r level text; do

@@ -16,6 +16,7 @@
 #     of a go command it starts, and each file it reads through `..`;
 #   * the module files of each go command's workspace: go.work, go.work.sum and every bound
 #     module's go.mod and go.sum (`go env GOWORK`, `go work edit -json`);
+#   * for a claimed go command this check does not reduce (below), every Go file of its module;
 #   * the static reads of the job's other steps: actions, the Bun install, Biome, scripts, fixtures.
 # Those globs are expanded over the repository's files (tracked, and untracked ones git does not
 # ignore, so an uncommitted new file counts and a build output does not) and each file is held to
@@ -27,21 +28,37 @@
 #   1. a file a gate reads that its filter does not match (up to 20 named per gate, with why),
 #   2. a gate whose filter the changes job lacks, or whose job's (or step's) if: does not test it,
 #   3. a job or step gated on a filter the table neither lists in GATES nor EXCLUDES,
-#   4. a run: line of a ci.yaml job (backslash continuations joined) that starts a go command
-#      (test, vet, build, run, list, install, generate) no Run of a gate on that job claims, or
-#      one that is not exactly the claiming Run: a positional argument that is neither a flag, a
-#      flag's value nor one of the Run's packages (or lacks one of them), a last -tags other than
-#      the Run's tags, or a subcommand of another mode (test, vet, or build for the rest); the
-#      closure the line itself compiles is then checked too, so its uncovered files are named,
+#   4. a run: line of a ci.yaml job that starts a go command (test, vet, build, run, list,
+#      install, generate) no Run of a gate on that job claims, or a claimed line in the simple
+#      form (below) whose packages, -tags or mode (test, vet, or build) are not exactly its Run's,
 #   5. a Run whose pinned text its step or script no longer holds, a RULES source file that is
 #      gone, or a why citing a step the job no longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
 #      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter,
 #   7. a SELECTED_BY in ci-ok's step that is not exactly {job: the output its if: tests} for every
-#      job ci-ok needs but changes and lint, or a PULL_REQUEST_ONLY that is not exactly the jobs
-#      whose if: restricts to github.event_name == 'pull_request': ci-ok.sh fails a job that map
+#      job ci-ok needs but changes and lint, a PULL_REQUEST_ONLY that is not exactly the jobs
+#      whose if: restricts to github.event_name == 'pull_request', or a NOT_ON_PUSH that is not
+#      exactly the jobs whose if: holds github.event_name != 'push': ci-ok.sh fails a job that map
 #      says changes selected unless it succeeded, so a wrong entry fails a job that was rightly
-#      skipped or passes one a failed-only re-run left skipped.
+#      skipped or passes one a failed-only re-run left skipped,
+#   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not
+#      name exactly that filter's patterns (anchors flattened), naming each missing and extra one,
+#      or that is missing or has no on.push.paths: it runs on main the work the filter's job runs
+#      on pull requests and merge groups (docs-pages.yaml, the docs filter), so the two lists
+#      cannot drift.
+#
+# A claimed go command is reduced only in its simple form, never parsed further: one physical
+# line, not continued with a backslash, of `go test|vet|build`, then relative package paths and
+# only -v, -race, -count=N, -timeout D, -buildvcs=false and one -tags T, with no GO* or CGO_*
+# variable in the workflow's, job's or step's env. A script_run is held exact instead: the
+# script's line holding its text must be that text alone and uncontinued, under such an env (the
+# job's and every one of its steps'); the script's variables are the Run author's to read, and
+# anything appended to that line falls to everything. Any other claimed command - an assignment
+# such as GOFLAGS, another flag, a pipe, a quote, a substitution - counts as reading every Go
+# file of its module (the nearest go.mod at or above its directory, nested modules aside), with
+# the module's go.mod and go.sum and its workspace's module files, and fails naming the command
+# unless its filter selects all of them. It fails wide, never narrow: a new evasion is answered
+# by falling to everything, not by more parsing.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party

@@ -2,17 +2,15 @@
 
 The source of <https://sjawhar.github.io/legion/>: an [Astro Starlight](https://starlight.astro.build/)
 site covering Legion, Dispatch and the Secrets Broker. The `docs` job of `.github/workflows/ci.yaml`
-builds it on every pull request and push to `main` whose change its `docs` filter matches, and its
-`docs-deploy` job publishes that build to GitHub Pages on a push to `main`.
+builds it on every pull request and merge group whose change its `docs` filter matches.
+`.github/workflows/docs-pages.yaml` builds it on every push to `main` whose change the same list
+matches (its `paths:`, which `.github/scripts/check-ci-filters.sh` holds equal to the `docs` filter)
+and publishes that build to GitHub Pages.
 
-Every push to `main` is a CI run of its own, so two docs builds can finish out of commit order. Only
-the build of the newest `main` commit that selects docs is published: at the end of a push's docs
-build, the job reads `main`'s tip, and when a later commit changed a file the `docs` filter matches,
-that later commit's run publishes, so this run's `docs-deploy` is skipped. A skipped deploy never
-enters the `pages` concurrency group, so the deploys that do enter it arrive in commit order, and a
-newer arrival only ever replaces an older pending one. The published site therefore ends at the
-newest docs-selecting commit's build. If that build fails, the site stays at the last one published
-until a later push selects docs again.
+Every docs-selecting push to `main` builds and deploys, in push order: the workflow's runs share one
+concurrency group, `pages`, which runs one at a time and queues the rest first in, first out (up to
+100), so none is skipped or replaced and the last to deploy is the newest commit's build. If a
+build fails, the site stays at the last one published until a later push selects docs again.
 
 ## Run it
 

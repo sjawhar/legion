@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Tests for `check-ci-filters.sh`: every ci.yaml filter must match every file its job reads, the
-# Go closures recomputed with go list, the table of go commands must say what ci.yaml says, and
-# ci-ok's SELECTED_BY and PULL_REQUEST_ONLY must say what each needed job's if: tests.
+# Go closures recomputed with go list, the table of go commands must say what ci.yaml says, a
+# claimed go command the check does not reduce counts as reading its whole module, ci-ok's
+# SELECTED_BY, PULL_REQUEST_ONLY and NOT_ON_PUSH must say what each needed job's if: tests, and a
+# PUSH_WORKFLOWS workflow's on.push.paths must equal its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -24,7 +26,8 @@ source "$script_dir/test-lib.sh"
 # fixture <name>: a tree that passes. The app job runs `go test ./cmd/app ./lib`, whose closure is
 # cmd/app and lib (cmd/app imports lib); lib's test reads fixtures/data.json through `..`, which
 # RULES records; mod/other is a package nothing imports. The image job runs only on a pull
-# request, and ci-ok needs both. Echoes the fixture root.
+# request, and ci-ok needs both. The site filter gates no job: site.yaml, which PUSH_WORKFLOWS
+# pairs with it, runs on a push whose paths are that filter flattened. Echoes the fixture root.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -68,6 +71,7 @@ GATES = [
     ], reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition")]),
 ]
 EXCLUDED = {"image": "an image build another check proves"}
+PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
 PY
   cat > "$root/.github/workflows/ci.yaml" <<'YAML'
 name: CI
@@ -95,6 +99,9 @@ jobs:
               - 'fixtures/**'
             image:
               - 'docs/**'
+            site:
+              - *workspace
+              - 'docs/**'
   app:
     needs: changes
     if: needs.changes.outputs.app == 'true'
@@ -119,7 +126,23 @@ jobs:
         env:
           SELECTED_BY: '{"app": "app", "image": "image"}'
           PULL_REQUEST_ONLY: '["image"]'
+          NOT_ON_PUSH: '[]'
         run: .github/scripts/ci-ok.sh
+YAML
+  cat > "$root/.github/workflows/site.yaml" <<'YAML'
+name: Site
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'go.work'
+      - 'mod/go.mod'
+      - 'docs/**'
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo build
 YAML
   git -C "$root" init -q
   echo "$root"
@@ -149,6 +172,8 @@ root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "counts the job's files" "$(contains "$out" '^app: 7 files, 0 uncovered (filter app)$')"
+check "holds the push workflow's paths to its filter" \
+  "$(contains "$out" '^.github/workflows/site.yaml: on.push.paths equals filter site (3 patterns)$')"
 check "says what it checked" "$(contains "$out" 'every ci.yaml filter matches every file its job reads (1 gates)')"
 
 echo "case: an import of a package outside the filter"
@@ -269,6 +294,45 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
 
+echo "case: ci-ok's NOT_ON_PUSH lists a job whose if: admits a push"
+root=$(fixture ci-ok-not-on-push-wrong)
+replace "$root/.github/workflows/ci.yaml" "NOT_ON_PUSH: '[]'" "NOT_ON_PUSH: '[\"app\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the term its if: lacks" \
+  "$(contains "$out" "ci-ok's NOT_ON_PUSH lists app, whose if: has no github.event_name != 'push' term")"
+
+echo "case: ci-ok's NOT_ON_PUSH misses a job whose if: admits no push"
+root=$(fixture ci-ok-not-on-push-missing)
+replace "$root/.github/workflows/ci.yaml" "if: needs.changes.outputs.app == 'true'" \
+  "if: github.event_name != 'push' && needs.changes.outputs.app == 'true'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job" "$(contains "$out" "ci-ok's NOT_ON_PUSH lacks app, whose if: admits no push, so ci-ok.sh fails its skip on a push")"
+
+echo "case: a push workflow's paths miss a pattern of its filter"
+root=$(fixture push-paths-missing)
+replace "$root/.github/workflows/site.yaml" "      - 'mod/go.mod'"$'\n' ""
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the workflow, the pattern and the filter" \
+  "$(contains "$out" "::error file=.github/workflows/site.yaml::.github/workflows/site.yaml's on.push.paths lacks mod/go.mod, which .github/workflows/ci.yaml's filter site has")"
+check "reports the lists differ" "$(contains "$out" '^.github/workflows/site.yaml: on.push.paths differs from filter site')"
+
+echo "case: a push workflow's paths name a pattern its filter lacks"
+root=$(fixture push-paths-extra)
+replace "$root/.github/workflows/site.yaml" "      - 'docs/**'" $'      - \'docs/**\'\n      - \'fixtures/**\''
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the pattern" "$(contains "$out" "site.yaml's on.push.paths has fixtures/\*\*, which .github/workflows/ci.yaml's filter site lacks")"
+
+echo "case: a push workflow PUSH_WORKFLOWS names is gone"
+root=$(fixture push-workflow-gone)
+rm "$root/.github/workflows/site.yaml"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'PUSH_WORKFLOWS names .github/workflows/site.yaml for filter site, which is not in the repository')"
+
 echo "case: a package added to a go command the table claims, outside the job's filter"
 root=$(fixture appended-package)
 replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test ./cmd/app ./lib ./other"
@@ -303,7 +367,8 @@ replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: g
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the tags the line builds with" "$(contains "$out" 'it builds with -tags probe, the Run with (none)')"
-check "and the file that closure reads outside the filter" "$(contains "$out" 'reads mod/other/other.go, which its filter app does not match')"
+check "and names the command" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib -tags probe`, which is not the Run')"
 
 echo "case: a Run whose tags or mode disagree with the line it claims"
 root=$(fixture run-disagrees)
@@ -340,5 +405,32 @@ replace "$root/.github/workflows/ci.yaml" "        working-directory: mod" $'   
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the file that closure reads outside the filter" "$(contains "$out" 'other')"
+
+echo "case: a go command this check does not reduce passes when its filter selects its whole module"
+root=$(fixture unreduced-whole-module)
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/cmd/app/*'" "              - 'mod/**'"
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: GOFLAGS=-tags=probe go test ./cmd/app ./lib"
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+check "counts every Go file of the module" "$(contains "$out" '^app: 8 files, 0 uncovered (filter app)$')"
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/**'" "              - 'mod/cmd/app/*'"
+run_check "$root"
+check "fails once its filter misses one of them" "$(is "$status" 1)"
+check "names the command, why it is not reduced and the filter" \
+  "$(contains "$out" 'job app step "Test the app" runs `GOFLAGS=-tags=probe go test ./cmd/app ./lib`, which this check does not reduce (it starts with `GOFLAGS=-tags=probe`, not go), so it counts as reading every Go file of module mod; filter app must select it on any Go change')"
+
+echo "case: a script's go command is held to its pinned text, the whole line"
+root=$(fixture script-line)
+printf '#!/bin/sh\ngo build ./cmd/app\n' > "$root/build.sh"
+replace "$root/.github/scripts/ci_job_reads.py" 'text="go test ./cmd/app ./lib"),' \
+  'text="go test ./cmd/app ./lib"), run("mod", ["./cmd/app"], "build.sh: go build ./cmd/app", mode="build", source="build.sh", text="go build ./cmd/app"),'
+run_check "$root"
+check "passes while the line is the text alone" "$(is "$status" 0)"
+printf '#!/bin/sh\ngo build ./cmd/app ./other\n' > "$root/build.sh"
+run_check "$root"
+check "fails once the line holds more" "$(is "$status" 1)"
+check "names the script's command and its line" \
+  "$(contains "$out" 'build.sh, which job app runs, runs `go build ./cmd/app`, which this check does not reduce (its line is `go build ./cmd/app ./other`, not the text alone), so it counts as reading every Go file of module mod')"
+check "and the file the module adds" "$(contains "$out" '::error file=mod/other/other.go::')"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
