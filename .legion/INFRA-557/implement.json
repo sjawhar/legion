@@ -2,69 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-27T17:11:00Z",
-  "round": 2,
+  "completed": "2026-10-28T15:47:00Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-  "answersTest": "3ea2cd7ba61b9a0f9c18a8fc990ad03871a3af13",
+  "codeHead": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+  "answersTest": "7899a4f6f79d8a6411bd60edb6fd003d9fe1877e",
   "proof": [
     {
-      "criterion": "Tester failure 1 (spec item 2): after a node loss, a graceful stop of the pod that took the lost node's expired lease hands over to the next standby within 10 s and no message is lost (red row TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s, unchanged from 3ea2cd7b)",
-      "surface": "three real cmd/listener binaries for machine id box-a against one in-process nats-server 2.10.29, the lost pod behind a frozen relay (sockets open, the server keeps its binding)",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
-      "observed": "--- PASS: TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s (21.62s); the next standby takes the released record carrying stale_binding, subscribes beside the lost pod's binding and settles (first prompt 6.64 s after the SIGTERM in the implementer's measured run). Output: https://github.com/sjawhar/legion/pull/2404#issuecomment-6448426787",
-      "headSha": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-      "negativeControl": "the same row at 24a88452 (tester): '99 of 161 messages never reached their session within 15s' in 2 of 2 runs; the standby logged 'durable is push-bound by a subscriber without the lease; waiting for its binding to end'"
+      "criterion": "Tester round-3 failure (README 'Take-over', architect 2026-10-27 17:47Z): a graceful stop with messages on the wire keeps each session's order (red row TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder, unchanged from 7bd2c29e)",
+      "surface": "two real cmd/listener binaries for one machine id against one in-process nats-server 2.10.29, the active pod behind a relay with a 300 ms delay",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=30 -timeout 90m -run '^TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder$' ./cmd/listener; and the full -run '^Test(TwoPods|TwoBuilds)' run",
+      "observed": "30 of 30 PASS (implementing worker's run at the final code); full run at dc6cf439: all 23 rows PASS, ok 526.053s, the red row 12.20s. Output: https://github.com/sjawhar/legion/pull/2404#issuecomment-6473572046",
+      "headSha": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+      "negativeControl": "the red row at 2e592cc8 (tester): 'ses_mp_wirestop_one took evt-mp-0063 ... before evt-mp-0055 ..., out of the publish order' in 3 of 3; a drain plus sorted NAK without keeping the subscription: '1 of 184 messages never reached their session within 15s: [evt-mp-0061 ...]' in 2 of ~78 runs (nats-server drops a first delivery queued when the last subscriber goes)"
     },
     {
-      "criterion": "Tester failure 2 (architect Q2): a graceful stop during a hard take-over's hold keeps each session's order (red row TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder, unchanged from 3ea2cd7b)",
-      "surface": "three real cmd/listener binaries against one in-process nats-server; the lost pod killed and its connection closed while the new holder holds",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
-      "observed": "--- PASS: TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder (14.72s): every message reached its session in publish order; the stopping holder NAKs its held batch in stream order and its released record keeps unsettled=true, so the next holder settles until NumAckPending is all in hand",
-      "headSha": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-      "negativeControl": "the same row at 24a88452 (tester): 'ses_mp_holdstop_one took evt-mp-0051 (published 5.001s ...) before evt-mp-0001 (published 0s ...), out of the publish order' in 4 of 4 runs"
+      "criterion": "Graceful and hard take-over on real binaries keep every message once and in order (spec item 2, architect Q2)",
+      "surface": "two listener processes built at dc6cf439 against a real nats-server 2.10.29 process (go run), a port session served by a local HTTP server, 40 sends through the standby at 100 ms intervals, the active pod signalled after the 15th",
+      "command": "bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head term TERM; bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head kill KILL",
+      "observed": "SIGTERM: 0 sends refused, 40 prompted, 40 unique, in send order, the last 3.29 s after the signal; the stopping pod logged 'handed the durable's messages back to the next holder' and the standby took the released record and settled. SIGKILL: 0 refused, 40 prompted once, in order, the last 4.67 s after the signal (lease taken from expired, settled)",
+      "headSha": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+      "negativeControl": "the same rows' red forms: round-3 red row at 2e592cc8 out of order (above); the first 20 multiprocess rows on base 819dc283 all FAIL (round 1, https://github.com/sjawhar/legion/pull/2404#issuecomment-6443394041)"
     },
     {
-      "criterion": "All earlier rows still hold after the merge of main and the settle hold: one deliverer through a reconnect in place, SIGKILL and node loss in order within 15 s, graceful within 10 s, standby past 140 s, readiness, sends during take-overs, ledger, exception id, CAS, addresses, grace, last-seen, two builds",
-      "surface": "real cmd/listener binaries (two per row) against one in-process nats-server, relays that cut, freeze or slow links",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
-      "observed": "all 22 rows PASS, ok 530.698s (SIGKILL row 14.73s, node loss 22.08s, graceful 14.87s, standby 144.62s)",
-      "headSha": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-      "negativeControl": "the first 20 rows on base 819dc283 with only the tests copied in: all FAIL (round 1, https://github.com/sjawhar/legion/pull/2404#issuecomment-6443394041), e.g. '50 of 143 messages were not prompted exactly once', 'pod-b exited 2m15s into its standby'"
-    },
-    {
-      "criterion": "A two-build test: an old and a new listener build sharing one machine id skip no message on any subject (the real pre-change build)",
-      "surface": "real binaries: this build, the envoy_twobuild build, and a listener built from main 8e53cdf3 (pre-INFRA-557, the merged base) as the old build",
-      "command": "cd packages/envoy && ENVOY_LISTENER_OLD_BINARY=$TMPDIR/listener-main go test -tags multiprocess -count=1 -timeout 20m -run TestTwoBuilds -v ./cmd/listener",
-      "observed": "PASS: 604 messages each prompted exactly once across plain/envoy_twobuild/plain; old 8e53cdf3 build active, this build waited on its binding, took over 960 ms after SIGTERM, 303 messages each prompted once",
-      "headSha": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-      "negativeControl": "an 819dc283 binary as the old build cannot start under the merged harness, which now holds the port it hands the binary (main #2229): 'listen tcp 127.0.0.1:63809: bind: address already in use' and the row fails 'waited 30s for pod-old to be the machine's active pod'; hence the 8e53cdf3 build"
-    },
-    {
-      "criterion": "Take-over on the real binary: kill -9 of the active pod with a standby running delivers a send made through the standby",
-      "surface": "two listener processes built at head for machine id box-smoke against a local nats-server 2.10.29 process, a port session served by a local HTTP server, curl",
-      "command": "bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head head2",
-      "observed": "healthz pod-a role active, pod-b role standby with active_instance pod-a; after kill -9 pod-a the send via pod-b answered 200 and the port session received it 5.41 s after the kill; pod-b then role active",
-      "headSha": "2e592cc8388ade0ebbdf44b6a093e3962bd812e2",
-      "negativeControl": "a send to an unregistered session through the surviving pod answered 404 {\"error\":\"no live session ses_never_registered\"}"
+      "criterion": "All earlier rows hold after the merge of main aeeee6c0 and the hand-back change",
+      "surface": "real cmd/listener binaries per row against one in-process nats-server, relays that cut, freeze or slow links",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; go test -count=1 -timeout 20m -skip '<the four Postgres-backed TestDispatch* names>' ./cmd/listener/",
+      "observed": "multiprocess: 23 PASS, ok 526.053s; untagged listener suite: ok 546.853s",
+      "headSha": "dc6cf439a9a9988655983e63ccd712316170fa4f",
+      "negativeControl": "round-2 red rows at 24a88452: '99 of 161 messages never reached their session within 15s' and an out-of-order hold stop; both pass now"
     }
   ],
   "filesChanged": [
-    "merge of main 8e53cdf3 (98be5ec2): 19 conflicted files resolved; #2167's store-backed send kept, role set reads through liveSessionEntry and writes with CAS (Amend); #2374's 15-minute interest grace inside the holder-only reaper; store/session CAS paths take a context and bound each bucket call; listener-multiprocess job gets its own path filter (listener_multiprocess) under #2325; docs/CHANGELOG/AGENTS.md merged",
-    "packages/envoy/cmd/listener/receive.go, lease.go: settle hold (NumAckPending vs held, poll 250 ms, cap 13 s), lease record fields stale_binding and unsettled, take-over rules",
-    "packages/envoy/cmd/listener/receive_test.go, lease_test.go: settle and flag tests replace the fixed-window test",
-    "packages/envoy/cmd/listener/multiprocess_test.go (merge adaptations only: mpStartPair env, 300 ms delay rows, unplaceable retry window 0 in the no-holder row), main_test.go healthz deadline test adapted to main's 3 s ping budget",
-    "packages/envoy/cmd/listener/README.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md: settle rule and timings"
+    "merge of main aeeee6c0 (ade9f69e): 8 conflicts; packages/envoy/CHANGELOG.md equals main's and the branch's entries are 13 changie fragments packages/envoy/.changes/unreleased/pr2404-*.yaml with no issue keys; store/kv.go keeps CAS writes plus main's private-topic cleanup; goldens keep both grant additions; twobuild_test.go leaves out subjects /v1/interests/subscribe now drops",
+    "packages/envoy/cmd/listener/receive.go, lease.go, main.go: graceful hand-back (keep subscription, NakWithDelay 2 s in stream order, release unsettled, linger until the next holder's record says receiving, 3 s cap, 1 s when no pod takes the lease, then drain); lease field receiving and SetReceiving/Unsettle",
+    "packages/envoy/cmd/listener/receive_test.go, lease_test.go: hand-back, linger, receiving and unsettled tests",
+    "packages/envoy/cmd/listener/README.md, packages/envoy/AGENTS.md (graceful-stop lines only), the pr2404 lease fragment"
   ],
   "trickyParts": [
-    "A lost pod's binding lingers on the server for minutes; a holder that subscribed beside it records stale_binding so the next holder, taking a released record, does not mistake it for a pre-INFRA-557 build.",
-    "The settle hold ends when every ack-pending message of the consumer is in this pod's hands, so a SIGKILL with nothing in hand delivers after the lease TTL (~5-6 s) and a node loss once the dead pod's messages return (~11-12 s); a NAK-delayed retry outstanding keeps the hold to its 13 s cap.",
-    "main #2229's held-port harness means the old-binary two-build run needs a pre-change build that knows it: main 8e53cdf3."
+    "nats-server 2.10.29 and 2.12.15 lose a push consumer's message whose first delivery is in the server's send queue when the deliver subject's last subscriber goes (didNotDeliver wraps the redelivery count; hasMaxDeliveries removes it at the ack wait). A graceful stop therefore keeps its subscription until the next holder is receiving.",
+    "A graceful release always carries unsettled=true: messages handed back with a 2 s NAK delay must not be overtaken by newer ones the next holder receives first, so it settles (about 2 s)."
   ],
   "deviations": [
-    "Merge adaptations to this branch's own tests: two multiprocess rows behind a slow link use 300 ms instead of 500 ms (a role set's bucket round trips at 500 ms exceed main's 3.5 s sendRequestBudget); the no-holder exception row runs with ENVOY_UNPLACEABLE_RETRY_WINDOW=0 (main defers an unknown session's message 60 s); TestHealthzAnswers503WhenADependencyHangsPastTheDeadline hangs WatchErr instead of Ping (main's 3 s ping budget answers first).",
-    "Send now follows main #2167 (a refused key answers main's 404 instead of this branch's 400).",
-    "Round 1 deviations stand (architect Q1 no-lease mode; Q2 order kept; '>' filter; no instance= prefix on Go's text logger; CI job runs only the multiprocess rows)."
+    "The linger ends after 1 s when no other pod takes the released record (not the 3 s cap): a sole pod gains nothing by lingering and the 3 s per stop pushed the untagged suite past go's 10-minute default. Residual: the last pod of a machine stopping can still meet the nats-server loss above for a message in flight at that instant; no client-side fix exists without another subscriber.",
+    "TestListenerFollowsTheInterestRegistryAcrossNATSRestarts is a flake under load on main too (1 of 30 on main aeeee6c0 with background load, 2 of 30 on the merged tree); passed in the final untagged run.",
+    "Changelog entries moved to changie fragments named pr2404-* per the controller's ruling; no issue key in fragment text."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
