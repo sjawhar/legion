@@ -500,6 +500,49 @@ func TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen(t *
 	}
 }
 
+// The evictor's liveness ping keeps the head tracker trusting a healthy LISTEN connection, and the
+// tracker's trust protects only what this process answers without the database: a resident room,
+// a cached cold read, a preload. A process holding none of those has nothing the ping protects, so
+// it sends none. On a real Dispatch pair left idle with no room, no cached read and no tracker
+// entry, the two processes sent 118 pings a minute (240 with four processes), where the build
+// before the ping sent none.
+func TestAServiceWithNothingTheTrackerProtectsSendsNoPing(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service, _ := newTestServiceInstance(t, database)
+	listen, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("connect the ping listener: %v", err)
+	}
+	t.Cleanup(func() { _ = listen.Close(context.Background()) })
+	if _, err := listen.Exec(ctx, "listen "+documentPingChannel); err != nil {
+		t.Fatalf("listen on %s: %v", documentPingChannel, err)
+	}
+	runProbedEvictor(t, service, nil)
+	if live := len(service.srv.Rooms()); live != 0 {
+		t.Fatalf("%d rooms are live, so the service holds something and nothing here is tested", live)
+	}
+
+	window := headTrustWindow + 2*headPingAfter
+	deadline := time.Now().Add(window)
+	pings := 0
+	for {
+		waitCtx, cancel := context.WithDeadline(ctx, deadline)
+		_, err := listen.WaitForNotification(waitCtx)
+		cancel()
+		if err != nil {
+			break
+		}
+		pings++
+	}
+	if figures := service.RoomFigures(); figures.ResidentRooms != 0 || figures.ReadCache.Entries != 0 || figures.Preloads != 0 || figures.HeadTracker.Entries != 0 {
+		t.Fatalf("the service came to hold something during the window (%+v), so nothing here is tested", figures)
+	}
+	if pings != 0 {
+		t.Errorf("a service with no room, no cached read, no preload and no tracker entry sent %d pings on %s in %s, want none: the ping protects nothing there and costs a shared-pool connection and a NOTIFY to every listener each second", pings, documentPingChannel, window)
+	}
+}
+
 // silencingProxy forwards each TCP connection it accepts to target until silence, after which the
 // connections it already holds forward nothing and neither end of them is closed: each looks open
 // to both ends and stays silent, a half-open connection. A connection accepted after silence
