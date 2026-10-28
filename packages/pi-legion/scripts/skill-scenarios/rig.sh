@@ -454,7 +454,7 @@ cmd_profile() {
     jq -s '.[0] * .[1]' "$agent/envoy.json" "$envoy_json" >"$agent/envoy.json.new"
     mv "$agent/envoy.json.new" "$agent/envoy.json"
   fi
-  install_model_route "$co" "$profile" "$P" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-$route_model_id}" >>"$P/install.log" 2>&1 ||
+  install_model_route "$co" "$profile" "$P" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-}" >>"$P/install.log" 2>&1 ||
     fail "the model route (${LEGION_E2E_MODEL_ROUTE:-gateway}) could not be installed; see $P/install.log"
   [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] ||
     printf 'model %s/%s\n' "$LEGION_E2E_MODEL_PROVIDER" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-$route_model_id}" >>"$P/built-from"
