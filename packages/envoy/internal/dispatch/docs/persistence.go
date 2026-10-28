@@ -285,13 +285,18 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// (PersistCoalesceWindow = -1). Why the announcement belongs inside this transaction is
 	// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
 	// twice because its two parameters are different types: doc_updates.artifact_id is a uuid,
-	// and pg_notify takes text.
+	// and pg_notify takes text. The same statement names the document in doc_compaction_owed, the
+	// documents the compaction sweep reads (compactionCandidates), once the row it appends is not
+	// the document's first: a first row has nothing to fold into, and a document already named
+	// stays as it is.
 	if _, err := tx.Exec(ctx, `
 		with appended as (
 			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+		), owed as (
+			insert into doc_compaction_owed (artifact_id) select $1 where $6 on conflict do nothing
 		)
 		select pg_notify('`+documentChangedChannel+`', $5)
-	`, room, int64(version), update, contentChanged, room); err != nil {
+	`, room, int64(version), update, contentChanged, room, latest > 0); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
 	authors, lastActor, include := credit.take()
@@ -564,6 +569,10 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 		}
 		*deletion.count = result.RowsAffected()
 	}
+	// The seed is the document's one row, so it has nothing a compaction could fold.
+	if _, err := tx.Exec(ctx, `delete from doc_compaction_owed where artifact_id = $1`, room); err != nil {
+		return RebuildReport{}, fmt.Errorf("delete rebuilt document's compaction entry: %w", err)
+	}
 	report.Head = int64(head) + 1
 	if _, err := tx.Exec(ctx, `
 		insert into doc_updates (artifact_id, version, update, content_changed)
@@ -592,6 +601,7 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 			`delete from doc_snapshots where artifact_id = $1`,
 			`delete from doc_updates where artifact_id = $1`,
 			`delete from doc_checkpoints where artifact_id = $1`,
+			`delete from doc_compaction_owed where artifact_id = $1`,
 		} {
 			if _, err := tx.Exec(ctx, query, room); err != nil {
 				return fmt.Errorf("delete document data: %w", err)

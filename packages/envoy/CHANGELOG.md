@@ -1936,19 +1936,22 @@
   append and every load, compacts a document once 16 rows after its first are older than 2
   minutes or one is older than 15 minutes, and an hourly sweep under the `document-compaction`
   lease, with or without NATS, first ticks within 30 seconds of start and compacts what the
-  queues missed. It reads and folds on a two-connection pool of its own (`dispatch-compaction`),
-  so one server's stated connection ceiling rises by 2, to 88; it holds no document lock while it
-  folds, writes under the lock only when the rows it folded are unchanged, and leaves rows
-  younger than 2 minutes as written. The LEGION-496 guarantee, that `doc_updates` and any backup
-  of it hold no text a write deleted, now holds within about 75 minutes of the write (the
-  2-minute tail, the 15-minute age rule, the hourly sweep) rather than as a room closes, as the
-  server shuts down and daily. ygo's `CompactEvery` setting and the outbox's daily compaction are
-  removed. The room's own decode of a document many writers touched is faster too: the ygo fork
-  pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.7`, whose decoder integrates an update's
-  deferred items in dependency order instead of re-scanning every deferred item once per
-  dependency, so the state of a 400-paragraph spec after 240 versions decodes in about 143 ms
-  rather than 433 ms. The tag also caps parked delete ranges as parked items are and retries them
-  only once they can apply; its opt-in hooks and scan bounds are off, and Dispatch sets none.
+  queues missed. The sweep reads only the documents a table of documents with rows to fold names
+  (`doc_compaction_owed`), written by each append in its own statement and cleared by compaction;
+  migration 0136 adds it and backfills it. Compaction reads and folds on a two-connection pool of
+  its own (`dispatch-compaction`), so one server's stated connection ceiling rises by 2, to 88; it
+  holds no document lock while it folds, writes under the lock only when the rows it folded are
+  unchanged, and leaves rows younger than 2 minutes as written. The LEGION-496 guarantee, that
+  `doc_updates` and any backup of it hold no text a write deleted, now holds within about 75
+  minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly sweep) rather than
+  as a room closes, as the server shuts down and daily. ygo's `CompactEvery` setting and the
+  outbox's daily compaction are removed. The room's own decode of a document many writers touched
+  is faster too: the ygo fork pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.7`, whose decoder
+  integrates an update's deferred items in dependency order instead of re-scanning every deferred
+  item once per dependency, so the state of a 400-paragraph spec after 240 versions decodes in
+  about 143 ms rather than 433 ms. The tag also caps parked delete ranges as parked items are and
+  retries them only once they can apply; its opt-in hooks and scan bounds are off, and Dispatch
+  sets none.
 
 - An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
   from the text its search vector indexes - the question, the options' labels and descriptions,

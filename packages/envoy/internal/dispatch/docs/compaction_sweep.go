@@ -1,8 +1,9 @@
 package docs
 
-// The compaction sweep: the hourly pass over every document with rows to fold, which compacts what
-// the compaction queue never saw or let go - the rooms a restart, a Shutdown or a Quiesce dropped
-// from it, and the documents another process wrote and never loaded here.
+// The compaction sweep: the hourly pass over every document with rows to fold, as
+// doc_compaction_owed names them, which compacts what the compaction queue never saw or let go -
+// the rooms a restart, a Shutdown or a Quiesce dropped from it, and the documents another process
+// wrote and never loaded here.
 
 import (
 	"context"
@@ -19,9 +20,9 @@ import (
 )
 
 // compactionSweepLease names the lease a sweep pass runs under, and compactionSweepPeriod the
-// period one pass serves (duty.Exclusive): a pass reads every document's row count, so two
-// envoy-dispatch processes sweeping, or one process sweeping again after a restart, inside one
-// aligned hour is that whole read again for what the queue already compacts.
+// period one pass serves (duty.Exclusive): a pass reads the rows of every document with rows to
+// fold, so two envoy-dispatch processes sweeping, or one process sweeping again after a restart,
+// inside one aligned hour is that whole read again for what the queue already compacts.
 const (
 	compactionSweepLease  = "document-compaction"
 	compactionSweepPeriod = time.Hour
@@ -69,10 +70,12 @@ func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
 	duty.Exclusive(ctx, leases, compactionSweepLease, compactionSweepPeriod, s.compactionSweepPass)
 }
 
-// compactionSweepPass lists the documents holding more than one row and compacts each one due
-// (checkCompaction), under the tail rule and without waiting for its lock, one at a time on the
-// compaction pool. The list is read whole before the first compaction, so no cursor holds a
-// connection while one runs. A compaction that found the room's lock held or another writer
+// compactionSweepPass lists the documents with rows to fold (compactionCandidates) and compacts each
+// one due (checkCompaction), under the tail rule and without waiting for its lock, one at a time on
+// the compaction pool. The list is read whole before the first compaction, so no cursor holds a
+// connection while one runs. A listed document with no row after its first - one a prune or an
+// artifact's deletion left, or one another process compacted - is taken off the list
+// (forgetCompactionCandidate). A compaction that found the room's lock held or another writer
 // changing its rows (compactBusy, compactDropped), or that failed, is handed to this service's
 // compaction queue rather than retried here: the queue retries it with backoff, and the pass goes
 // on to the next document. It ends at the document it is on once ctx ends.
@@ -89,7 +92,7 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		}
 		return
 	}
-	compacted, deleted, left := 0, 0, 0
+	compacted, deleted, left, forgotten := 0, 0, 0, 0
 	leave := func(room string) {
 		s.compactions.note(room)
 		left++
@@ -102,6 +105,15 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		if err != nil {
 			warnCompaction(ctx, warnCompactionCheck, room, err)
 			leave(room)
+			continue
+		}
+		if check.later == 0 {
+			removed, err := forgetCompactionCandidate(ctx, pool, room)
+			if err != nil {
+				warnCompaction(ctx, warnCompactionCheck, room, err)
+			} else if removed {
+				forgotten++
+			}
 			continue
 		}
 		if !check.due {
@@ -123,15 +135,16 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		return
 	}
 	slog.Info("dispatch: document compaction sweep",
-		"candidates", len(rooms), "compacted", compacted, "rows_deleted", deleted, "left_to_queue", left)
+		"candidates", len(rooms), "compacted", compacted, "rows_deleted", deleted, "left_to_queue", left,
+		"forgotten", forgotten)
 }
 
-// compactionCandidates lists every document holding more than one row, the only ones a compaction
-// can fold. It reads the (artifact_id, version) primary key alone, which Postgres can answer with
-// an index-only scan, so the pass reads no row's bytes or created_at to choose them; and it drains
-// the list before it returns.
+// compactionCandidates lists every document doc_compaction_owed names: the documents an append
+// gave a row after their first that no compaction has folded since (appendUpdateTxClass,
+// writeCompaction). It reads that table alone, so the pass reads no row of a document with nothing
+// to fold, and it drains the list before it returns.
 func compactionCandidates(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
-	rows, err := pool.Query(ctx, `select artifact_id::text from doc_updates group by artifact_id having count(*) > 1`)
+	rows, err := pool.Query(ctx, `select artifact_id::text from doc_compaction_owed`)
 	if err != nil {
 		return nil, fmt.Errorf("list the documents to compact: %w", err)
 	}
@@ -140,4 +153,31 @@ func compactionCandidates(ctx context.Context, pool *pgxpool.Pool) ([]string, er
 		return nil, fmt.Errorf("list the documents to compact: %w", err)
 	}
 	return rooms, nil
+}
+
+// forgetCompactionCandidate takes room off the sweep's list when it holds no row after its first,
+// and reports whether it did. It deletes in one transaction on pool under the document's lock
+// (lockDocumentRoom), which every append that names a document takes too, so an append committing
+// meanwhile either committed before the delete reads the rows, which then keeps the entry, or
+// names the document again after it.
+func forgetCompactionCandidate(ctx context.Context, pool *pgxpool.Pool, room string) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin forget the document's compaction entry: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return false, err
+	}
+	result, err := tx.Exec(ctx, `
+		delete from doc_compaction_owed where artifact_id = $1
+			and not exists (select 1 from doc_updates where artifact_id = $1 offset 1)
+	`, room)
+	if err != nil {
+		return false, fmt.Errorf("forget the document's compaction entry: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit forget the document's compaction entry: %w", err)
+	}
+	return result.RowsAffected() > 0, nil
 }

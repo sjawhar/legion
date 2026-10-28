@@ -219,7 +219,8 @@ func (p *PgVersioned) readCompaction(ctx context.Context, pool *pgxpool.Pool, ro
 }
 
 // writeCompaction writes folded back under the room's lock, on a connection of pool, when the rows
-// at or below its fold point are still the ones it folded (compactRoom).
+// at or below its fold point are still the ones it folded (compactRoom), and takes the document off
+// the sweep's list (doc_compaction_owed) when no row stands above the fold point.
 func (p *PgVersioned) writeCompaction(ctx context.Context, pool *pgxpool.Pool, room string, wait bool, folded compactFold) (compactResult, error) {
 	result := compactResult{outcome: compactDropped}
 	point := folded.point()
@@ -272,6 +273,15 @@ func (p *PgVersioned) writeCompaction(ctx context.Context, pool *pgxpool.Pool, r
 			delete from doc_updates where artifact_id = $1 and version < $2
 		`, room, point.version); err != nil {
 			return fmt.Errorf("delete compacted document updates: %w", err)
+		}
+		// A document left with no row above the fold point has nothing more to fold, so it leaves
+		// the sweep's list (compactionCandidates); one with younger rows above it stays there.
+		// Every append that names it takes the lock this transaction holds.
+		if _, err := tx.Exec(ctx, `
+			delete from doc_compaction_owed where artifact_id = $1
+				and not exists (select 1 from doc_updates where artifact_id = $1 and version > $2)
+		`, room, point.version); err != nil {
+			return fmt.Errorf("delete compacted document's compaction entry: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit compact document: %w", err)

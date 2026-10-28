@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -109,29 +111,148 @@ func TestTheCompactionSweepLeavesADocumentWhoseRowsAreYoungerThanTheAgeRule(t *t
 	requireRowsAsStored(t, database, young, youngRows)
 }
 
-// The sweep's list of documents to compact holds every document with more than one row and no
-// other: a document of one row, or of none, has nothing a compaction could fold.
-func TestTheCompactionSweepListsOnlyDocumentsOfMoreThanOneRow(t *testing.T) {
+// The sweep's list of documents to compact names a document once an append gives it a row after
+// its first, and no other: a document of one row, or of none, has nothing a compaction could fold,
+// and the append of a document's first row names nothing.
+func TestTheCompactionSweepListsADocumentOnceAnAppendGivesItASecondRow(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
-	storeAgedRows(t, database, 1, time.Hour)
+	one := storeAgedRows(t, database, 1, time.Hour)
 	createDocument(t, database, "none")
+	if got := owedDocuments(t, database); len(got) != 0 {
+		t.Fatalf("the sweep lists %v after documents of one row and of none, want nothing", got)
+	}
 	two := storeAgedRows(t, database, 2, 0)
 	three := storeAgedRows(t, database, 3, time.Hour)
+	requireOwed(t, database, "the documents of two and three rows", two, three)
+	appendUpdates(t, NewPgVersioned(database), one, newProofHistory(t, 202).write("Second.\n"))
+	requireOwed(t, database, "the documents of two and three rows and the one given its second", one, two, three)
+
 	pool, err := database.Pool.Compaction()
 	if err != nil {
 		t.Fatalf("open the compaction pool: %v", err)
 	}
-
 	listed, err := compactionCandidates(ctx, pool)
 	if err != nil {
 		t.Fatalf("list the documents to compact: %v", err)
 	}
 	slices.Sort(listed)
-	want := []string{two, three}
+	if want := owedDocuments(t, database); !slices.Equal(listed, want) {
+		t.Fatalf("the sweep's candidates are %v, want the documents doc_compaction_owed names %v", listed, want)
+	}
+}
+
+// A compaction takes its document off the sweep's list only when it leaves no row above its fold
+// point: one that folds every row, all of them old, takes it off, and one that leaves a row younger
+// than the tail above the fold point keeps it there until a later compaction folds that row too.
+func TestACompactionTakesItsDocumentOffTheSweepsListOnceNoRowStaysAboveTheFoldPoint(t *testing.T) {
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	whole := storeAgedRows(t, database, 3, time.Hour)
+	tail := storeAgedRows(t, database, 3, 0)
+	ageUpdatesThrough(t, database, tail, 2, time.Hour)
+	requireOwed(t, database, "both documents", whole, tail)
+
+	if result := compactUnderTail(t, versioned, whole); result.outcome != compactCompacted {
+		t.Fatalf("the whole compaction ended %v, want it compacted", result.outcome)
+	}
+	if result := compactUnderTail(t, versioned, tail); result.outcome != compactCompacted {
+		t.Fatalf("the tail compaction ended %v, want it compacted", result.outcome)
+	}
+	if got := storedRows(t, database, tail); len(got) != 2 || got[0].version != 2 {
+		t.Fatalf("the tail compaction left rows %v, want the fold point 2 and the young row above it", rowVersions(got))
+	}
+	requireOwed(t, database, "the document whose young row stays above its fold point", tail)
+
+	if result := compactAged(t, versioned, database, tail); result.outcome != compactCompacted {
+		t.Fatalf("the later compaction ended %v, want it compacted", result.outcome)
+	}
+	requireOwed(t, database, "nothing once the young row folded too")
+}
+
+// A document's deletion and its rebuild, which leaves it one row, each take it off the sweep's
+// list in their own transaction; the rebuilt document's next append names it again.
+func TestDeleteAndRebuildTakeTheDocumentOffTheSweepsList(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	deleted := storeAgedRows(t, database, 2, time.Hour)
+	rebuilt := storeAgedRows(t, database, 3, time.Hour)
+	requireOwed(t, database, "both documents", deleted, rebuilt)
+
+	if err := versioned.Delete(ctx, deleted); err != nil {
+		t.Fatalf("delete the document: %v", err)
+	}
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the rebuild: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	writer := newProofHistory(t, 303)
+	if _, err := versioned.RebuildTx(ctx, tx, rebuilt, writer.write("Rebuilt.\n")); err != nil {
+		t.Fatalf("rebuild the document: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the rebuild: %v", err)
+	}
+	if got := storedRows(t, database, rebuilt); len(got) != 1 {
+		t.Fatalf("the rebuilt document holds rows %v, want its seed alone", rowVersions(got))
+	}
+	requireOwed(t, database, "nothing after the delete and the rebuild")
+
+	appendUpdates(t, versioned, rebuilt, writer.write("Rebuilt.\n\nAgain.\n"))
+	requireOwed(t, database, "the rebuilt document once an append follows its seed", rebuilt)
+}
+
+// The sweep takes off its list a document that holds no row after its first - one a prune left a
+// single row, one whose rows went with its artifact - and keeps a document whose rows after its
+// first are too young to be due, which it leaves as stored.
+func TestTheCompactionSweepForgetsADocumentWithNoRowAfterItsFirst(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	pruned := storeAgedRows(t, database, 3, time.Hour)
+	if err := NewPgVersioned(database).PruneAfter(ctx, pruned, 1, nil); err != nil {
+		t.Fatalf("prune to version 1: %v", err)
+	}
+	emptied := storeAgedRows(t, database, 2, time.Hour)
+	// What an artifact's deletion leaves: its rows go, and nothing deletes its entry.
+	if _, err := database.Pool.Exec(ctx, `delete from doc_updates where artifact_id = $1`, emptied); err != nil {
+		t.Fatalf("delete the document's rows: %v", err)
+	}
+	young := storeAgedRows(t, database, 3, 0)
+	youngRows := storedRows(t, database, young)
+	requireOwed(t, database, "every document an append gave a second row", pruned, emptied, young)
+
+	service.compactionSweepTick(ctx, excerptLeases(t, database))
+
+	requireOwed(t, database, "the document whose young rows are not yet due", young)
+	requireRowsAsStored(t, database, young, youngRows)
+}
+
+// owedDocuments is every document doc_compaction_owed names, sorted.
+func owedDocuments(t *testing.T, database *store.Store) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `select artifact_id::text from doc_compaction_owed`)
+	if err != nil {
+		t.Fatalf("read the documents owed a compaction: %v", err)
+	}
+	owed, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the documents owed a compaction: %v", err)
+	}
+	slices.Sort(owed)
+	return owed
+}
+
+// requireOwed fails unless doc_compaction_owed names want and no other document.
+func requireOwed(t *testing.T, database *store.Store, what string, want ...string) {
+	t.Helper()
+	want = slices.Clone(want)
 	slices.Sort(want)
-	if !slices.Equal(listed, want) {
-		t.Fatalf("the sweep lists %v, want the documents of two and three rows %v", listed, want)
+	if got := owedDocuments(t, database); !slices.Equal(got, want) {
+		t.Fatalf("doc_compaction_owed names %v, want %s %v", got, what, want)
 	}
 }
 

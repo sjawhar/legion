@@ -349,12 +349,17 @@ first older than 15 minutes (`compactMaxTailAge`), retrying a compaction that fo
 was dropped or failed after 1 s, doubling to 1 min; and the hourly sweep (`RunCompactionSweep`,
 lease `document-compaction`, first tick within 30 s of start, then every 10 minutes give or take
 one), which compacts every document due by the same rule whether or not NATS is configured, and
-so catches what a restart, `Shutdown` or `Quiesce` dropped from a queue. `PgVersioned.Compact`,
-ygo's interface, folds under a keep-N rule instead and is scheduled by nothing in Dispatch. A
-compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted
-once that write is about 75 minutes old - the two-minute tail, the 15-minute age rule and the
-hourly sweep: text deleted before a version captured it is gone (the operator's decision,
-LEGION-496).
+so catches what a restart, `Shutdown` or `Quiesce` dropped from a queue. The sweep reads only the
+documents `doc_compaction_owed` (migration `0136`) names, never a scan of `doc_updates`: every
+append names its document there in the statement that inserts its row once that row is not the
+document's first, a compaction that leaves no row above its fold point removes it in its write's
+transaction, as do a rebuild and `Delete`, and the sweep removes an entry whose document holds no
+row after its first (a prune's or an artifact deletion's), each under the document's lock.
+`PgVersioned.Compact`, ygo's interface, folds under a keep-N rule instead and is scheduled by
+nothing in Dispatch. A compacted `doc_updates`, and any backup of it taken later, therefore holds
+no text a write deleted once that write is about 75 minutes old - the two-minute tail, the
+15-minute age rule and the hourly sweep: text deleted before a version captured it is gone (the
+operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and

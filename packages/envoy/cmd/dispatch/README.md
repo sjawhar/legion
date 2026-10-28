@@ -1070,6 +1070,19 @@ server processes, and `server_build_announcements`, each build the fleet has ann
 exists, and the release before it neither reads nor writes either table, so that release runs
 over the new schema unchanged and the census answers `0`.
 
+Migration `0136_doc_compaction_owed` creates `doc_compaction_owed`, the documents with rows a
+compaction could fold, which the hourly compaction sweep reads in place of a scan of
+`doc_updates`: every append names its document there in the statement that inserts its row once
+that row is not the document's first, and a compaction that leaves no row above its fold point, a
+rebuild, a delete and the sweep (for a document with no row after its first) remove it, each under
+the document's lock. It has no foreign key, so no append that names a document locks `artifacts`.
+Its one insert names every document holding more than one row; it reads `doc_updates` under
+`ACCESS SHARE` and writes only the table it creates, so `doc_updates`, which may be past the
+census's 1 GiB limit, is not a table it touches. The release before it neither reads nor writes
+the table: a document only that release appends to during the roll is compacted by the new
+release's queue on its next append or load. It refuses and rewrites no existing row; its census
+answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
