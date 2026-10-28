@@ -2,46 +2,51 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-548",
-  "completed": "2026-10-27T09:00:31Z",
-  "round": 2,
-  "decision": "approved",
-  "reviewedHead": "e421af2d0d3a1c50716d98896322542caa7aa8fb",
-  "codeHead": "48bef8d1c5191cab79bcc8eb57ded3593c6f8863",
+  "completed": "2026-10-28T09:34:39Z",
+  "round": 3,
+  "decision": "changes_requested",
+  "reviewedHead": "c6eb2bda1b471f7032c51ff90922a3a7c7bf3a11",
+  "previousApprovedHead": "ccdc02ea46e519a7ce4e0ca39946a332e2f7f545",
+  "fingerprint": "ccdc02ea 96bdc922b067b0c92f343c35711e262cb1dbf8620e9c8876e80b16f3436cb051 -> c6eb2bda 4428016b0e74b6120b473257d2373573e76662359f6e8a7d58bd60920d5cff6b: changed (#2228's lines left the diff with its merge, and the tester's a5a67218 changed row C), so a new round",
   "critical": 0,
-  "important": 0,
-  "minor": 4,
+  "important": 2,
+  "minor": 3,
   "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "The envoy-session-stall job's setup-go (line 1641-1644) keeps cache-dependency-path, so every pull-request run saves a Go cache entry under refs/pull/<n>/merge. Main's #2328 (INFRA-584), brought in by the merge 790a7969, changed every other setup-go that caches to cache: false plus an actions/cache/restore and a main-only actions/cache/save (pi-legion :865-930, envoy-infra-go :1202-1247, envoy-e2e-local :1582-1618; rule 5 of docs/solutions/github/only-main-saves-an-actions-cache-...-INFRA-584.md). This job is now the only one that writes PR-ref entries, which no other PR reads and which push main's entries out. Use envoy-e2e-local's pattern with the go-envoy key family."
+    },
+    {
+      "severity": "important",
+      "file": "PR body (E2E (implementer) negative control)",
+      "description": "The implementer's proof line records the row C negative control at 790a7969 as 'reconnect none ... (fail) [60261.41ms]', the round-2 figure at 4 MiB. The tester's test.json records that it does not reproduce on Bun 1.4.4 (main's pin): 4 MiB drains, so row C passed without the patch until a5a67218 raised it to 32 MiB. A proof's negative control must be one observed at the head it names; re-run it at the new head (32 MiB, protocol.js hunk reverted) and record what was seen."
+    },
     {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-proxy.ts",
-      "description": "Cleanup (Fast-follow): closedAt's doc comment does not say a connection paused by freeze() never records its close; the frozen guards in the two data handlers cannot fire once freeze() pauses both sockets."
+      "description": "Cleanup still open from round 2 (Fast-follow): closedAt doc does not say a paused connection never records its close; dead frozen guards in the data handlers."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-scenario.ts",
-      "description": "Cleanup (Fast-follow): RECOVERY_BOUND_MS is copied from nats-stall.test.ts and appears as a bare 60_000 in claude-envoy's envoy-channel-stall.test.ts."
+      "description": "Cleanup still open from round 2 (Fast-follow): RECOVERY_BOUND_MS duplicated in nats-stall.test.ts and a bare 60_000 in envoy-channel-stall.test.ts."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/README.md",
-      "description": "Cleanup (Fast-follow): the patch note names reconnect() as the unpatched path but not that handleAuthError also reaches the patched disconnect()."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/claim_wiring.go",
-      "description": "Hardening, no exploit path: plugin and plugin_version have no length cap, the same gap title and dir already have (ASVS v5.0.0-2.2.1)."
+      "description": "Cleanup still open from round 2 (Fast-follow): name handleAuthError as the other caller of the patched disconnect()."
     }
   ],
-  "roundOneFindings": [
-    "Stale close waited on an unbounded flush: fixed in eadcf8fe (protocol.js disconnect() -> transport.close()); reviewer re-ran the reproduction: 4 MiB and 16 MiB published after the freeze reconnect at 30.0 s (none within 90 s before).",
-    "patches/** missing from CI and release filters: fixed in 0504cbfb; release-bump.sh's --patch-path rule satisfied."
+  "verified": [
+    "Per-file interdiff of this issue's 58 files, old a92387a8->48bef8d1 vs new b295a3fb->c6eb2bda: 48 identical; the rest differ only by main's newer text (CHANGELOG neighbours, AGENTS.md and architecture.md rows, the askgate-marker build entry), the rebuilt claude-envoy dist, and the tester's 4->32 MiB row C change. Plugin fields are present in the merged AGENTS.md rows; all INFRA-548 CHANGELOG entries sit under [Unreleased].",
+    "Both thermonuclear agents ran check-dist with Bun 1.4.4: 'dist/ and legion/ match a fresh build'; dist/envoy-channel.js carries this.transport.close() and this.socket = socket."
   ],
-  "threads": "PRRT_kwDORFy7ds6wkMTK, PRRT_kwDORFy7ds6wkMTS, PRRT_kwDORFy7ds6wkMTU: each answered by the reviewer and accepted; resolved by the implementer.",
   "thermonuclear": {
-    "head": "e421af2d",
-    "deepReview": "Verdict: APPROVE at e421af2d (one Minor: stale PR-body brief lines, which the reviewer rewrote)",
-    "codeQuality": "Verdict: CHANGES at e421af2d, all three findings cleanup in test helpers (doc comment, redundant guards, duplicated bound); judged cleanup-only by the reviewer and named on the Fast-follow line"
+    "head": "c6eb2bda",
+    "deepReview": "Verdict: APPROVE at c6eb2bda (Minor: stale PR body lines)",
+    "codeQuality": "Verdict: CHANGES at c6eb2bda (setup-go cache convention in envoy-session-stall)"
   },
-  "ci": "Required checks at code head 48bef8d1 (newest pull_request run's head): lint, typecheck, test, pr-title all completed success at 09:00Z; compare 48bef8d1...e421af2d changes only .legion/ (2 files). Non-required jobs (envoy-session-stall, claude-envoy, pi-envoy, envoy-client and others) were still queued under a repository-wide runner backlog.",
-  "proofLines": "E2E (implementer) and E2E (tester) both name 48bef8d1, each with surface, command, observation and negative control."
+  "ci": "Required lint, typecheck, test and pr-title at c6eb2bda (the newest pull_request run's head, which is the PR head) were queued at 09:34Z. A request for changes does not wait on CI.",
+  "mergeGate": "sjawhar/legion#2228 merged as 85713740 and main carrying it is merged into the branch; the plan's merge gate is met."
 }
