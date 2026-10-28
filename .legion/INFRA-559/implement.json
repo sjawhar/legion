@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-559",
-  "completed": "2026-10-28T16:15:00Z",
-  "round": 4,
-  "reviewAnswered": "Round 4 (the architect's task after #2390 merged as d47dbf05): forward merge of main d47dbf05 (merge 8675beea; the diff against main holds only this change, 77 files; CHANGELOG entries moved to seven pr2323-*.yaml changie fragments; 0136_dashboard_assets above main's 0135_server_processes; no pool changed) and the sign-in spec moved here from #2390's plan (274bdf2a). Round 3 (changes requested at e363358e): invalid-UTF-8 asset path (fc316304), stale workflow comment (355331f0). Round 2: forward merges, the dev-server notice (ba1703c9), the NUL-byte 500 (599232ec), the abandoned-read hardening (801a4f26).",
+  "completed": "2026-10-28T17:12:00Z",
+  "round": 5,
+  "reviewAnswered": "Round 5 (changes requested at 2837e75d: conflict with main e82b013b, #2324): forward merge c61b53f2. sse.ts keeps main's onOpen({ replayComplete }) and `if (!replayComplete) refreshEverything()`, its comment says a refresh is spread only for a reconnect the server does not replay in full; live.ts keeps EVENT_REPLAY_HEADER/StreamOpened beside RECONNECT_SPREAD_MS and the jittered reconnectDelayMs; sse-reconnect.test.tsx imports all three, timer row at RECONNECT_SPREAD_MS + 1_000; registeredRoutes 142; packages/dispatch/AGENTS.md takes main's paragraph with only the reconnect-delay clause replaced. Round 4: merge of main d47dbf05 (8675beea), changelog fragments, sign-in spec (274bdf2a). Round 3: invalid-UTF-8 asset path (fc316304), workflow comment (355331f0). Round 2: dev-server notice (ba1703c9), NUL-byte 500 (599232ec), abandoned-read hardening (801a4f26).",
   "proof": [
+    {
+      "criterion": "Round 5: after main's #2324, the reconnect spread and the replay rule hold together, and the two-builds and sign-in specs still pass",
+      "surface": "two real envoy-dispatch processes behind e2e/round-robin-proxy.ts in Chromium; the sse/live unit suites in happy-dom",
+      "command": "cd packages/dispatch && bun test web/src/__tests__/sse-reconnect.test.tsx web/src/__tests__/sse-attempts.test.tsx web/src/__tests__/sse.test.ts web/src/__tests__/live.test.ts web/src/api web/src/features/shell web/src/features/doc e2e/__tests__; bun run test; DATABASE_URL=<db> bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts; DATABASE_URL=<db> DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts; DATABASE_URL=<db> bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts live.e2e.ts delivery-live.e2e.ts doc.e2e.ts --project chromium",
+      "observed": "unit 473 pass 0 fail; bun run test 2672 pass 0 fail; two-builds 5 passed (2.7m); sign-in spec 1 passed; shell/live/delivery-live/doc 53 passed; tsc and biome clean; go test RoutesTable/DashboardBuilds, routes, dashboard ok",
+      "headSha": "c61b53f2535f6d9d0aec42667176fed9e06c7cb7",
+      "negativeControl": "The pre-change live.ts still fails the spread tests (`Expected: <= 100 Received: 1000`, round 1); the sign-in spec against the server from 7583347570a9 answers the callback 400 (round 4); the two-builds spec at 47c3ba79d2e4 fails 3 of 3 with 404s (round 1)."
+    },
     {
       "criterion": "Moved task: a sign-in started at /auth/start on Dispatch process A completes at /auth/callback on process B, in a real browser on the two-process harness, with Dispatch in group mode",
       "surface": "Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres, both signing people in through cmd/dev-oidc-issuer (--code-flow dispatch-e2e=<secret> --sign-in-as alice@example.com --sign-in-group dispatch-e2e-people) with DISPATCH_SIGNIN_GROUP, one shared DISPATCH_SIGNING_KEY and no dev sign-in (DISPATCH_E2E_SIGNIN=oidc)",
@@ -42,8 +50,8 @@
       "criterion": "A1: Dispatch's browser suite, against two server processes running two builds, loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
       "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 + pgvector, A serving web/dist and B serving web/dist-b (another build id)",
       "command": "cd packages/dispatch && DATABASE_URL=<isolated db> bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts (after `go build -o ./dispatch-e2e ./cmd/dispatch` in packages/envoy)",
-      "observed": "5 passed (1.0-1.1m) after the merge of main d47dbf05 and again with the sign-in spec's harness changes, i.e. at 274bdf2a: both cross-pinned route walks (now also loading main's Mermaid worker chunk), every file of both builds 200 with its bytes from both processes, both notice rows; `shell.e2e.ts --project chromium` 18 passed; `bun test e2e/__tests__` 56 pass; `bunx biome check packages/dispatch/ packages/envoy/ .github` clean",
-      "headSha": "274bdf2a8a50874d0985786162ced8203e6f3f02",
+      "observed": "5 passed (2.7m) at the round-5 merge c61b53f2 (and at 274bdf2a before it): both cross-pinned route walks (including main's Mermaid worker chunk), every file of both builds 200 with its bytes from both processes, both notice rows",
+      "headSha": "c61b53f2535f6d9d0aec42667176fed9e06c7cb7",
       "negativeControl": "The same harness and spec at 47c3ba79d2e4 (server without the shared store): 3 of 3 failed, every page load `\"/assets/index-CNAstPYb.js from Dispatch B answered 404\"` then `net::ERR_ABORTED`, 60 files answered 404 from the process lacking them (re-run by the tester in round 1)."
     },
     {
