@@ -54,30 +54,49 @@ type reclaimCopy struct {
 	resends int
 }
 
-// reclaimTry is one claim's reclaim record. Its rows are outbox row ids, read as points in time. The
-// fence holds a notice behind the earlier notices of its tree that go to the same architect
-// (earlierNoticeFor), and a re-held copy is a new row, so a later row to one architect mostly goes out
-// after an earlier one. Not always: a row whose publish the listener refused, or that failed, is held
-// and published again under its own id while the fence keeps the architect's later rows behind it,
-// so a row stands for its first publish and every retry, and a report about it is placed at the row
-// whichever publish it is about; and an earlier notice whose owner becomes this architect (the
-// sub-architect that owned it stops) goes out after later rows already sent here.
+// reclaimTry is one claim's reclaim record. Its rows are outbox row ids, and the record reads a row as
+// one point in time: the fence holds a notice behind the earlier notices of its tree that go to the
+// same architect (earlierNoticeFor), and a re-held copy is a new row, so a later row to one architect
+// mostly goes out after an earlier one. That reading is known to fail in these cases, and there may
+// be others:
+//
+//   - A row the listener refused for want of a holder, or whose publish returned an error, is
+//     published again under its own id. The fence keeps the architect's later rows behind it, so the
+//     order holds, but the row stands for several publishes, possibly on both sides of a relaunch,
+//     and a report about any of them is placed at the row.
+//   - An earlier notice whose owner becomes this architect (the sub-architect that owned it stops)
+//     goes out after later rows already sent to this architect.
+//   - A row is numbered when it is written, and the fence sees it only once its transaction commits.
+//     Two notices to one architect whose transactions overlap can commit out of id order, and the
+//     lower-numbered one then goes out after the other. Facts do not overlap (ApplyFact holds its
+//     lock until it commits), but a notice written outside that lock, such as a re-held copy
+//     (rehold), can overlap a fact or another such notice.
+//
+// So the record can misplace a row, either way. A row numbered below bootRow that went out after it
+// reached the current process, but is read as the replaced one's: its acceptance does not start the
+// healing clock, and a failed-forward report about it neither stops the clock nor relaunches. A
+// refusal of it does stop the clock, since a refusal is about the role now (noteReclaimFailed). A row
+// numbered at or above bootRow that went out before it reached the replaced process, but is read as
+// the current one's: a failed-forward report about it stops the clock and can relaunch the pane. On a
+// tombstone, a row numbered in [bootRow, healEnd] that goes out after the heal is read as sent inside
+// the clock, so its failure reopens the incident with its count instead of starting a new one.
 //
 //   - count, nextAt and gaveUp are the incident's attempts, its own backoff, and the give-up.
 //   - relaunched says a relaunch of this record has started; bootRow is the first row published to
 //     the claim after its latest relaunch booted (zero until one is), and a row below it is read as
 //     one that went to a process the relaunch has replaced.
-//   - failedRow is the highest row a failed-forward report named. A publish refused for want of a
-//     holder does not raise it (noteReclaimFailed).
-//   - lastPublished is the newest row published while the incident is open.
+//   - failedRow is the highest row a failed-forward report was placed at (ordinalOf). A publish
+//     refused for want of a holder does not raise it (noteReclaimFailed).
+//   - lastPublished is the highest row published while the incident is open.
 //   - copies maps each re-held copy published while the record exists to its own row.
 //   - deliveredAt is the healing clock: when the listener accepted the first row at or above bootRow
-//     and above failedRow, zero when it is not running. A failure at or above bootRow stops it.
+//     and above failedRow, zero when it is not running. A refusal of any row, a failed-forward report
+//     placed at or above bootRow, and an admission stop it.
 //   - healedAt and healEnd: the clock stood reclaimHealedAfter and the incident ended at healedAt;
-//     healEnd is the newest row published before. The record stays as a tombstone: a failure reported
-//     late for a row in [bootRow, healEnd] was a copy the pane did not take inside the clock, so it
-//     reopens the incident with its count; one above healEnd is a new loss, started fresh at its
-//     admission; one below bootRow went to the replaced process and changes nothing.
+//     healEnd is the highest row published before. The record stays as a tombstone: a failure reported
+//     late for a row in [bootRow, healEnd] is read as a copy the pane did not take inside the clock,
+//     so it reopens the incident with its count; one above healEnd is read as a new loss, started
+//     fresh at its admission; one below bootRow is read as the replaced process's and changes nothing.
 type reclaimTry struct {
 	count         int
 	nextAt        time.Time
@@ -95,10 +114,10 @@ type reclaimTry struct {
 // healed is whether the record is a tombstone: its incident ended on healing evidence.
 func (t reclaimTry) healed() bool { return !t.healedAt.IsZero() }
 
-// ordinalOf is the row a reported copy went out as, and whether the record can tell: an original
-// went out as its own key row; a re-held copy as the row the record mapped it to at its publish.
-// A copy of a tombstone's that it did not map, of an original above healEnd, went out after the heal
-// (every copy goes after its original), so its key row stands for it.
+// ordinalOf is the row a reported copy is placed at, and whether the record can tell: an original at
+// its own key row; a re-held copy at the row the record mapped it to at its publish. A copy a
+// tombstone did not map, of an original numbered above healEnd, is read as sent after the heal (every
+// copy goes after its original), so its key row stands for it.
 func (t reclaimTry) ordinalOf(c reclaimCopy) (int64, bool) {
 	if c.resends == 0 {
 		return c.keyRow, true
@@ -408,8 +427,8 @@ func (r *outbox) setReclaimTryLocked(token claim.Token, try reclaimTry) {
 // noteReclaimPublishing records that the notice executor is about to publish row to token's
 // architect, as copy, before the publish goes out, so a report about it — which can come back before
 // the publish returns — finds it recorded. A re-held copy is mapped to its row (a tombstone maps only
-// copies of originals published before its heal, the ones ordinalOf cannot place otherwise). The row
-// is the incident's newest while it is open. The first row published after the record's latest
+// copies of originals numbered at or below healEnd, the ones ordinalOf cannot place otherwise). The
+// row is the incident's highest while it is open. The first row published after the record's latest
 // relaunch booted — the claim has taken its role and holds no reservation — becomes bootRow, and
 // copies mapped below it are dropped, since an unmapped copy reads the same.
 func (r *outbox) noteReclaimPublishing(token claim.Token, copy reclaimCopy, row int64) {
@@ -495,7 +514,8 @@ func (r *outbox) noteReclaimDelivered(token claim.Token, row int64) {
 // exception lane and can be handled before the accepted publish it is about returns. This refusal
 // comes back inside its own publish call, so no acceptance of that publish follows it. The row's next
 // publish is its retry, and a row's publishes run one at a time on its lane, so the retry goes out
-// after this refusal: accepted once a relaunch has re-claimed the role, it is the evidence the clock
+// after this refusal. Once a relaunch has re-claimed the role the retry is at or above bootRow (the
+// fence keeps the architect's higher rows behind it), so its acceptance is the evidence the clock
 // waits for. Raising failedRow here kept that retry from starting the clock, so an incident healed on
 // the held row never ended, and separate resets added up to the give-up.
 func (r *outbox) noteReclaimFailed(token claim.Token, row int64) {
@@ -517,10 +537,10 @@ func (r *outbox) noteReclaimFailed(token claim.Token, row int64) {
 }
 
 // noteReclaimReport records that the listener reported a failed forward of copy to token's architect,
-// and says whether the report is about a copy the claim's current process got, so that it may drive
-// a relaunch. A claim with no record has no relaunch to measure against: every report counts. A copy
-// the record cannot place went out before the record existed, so before its relaunch, when there was
-// one.
+// and says whether the record reads the copy as one the claim's current process got (reclaimTry says
+// when that reading is wrong), so that it may drive a relaunch. A claim with no record has no relaunch
+// to measure against: every report counts. A copy the record cannot place is read as sent before the
+// record existed, so before its relaunch, when there was one.
 func (r *outbox) noteReclaimReport(token claim.Token, copy reclaimCopy) bool {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
@@ -540,13 +560,13 @@ func (r *outbox) noteReclaimReport(token claim.Token, copy reclaimCopy) bool {
 	return r.noteReclaimFailedLocked(token, try, ordinal)
 }
 
-// noteReclaimFailedLocked applies the failure of row to token's record and says whether row went to
-// the claim's current process. Before any relaunch of the record it did. On an open incident, a row at
-// or above bootRow did, and stops the healing clock; one below went to the process the relaunch
-// replaced and changes nothing. On a tombstone, a row above healEnd went out after the heal and is a
-// new loss (admission starts it fresh); a row in [bootRow, healEnd] was not taken inside the clock, so
-// the incident reopens with its count; one below bootRow changes nothing. It leaves failedRow to its
-// caller: only a report raises it.
+// noteReclaimFailedLocked applies the failure of row to token's record and says whether the record
+// reads row as the claim's current process's (reclaimTry says when that reading is wrong). Before any
+// relaunch of the record it does. On an open incident, a row at or above bootRow does, and stops the
+// healing clock; one below is read as the replaced process's and changes nothing. On a tombstone, a
+// row above healEnd is read as sent after the heal, a new loss (admission starts it fresh); a row in
+// [bootRow, healEnd] as not taken inside the clock, so the incident reopens with its count; one below
+// bootRow changes nothing. It leaves failedRow to its caller: only a report raises it.
 func (r *outbox) noteReclaimFailedLocked(token claim.Token, try reclaimTry, row int64) bool {
 	current := true
 	switch {
