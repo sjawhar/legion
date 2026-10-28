@@ -416,6 +416,14 @@ Either way the browser reconnects, re-syncs and shows the current text.
 A reader sees a brief reconnect, never stale text they can act on.
 Cross-process live co-editing of one document — two rooms with text streaming between them — is a follow-up issue, out of scope here.
 
+**A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`, `cmd/dispatch/conn_age.go`):
+the server stamps each connection's accept time and answers the first request it reads at that age or later with `Connection: close`, and a request carrying an `Upgrade` header, a websocket handshake, keeps its connection.
+kube-proxy and the front door spread load per connection, not per request, so while callers reuse their keep-alive connections a process that has just rolled in gets little traffic;
+a closed connection makes the client open a new one, which kube-proxy spreads across every ready process.
+Shutdown needs none of this: once `Server.Shutdown` begins, Go's server already writes every response with `Connection: close` and closes the connection after it.
+One race remains: a client can write a request onto an idle pooled connection at the instant the server closes it.
+Clients retry an idempotent request on a new connection, but a proxied `POST` can come back as a `502`.
+
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each version in `schema_migrations`, which it creates under the runner's advisory lock, so processes booting together against an empty database migrate one after the other.
@@ -1078,7 +1086,7 @@ it names the caller the connection was admitted as.
 Every route the server answers writes one:
 every `/api/v1` route, the document and delivery websockets, `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an `unmatched` path gets (a known path called with a method its route does not serve is one too).
 The dashboard's own pages and assets write none, so a browser's page loads do not bury the callers.
-`/healthz`, which a load balancer calls every few seconds, writes none either.
+`/healthz`, which a load balancer calls every few seconds, and `/livez`, which a liveness probe calls, write none either.
 Three answers are given before any route runs and write none:
 the `403` a cookie request from another origin gets, the `421` a request for another host gets on a server with local sign-in, and the `307` redirect Go's router gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash (`/api/github/rest`).
 Match the line as `msg="dispatch: request"`: the previous-shared-token warning's message starts with the same words.
@@ -1161,6 +1169,11 @@ Each item below names a path with its method and identity, then its purpose.
   Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five.
   The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`;
   `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false).
+
+- `/livez` (GET; none)
+
+  Answer `204` with no body, reading nothing: it says only that the process answers.
+  A liveness or startup probe asks it rather than `/healthz`, so a slow or unreachable Postgres, NATS or file store neither restarts the process nor adds load on every probe period.
 
 - `/api/v1/events` (GET; cookie, trusted header, or bearer)
 
