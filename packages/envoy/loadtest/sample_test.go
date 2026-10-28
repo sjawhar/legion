@@ -188,7 +188,8 @@ func TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked(t *testing.T) {
 }
 
 // TestSamplerMarksNoReadThatFailedOnceTheStepEnded: a read that fails while the step runs is
-// marked in its sample and logged; one that fails once ctx has ended is neither, as poll does.
+// marked in its sample and logged; a sample taken once ctx has ended is not kept at all, and its
+// failed reads are neither counted nor logged, as poll does.
 func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	down := endpoints{pprof: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
 	now := time.Now()
@@ -213,8 +214,8 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	endedCtx, end := context.WithCancel(context.Background())
 	end()
 	ended.loop(endedCtx, now, now.Add(time.Minute), log.New(&logged, "", 0))
-	if ss := ended.all(); len(ss) != 1 || len(ss[0].FailedReads) != 0 || logged.Len() != 0 {
-		t.Fatalf("reads that failed once ctx had ended: samples %+v, log %q; want one sample with no mark and no log line", ss, logged.String())
+	if ss := ended.all(); len(ss) != 0 || logged.Len() != 0 {
+		t.Fatalf("reads that failed once ctx had ended: samples %+v, log %q; want no sample and no log line", ss, logged.String())
 	}
 }
 
