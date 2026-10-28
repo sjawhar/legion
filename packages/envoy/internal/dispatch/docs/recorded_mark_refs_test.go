@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -91,18 +92,9 @@ func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("explain recorded %s marks query: %v", test.table, err)
 			}
-			var lines []string
-			for rows.Next() {
-				var line string
-				if err := rows.Scan(&line); err != nil {
-					rows.Close()
-					t.Fatalf("scan plan: %v", err)
-				}
-				lines = append(lines, line)
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				t.Fatalf("iterate plan: %v", err)
+			lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				t.Fatalf("read recorded %s marks plan: %v", test.table, err)
 			}
 			if _, err := tx.Exec(ctx, "deallocate recorded_marks"); err != nil {
 				t.Fatalf("deallocate recorded %s marks query: %v", test.table, err)

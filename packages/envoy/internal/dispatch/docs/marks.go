@@ -753,9 +753,13 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
-// recordedMarksQuery is the statement that lists the anchor and mark type of every row of table, asks
-// or comments, whose anchor names the artifact $1. Both tables share the predicate, which matches
-// the expression of asks_anchor_artifact_id (migration 0137) and comments_anchor_artifact (0032).
+// recordedMarksQuery is the statement that lists the anchor and mark type of every row of table,
+// asks or comments, whose anchor names the artifact $1. Both tables share the predicate. Its uuid
+// comparison is the expression of asks_anchor_artifact_id (migration 0137) or
+// comments_anchor_artifact (0032), so the read is an index scan, and it keeps the text comparison
+// so it returns exactly the rows that comparison alone would. The uuid casts cannot fail: each
+// index evaluates the same cast on every row it holds (for asks, every anchored row), so a row
+// whose artifact_id does not cast could not have been written.
 func recordedMarksQuery(table string) string {
 	return fmt.Sprintf(`
 		select anchor, %s
@@ -767,11 +771,7 @@ func recordedMarksQuery(table string) string {
 // recordedMarkRefs is every mark an ask or comment row anchored on artifactID records, read by the
 // anchor's artifact alone whatever an ask's block_artifact_id holds: an ask that also names an ask
 // block on another document keeps its mark on its anchor's document, as refreshAnchors and the
-// other anchor readers read it. Each read compares the expression of an index,
-// asks_anchor_artifact_id (migration 0137) or comments_anchor_artifact (0032), so it is an index
-// scan, and keeps the text comparison so it returns exactly the rows that comparison alone would.
-// The uuid casts cannot fail: each index evaluates the same cast on every row it holds (for asks,
-// every anchored row), so a row whose artifact_id does not cast could not have been written.
+// other anchor readers read it.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
 	for _, table := range []string{"asks", "comments"} {
