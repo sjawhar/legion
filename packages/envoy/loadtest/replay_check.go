@@ -56,6 +56,7 @@ func runReplayCheckSeed(args []string) error {
 	df.register(fs)
 	bundleDir := fs.String("bundle", "", "replay bundle directory")
 	keysFile := fs.String("keys-file", "", "the keys file the seed was given")
+	out := fs.String("out", "", "write the results as JSON to this file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -90,20 +91,220 @@ func runReplayCheckSeed(args []string) error {
 	if err != nil {
 		return err
 	}
+	sa, err := checkSizesAndAnchors(ctx, conn, b, plans, ids)
+	if err != nil {
+		return err
+	}
 	for _, d := range r.Differences {
 		fmt.Printf("difference %s %s %s: expected %s, found %s\n", d.Issue, d.Artifact, d.What, d.Expected, d.Found)
 	}
+	for _, m := range sa.SizeMismatches {
+		fmt.Printf("version size mismatch %s %s version %d: expected change %d, found %d\n", m.Issue, m.Artifact, m.Version, m.Expected, m.Found)
+	}
+	for _, a := range sa.Outside {
+		fmt.Printf("anchor outside its chosen block %s %s %s: %s\n", a.Issue, a.Kind, a.LoggedID, a.Why)
+	}
 	fmt.Printf("documents compared %d; differences %d; fallbacks %d (comments %d, asks %d)\n",
 		r.Documents, len(r.Differences), r.FallbackComments+r.FallbackAsks, r.FallbackComments, r.FallbackAsks)
+	fmt.Printf("version sizes: %d changes compared, %d mismatches, %d sign flipped, %d without a listed size\n",
+		sa.SizeChanges, len(sa.SizeMismatches), sa.SignFlipped, sa.SizesMissing)
+	fmt.Printf("anchors: %d recorded, %d outside the block their rule chose; by rule %s\n", sa.Anchors, len(sa.Outside), fmtCounts(sa.Rules))
 	fmt.Printf("documents with typed ask blocks %d, compared with answered_at masked: %d equal\n", r.AskBlockDocs, r.AskBlockDocsEqual)
 	for _, d := range r.Distribution {
 		fmt.Printf("open anchored roots on written primary documents (%s): documents %d, median %.1f, write-weighted mean %.2f\n",
 			d.When, d.Documents, d.Median, d.WeightedMean)
 	}
-	if len(r.Differences) > 0 {
-		return fmt.Errorf("%d differences", len(r.Differences))
+	res := checkResult{
+		Documents: r.Documents, Differences: len(r.Differences), VersionSizeMismatches: len(sa.SizeMismatches),
+		AnchorsOutsideLoggedBlock: len(sa.Outside), SignFlipped: sa.SignFlipped,
+		AnchorRules:      checkAnchorRules{sa.Rules[ruleLoggedQuote], sa.Rules[ruleInBlock], sa.Rules[ruleNearest]},
+		OtherAnchorRules: sa.Rules, DifferenceList: r.Differences, SizeMismatchList: sa.SizeMismatches, OutsideList: sa.Outside,
+	}
+	res.Passed = res.Differences == 0 && res.VersionSizeMismatches == 0 && res.AnchorsOutsideLoggedBlock == 0
+	fmt.Printf("passed %v\n", res.Passed)
+	if *out != "" {
+		b, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
+			return err
+		}
+	}
+	if !res.Passed {
+		return fmt.Errorf("check failed: %d differences, %d version size mismatches, %d anchors outside their block", res.Differences, res.VersionSizeMismatches, res.AnchorsOutsideLoggedBlock)
 	}
 	return nil
+}
+
+// checkResult is replay-check-seed -out's file. Another team's tool reads these field names.
+type checkResult struct {
+	Documents                 int              `json:"documents"`
+	Differences               int              `json:"differences"`
+	VersionSizeMismatches     int              `json:"version_size_mismatches"`
+	AnchorsOutsideLoggedBlock int              `json:"anchors_outside_logged_block"`
+	AnchorRules               checkAnchorRules `json:"anchor_rules"`
+	SignFlipped               int              `json:"sign_flipped"`
+	Passed                    bool             `json:"passed"`
+	// Detail: every branch's count (no_block_map, unanchorable included) and the lists, ids and
+	// numbers only.
+	OtherAnchorRules map[string]int   `json:"anchor_rules_all"`
+	DifferenceList   []seedDifference `json:"difference_list"`
+	SizeMismatchList []sizeMismatch   `json:"version_size_mismatch_list"`
+	OutsideList      []anchorOutside  `json:"anchors_outside_list"`
+}
+
+type checkAnchorRules struct {
+	LoggedQuote           int `json:"logged_quote"`
+	InLoggedBlock         int `json:"in_logged_block"`
+	NearestSurvivingBlock int `json:"nearest_surviving_block"`
+}
+
+type sizeMismatch struct {
+	Issue    string `json:"issue"`
+	Artifact string `json:"artifact"`
+	Version  int    `json:"version"`
+	Expected int    `json:"expected"`
+	Found    int    `json:"found"`
+}
+
+type anchorOutside struct {
+	Issue    string `json:"issue"`
+	Kind     string `json:"kind"`
+	LoggedID string `json:"logged_id"`
+	Why      string `json:"why"`
+}
+
+type sizeAnchorCheck struct {
+	SizeChanges, SignFlipped, SizesMissing int
+	SizeMismatches                         []sizeMismatch
+	Anchors                                int
+	Rules                                  map[string]int
+	Outside                                []anchorOutside
+}
+
+// checkSizesAndAnchors compares each seeded document's version size changes (Dispatch's
+// coalesce(size, octet_length(markdown))) with production's (VersionSizes): equal, or equal with
+// the sign flipped (counted, not a mismatch), else a mismatch; and checks every anchored item the
+// seed should have placed: its branch is recorded in loadtest.replay_anchors and its stored quote
+// lies, once, inside the span of the text at At its rule chose.
+func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (sizeAnchorCheck, error) {
+	r := sizeAnchorCheck{Rules: map[string]int{}}
+	type anchorRow struct {
+		branch     string
+		start, end int
+	}
+	rows, err := conn.Query(ctx, `select kind, logged_id, branch, span_start, span_end from loadtest.replay_anchors`)
+	if err != nil {
+		return r, fmt.Errorf("read loadtest.replay_anchors: %w", err)
+	}
+	recorded := map[[2]string]anchorRow{}
+	var kind, logged, branch string
+	var start, end int
+	if _, err := pgx.ForEachRow(rows, []any{&kind, &logged, &branch, &start, &end}, func() error {
+		recorded[[2]string{kind, logged}] = anchorRow{branch, start, end}
+		return nil
+	}); err != nil {
+		return r, err
+	}
+	for _, p := range plans {
+		if p.Placeholder {
+			continue
+		}
+		is := p.Issue
+		texts := map[string]string{}
+		for i := range is.Artifacts {
+			a := &is.Artifacts[i]
+			if a.Kind != "doc" {
+				continue
+			}
+			raw, err := b.readFile(a.TextPath)
+			if err != nil {
+				return r, err
+			}
+			texts[a.ID] = string(raw)
+			local, ok := ids[[2]string{idArtifact, a.ID}]
+			if !ok {
+				continue
+			}
+			vrows, err := conn.Query(ctx, `select coalesce(size, octet_length(markdown)) from artifact_versions where artifact_id = $1 order by number`, local)
+			if err != nil {
+				return r, err
+			}
+			sizes, err := pgx.CollectRows(vrows, pgx.RowTo[int])
+			if err != nil {
+				return r, err
+			}
+			for n := 2; n <= min(len(sizes), len(a.VersionSizes)); n++ {
+				if a.VersionSizes[n-1] < 0 || a.VersionSizes[n-2] < 0 {
+					r.SizesMissing++
+					continue
+				}
+				r.SizeChanges++
+				want, got := a.VersionSizes[n-1]-a.VersionSizes[n-2], sizes[n-1]-sizes[n-2]
+				switch {
+				case got == want:
+				case got == -want:
+					r.SignFlipped++
+				default:
+					r.SizeMismatches = append(r.SizeMismatches, sizeMismatch{p.Key, a.Name, n, want, got})
+				}
+			}
+		}
+		check := func(kind, logged string) error {
+			row, ok := recorded[[2]string{kind, logged}]
+			if !ok {
+				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, "no recorded branch"})
+				return nil
+			}
+			r.Anchors++
+			r.Rules[row.branch]++
+			local := ids[[2]string{kind, logged}]
+			table := "comments"
+			if kind == idAsk {
+				table = "asks"
+			}
+			var quote, doc string
+			if err := conn.QueryRow(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'artifact_id', '') from `+table+` where id::text = $1`, local).Scan(&quote, &doc); err != nil {
+				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, "seeded item not found"})
+				return nil
+			}
+			var text string
+			for id, t := range texts {
+				if ids[[2]string{idArtifact, id}] == doc {
+					text = t
+				}
+			}
+			i := strings.Index(text, quote)
+			switch {
+			case quote == "" || text == "":
+				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, "no stored quote or document"})
+			case strings.Count(text, quote) != 1 || i < row.start || i+len(quote) > row.end || row.end > len(text):
+				r.Outside = append(r.Outside, anchorOutside{p.Key, kind, logged, fmt.Sprintf("stored quote at byte %d, chosen span [%d, %d)", i, row.start, row.end)})
+			}
+			return nil
+		}
+		plan := planComments(is)
+		steps := append([]commentStep{}, plan.Main...)
+		for _, t := range plan.ByAsk {
+			steps = append(steps, t...)
+		}
+		for _, s := range steps {
+			if s.Kind == commentAnchored {
+				if err := check(idComment, s.C.ID); err != nil {
+					return r, err
+				}
+			}
+		}
+		for _, a := range is.Asks {
+			if a.BlockID == nil && a.Approval == nil && a.Anchor != nil {
+				if err := check(idAsk, a.ID); err != nil {
+					return r, err
+				}
+			}
+		}
+	}
+	return r, nil
 }
 
 type seedDifference struct {

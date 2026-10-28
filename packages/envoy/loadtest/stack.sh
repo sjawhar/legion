@@ -920,6 +920,19 @@ cmd_replay_seed() {
   [ "$migration" = "$REPLAY_MIGRATION" ] ||
     die "database $REPLAY_DB is at migration '$migration', not $REPLAY_MIGRATION; refusing to dump it"
 
+  # The seed's check (loadgen replay-check-seed) with the bundle and keys file it seeded: no dump
+  # unless it passed. Its file goes beside the dump as seed-check.json and into seed.meta.json.
+  local check_file=$ROOT/tmp/seed-check.json check_args=(replay-check-seed -bundle "$bundle" -db "$REPLAY_DB")
+  [ -z "$keys" ] || check_args+=(-keys-file "$keys")
+  rm -f -- "$check_file"
+  note "replay-check-seed; log $LOGS/replay-check-seed.log"
+  loadgen "${check_args[@]}" -out "$check_file" >"$LOGS/replay-check-seed.log" 2>&1 || true
+  [ -f "$check_file" ] || die "replay-check-seed wrote no result; see $LOGS/replay-check-seed.log"
+  [ "$(jq -r .passed "$check_file")" = true ] ||
+    die "replay-check-seed did not pass ($(jq -c '{differences, version_size_mismatches, anchors_outside_logged_block}' "$check_file")); refusing to dump; see $LOGS/replay-check-seed.log"
+  cp -- "$check_file" "$out/seed-check.json"
+  note "replay-check-seed passed: $(jq -c '{documents, anchor_rules, sign_flipped}' "$check_file")"
+
   # pg_dump's custom format under each compression; pgserver's 16.2 is built without zstd and
   # refuses those, which is logged and skipped. The smallest is kept.
   local name dump_log=$LOGS/replay-seed-dump.log candidates=() spec file best="" best_bytes=0 best_spec="" i=0
@@ -974,14 +987,14 @@ cmd_replay_seed() {
     --argjson seed_seconds "$seed_seconds" --argjson quiet "$QUIET_SECONDS" \
     --arg chosen "$best_spec" --argjson candidates "$compression" \
     --argjson bytes "$best_bytes" --arg sha "$dump_sha" --argjson parts "$parts" --argjson counts "$counts" \
-    --arg keys "$([ -z "$keys" ] || basename -- "$keys")" \
+    --arg keys "$([ -z "$keys" ] || basename -- "$keys")" --slurpfile check "$check_file" \
     '$build[0] as $b |
      {migration: $migration, dispatch_commit: $b.dispatch_commit, dispatch_tree: $b.dispatch_tree,
       dispatch_binary_sha256: $b.dispatch_binary_sha256, patch: $b.patch, patch_sha256: $b.patch_sha256,
       go_version: $b.go_version, postgres_version: $pg, created_at: $at, seed_seconds: $seed_seconds,
       quiet_wait_seconds: $quiet, compression: {chosen: $chosen, candidates: $candidates},
       dump: {bytes: $bytes, sha256: $sha}, parts: $parts, counts: $counts,
-      keys_file: (if $keys == "" then null else $keys end)}' >"$out/seed.meta.json"
+      keys_file: (if $keys == "" then null else $keys end), check: $check[0]}' >"$out/seed.meta.json"
   note "replay seed done: $(jq '.parts | length' "$out/seed.meta.json") parts of $best_bytes bytes ($best_spec) in $out; $(jq -c .counts "$out/seed.meta.json")"
 }
 

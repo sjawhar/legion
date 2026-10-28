@@ -49,6 +49,9 @@ type replayState struct {
 	// largest number created before At, so recreating them in order reproduces the keys; a number
 	// with no issue at At (deleted since, or never reached) is a placeholder with Exists false.
 	Issues []replayIssue `json:"issues"`
+	// BlockMaps are, by document id, the current blocks of every document an anchored comment
+	// or ask in the state or the window names (window-created documents included).
+	BlockMaps map[string]*replayBlockMap `json:"block_maps,omitempty"`
 }
 
 // replayIssue is one issue as it stood strictly before At: the fields of its last issue.created,
@@ -120,6 +123,33 @@ type replayArtifact struct {
 	// TextVersion is the version TextPath holds: Version, or the nearest readable lower version
 	// when Version was not readable; 0 when TextPath is empty.
 	TextVersion int `json:"text_version,omitempty"`
+	// VersionSizes are the listed sizes in bytes of versions 1..Version, index 0 = version 1;
+	// -1 where the listing gives none.
+	VersionSizes []int `json:"version_sizes,omitempty"`
+}
+
+// replayBlockMap is a document's blocks at its current version (production's GET
+// /api/v1/artifacts/{id}/blocks, read after the window), each with its markdown in that version.
+// Production's block ids are in no version's markdown, so this is how an anchor's logged block
+// (anchor.block_id) is found in the text at At (chooseAnchor).
+type replayBlockMap struct {
+	Version int `json:"version"`
+	// Blocks are the top-level blocks in document order.
+	Blocks []replayBlock `json:"blocks"`
+}
+
+// replayBlock is one top-level block. Inner are a table's rows and cells: an anchor in a cell
+// names the cell's id, which is found here with the cell's text.
+type replayBlock struct {
+	ID    string             `json:"id"`
+	Type  string             `json:"type"`
+	Text  string             `json:"text"`
+	Inner []replayInnerBlock `json:"inner,omitempty"`
+}
+
+type replayInnerBlock struct {
+	ID   string `json:"id"`
+	Text string `json:"text,omitempty"`
 }
 
 // replayComment is one comment at At.
@@ -178,6 +208,10 @@ type replayAsk struct {
 	BlockArtifactID *string            `json:"block_artifact_id,omitempty"`
 	Answer          *replayAskAnswer   `json:"answer,omitempty"`
 	Approval        *replayAskApproval `json:"approval,omitempty"`
+	// AnswerVersion is, for an answered typed ask block, the version of its block's document whose
+	// settlement carried the answer (the first listed version created at or after the answer); 0
+	// when the listing names none at or below the document's Version.
+	AnswerVersion int `json:"answer_version,omitempty"`
 }
 
 // replayAskOption is one answer choice.
@@ -249,6 +283,16 @@ type replayCounts struct {
 	WrittenDocs                int     `json:"written_docs"`
 	WrittenDocsOpenRootsMedian float64 `json:"written_docs_open_roots_median"`
 	WrittenDocsOpenRootsSum    int     `json:"written_docs_open_roots_sum"`
+	// VersionSizesMissing counts document versions 1..Version the listing gives no size for.
+	VersionSizesMissing int `json:"version_sizes_missing"`
+	// BlockMaps counts the documents with an anchor in the state or the window whose current
+	// blocks were read; BlockMapsUnavailable those production would not serve.
+	BlockMaps            int `json:"block_maps"`
+	BlockMapsUnavailable int `json:"block_maps_unavailable"`
+	// AnchorRules counts the state's and the window's anchors by the chooseAnchor branch each
+	// takes on the text at At (logged_quote, in_logged_block, nearest_surviving_block,
+	// unanchorable); window anchors on documents not in the state are not counted.
+	AnchorRules map[string]int `json:"anchor_rules"`
 }
 
 // replayEvent is one window.jsonl line. Payload is left raw for the consumer to decode per Type;

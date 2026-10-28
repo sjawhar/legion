@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -101,6 +103,7 @@ type replayFetcher struct {
 	raw  string
 	conc int
 	lg   *log.Logger
+	gets atomic.Int64
 }
 
 // httpStatusError is a non-2xx answer: it names the route template, never the URL or the body.
@@ -115,6 +118,7 @@ func (e *httpStatusError) Error() string { return fmt.Sprintf("GET %s: status %d
 // attempts tries. A transport error is reported by its type only, since its text names the host.
 func (f *replayFetcher) get(ctx context.Context, route, path string, attempts int) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
+		f.gets.Add(1)
 		res := f.api.call(ctx, http.MethodGet, path, who{}, nil)
 		if res.ok() {
 			return res.body, nil
@@ -353,6 +357,13 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 		listings[k] = listingsByIdx[i]
 	}
 	unlisted := attachArtifacts(&rec.State, listings, rec.CreatedBefore, at)
+	byID := map[string]listedArtifact{}
+	for _, ls := range listings {
+		for _, la := range ls {
+			byID[la.ID] = la
+		}
+	}
+	setAnswerVersions(&rec.State, byID)
 
 	for _, d := range []string{bundleDocsDir, bundleCreatedDir} {
 		if err := os.RemoveAll(filepath.Join(out, d)); err != nil {
@@ -416,6 +427,16 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 		return counts, err
 	}
 
+	mapsUnavailable, err := f.fetchBlockMaps(ctx, &rec.State, rec.Window, byID, out)
+	if err != nil {
+		return counts, err
+	}
+	docTexts, err := readDocTexts(out, docs)
+	if err != nil {
+		return counts, err
+	}
+	f.lg.Printf("block maps: %d read, %d unavailable", len(rec.State.BlockMaps), mapsUnavailable)
+
 	roster := buildRoster(rec.State, rec.Window, rec.Origins)
 	counts = stateCounts(rec.State, rec.Window)
 	counts.ArtifactsUnlisted = unlisted
@@ -436,6 +457,10 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 			counts.CreatedDocsUnreadable++
 		}
 	}
+	counts.VersionSizesMissing = versionSizesMissing(docs)
+	counts.BlockMaps, counts.BlockMapsUnavailable = len(rec.State.BlockMaps), mapsUnavailable
+	counts.AnchorRules = countAnchorRules(rec.State, rec.Window, docTexts)
+	f.lg.Printf("requests: %d GETs sent this run", f.gets.Load())
 
 	stateJSON, err := json.MarshalIndent(rec.State, "", "  ")
 	if err != nil {
@@ -862,6 +887,7 @@ func attachArtifacts(st *replayState, listings map[string][]listedArtifact, crea
 			is.Artifacts = append(is.Artifacts, replayArtifact{
 				ID: la.ID, Name: la.Name, Slug: la.Slug, Kind: la.Kind, Primary: la.Primary,
 				CreatedAt: la.CreatedAt, Version: v.Number, Size: v.Size, MIME: v.MIME,
+				VersionSizes: versionSizes(la.Versions, v.Number),
 			})
 		}
 		for _, id := range createdBefore[is.Key] {
@@ -1015,4 +1041,307 @@ func stateCounts(st replayState, window []replayEvent) replayCounts {
 		}
 	}
 	return c
+}
+
+// --- version sizes, answer versions, block maps --------------------------------------------------
+
+// versionSizes are the listed sizes of versions 1..final, -1 for a number unlisted or sizeless.
+func versionSizes(versions []listedVersion, final int) []int {
+	out := make([]int, final)
+	for i := range out {
+		out[i] = -1
+	}
+	for _, v := range versions {
+		if v.Number >= 1 && v.Number <= final && v.Size != nil {
+			out[v.Number-1] = *v.Size
+		}
+	}
+	return out
+}
+
+func versionSizesMissing(docs []*replayArtifact) int {
+	n := 0
+	for _, a := range docs {
+		for _, s := range a.VersionSizes {
+			if s < 0 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// setAnswerVersions sets each answered typed ask block's AnswerVersion: the first version of its
+// document listed at or after the answer, at most the document's version at At.
+func setAnswerVersions(st *replayState, byID map[string]listedArtifact) {
+	for i := range st.Issues {
+		is := &st.Issues[i]
+		final := map[string]int{}
+		for _, a := range is.Artifacts {
+			final[a.ID] = a.Version
+		}
+		for j := range is.Asks {
+			a := &is.Asks[j]
+			if a.BlockID == nil || a.State != "answered" || a.Answer == nil || a.BlockArtifactID == nil {
+				continue
+			}
+			best := 0
+			for _, v := range byID[*a.BlockArtifactID].Versions {
+				if !v.CreatedAt.Before(a.Answer.At) && v.Number <= final[*a.BlockArtifactID] && (best == 0 || v.Number < best) {
+					best = v.Number
+				}
+			}
+			a.AnswerVersion = best
+		}
+	}
+}
+
+// readDocTexts reads the bundle's texts at At by document id.
+func readDocTexts(out string, docs []*replayArtifact) (map[string]string, error) {
+	texts := map[string]string{}
+	for _, a := range docs {
+		if a.TextPath == "" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(a.TextPath)))
+		if err != nil {
+			return nil, err
+		}
+		texts[a.ID] = string(b)
+	}
+	return texts, nil
+}
+
+// windowAnchor is the anchor a window comment.created or ask.opened payload carries.
+type windowAnchor struct {
+	ID     string        `json:"id"`
+	Anchor *replayAnchor `json:"anchor"`
+	Ask    *struct {
+		ID     string        `json:"id"`
+		Anchor *replayAnchor `json:"anchor"`
+	} `json:"ask"`
+}
+
+func (w windowAnchor) anchor() (string, *replayAnchor) {
+	if w.Anchor != nil {
+		return w.ID, w.Anchor
+	}
+	if w.Ask != nil && w.Ask.Anchor != nil {
+		return w.Ask.ID, w.Ask.Anchor
+	}
+	return "", nil
+}
+
+// anchoredDocs are the document ids an anchor in the state or the window names, sorted.
+func anchoredDocs(st *replayState, window []replayEvent) []string {
+	set := map[string]bool{}
+	for _, is := range st.Issues {
+		for _, c := range is.Comments {
+			if c.Anchor != nil {
+				set[c.Anchor.ArtifactID] = true
+			}
+		}
+		for _, a := range is.Asks {
+			if a.Anchor != nil {
+				set[a.Anchor.ArtifactID] = true
+			}
+		}
+	}
+	for _, ev := range window {
+		if ev.Type != "comment.created" && ev.Type != "ask.opened" {
+			continue
+		}
+		var w windowAnchor
+		if json.Unmarshal(ev.Payload, &w) == nil {
+			if _, a := w.anchor(); a != nil && a.ArtifactID != "" {
+				set[a.ArtifactID] = true
+			}
+		}
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// servedBlocks is GET /api/v1/artifacts/{id}/blocks: byte ranges into the current markdown.
+type servedBlock struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	From  int    `json:"from"`
+	To    int    `json:"to"`
+	Table *struct {
+		Rows []struct {
+			ID    string `json:"id"`
+			Cells []struct {
+				ID   string `json:"id"`
+				Text string `json:"text"`
+			} `json:"cells"`
+		} `json:"rows"`
+	} `json:"table"`
+}
+
+// buildBlockMap cuts each served block's text out of the markdown it indexes; a block whose range
+// falls outside it is left out and counted.
+func buildBlockMap(version int, markdown string, served []servedBlock) (*replayBlockMap, int) {
+	bm := &replayBlockMap{Version: version, Blocks: []replayBlock{}}
+	bad := 0
+	for _, s := range served {
+		if s.From < 0 || s.To < s.From || s.To > len(markdown) {
+			bad++
+			continue
+		}
+		b := replayBlock{ID: s.ID, Type: s.Type, Text: markdown[s.From:s.To]}
+		if s.Table != nil {
+			for _, r := range s.Table.Rows {
+				b.Inner = append(b.Inner, replayInnerBlock{ID: r.ID})
+				for _, c := range r.Cells {
+					b.Inner = append(b.Inner, replayInnerBlock{ID: c.ID, Text: c.Text})
+				}
+			}
+		}
+		bm.Blocks = append(bm.Blocks, b)
+	}
+	return bm, bad
+}
+
+// cachedOrUnavailable is cached for a route whose refusal (any non-2xx but 401 and 403) is kept as
+// <rel>.unavailable, so a rerun does not ask again: ok is false for a refusal.
+func (f *replayFetcher) cachedOrUnavailable(ctx context.Context, rel, route, path string) ([]byte, bool, error) {
+	bad := filepath.Join(f.raw, rel+".unavailable")
+	if _, err := os.Stat(bad); err == nil {
+		return nil, false, nil
+	}
+	body, err := f.cached(ctx, rel, route, path)
+	var se *httpStatusError
+	if errors.As(err, &se) && se.status != http.StatusUnauthorized && se.status != http.StatusForbidden {
+		return nil, false, writeFileAtomic(bad, []byte(strconv.Itoa(se.status)+"\n"))
+	}
+	return body, err == nil, err
+}
+
+// fetchBlockMaps reads the current blocks and markdown of every anchored document into
+// st.BlockMaps, returning how many production would not serve.
+func (f *replayFetcher) fetchBlockMaps(ctx context.Context, st *replayState, window []replayEvent, byID map[string]listedArtifact, out string) (int, error) {
+	stateDocs := map[string]*replayArtifact{}
+	for i := range st.Issues {
+		for j := range st.Issues[i].Artifacts {
+			a := &st.Issues[i].Artifacts[j]
+			stateDocs[a.ID] = a
+		}
+	}
+	ids := anchoredDocs(st, window)
+	st.BlockMaps = map[string]*replayBlockMap{}
+	var mu sync.Mutex
+	var unavailable, outOfRange atomic.Int64
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(f.conc)
+	for _, id := range ids {
+		g.Go(func() error {
+			body, ok, err := f.cachedOrUnavailable(gctx, filepath.Join("blocks", id+".json"), "/api/v1/artifacts/{id}/blocks",
+				"/api/v1/artifacts/"+url.PathEscape(id)+"/blocks")
+			if err != nil || !ok {
+				if err == nil {
+					unavailable.Add(1)
+				}
+				return err
+			}
+			la, listed := byID[id]
+			if !listed {
+				meta, ok, err := f.cachedOrUnavailable(gctx, filepath.Join("artifact", id+".json"), "/api/v1/artifacts/{id}",
+					"/api/v1/artifacts/"+url.PathEscape(id))
+				if err != nil || !ok {
+					if err == nil {
+						unavailable.Add(1)
+					}
+					return err
+				}
+				if err := json.Unmarshal(meta, &la); err != nil {
+					return fmt.Errorf("artifact %s: %w", id, err)
+				}
+			}
+			cur := 0
+			for _, v := range la.Versions {
+				cur = max(cur, v.Number)
+			}
+			var markdown string
+			if a := stateDocs[id]; a != nil && a.TextPath != "" && cur == a.Version && a.TextVersion == a.Version {
+				b, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(a.TextPath)))
+				if err != nil {
+					return err
+				}
+				markdown = string(b)
+			} else {
+				b, ok, err := f.docText(gctx, id, cur)
+				if err != nil || !ok {
+					if err == nil {
+						unavailable.Add(1)
+					}
+					return err
+				}
+				markdown = string(b)
+			}
+			var served []servedBlock
+			if err := json.Unmarshal(body, &served); err != nil {
+				return fmt.Errorf("artifact %s blocks: %w", id, err)
+			}
+			bm, bad := buildBlockMap(cur, markdown, served)
+			outOfRange.Add(int64(bad))
+			mu.Lock()
+			st.BlockMaps[id] = bm
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return 0, err
+	}
+	if n := outOfRange.Load(); n > 0 {
+		f.lg.Printf("block maps: %d blocks with a range outside their markdown left out", n)
+	}
+	return int(unavailable.Load()), nil
+}
+
+// countAnchorRules counts the state's and the window's anchors by the branch chooseAnchor takes on
+// the text at At (rng seed 1); an anchor on a document with no text at At counts as no_text.
+func countAnchorRules(st replayState, window []replayEvent, texts map[string]string) map[string]int {
+	counts := map[string]int{}
+	add := func(id string, a *replayAnchor) {
+		text, ok := texts[a.ArtifactID]
+		if !ok {
+			counts["no_text"]++
+			return
+		}
+		blockID := ""
+		if a.BlockID != nil {
+			blockID = *a.BlockID
+		}
+		counts[chooseAnchor(text, st.BlockMaps[a.ArtifactID], blockID, a.Quote, a.Orphaned, false, 1, a.ArtifactID, id).Branch]++
+	}
+	for _, is := range st.Issues {
+		for _, c := range is.Comments {
+			if c.Anchor != nil {
+				add(c.ID, c.Anchor)
+			}
+		}
+		for _, a := range is.Asks {
+			if a.Anchor != nil {
+				add(a.ID, a.Anchor)
+			}
+		}
+	}
+	for _, ev := range window {
+		if ev.Type != "comment.created" {
+			continue
+		}
+		var w windowAnchor
+		if json.Unmarshal(ev.Payload, &w) == nil {
+			if id, a := w.anchor(); a != nil {
+				add(id, a)
+			}
+		}
+	}
+	return counts
 }

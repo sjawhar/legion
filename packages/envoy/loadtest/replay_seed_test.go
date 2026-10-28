@@ -19,7 +19,7 @@ func TestResumeSkipsMappedIDs(t *testing.T) {
 	if err := s.createIssue(ctx, seedIssuePlan{Key: "PRJ-1", Number: 1, Issue: is}); err != nil {
 		t.Fatal(err)
 	}
-	d := &issueDoc{a: &replayArtifact{ID: "d1", Kind: "doc", Version: 2}, text: "synthetic\n", target: 2}
+	d := &issueDoc{a: &replayArtifact{ID: "d1", Kind: "doc", Version: 2}, text: "synthetic\n", plan: historyPlan{Final: 2, Restore: 2}, is: is}
 	if err := s.ensureDoc(ctx, "PRJ-1", d); err != nil || d.local != "local-d1" {
 		t.Fatalf("ensureDoc: %v, local %q", err, d.local)
 	}

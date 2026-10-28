@@ -28,10 +28,9 @@ const replaySeedActorID = "ses-replay-seed"
 // placeholderTitle is a placeholder issue's title: an issue that keeps the numbering and nothing else.
 const placeholderTitle = "placeholder"
 
-// historyMarker is the synthetic line a document's history edits alternately append and remove,
-// so the document reaches its logged version number with its logged text. It holds no markdown
-// syntax and is checked absent from every document it is added to.
-const historyMarker = "Replay seed history marker line"
+// padToken opens every padding paragraph the seed's history writes (padText), and no document it
+// seeds holds it.
+const padToken = "zqpad"
 
 // seedIssuePlan is one issue number of the project: seeded from the bundle, or a placeholder.
 type seedIssuePlan struct {
@@ -98,52 +97,6 @@ func planIssues(st replayState, keys map[string]bool) ([]seedIssuePlan, error) {
 		return nil, fmt.Errorf("keys file names issues the bundle does not hold at its instant: %s", strings.Join(missing, ", "))
 	}
 	return plans, nil
-}
-
-// --- document history ----------------------------------------------------------------------------
-
-// withMarker is text with the history marker appended as a paragraph of its own.
-func withMarker(text string) string {
-	if text != "" && !strings.HasSuffix(text, "\n") {
-		text += "\n"
-	}
-	return text + "\n" + historyMarker + "\n"
-}
-
-// markedAt says whether a document whose logged version is final holds the marker at version n:
-// the last version is the logged text, and each version before it toggles the marker.
-func markedAt(final, n int) bool { return (final-n)%2 == 1 }
-
-// historyFirstText is what a document of logged version final is created with: its logged text
-// when final is odd, the text plus the marker when it is even.
-func historyFirstText(text string, final int) string {
-	if markedAt(final, 1) {
-		return withMarker(text)
-	}
-	return text
-}
-
-// historyOp is the edit that takes a document of logged version final from version n to n+1:
-// remove the marker when version n holds it, append it otherwise.
-func historyOp(final, n int) map[string]any {
-	if markedAt(final, n) {
-		return map[string]any{"op": "delete", "find": historyMarker}
-	}
-	return map[string]any{"op": "insert", "markdown": historyMarker, "after": "end"}
-}
-
-// historyTarget is the version a document's marker history ends at: its logged version less one
-// for each typed ask block on it answered at the instant. Dispatch strips a block's answer from
-// seeded text (it is server-owned), so step 4 re-sends each answer, and each answer's settlement
-// writes the document's next version, the last one back at the logged text (answered_at aside).
-func historyTarget(is *replayIssue, a *replayArtifact) int {
-	n := a.Version
-	for _, ask := range is.Asks {
-		if ask.BlockID != nil && ask.State == "answered" && ask.BlockArtifactID != nil && *ask.BlockArtifactID == a.ID {
-			n--
-		}
-	}
-	return n
 }
 
 // --- comments ------------------------------------------------------------------------------------
@@ -309,14 +262,23 @@ func fallbackCandidates(text string) []string {
 		for blockMarker.MatchString(trimmed) {
 			trimmed = blockMarker.ReplaceAllString(trimmed, "")
 		}
-		for _, s := range sentences(trimmed) {
+		// A table row's cells are each a segment of their own.
+		segments := []string{trimmed}
+		if strings.HasPrefix(trimmed, "|") {
+			segments = strings.Split(trimmed, "|")
+		}
+		var lineSentences []string
+		for _, seg := range segments {
+			lineSentences = append(lineSentences, sentences(strings.TrimSpace(seg))...)
+		}
+		for _, s := range lineSentences {
 			if len(s) < 20 || len(s) > 200 || seen[s] {
 				continue
 			}
 			seen[s] = true
 			r := s[0]
 			if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') || strings.ContainsAny(s, fallbackSyntax+"\t") ||
-				strings.Contains(s, "  ") || strings.Contains(s, historyMarker) || strings.Count(text, s) != 1 {
+				strings.Contains(s, "  ") || strings.Contains(s, padToken) || strings.Count(text, s) != 1 {
 				continue
 			}
 			out = append(out, s)
