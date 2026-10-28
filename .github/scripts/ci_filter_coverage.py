@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -356,7 +356,7 @@ def go_lines(text: str) -> list:
 # value reads as a package the Run does not name.
 GO_SUBCOMMANDS = {"test", "vet", "build", "run", "list", "install", "generate"}
 VALUE_FLAGS = {
-    "-C", "-o", "-tags", "-timeout", "-run", "-skip", "-count", "-p", "-parallel", "-cpu", "-ldflags",
+    "-C", "-o", "-tags", "--tags", "-timeout", "-run", "-skip", "-count", "-p", "-parallel", "-cpu", "-ldflags",
     "-gcflags", "-asmflags", "-overlay", "-mod", "-modfile", "-exec", "-bench", "-benchtime",
     "-coverprofile", "-covermode", "-coverpkg", "-shuffle", "-vet", "-pkgdir", "-toolexec",
     "-installsuffix", "-buildmode", "-compiler", "-f", "-pgo", "-outputdir", "-blockprofile",
@@ -365,19 +365,22 @@ VALUE_FLAGS = {
 SHELL_BREAKS = {"|", "||", "&&", ";", "&", ")", "(", "|&"}
 
 
-def line_packages(line: str) -> set:
-    """Every positional argument of the go commands on one logical line: each word after a go
-    subcommand, up to the shell's next `|`, `&&`, `;` or `)`, that is neither a flag nor a flag's
-    value. A Run claims a line only when these are exactly its packages, so a package appended to a
-    claimed command, however it is spelled (a relative pattern, an import path, a variable), is never
-    left out of the closure the check computes."""
+def line_command(line: str) -> tuple:
+    """What decides the closure of the go commands on one logical line: (packages, tags, mode).
+    Packages are every positional argument after a go subcommand, up to the shell's next `|`, `&&`,
+    `;` or `)`, that is neither a flag nor a flag's value. Tags are the last `-tags x` or `-tags=x`
+    on the line (go reads the last), as a set; none when absent. The mode is "test" when a command on
+    the line is `go test`, else "vet" for `go vet`, else "build" (build, run, install, list,
+    generate). A Run claims a line only when all three are exactly its own, so nothing appended to a
+    claimed command (a package however spelled, a later -tags, another subcommand) is left out of the
+    closure the check computes."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         words = list(lexer)
     except ValueError:
-        return {f"<unparsed: {line}>"}
-    found, index = set(), 0
+        return {f"<unparsed: {line}>"}, frozenset(), "<unparsed>"
+    found, tags, subcommands, index = set(), frozenset(), set(), 0
     while index < len(words):
         if words[index] != "go":
             index += 1
@@ -387,20 +390,31 @@ def line_packages(line: str) -> set:
             index += 2
         if index >= len(words) or words[index] not in GO_SUBCOMMANDS:
             continue
+        subcommands.add(words[index])
         index += 1
         while index < len(words) and words[index] not in SHELL_BREAKS:
             word = words[index]
             if word.startswith("-") and len(word) > 1:
-                if "=" not in word and word.split("=")[0] in VALUE_FLAGS:
+                name, has_value, value = word.partition("=")
+                if not has_value and name in VALUE_FLAGS:
                     index += 1
+                    value = words[index] if index < len(words) else ""
+                if name in ("-tags", "--tags"):
+                    tags = tag_set(value)
             else:
                 found.add(word)
             index += 1
-    return found
+    mode = "test" if "test" in subcommands else "vet" if "vet" in subcommands else "build"
+    return found, tags, mode
+
+
+def tag_set(tags: str) -> frozenset:
+    """A -tags value as the set of tags go reads from it (comma- or space-separated)."""
+    return frozenset(t for t in re.split(r"[,\s]+", tags) if t)
 
 
 # ---------------------------------------------------------------- the check
-def check_table(document: dict, data, filters: dict, files: set, problems: list) -> None:
+def check_table(document: dict, data, filters: dict, files: set, problems: list) -> dict:
     """The table must say what ci.yaml says: every gate a real filter on a real job, every go
     command a job's run: steps start listed, every pin and citation still found."""
     jobs = document.get("jobs") or {}
@@ -442,6 +456,8 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
     # Every go command line of a run: step must be claimed by a pinned Run of a gate on that job.
     skipped = {j for j, names in gated.items() if names and names <= set(excluded)}
     claims = defaultdict(list)  # (job, step label) -> pinned texts
+    owner = {}  # id(Run) -> the gate's filter
+    derived = defaultdict(list)  # filter -> Runs read off a line that is not its Run's
     for g in data.GATES:
         for r in g.runs:
             if not (r.step or r.source) or not r.text:
@@ -449,6 +465,7 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                                 f"{r.workdir} {' '.join(r.pkgs)} is pinned to no step or source text")
             if r.step:
                 claims[(g.job, r.step)].append(r)
+                owner[id(r)] = g.filter
     for job_id, job in jobs.items():
         if job_id in skipped:
             continue
@@ -463,20 +480,34 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                                     f"which no Run in ci_job_reads.py lists; add it to the job's gate so its closure "
                                     f"is checked")
                     continue
-                # The pin finds the line; the packages decide the closure, so they must be exactly the
-                # Run's: a package appended to a claimed command would otherwise go unchecked.
-                named = line_packages(line)
+                # The pin finds the line; its packages, -tags and subcommand decide the closure, so
+                # each must be exactly the Run's: anything appended to a claimed command would
+                # otherwise go unchecked.
+                named, tags, mode = line_command(line)
                 for r in pinned:
-                    if named != set(r.pkgs):
-                        extra = sorted(named - set(r.pkgs))
-                        missing = sorted(set(r.pkgs) - named)
-                        detail = "; ".join(part for part in (
-                            f"it also names {' '.join(extra)}" if extra else "",
-                            f"it no longer names {' '.join(missing)}" if missing else "") if part)
+                    parts = []
+                    extra = sorted(named - set(r.pkgs))
+                    missing = sorted(set(r.pkgs) - named)
+                    if extra:
+                        parts.append(f"it also names {' '.join(extra)}")
+                    if missing:
+                        parts.append(f"it no longer names {' '.join(missing)}")
+                    if tags != tag_set(r.tags):
+                        parts.append(f"it builds with -tags {','.join(sorted(tags)) or '(none)'}, the Run with "
+                                     f"{','.join(sorted(tag_set(r.tags))) or '(none)'}")
+                    if mode != r.mode:
+                        parts.append(f"its go command is a {mode} run, the Run a {r.mode} run")
+                    if parts and mode != "<unparsed>":
+                        # Check the closure the line compiles too, so its uncovered files are named.
+                        derived[owner[id(r)]].append(replace(
+                            r, pkgs=tuple(sorted(named)), tags=",".join(sorted(tags)), mode=mode,
+                            why=f"{r.why} (as the line runs it: `{line}`)"))
+                    if parts:
                         problems.append(f"::error file={WORKFLOW}::job {job_id} step \"{step_label(step)}\" runs "
-                                        f"`{line}`, whose packages are not the Run's ({' '.join(r.pkgs)}): {detail}; "
-                                        f"make the Run in ci_job_reads.py name exactly the packages the line names, "
-                                        f"so their closure is checked against the job's filter")
+                                        f"`{line}`, which is not the Run's ({' '.join(r.pkgs)}): {'; '.join(parts)}; "
+                                        f"make the Run in ci_job_reads.py name exactly the packages, tags and mode the "
+                                        f"line does, so the closure checked against the job's filter is the one it "
+                                        f"compiles")
     for (job_id, ref), rs in claims.items():
         steps = [s for s in (jobs.get(job_id) or {}).get("steps") or [] if step_matches(s, ref)]
         text = squash(" ".join(str(s.get("run", "")) for s in steps))
@@ -497,7 +528,7 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
         if not any(step_matches(s, ref) for s in (jobs.get(job_id) or {}).get("steps") or []):
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::a why cites step \"{ref}\" of job "
                             f"{job_id}, which {WORKFLOW} does not have")
-
+    return derived
 
 # The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.
 ALWAYS_RUN = ("changes", "lint")
@@ -573,7 +604,7 @@ def main() -> int:
 
     filters, quantifiers = changes_filters(document, problems)
     files = repo_files()
-    check_table(document, data, filters, set(files), problems)
+    derived = check_table(document, data, filters, set(files), problems)
     check_ci_ok(document, problems)
     expander = Expander(files)
     session = Session()
@@ -591,7 +622,7 @@ def main() -> int:
                             f"a brace picomatch expands and this check does not read")
         whys = defaultdict(list)
         seen: set = set()
-        for r in g.runs:
+        for r in list(g.runs) + derived.get(g.filter, []):
             for read in closure(session, data.RULES, r, seen):
                 whys[read.glob].append(read.why)
         for read in g.reads:

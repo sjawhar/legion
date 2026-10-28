@@ -29,8 +29,10 @@
 #   3. a job or step gated on a filter the table neither lists in GATES nor EXCLUDES,
 #   4. a run: line of a ci.yaml job (backslash continuations joined) that starts a go command
 #      (test, vet, build, run, list, install, generate) no Run of a gate on that job claims, or
-#      one with a positional argument that is neither a flag, a flag's value nor one of the
-#      claiming Run's packages (or that lacks one of them), since only the Run's are listed,
+#      one that is not exactly the claiming Run: a positional argument that is neither a flag, a
+#      flag's value nor one of the Run's packages (or lacks one of them), a last -tags other than
+#      the Run's tags, or a subcommand of another mode (test, vet, or build for the rest); the
+#      closure the line itself compiles is then checked too, so its uncovered files are named,
 #   5. a Run whose pinned text its step or script no longer holds, a RULES source file that is
 #      gone, or a why citing a step the job no longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure

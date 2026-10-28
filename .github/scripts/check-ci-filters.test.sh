@@ -290,4 +290,27 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the package the job now also tests" "$(contains "$out" 'other')"
 
+echo "case: a -tags appended after a claimed go command's packages compiles a file outside the job's filter"
+root=$(fixture appended-tags)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test ./cmd/app ./lib -tags probe"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the tags the line builds with" "$(contains "$out" 'it builds with -tags probe, the Run with (none)')"
+check "and the file that closure reads outside the filter" "$(contains "$out" 'reads mod/other/other.go, which its filter app does not match')"
+
+echo "case: a Run whose tags or mode disagree with the line it claims"
+root=$(fixture run-disagrees)
+replace "$root/.github/scripts/ci_job_reads.py" 'text="go test ./cmd/app ./lib"),' 'text="go test ./cmd/app ./lib", tags="probe", mode="build"),'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the tags" "$(contains "$out" 'it builds with -tags (none), the Run with probe')"
+check "and the mode" "$(contains "$out" 'its go command is a test run, the Run a build run')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
