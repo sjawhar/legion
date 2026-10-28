@@ -1040,13 +1040,47 @@ test("a past version's highlighted mark lands on its block once a diagram above 
     const highlight = versionView.locator(`[data-id="${comment.id}"]`);
     const diagram = diagramIn(versionView);
     await expect(highlight).toHaveText("quoted words");
-    // The first landing is not asserted: on this route the page sometimes ends at its top before
-    // any diagram draws (2 of 16 runs in chromium at ef163c71), a race the re-run after the
-    // diagrams draw repairs too. What this row proves is that re-run's landing.
+    // The first landing holds before any diagram draws: the version's editor mounts once, so its
+    // one scroll runs after its content has laid out.
+    await expect(highlight).toBeInViewport();
     await expect(diagram).toHaveCount(0);
     await withoutScrollAnchoring(page);
     await page.evaluate(() => window.__releaseMermaid?.());
     await expect(diagram).toBeVisible();
+    await expect(highlight).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The past version's first landing with no diagram at all, so nothing runs it again: when every
+// render of the page rebuilt the version's editor, the last scroll could run before the last
+// editor had laid out and leave the reader at the top of the page.
+test("a past version's comment link lands on its quote in a document with no diagram @phone", async ({
+  browser,
+}) => {
+  const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: `Plain document:\n\n${filler.join("\n\n")}\n\nTarget paragraph holds the quoted words.\n`,
+    title: "Highlighted mark in a plain document",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(
+      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
+    await expect(highlight).toHaveText("quoted words");
     await expect(highlight).toBeInViewport();
   } finally {
     await alice.close();
