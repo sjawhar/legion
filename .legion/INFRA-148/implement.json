@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-148",
-  "completed": "2026-10-28T10:30:03Z",
+  "completed": "2026-10-28T11:38:10Z",
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
@@ -75,6 +75,14 @@
       "observed": "36 of 36 loaded runs (3 early, 12+12 at e9e42cc7, 9 at the final merge 594b8de6): 14 pass, 0 fail each; unloaded 14 pass",
       "headSha": "e9e42cc78f1378a6c5dfb6742998b132a3f0692f",
       "negativeControl": "Before the change the tester saw the five-source test fail 2 of 21 loaded runs (cached list or failure line where it demanded the fresh list) and the cross-URL test 1 of 6 (cached list on the first hook)"
+    },
+    {
+      "criterion": "Review 5: a hook carries the refresher's or the cache's list only when it was read for the URL envoy.json names now; with envoy.json unreadable it carries the failure line naming why",
+      "surface": "the built claude-envoy hook bundle (dist/session-hook.js) as Claude Code runs it, against stand-in Dispatches",
+      "command": "cd packages/claude-envoy && bun test tests/answers-hook.test.ts (16 pass, 3 runs unloaded); $TMPDIR/infra148/load.sh 4 and 5 (4 busy loops on 2 CPUs, 3 suites at once): 27 of 27 runs pass; LEGION_TEST_CLAUDE=<claude 2.1.311> bun test with Bun 1.4.4: 236 pass",
+      "observed": "envoy.json caught mid-edit, with answers.json and a fresh refresher outcome from another Dispatch: the hook prints the failure line naming envoy.json's error, never that Dispatch's list, and starts no refresher. A refresher outcome that read no Dispatch, with answers.json read for the Dispatch envoy.json names: the hook carries that cached list with `the refresher read no Dispatch, not the Dispatch envoy.json names now`, never the stale error line. The failing token command still carries its own `exited with status 3`.",
+      "headSha": "9740c3f6153e5bc3f9139b41aae176d242c521a2",
+      "negativeControl": "With the round-5 rule (other === null || dispatchUrl === undefined) both new tests fail: 0 pass, 2 fail."
     }
   ],
   "filesChanged": [
@@ -93,7 +101,8 @@
     "Forward merge of main 2df3353c (merge commit 3d789a90): CHANGELOGs and cmd/dispatch README keep both sides; this branch's migrations renumbered 0135 events_person_words, 0136 comment_deliveries_session, 0137 message_deliveries_session_created after main's 0130-0134; claude-envoy dist rebuilt",
     "Round 5 (tester fail at e1dd5c52): claude-envoy hooks/session-hook.ts records the refresher's Dispatch URL in answers-refresh.json and refuses another URL's outcome; dist rebuilt",
     "Round 6 (review 4): claude-envoy session-hook.ts records the targeted Dispatch URL and reports a mismatch only when both URLs are known and differ; ENVOY_ANSWERS_TIMING_FILE test seam; answers-hook.test.ts timing assertions on the hook's own bound, quick-token and cross-URL tests assert the outcome, failing-command test added; dist rebuilt",
-    "Round 7 (merge): forward merges of main b295a3fb (merge 0e10ce38: claude-envoy dist rebuilt with Bun 1.4.4, envoy-client package.json build list, pi-envoy imports; askgate imports moved to dispatch-session-directory) and 4e55b2e0 (merge 8a2c0562, clean); answers-hook.test.ts accepts every design outcome (allowedOutcome); changelog entries moved to changie fragments pr2376-*.yaml with CHANGELOG.md as main has it; no Dispatch key in any added line (old-server message now 'its build is older than the answers route'); forward merge of main aeeee6c0 (merge 594b8de6): the three .dispatch/architecture conflicts keep both sides, claude-envoy dist rebuilt with Bun 1.4.4"
+    "Round 7 (merge): forward merges of main b295a3fb (merge 0e10ce38: claude-envoy dist rebuilt with Bun 1.4.4, envoy-client package.json build list, pi-envoy imports; askgate imports moved to dispatch-session-directory) and 4e55b2e0 (merge 8a2c0562, clean); answers-hook.test.ts accepts every design outcome (allowedOutcome); changelog entries moved to changie fragments pr2376-*.yaml with CHANGELOG.md as main has it; no Dispatch key in any added line (old-server message now 'its build is older than the answers route'); forward merge of main aeeee6c0 (merge 594b8de6): the three .dispatch/architecture conflicts keep both sides, claude-envoy dist rebuilt with Bun 1.4.4",
+    "Round 8 (review 5): claude-envoy session-hook.ts strict URL comparison, no refresher when envoy.json names no Dispatch URL, timing-file write guarded; answers-hook.test.ts two carry-rule tests and the empty-list request count accepts a read that missed; dist rebuilt with Bun 1.4.4"
   ],
   "trickyParts": [
     "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
@@ -121,6 +130,7 @@
   "openQuestions": [],
   "discoveredComplexity": [
     "The answers-hook wall-time checks (< 1 s) measured 0.87-0.90 s on this loaded pod because Bun start-up varies 240-760 ms; a very loaded CI runner could make them flaky.",
-    "Under synthetic overload (four busy loops on 2 CPUs) the five-source content test can miss: a hook whose start-up spent the budget waits only 150 ms for a quick Dispatch read, and the design then carries the failure line (1 of 3 loaded runs here)."
+    "Under synthetic overload (four busy loops on 2 CPUs) the five-source content test can miss: a hook whose start-up spent the budget waits only 150 ms for a quick Dispatch read, and the design then carries the failure line (1 of 3 loaded runs here).",
+    "Under synthetic overload the tester's round-2 red test (`a hook whose start-up took past 800 ms still carries the list Dispatch answers at once`) failed 1 of 9 loaded runs before this round's last change and 0 of 27 after: when the starved process misses its 150 ms read the design carries the failure line, which that test, unchanged, does not accept."
   ]
 }
