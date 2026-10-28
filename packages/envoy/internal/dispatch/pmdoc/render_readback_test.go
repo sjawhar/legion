@@ -479,6 +479,13 @@ func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 		"&lt;javascript:alert(1);'a@b.cc'>\n",
 		"&lt;javascript:void(0);www.a.b>\n",
 		"&lt;javascript:void(a@b.cc)>\n",
+		// So is one whose later markdown closes it into inline raw HTML: an open tag, a comment
+		// or a processing instruction around an address's link.
+		"Set \\<input value=me@x.cc> in the form.\n",
+		"Use \\<a href=https://x.cc/> here.\n",
+		"x &lt;!-- see x;https://a.bc/ --> y\n",
+		"x &lt;?php x;a@b.cc ?> y\n",
+		"x &lt;!-- a@b.cc --> y\n",
 	}
 	docs := make([]*Node, len(markdowns))
 	rendered := make([]string, len(markdowns))

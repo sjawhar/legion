@@ -298,28 +298,43 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // again from the next place. Each shape is one paragraph of one text node, which no element limit
 // stops, read as a rendering is and written from that tree.
 //
+// A text `<` before each address that opens a comment, a processing instruction, a declaration, a
+// CDATA section or a tag the run's markdown closes only at its end is asked whether that markdown
+// reads as raw HTML there (rawHTMLScan), which reads to the closer at the run's end, and past the
+// next `<` in a quoted attribute value. Each such `<` is then escaped, so the readers, which search
+// from each `<` they read as one for its closer, read none of them. (Without the closer, goldmark
+// searches from each `<` to the paragraph's end itself, which no writing changes.)
+//
 // A paragraph that reads back in no spelling is written in every spelling runSpellings lists for
 // it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
 // and each distinct writing is read back once (TestRenderReadsEachWritingBackUnderAReaderOnce). It
 // is timed up to renderFullTarget, which -race shrinks, as
 // TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
+	sizes := []int{16 << 10, 256 << 10, 1 << 20}
 	for _, shape := range []string{
 		"_www.a", "-www.x_", `(https://-a.b\`, ".www.a&", ".www", "www.", `www\.`, `www\.a `, "HTTP://a ", ` "'https://-a.b`, `(""www.a_`, ` ".www.a`,
 		";https://-a.b", "x;www.a_", `\*https://-a`, "&amp;https://-a.", "éhttps://-a.", `http\://-a.`, `www\.a_`, `x"www.a_`, ";;", `\*`, ";a_a@", "é+a@b-", `www\.a@`,
 	} {
-		readsAndWritesLinearly(t, "", shape, []int{16 << 10, 256 << 10, 1 << 20})
+		readsAndWritesLinearly(t, "", shape, "", sizes)
 	}
-	readsAndWritesLinearly(t, unreadableRun, "lorem ipsum ", []int{renderFullTarget / 16, renderFullTarget})
+	for _, shape := range []struct{ opener, closer string }{
+		{"&lt;!-- a@b.cc ", "-->"}, {"&lt;?x;https://a.bc/ ", "?>"}, {"&lt;!X a@b.cc ", ">"}, {"&lt;![CDATA[ a@b.cc ", "]]>"},
+		{`&lt;a b="x;a@b.cc `, `">`}, {`&lt;a b='&lt;a c="x;a@b.cc `, `'>`},
+	} {
+		readsAndWritesLinearly(t, "", shape.opener, shape.closer, sizes)
+	}
+	readsAndWritesLinearly(t, unreadableRun, "lorem ipsum ", "", []int{renderFullTarget / 16, renderFullTarget})
 }
 
-// readsAndWritesLinearly requires a paragraph of head and then shape repeated to each of sizes to be
-// read as a rendering is and written from that tree in time linear in its size (growsLinearly).
-func readsAndWritesLinearly(t *testing.T, head, shape string, sizes []int) {
+// readsAndWritesLinearly requires a paragraph of head, then shape repeated to each of sizes and then
+// tail to be read as a rendering is and written from that tree in time linear in its size
+// (growsLinearly).
+func readsAndWritesLinearly(t *testing.T, head, shape, tail string, sizes []int) {
 	t.Helper()
-	what := head + shape
+	what := head + shape + tail
 	growsLinearly(t, fmt.Sprintf("reading and writing %q", what), sizes, growthAllowance, func(size int) (time.Duration, error) {
-		markdown := head + strings.Repeat(shape, (size-len(head))/len(shape)) + "._\n"
+		markdown := head + strings.Repeat(shape, (size-len(head))/len(shape)) + tail + "._\n"
 		var doc *Node
 		parsed, err := cpuTimeOf(func() {
 			var err error

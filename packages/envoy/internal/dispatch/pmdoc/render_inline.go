@@ -1,12 +1,16 @@
 package pmdoc
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
@@ -598,13 +602,16 @@ func (r *renderer) wwwMayFollow() bool {
 // one run.
 //
 // A text `<` the escape rules leave as it is (angleConstruct judges it within its own node) can
-// still open an autolink with what the run writes after it, out to a `>` in a later node: the
-// text after an address, which the readers split off from the text before it, or a link's syntax
-// (`&lt;javascript:void(a@b.cc)>` written `<javascript:void([a@b.cc](mailto:a@b.cc))>` reads as
-// one autolink to a `javascript:` address). So the run is written, and where the markdown it wrote
-// opens an autolink at such a `<` (autolinkAt), it is written again with each of those escaped.
-// That markdown reads back as no run that holds the `<` as text, so a run that reads back keeps
-// its bytes; and escaping a `<` changes no autolink at another, which stops at any `<`.
+// still open an autolink or inline raw HTML with what the run writes after it, out to a `>` in a
+// later node: the text after an address, which the readers split off from the text before it, or
+// a link's syntax (`&lt;javascript:void(a@b.cc)>` written `<javascript:void([a@b.cc](mailto:a@b.cc))>`
+// reads as one autolink to a `javascript:` address, `x &lt;!-- a@b.cc --> y` written
+// `x <!-- [a@b.cc](mailto:a@b.cc) --> y` as one HTML comment). So the run is written, and where
+// the markdown it wrote opens an autolink (autolinkAt) or raw HTML (rawHTMLScan) at such a `<`, it
+// is written again with each of those escaped. That markdown reads back as no run that holds the
+// `<` as text, so a run that reads back keeps its bytes; and escaping a `<` changes neither at
+// another: an autolink stops at any `<`, and the backslash comes before a `<`, which no closer of
+// raw HTML holds and a tag holds only inside a quoted value.
 //
 // A spelling that keeps marks open is never kept once it fuses a delimiter run
 // (inlineWithEscapes), so its writing stops there (writeInlineNodes) and is not written again.
@@ -617,8 +624,9 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 	}
 	written := r.b.Bytes()
 	var escaped []angleOpener
+	html := rawHTMLScan{written: written, from: from, prefix: prefix}
 	for _, opener := range r.openers {
-		if written[opener.at] == '<' && autolinkAt(written[opener.at+1:]) {
+		if written[opener.at] == '<' && (autolinkAt(written[opener.at+1:]) || html.opensAt(opener.at)) {
 			escaped = append(escaped, opener)
 		}
 	}
@@ -654,6 +662,108 @@ func autolinkAt(after []byte) bool {
 	}
 	address := after[:end]
 	return util.FindURLIndex(address) == end || util.FindEmailIndex(address) == end
+}
+
+// rawHTMLParser is goldmark's inline raw HTML parser, which every reader of Parse's reads raw HTML
+// with (inlineParsers).
+var rawHTMLParser = parser.NewRawHTMLParser()
+
+// rawHTMLScan asks rawHTMLParser whether the markdown a run wrote, from its start at from to the
+// end of written, opens inline raw HTML at each text `<` (opensAt), in the order they are written.
+// It reads the run's lines as the readers do, each later line without the prefix written after
+// the line feed (as readsBackUnder takes it off), so a `>` of a quote marker closes nothing.
+//
+// An open or closing tag reads past a `<` only inside a quoted attribute value, which ends at the
+// next quote of its kind, so no more than one asked tag is read at any byte per kind of quote, and
+// one outside both. A comment, processing instruction, declaration or CDATA section ends at the
+// first of its closer (`-->`, `?>`, `>`, `]]>`) after its `<`, which the parser searches for out
+// to the run's end, so one is asked only where the last of its kind asked does not answer for it:
+// a later `<` of that kind before the end of the construct that one found ends at the same closer,
+// and none after one that found no closer finds one. Each byte is so read for at most one of each
+// kind, and the run's scan is linear.
+type rawHTMLScan struct {
+	written []byte
+	from    int
+	prefix  string
+	// lines are the run's lines the reader reads, made at the first ask; line is the one the last
+	// `<` asked about is on.
+	lines  text.Segments
+	reader text.BlockReader
+	line   int
+	// ends is, for each kind rawHTMLCloser tells apart, where the construct its last ask found
+	// ends, -1 where that ask found none, and 0 before any ask.
+	ends [4]int
+}
+
+// opensAt reports whether the markdown written from the `<` at at reads as inline raw HTML, as
+// rawHTMLParser reads it at that `<`; at is after the `<` asked about before.
+func (s *rawHTMLScan) opensAt(at int) bool {
+	if at+1 >= len(s.written) || !isASCIIAlphaNumeric(s.written[at+1]) && s.written[at+1] != '/' && s.written[at+1] != '!' && s.written[at+1] != '?' {
+		return false
+	}
+	if s.reader == nil {
+		s.readLines()
+	}
+	for s.lines.At(s.line).Stop <= at {
+		s.line++
+	}
+	s.reader.SetPosition(s.line, text.NewSegment(at, s.lines.At(s.line).Stop))
+	line, _ := s.reader.PeekLine()
+	kind := rawHTMLCloser(line)
+	if kind >= 0 {
+		switch end := s.ends[kind]; {
+		case end < 0:
+			return false
+		case at < end:
+			// The `<` is before that construct's closer, which holds no `<`.
+			return true
+		}
+	}
+	// The raw HTML parser reads neither the parent nor the parser context.
+	html := rawHTMLParser.Parse(nil, s.reader, nil)
+	if kind >= 0 {
+		s.ends[kind] = -1
+		if html != nil {
+			segments := html.(*ast.RawHTML).Segments
+			s.ends[kind] = segments.At(segments.Len() - 1).Stop
+		}
+	}
+	return html != nil
+}
+
+// readLines makes the run's lines and a reader over them.
+func (s *rawHTMLScan) readLines() {
+	start := s.from
+	for start < len(s.written) {
+		end := bytes.IndexByte(s.written[start:], '\n') + 1
+		if end == 0 {
+			s.lines.Append(text.NewSegment(start, len(s.written)))
+			break
+		}
+		s.lines.Append(text.NewSegment(start, start+end))
+		start += end
+		if len(s.written)-start >= len(s.prefix) && string(s.written[start:start+len(s.prefix)]) == s.prefix {
+			start += len(s.prefix)
+		}
+	}
+	s.reader = text.NewBlockReader(s.written, &s.lines)
+}
+
+// rawHTMLCloser is which kind of construct ending at the first of its closer a line opens, as
+// rawHTMLParser tells them apart: 0 a comment, 1 a processing instruction, 2 a declaration, 3 a
+// CDATA section, and -1 a tag or nothing.
+func rawHTMLCloser(line []byte) int {
+	switch {
+	case bytes.HasPrefix(line, []byte("<!--")):
+		return 0
+	case bytes.HasPrefix(line, []byte("<?")):
+		return 1
+	case len(line) > 2 && line[1] == '!' && line[2] >= 'A' && line[2] <= 'Z':
+		return 2
+	case bytes.HasPrefix(line, []byte("<![CDATA[")):
+		return 3
+	}
+	return -1
 }
 
 // escapesOpener reports whether the text `<` at offset in node is the next of the openers the run's

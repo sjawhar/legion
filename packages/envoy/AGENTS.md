@@ -1966,9 +1966,13 @@ outside ASCII (`schemeColons`, `ats`, alone or with `angleURLs`). Plain text the
 written as it is and reads back as a link, as the engine reads it. A text `<` the escape rules
 leave as it is, judged within its own text (`angleConstruct`), is escaped where what the run writes
 after it, out to a `>` in a later node, closes it into an autolink (`writeInlineRun`,
-`autolinkAt`): `&lt;javascript:void(a@b.cc)>`, whose email the readers link, would otherwise be
+`autolinkAt`) or CommonMark inline raw HTML - an open or closing tag, a comment, a processing
+instruction, a declaration or a CDATA section, as goldmark's raw HTML parser reads one from that
+`<` (`rawHTMLScan`): `&lt;javascript:void(a@b.cc)>`, whose email the readers link, would otherwise be
 written `<javascript:void([a@b.cc](mailto:a@b.cc))>` and read back as one autolink to a
-`javascript:` address. Marks are
+`javascript:` address, and `Set \<input value=me@x.cc> in the form.` as
+`Set <input value=[me@x.cc](mailto:me@x.cc)> in the form.`, which reads back as raw HTML. Only a
+`<` the run's first writing reads so is escaped, so a run that reads back keeps its bytes. Marks are
 written in one order - link, strong, emphasis - so where a text still carries a mark the text
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
@@ -2098,10 +2102,13 @@ backslash before an `&` that would open a reference. One writer writes a link's 
 address (`escapeDestination`): an `&` that would open a reference as `&amp;` in a link's
 (`escapeLinkDestination`), so a stored `x?a=1&amp;amp;b=2` keeps its bytes, and as `\&` in an
 image's (`escapeImageSource`); a backslash before punctuation or ending the address doubled, in
-and out of a table; and an ASCII control character, which a decoded `&#9;`, `&#10;` or `&#12;`
-leaves there and which ends a destination or is none to the engine's parser, as its numeric
-reference (`asciiControl`). So each reads back; an `&` that opens none, as in `&foo;` or `AT&T`,
-is written as it is.
+and out of a table; and an ASCII control character, which a decoded `&#9;`, `&#10;`, `&#12;` or
+`&#13;` leaves there and which ends a destination or is none to the engine's parser, as its numeric
+reference (`asciiControl`). So each of these reads back but a control character other than those
+four: `&#9;`, `&#10;`, `&#12;` and `&#13;` read back as the character, and every other byte
+0x00–0x1F and 0x7F is written as its reference too, which both readers decode to U+FFFD, as
+CommonMark specifies; no markdown makes such an href, so no write is refused. An `&` that opens
+none, as in `&foo;` or `AT&T`, is written as it is.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
