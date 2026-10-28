@@ -2,32 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T17:15:22Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedHead": "3b97183ba27c01df06190f394e659610042bb44f",
-  "codeHead": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
-  "ci": "Required lint, typecheck, test, pr-title. CI head ebeda2541e7f: lint, typecheck and test queued since 16:37Z, no result at 17:15Z (repository-wide runner backlog: every branch's runs queued); compare ebeda2541e7f...3b97183b handoffsOnly true (2 files). Not read as green.",
-  "thermonuclear": "deep-review: APPROVE at 3b97183b (round-1 findings fixed; 3 Minor). code-quality: CHANGES at 3b97183b (3 structural refinements, judged not defects in the review body).",
-  "round1Verified": "All 9 round-1 threads fixed, verified at 3b97183b (missing-parent records now exit 1; P1 byte-identical to round 0; 35 tests pass, biome and tsc clean) and answered as accepted.",
+  "completed": "2026-10-28T08:48:52Z",
+  "round": 3,
+  "decision": "approved",
+  "codeHead": "5cfd1080069831382a886cc5e72666f5a1274275",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). Newest pull_request run head 5cfd10800698: lint success 18:57Z, typecheck success 18:45Z, test success 19:01Z (2026-10-27); pr-title failed there on the old title, and success at c156b68bd6f6 (run 40658794266, pull_request_review, 08:43Z 2026-10-28) on the current conventional title. compare 5cfd10800698...b5494839 handoffsOnly true (2 files).",
+  "thermonuclear": "Pair run at ae4b7924 (code 5cfd10800698, identical to this head's code): deep-review APPROVE (3 Minor + 1 hardening note), code-quality CHANGES (2 Minor: open-list cap described as GitHub's search cap; a second sort in readPullRequests). All judged Minor, not defects.",
+  "round2Verified": "All 3 round-2 threads fixed at 5cfd10800698 and answered as accepted (PRRT_kwDORFy7ds6wzNZu, PRRT_kwDORFy7ds6wzNZ7, PRRT_kwDORFy7ds6wzNaB). Recreated workspace: 40 tests pass; P1 from the re-fetched before records 126 read / 80 carrying / 253 conflicting.",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
+  "important": 0,
+  "minor": 4,
   "keyFindings": [
     {
-      "severity": "important",
+      "severity": "minor",
       "file": "scripts/conflicts/github.ts",
-      "description": "listPullRequests reads only PRs updated since `since`; a PR open through the window with no update in it is missing from a run made at the window's end but counted by a later run once anything touches it, and the Python before run counted every open PR. The README's claim (65) that a late run counts the same PRs as one made as the window ended does not hold for it. Union the list with the open PRs."
+      "description": "LIST_CAP's comment (4-6) and README 72-75 attribute the open list's 1000 limit to GitHub's search cap; gh pr list --state open does not search, so for that list it is the script's own --limit. No behaviour effect (102 open PRs)."
     },
     {
       "severity": "minor",
-      "file": "scripts/conflicts/analyse.ts",
-      "description": "A merge with an unfetchable parent is recorded kind forward (40-53) without an ancestry check; README 15-23 defines forward by ancestry. Say so in the README."
+      "file": "scripts/conflicts/measure.ts",
+      "description": "readPullRequests sorts by number (139) although unionByNumber already sorts and mapLimit keeps input order."
     },
     {
       "severity": "minor",
-      "file": "scripts/conflicts/summary.ts",
-      "description": "readRawRun (116-131) does not check createdAt/mergedAt, which existedInWindow now reads; a record without createdAt silently drops out of a selection run."
+      "file": "scripts/conflicts/__tests__/github.test.ts",
+      "description": "No test fails if the --state open list call is removed; the tester's live negative control (61 vs 19 PRs read) proves the behaviour."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The Change bullet on selection names merges but not force pushes as what keeps a later-opened PR in the window; README states it correctly."
     }
   ]
 }
