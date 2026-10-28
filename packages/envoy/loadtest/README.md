@@ -4,13 +4,11 @@ This package reproduces the load of the 2026-10-26 Dispatch outage on one 2-core
 a local stack (Postgres, a latency proxy, NATS, the Envoy listener and Dispatch, all built from this
 checkout), puts a measured load on it and writes tables of what happened.
 
-- The root report of the outage load:
-  [load reproduction, 2026-10-27](dispatch://INFRA-514/artifact/load-reproduction-2026-10-27-md).
-  This harness is the committed form of the harness that report used.
-- The spec of this package: [INFRA-589](dispatch://INFRA-589). The root spec:
-  [INFRA-514](dispatch://INFRA-514/spec).
+- The outage-load reproduction report of 2026-10-27 (the root report, below), which ran on a
+  2-vCPU pod, is the source of the tables' shape. This harness is the committed form of the
+  harness that report used.
 
-The harness measures. It changes no Dispatch, listener or outbox code. A fix of INFRA-514 runs the
+The harness measures. It changes no Dispatch, listener or outbox code. A fix of the outage runs the
 same step before and after its change, and compares the two rows.
 
 ## Files
@@ -414,7 +412,7 @@ own writes.
   of a live step. The envelope's `payload` field holds the whole Dispatch event as a JSON string.
   The marker field is a path in that event.
 - The 0.77 is from production: 1,217 of 1,576 replies were in anchored threads
-  ([INFRA-512 report](dispatch://INFRA-512/artifact/dispatch-cpu-profile-linux-replay-md) §2).
+  (the 2026-10-26 production write counts, §2 of the replay report of those writes).
 - A write can add other events with its marker, for example an anchored comment's document
   snapshot or a reply's `comment.reopened`. `summary.json` counts them (`events.other_events`,
   `events.other_receipts`). The harness does not time them.
@@ -435,7 +433,7 @@ also refuses a mix with `reply` or `anchored` when `seed.json` has no root comme
 
 | Preset | Weights | Source |
 | --- | --- | --- |
-| `production-2026-10-26` (default) | `comment=3,anchored=33,reply=35,edit=22,upload=7` | INFRA-512's counts for 22:55-23:34Z on 2026-10-26: 153 plain roots, 1,495 anchored roots, 1,576 replies, 1,329 document versions ([INFRA-512 report](dispatch://INFRA-512/artifact/dispatch-cpu-profile-linux-replay-md) §2). The 3 to 1 split of the versions into edits and uploads is INFERENCE from the production profile's write counts: `editArtifact` 6, `uploadArtifact` 2 ([production profile](dispatch://INFRA-514/artifact/production-profile-2026-10-27-md) §3). |
+| `production-2026-10-26` (default) | `comment=3,anchored=33,reply=35,edit=22,upload=7` | The 2026-10-26 production write counts for 22:55-23:34Z: 153 plain roots, 1,495 anchored roots, 1,576 replies, 1,329 document versions (§2 of the replay report of those writes). The 3 to 1 split of the versions into edits and uploads is INFERENCE from the production profile's write counts: `editArtifact` 6, `uploadArtifact` 2 (§3 of the production CPU profile of 2026-10-27). |
 | `report-2026-10-27` | `comment=50,anchored=30,edit=20` | The root report's mix, so that its 1x row can be compared. |
 
 ### Route mix
@@ -470,8 +468,8 @@ One route per line. Blank lines and lines that start with `#` are skipped.
 It also refuses a file with no routes.
 
 The default file, `routes-2026-10-26-1719Z.txt`, is built into the binary. It has 18 routes. Its
-source is the 60 s capture of Dispatch's requests at 17:19Z on 2026-10-26
-(dispatch://INFRA-324/comment/dcb8960b-923a-4d07-a3d8-8b8d3d2cf134). The capture gives the caller
+source is the request-source capture of 2026-10-26 17:19Z: 60 s of Dispatch's requests,
+attributed to their callers. The capture gives the caller
 groups: 39% one dashboard tab, 34% `dispatch read` calls, 17% Legion pods, 10% unattributed. The
 split inside each group is INFERENCE from the capture's prose. These are the 18 routes of the root
 report.
@@ -495,8 +493,8 @@ and have its kind's primary type. Only primary events on issue topics are timed.
 - **From arrival**: the receipt time minus the write's arrival time. The arrival time is when the
   whole request is in Dispatch's socket (`httptrace.ClientTrace.WroteRequest`). When the trace does
   not see that, it is when the client started the request. So the value includes the time in
-  Dispatch's accept queue, the header read, the pool wait, the lock and the commit, as the root spec
-  asks: "time spent queued before the commit counts" (dispatch://INFRA-514/spec, acceptance 4). The
+  Dispatch's accept queue, the header read, the pool wait, the lock and the commit, as the outage
+  work's spec asks: "time spent queued before the commit counts" (its acceptance line 4). The
   client's own wait for a connection is in `summary.json` as `conn_wait_ms`, so a generator that
   queues its own requests shows it.
 - **From commit**: the receipt time minus the commit time of the primary event's transaction.
@@ -711,7 +709,7 @@ transaction-ids table uses the mark `(1 failed read)` for its probe (Transaction
 of these probes feeds the committed, receipt or delivery columns, so a failed read marks its own
 table and does not fail the step.
 
-When dispatch://INFRA-591 removes the commit-order lock, this table reads 0 by construction. No
+When the event-lock change removes the commit-order lock, this table reads 0 by construction. No
 backend can hold or wait for a lock that Dispatch does not take. The ungranted-locks table
 (Ungranted locks, below) is then the measure of lock waits.
 
@@ -812,7 +810,7 @@ write:
 The pod's live listener and production Dispatch hold other tokens, so a mistaken target fails the
 check.
 
-`-allow-foreign` is for a stack that is not local, such as a cluster copy (dispatch://INFRA-598).
+`-allow-foreign` is for a stack that is not local, such as the cluster load test's copy.
 With it, every endpoint and token comes from its flag, and none from `stack.json`. A flag that fell
 back to the local stack would have a run write to the remote Dispatch while it counted commits in
 the local database or profiled the local Dispatch, with no error.
@@ -870,7 +868,7 @@ Compare the right rows:
 
 ## What this harness does not do
 
-- A cluster run (dispatch://INFRA-598) can use `loadgen run -allow-foreign` with every endpoint and
+- The cluster load test can use `loadgen run -allow-foreign` with every endpoint and
   token flag and its own seed. It gets:
   - no `/proc` CPU or RSS columns, because it has no pids,
   - no committed counts, issue-topic receipts or delivery latencies at all when its database lacks
@@ -882,11 +880,13 @@ Compare the right rows:
     `track_commit_timestamp` is off: `commit_times_missing` counts those events, and the
     committed counts, receipts and the other latencies stay,
   - no reset per step.
-- These belong to INFRA-598: 10-minute steps, one-hour soak trends (the 5 s series in
+- These belong to the cluster load test: 10-minute steps, one-hour soak trends (the 5 s series in
   `samples.json` is there for them), the replay of production's log, sampling of the production
   database and restarts during load.
-- INFRA-605 adds its browser-editor workload, its round-trip counter and its document-room sampler
+- The browser-editor load work adds its browser-editor workload, its round-trip counter and its
+  document-room sampler
   to this package.
-- INFRA-512's request generator (dispatch://INFRA-512) is to be built into this package, so that
+- The request-path CPU work's request generator, a replay of production's writes, is to be built
+  into this package, so that
   one generator remains. The route-mix file and `routes.go` are this package's own GET generator
   until then.

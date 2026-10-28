@@ -4,7 +4,7 @@
 # Proves the run lock of common.sh (lock_root) without a stack. Each lock taker below sources
 # common.sh and calls lock_root, as run-series.sh, run-step.sh and stack.sh do.
 #
-# INFRA-589 review of PR #2369: a series' run-step.sh re-opened descriptor 9, so it lost the lock
+# The case this covers: a series' run-step.sh that re-opened descriptor 9 lost the lock
 # that it inherited from run-series.sh and went on by the token alone. Killing run-series.sh then
 # freed the root while its step still ran, and a new run-step.sh reset the stack under that step.
 # And a refused caller could name a previous holder that had ended, whose complete record was still
