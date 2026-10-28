@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T10:30:00Z",
+  "completed": "2026-10-28T10:20:00Z",
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
@@ -48,8 +48,8 @@
   "filesChanged": [
     ".dispatch/architecture/dispatch-events.md",
     ".github/workflows/envoy-and-contracts.yaml",
+    "packages/envoy/.changes/unreleased/pr2392-Changed-20261028-101132.yaml",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md",
     "packages/envoy/cmd/dispatch/AGENTS.md",
     "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/internal/dispatch/api/copy_lock_order_test.go",
@@ -105,7 +105,8 @@
     "Review round: a cold SSE stream (no since) still sends its headers only once its subscription is in place, unlike the reviewer's literal suggestion. The browser refreshes when the headers arrive (web/src/api/live.ts:142, sse.ts:768-776), so opening first would lose events at or below the start cursor. Resuming streams open at once, and every waiting handler ends at request end or shutdown.",
     "Review round: a second forward merge (312e84c6 onto main c210f10d), resolving changelog and route-doc conflicts with #2389. Fingerprint 1ef32544... -> 93317245..., changed; PR comment posted.",
     "envoy-go timed out at 312e84c6 by deadline, not by hang: at the timeout the test running was TestQuiesceDocumentsHookIsGatedByTestHooksEnabled. internal/dispatch/api already takes 410-572 s on main's CI against go test's 600 s default. Under contention the package time at head and main is the same locally (895 vs 890 s), but the horizon tests add about 80 s of waits. The unit step now passes -timeout 20m (.github/workflows/envoy-and-contracts.yaml).",
-    "The dashboard unit test AgentName.test.tsx timed out in CI at 26a15dcf; the controller routed it to dispatch://INFRA-523 (ask dispatch://INFRA-49/ask/465e5680-fe98-460b-a818-d0b91137de2e). At 312e84c6 the dispatch job passed."
+    "The dashboard unit test AgentName.test.tsx timed out in CI at 26a15dcf; the controller routed it to dispatch://INFRA-523 (ask dispatch://INFRA-49/ask/465e5680-fe98-460b-a818-d0b91137de2e). At 312e84c6 the dispatch job passed.",
+    "Third forward merge (b923561b onto main 4e55b2e0): main's 582cb2a2 runs internal/dispatch/api on its own line, which now carries -timeout 20m; per #2419 the changelog entry moved out of packages/envoy/CHANGELOG.md into packages/envoy/.changes/unreleased/pr2392-Changed-20261028-101132.yaml, written by changie new --custom Issue=pr2392 as INFRA-514's architect directed. Fingerprint e04cb4de... -> 06301544..., changed; PR comment posted. go vet and the events, refs and api live-path tests pass on the merged tree."
   ],
   "openQuestions": [
     "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
