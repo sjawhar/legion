@@ -2,111 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T12:52:00Z",
-  "round": 4,
-  "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
-  "ci": "read on GitHub at 621cf3e5 at 12:51Z: Tests 40689830074, Worker Image 40689830379, Docs 40689830110 queued and Legion Envoy and Contracts 40689830091 pending (PR Title runs cancelled by the body edits, the newest pending) - read as running, no verdict; nothing re-run. At 55265661 Worker Image and Docs were success and Tests and Legion Envoy and Contracts were cancelled by the next push.",
-  "scope": "55265661 -> 621cf3e5 answers review round 1 (review.json): session-title.test.ts back to main's strict queryTmux test, the redelivery sweep's first due read before its ticker, the Exclusive boundary tests aimed at the process's clock (and comments), four changelog fragments (envoy x2, claude-envoy, pi-legion), and a '## Contract change census' in the PR body for Deps.Lifetime; deep-links.e2e.ts unchanged on the architect's decision (dispatch://INFRA-662). Every other path is unchanged since 55265661, so rounds 2 and 3 stand for it.",
+  "completed": "2026-10-28T16:33:00Z",
+  "round": 5,
+  "headSha": "ec4448fbab0d9890d70d75b4b78494869d7e4f48",
+  "ci": "read on GitHub at ec4448fb at 16:32Z: Tests 40722034937 (incl. the new 'Daemon Go suite on production's Postgres 16'), Legion Envoy and Contracts 40722034935, Worker Image 40722034945, Docs 40722034913 and PR Title 40722310201 all queued - read as running, no verdict; nothing re-run",
+  "scope": "621cf3e5 -> ec4448fb: two merges of main on GitHub-reported conflicts (9b9f10ff, ec4448fb; main added api.RunIssueAskRepair and the processes prune loop), 38740f38 (fragment), 73dbc2c5 (duty.RunLeased for every self-ticking leased loop), 817ed0ce (tmux launch credential helpers), 9893fa1c (api.Register takes the lifetime as a parameter; storetest.WaitForQueuedBehind; logtest swaps). Fingerprint changed: full round on what changed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's round-4 claims at 621cf3e5: the strict queryTmux test 30/30 under the pinned Bun 1.4.4 and 4/10 failing under the pod's 1.3.14 ('Received: 5017'-'5019', the missed kill); both Exclusive boundary tests 10/10 each and the duty and redeliver packages ok; bucketing the gate's own moment fails both boundary tests 5/5 each (the stalled test now catches it every time, against 9/13 while aimed at the database's clock); the census search reproduces with no caller missing; the census's one production caller, the Dispatch server, driven for real (below)."
+    "how": "The implementer's round-5 claims hold where measured (CI green was not observed: every run queued). api.Register(mux, lifetime, deps): every caller passes a cancelled-at-end context, a nil lifetime panics naming the parameter, and the Dispatch binary built at ec4448fb booted, streamed project.created, and on SIGTERM exited in 0.036 s with 10 -> 0 backends. The merges keep every fix: the PR's diff against main is identical to round 4's for 20 of 21 daemon files (spawn.go differs by 817ed0ce alone), and main's 40 daemon files carry over intact. Re-runs at ec4448fb all pass: Exclusive boundary pair 20/20, TestALoneRunnerMakesAPassOnEveryTick -race 5/5, multiprocess leased loops 2/2, T1 20/20, T3 5/5, compaction and suggestion-outcome lease tests 3/3 and 6/6, redeliver, T6 20/20 race, T7+T8 25/25 race, T9 55/55, T10 20/20 race, T12 10/10 race, T13 5/5, T14 10/10, real tmux 5/5 (main's write-before-refusal order fails it 3/3), atomic secret files 10/10, claude-envoy 222/0 and reconciliation 50/50, strict queryTmux 20/20 on Bun 1.4.4 (2/3 fail on 1.3.14), VersionView 50/50, Playwright chromium agent-view-settings 30/30 and issue header 3/3, webkit deep-links 10/10; omp-plugins frozen install under Bun 1.4.4, check-bun-version, bun-workspace-manifests, image-trigger-paths and private-names pass. But 73dbc2c5, described as behaviour-neutral, makes the fixed-cadence leased loops lose periods (failure 1)."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Contract change census: api.Register requires Deps.Lifetime; the one production caller (cmd/dispatch) passes the process context, so the server boots, serves, and on SIGTERM leaves no relay or hub running",
-      "surface": "the Dispatch server binary built from 621cf3e5 against Postgres 17.11 in the issue pod",
-      "command": "go build -o dispatch-bin ./cmd/dispatch; boot with DATABASE_URL=<own db>, DISPATCH_AGENT_TOKEN, DISPATCH_DEV_SIGNIN=1, DISPATCH_IDENTITY=cookie, DISPATCH_NATS_DISABLED=1, DISPATCH_PORT=18779; curl /healthz; curl -N /api/v1/events with the agent bearer; GET /auth/_dev/signin?login=alice then POST /api/v1/projects; kill -TERM <server pid> with the stream open; pg_stat_activity for the database",
-      "observed": "healthz 200 {\"ok\":true,\"db\":true,...,\"schema_version\":134}; the stream printed ': open', a heartbeat and 'id: 1 event: project.created' after the 201; leased passes ran (reference-excerpts, edit-notices, block-index); on SIGTERM the server logged 'dispatch: shutting down' and exited in 0.11 s, curl ended with exit 0, and the database's backends went from 8 (incl. listen dispatch_events, listen dispatch_doc_changed) to 0; `dispatch-bin routes` (WriteRouteIndex, no Register) still prints the route index",
-      "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
-      "negativeControl": "api.Register(mux, api.Deps{}) in a throwaway test panics 'api.Register: Deps.Lifetime is required: it is the context that ends the delivery hub, the event stream relay and every broadcast delivery (a test passes t.Context())'; the census grep finds every other caller in tests, each setting Lifetime (ask_turn_test.go:350 copies newRegisteredTestServer's Deps), and the broker's own api.Register is another package"
+      "criterion": "A2 T2 and the envoy fragment ('a lone process no longer loses a period'): a lone leased loop of a fixed cadence serves every period - the architect's question for 73dbc2c5 (dispatch://INFRA-523/comment/20869aaf-b65d-4306-8817-13b03d564f31)",
+      "evidence": "duty.RunLeased (packages/envoy/internal/dispatch/duty/ticker.go, 73dbc2c5) arms each tick's timer only after the tick before it returns (due = <-time.After(wait)), so a fixed-cadence loop's due times are interval + that pass's time apart and drift across the period boundaries, jumping over periods no pass serves. On main and through round 4 the webhook redelivery, suggestion-outcome, compaction, issue-ask repair (main's) and prune (main's) loops ticked on a time.NewTicker, due times exactly one interval apart. Red test committed: packages/envoy/internal/dispatch/duty/run_leased_period_test.go, TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime (interval 1 s, each pass 400 ms, each pass reads the period its predecessor recorded). cd packages/envoy && go test -count=3 -v -run '^TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime$' ./internal/dispatch/duty/ -> FAIL 3/3, e.g. 'pass 4 served the period at 16:09:09.000 and the pass after it the period at 16:09:11.000, 2s later: 1 period(s) between them got no pass (each pass takes 400ms of the 1s interval)' (2-3 lost periods in 7 passes). Control: RunLeased on a fixed time.NewTicker(interval) with due = the tick's value passes 3/3. The fragment's second sentence ('now wait their interval after each pass ends ... rather than ticking on a fixed schedule') states the change, and it omits the prune loop, which RunLeased also converts (processes.go:435). Loops whose pass chooses its own wait (block index, reference excerpts) and edit notices waited after each pass on main already."
     },
     {
-      "criterion": "Review finding 1: the queryTmux bound test requires the kill to arrive, under the Bun the repository pins",
-      "surface": "packages/claude-envoy bun test in the issue pod",
-      "command": "bun test --timeout=60000 tests/session-title.test.ts -t 'ignores SIGTERM' --rerun-each 30 with Bun 1.4.4 (.bun-version) and --rerun-each 10 with the pod image's Bun 1.3.14",
-      "observed": "Bun 1.4.4: 30 pass 0 fail",
-      "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
-      "negativeControl": "Bun 1.3.14, which sometimes sends no kill on a timed-out execFileSync: 4 of 10 fail 'Expected: < 3000, Received: 5017' (5018, 5019)"
-    },
-    {
-      "criterion": "Review findings 4 and 5: the leased-loop boundary tests aim at the clock Exclusive buckets on; the redelivery sweep's first two sweeps cannot share a period",
-      "surface": "packages/envoy go test against Postgres 17.11 in the issue pod",
-      "command": "go test -count=10 -run '^(TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn|TestExclusiveCountsALateTickInThePeriodItWasDueIn)$' ./internal/dispatch/duty/; go test -count=1 ./internal/dispatch/duty/ ./internal/dispatch/redeliver/; read of sweep.go:240-248 and every other leased caller's first due",
-      "observed": "20 of 20 pass; both packages ok; the sweep reads due before NewTicker, so its first tick (armed + interval) is at least one period after the first due; block_index, edit_notices and reference_excerpts take the next due from time.After(wait) after the pass and suggestion_outcomes, the outbox compaction and RunJittered from their timer alone, so none has two dues closer than its period",
-      "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
-      "negativeControl": "scratch copy, boundary = periodBoundary(time.Now(), period) at the gate: TestExclusiveCountsALateTickInThePeriodItWasDueIn fails 5/5 'the tick due one period after a late one was refused ... its lease 400ms late' and TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn fails 5/5 '...its writes stalled 100ms each); a lone loop lost that period'"
-    },
-    {
-      "criterion": "A2 T12 (round-2 finding 1): the launcher test fails a start that reaches the daemon after it stopped waiting, whichever side of the proof dial lost the time",
-      "surface": "packages/daemon go test in the issue pod",
-      "command": "cd packages/daemon && CGO_ENABLED=1 go test -race -count=20 -timeout 0 -run '^TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits$' ./internal/launcher/",
-      "observed": "ok 20 of 20 (22.7 s) under sibling load",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "scratch copy, time.Sleep(m.cfg.StopGrace) just before sessionproxy.Start (passed 2/2 at f26dca26): FAIL 2/2 'launcher_test.go:1226: generation 1's start took 2.002165766s outside its proof dial (2.001202036s before it, 963.73\u00b5s after it), past the other half of the 2s stop grace'; time.Sleep(StopGrace*6/10) after the proxy error: FAIL 2/2 'took 1.203274779s outside its proof dial (1.08473ms before it, 1.202190049s after it)'"
-    },
-    {
-      "criterion": "A2 T2 (round-2 finding 2): the cost of a clock offset between two processes is stated as it happens (exclusive.go:74-90)",
-      "surface": "packages/envoy duty.Exclusive against Postgres 17 in the issue pod, synthetic due values",
-      "command": "throwaway test in a scratch copy calling Exclusive with a 1 s period: (a) A 300 ms behind ticking at true x.1, B at x.2, true 15-24 s; (b) A 300 ms ahead ticking at true x.7 until 19.7 s, B at x.9 until 24.9 s; go test -count=1 -v -run '^TestProbe' ./internal/dispatch/duty/ (probe deleted afterwards)",
-      "observed": "(a) both ran once at the start (15.1 s A and 15.2 s B: the one extra pass), then only B, one pass per period; (b) A ran every period, B refused while A ran; A's last pass at 19.7 s (own clock 20.0) recorded period 20, B's 20.9 s tick was refused and B ran from 21.9 s on: the comment's 'one extra pass while both run' and 'a skipped period, two passes up to two periods apart, once' match",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "the round-2 wording ('the other's ticks are skipped for at most that offset') is contradicted by (b): B's refused tick is 900 ms past its boundary with a 300 ms offset; the new wording names that case"
-    },
-    {
-      "criterion": "T17 (round-2 finding 3): the claude-envoy per-test timeout is above the longest chain of waits one test makes, so a stuck wait names its step",
-      "surface": "packages/claude-envoy bun test (Bun 1.4.4) in the issue pod",
-      "command": "cd packages/claude-envoy && bun run test (bun test --timeout=60000), and a count of the waits in envoy-channel-replay.test.ts:600 'a stored frame the channel never takes is named in one notice\u2026'",
-      "observed": "218 pass 0 fail (21.2 s); that test makes 11 waits of up to 5 s (boot's first sweep twice, 6 reconnect sweeps, 3 named waits at :615 :617 :620), 55 s + 5 s = 60 s as the comment says",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "round 2: a wait made unsatisfiable fails with the named error 'timed out waiting for the heartbeat reclaiming the held role (holder now ...)' under the package timeout and only 'this test timed out after 5000ms' under bun's default; the 15 s figure was below this test's 55 s chain"
-    },
-    {
-      "criterion": "A2 product races T1, T2, T6, T10, T11 and the claude-envoy heartbeat: fixed at their root (round 2, full round after the merge with main)",
-      "surface": "packages/envoy, packages/daemon and packages/claude-envoy tests against Postgres 17.11 + pgvector, nats-server 2.10.29, a real tmux 3.5a and Bun 1.4.4 in the issue pod",
-      "command": "go test -count=20 the two Exclusive boundary tests; -race -count=10 TestALoneRunnerMakesAPassOnEveryTick; -tags multiprocess -count=2 the leased-loop tests; -count=10 the T1 tests; -race -count=5 the four outbox lane tests; -race -count=30 TestARefusedProofLogsInAgain; -count=5 TestRealTmuxSplitsIntoTheIssueWindow with tmux; -count=10 TestARewrittenSecretFileIsNeverReadEmptyOrShort; bun test --rerun-each 100 the reconciliation test",
-      "observed": "all pass: 40/40, 10/10, 2/2 each ('A ran 1 skipped 0, B ran 0 skipped 1' for every leased loop), 20/20, 20/20, 30/30, 5/5, 10/10, 100/100",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "periodBoundary(time.Now()) at the gate fails the late-tick test 13/13; main's two-statement eventCursorCheck fails the new T1 test 3/3 (round 1); a 20 ms split in LoginStatus fails 5/5 'no token login yet'; main's spawn order fails the real-tmux test 2/2 'the refused second spawn rewrote the live tester's secret files'; an unconditional heartbeat fails the reconciliation test 50/400 'Expected: 3 Received: 4'"
-    },
-    {
-      "criterion": "A2 test causes T3-T5, T7-T9, T12-T16, T24 and the deep-links WebKit test: each waits on the state it asserts (round 2)",
-      "surface": "go test, bun test and Playwright chromium and webkit against the real Dispatch stack in the issue pod",
-      "command": "-count=10/5 T3 T4; pmdoc -race -count=2 and Linear -count=2; -race -count=5 T7+T8; -count=5 TestConsume*, TestFetchKeepsAFeedAfterGitGC, the two bridge tests; VersionView --rerun-each 100; playwright --project=chromium -g 'agent-view-settings' --repeat-each=5, -g 'issue header keeps every control' --repeat-each=5, --project=webkit -g 'withdraws its report' --repeat-each=10",
-      "observed": "all pass: 10/10, 5/5, 4/4, 12/12, 25/25, 55/55, 5/5, 10/10, 100/100, 50/50, 5/5, 20/20 (webkit)",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "New mark hidden on pointerdown: the old deep-links test fails 5/10 at :606 after the View in document click, the new one passes 10/10; 1 s fake-Envoy delay: main's agent-view-settings fails 3/30 at :747, the new one passes 30/30; a quadratic freeDelimiterRuns fails the merged render test; setHighlightMissing(false) fails VersionView 3/3"
-    },
-    {
-      "criterion": "A2 T19, T20: the worker image needs no external Dockerfile frontend and installs CodeGraph from a committed lockfile, under the Bun 1.4.4 main now pins",
-      "surface": "Bun 1.4.4 frozen install of packages/daemon/docker/omp-plugins as worker.Dockerfile:168-170 runs it; BuildKit v0.33.1's dockerfile2llb; the repository's check scripts",
-      "command": "bun install --frozen-lockfile --ignore-scripts in a copy of the two files; check-bun-version.sh, check-bun-workspace-manifests.sh, check-image-trigger-paths.sh; dockerfile2llb parse of worker.Dockerfile (round 1)",
-      "observed": "exit 0, pi-codegraph 0.1.1, 122 packages, lockfile sha256 unchanged; the three scripts pass; the Dockerfile converts with the built-in frontend 1.27 and no lint warnings",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "an added dependency: 'lockfile had changes, but lockfile is frozen', exit 1; ARG BUN_VERSION=1.3.14: check-bun-version refuses 'but .bun-version locks 1.4.4'"
-    },
-    {
-      "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job, each once",
-      "surface": "GitHub Actions API; dispatch://INFRA-523/artifact/rerun-measure-py v2 and dispatch://INFRA-523/artifact/rerun-catalog-md (latest)",
-      "command": "python3 rerun-measure.py --from 2026-10-19T23:50:00Z --to 2026-10-26T23:50:00Z --cache <round-1 cache> --list; job ids compared with the catalog's table",
-      "observed": "109 job ids, each once; identical to the catalog's 109; totals 13112 runs, 177 re-run runs, 1630 test-or-code minutes, as the catalog header says",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "v1 of the script on the same cache prints job 120771000438 twice and 13117 runs"
-    },
-    {
-      "criterion": "A2a: no retry, no race-hiding timeout, no skip, no workflow file",
-      "surface": "the pull request's diff against main 4e55b2e0 plus round 3",
-      "command": "gh pr diff 2396 --repo sjawhar/legion --name-only; scan of every added line for t.Skip, .skip(, retries, toPass, waitForTimeout, time.Sleep, retry, timeout",
-      "observed": "no .github/workflows/ file; no skip, retry or toPass; the waits added poll an observable state; the two raised timeouts are the T12 grace (its bounds now read from the dial and the start's send) and claude-envoy's per-test 60 s, above eleven 5 s named waits, so each wait still fails first with its name",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "check-private-names.sh over the changed files and check-pr-text.sh pass, and refuse a planted private host and repository name (round 2)"
+      "criterion": "A2 T11 after 817ed0ce: a refused tmux spawn or resume rewrites none of the live pane's per-claim files, the gh bundle included",
+      "evidence": "817ed0ce keeps the order (mint outside launchMu; refuseLiveIncarnation; WriteSecretFiles; writeGitHubCredential: spawn.go:504-521), but no test would catch the gh bundle written before the refusal. Mutant in a scratch copy, writeGitHubCredential moved above refuseLiveIncarnation inside the lock: go test -count=1 ./internal/runtime/tmux/ fails only the two known pod-only tests. Cause: the rig's staticCredential returns the same bundle each time and ghconfig.WriteBundle rewrites an owner's files only when their content changed, so TestRealTmuxSplitsIntoTheIssueWindow (which compares the secret files alone) cannot see it. A check that closes it (DaemonR5's diff, /legion/scratch/tmp/infra523-tester/r5-daemon/regr.diff): each mint returns a fresh token (ghconfig.Render(fmt.Sprintf(\"ghs_mint_%d\", n), ...)), readSecrets also walks runtime.GHConfigDir(r.stateDir, testerSpec.Claim), and the snapshot is compared after the refused Resume too; it fails the mutant 2/2 ('tmux_real_test.go:1200: the refused second spawn rewrote ... -gh/acme/hosts.yml ... oauth_token: ghs_mint_2', and ':1210 the refused resume rewrote ...') and passes 5/5 at ec4448fb. No red test committed: the product order is correct at ec4448fb, so only a mutant shows the gap."
     }
   ],
+  "failed": 2,
   "observations": [
-    "Changelog fragments follow each package's .changie.yaml (kinds Fixed/Changed, custom Issue, fragmentFileFormat {{Issue}}-{{Kind}}-<time>); packages/daemon has no changelog of its own.",
-    "deep-links.e2e.ts keeps its read-mark pre-read on the architect's decision; the layout shift is dispatch://INFRA-662's. It neither retries nor sleeps: it awaits the API's stored read mark before the page opens (round 2: hiding the New mark on pointerdown fails the old test 5/10, the new one passes 10/10).",
-    "T6: no suite test fails main's wakeLane order deterministically; only the implementer's forced-order probe shows it.",
-    "A3 (re-run minutes over [merge, merge+7d)) is measured after the merge by the implementer's production check."
+    "The census nit: the PR body's search also returns same-named functions it does not list (processes.Register, startup register, listener write_routes register, broker helper register); none is api.Register. routes.BuildAppContext accepts a missing Lifetime and the refusal comes from routes.New's panic.",
+    "storetest.WaitForQueuedBehind watches the call's own backend and polls under a deadline; making it a no-op passes its callers locally, but with a 300 ms delay before the call a timestamp mutant (comment_create.go:493) passes under the no-op helper and fails 3/3 under the real one ('ask detail waiting_on = \"agent\", want human').",
+    "The claude-envoy reconciliation test catches an unconditional heartbeat in 42/300 runs under Bun 1.4.4 (round 2: 50/400).",
+    "bun scripts/build.ts --check exits 1 at ec4448fb because main no longer has a pull request commit dist/ or legion/; bun run verify-build, the check CI runs, exits 0.",
+    "deep-links.e2e.ts keeps its read-mark pre-read (dispatch://INFRA-662), with no retry or sleep.",
+    "T6: no suite test fails main's wakeLane order deterministically."
   ]
 }
