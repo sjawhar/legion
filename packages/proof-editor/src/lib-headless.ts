@@ -86,11 +86,12 @@ export interface HeadlessProofOptions {
   renderBlock?: HostBlockRenderer;
   /** Read-only parse, for display: a container directive the block schema refuses is drawn as
    *  its literal fence lines around its formatted content, as is an accepted typed block whose
-   *  content breaks its content rule (both through `remarkReadOnlyDirectives`), and the
-   *  paragraph-line directive refusals are not applied. The default, false, is what the live
-   *  (browser) editor imports: with a `blockSchema` it keeps the parser's directive refusals
-   *  listed at `parseMarkdown`, which the pmdoc fixture generators rely on, and draws a typed
-   *  block whose content breaks its content rule as its literal lines through
+   *  content breaks its content rule (both through `remarkReadOnlyDirectives`), the
+   *  paragraph-line directive refusals are not applied, and a typed block kept typed loses the
+   *  block schema's `server` attributes, so they read at their defaults. The default, false, is
+   *  what the live (browser) editor imports: with a `blockSchema` it keeps the parser's directive
+   *  refusals listed at `parseMarkdown`, which the pmdoc fixture generators rely on, and draws a
+   *  typed block whose content breaks its content rule as its literal lines through
    *  `remarkUnfitTypedBlocks` rather than dropping it. A general read-only mode, so later
    *  read-only rules hang on it too. */
   readOnly?: boolean;

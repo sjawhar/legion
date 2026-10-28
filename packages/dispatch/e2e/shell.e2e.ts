@@ -16,7 +16,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a transient whoami failure shows a retry banner and keeps the app, not the sign-in page", async ({
+test("a transient whoami failure shows a retry banner and keeps the app, not the sign-in page @phone", async ({
   browser,
 }, testInfo) => {
   const context = await asUser(browser, "alice");
@@ -47,7 +47,7 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
   await context.close();
 });
 
-test("signing out revokes the session on the server and returns to the sign-in page", async ({
+test("signing out revokes the session on the server and returns to the sign-in page @phone", async ({
   browser,
 }, testInfo) => {
   const context = await asUser(browser, "alice");
@@ -489,7 +489,7 @@ async function seedManyProjects(count: number): Promise<void> {
 // A column that is only as tall as the viewport at its minimum pushes the footer and the lower
 // links off the bottom of the screen, where a reader reaches them only by scrolling to the end
 // of the page - or, on a phone, not at all, because the drawer is fixed to the viewport.
-test("the sidebar scrolls, so Sign out is reachable with a navigation taller than the viewport", async ({
+test("the sidebar scrolls, so Sign out is reachable with a navigation taller than the viewport @phone", async ({
   browser,
 }, testInfo) => {
   await seedManyProjects(17);
