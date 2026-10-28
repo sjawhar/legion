@@ -62,8 +62,7 @@ func IndexBlocks(
 	var texts []*string
 	for _, block := range nodes {
 		body := markdown[block.From:block.To]
-		sum := sha256.Sum256([]byte(body))
-		hexSum := hex.EncodeToString(sum[:])
+		hexSum := BlockTextSum(body)
 		previous, held := stored[block.ID]
 		delete(stored, block.ID)
 		if held && previous == hexSum {
@@ -131,6 +130,13 @@ func IndexBlocks(
 		return nil, fmt.Errorf("record the blocks of %s indexed at version %d: %w", artifactID, version, err)
 	}
 	return moved, nil
+}
+
+// BlockTextSum is the sha256 (hex) of a block's text (markdown[From:To]), as document_blocks
+// stores it in text_sha256.
+func BlockTextSum(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }
 
 // storedBlockSums is each block the document's index holds, by id, with its text's sha256.

@@ -4,7 +4,8 @@ import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
-import { AgentName, AgentParts } from "../refs/AgentName";
+import { AgentParts, AskResolutionLine } from "../refs/AgentName";
+import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -24,7 +25,9 @@ function AskEventBody({
   onRendered?: () => void;
 }): ReactNode {
   const { answer, question, options, resolution, created_at } = event.payload;
-  // A changed answer names the one it replaced; the first answer's event carries none.
+  const resolutionReason = resolution === undefined ? undefined : askResolutionReason(resolution);
+  // A changed answer names the one it replaced; the first answer's event carries none. An event
+  // written before answers stored an empty list holds null for either's selected: no option.
   const previous = event.type === "ask.answered" ? event.payload.previous_answer : undefined;
   return (
     <>
@@ -50,7 +53,7 @@ function AskEventBody({
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
               <s>
                 was:{" "}
-                {[previous.selected.join(", "), previous.text ?? ""]
+                {[(previous.selected ?? []).join(", "), previous.text ?? ""]
                   .filter((part) => part !== "")
                   .join(" - ")}
               </s>
@@ -60,8 +63,14 @@ function AskEventBody({
       )}
       {resolution === undefined ? null : (
         <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-          Resolved by <AgentName actor={resolution.actor} inline /> (
-          <MarkdownBody markdown={resolution.reason} onRendered={onRendered} variant="inline" />){" "}
+          <AskResolutionLine resolution={resolution} />
+          {resolutionReason === undefined ? null : (
+            <>
+              {" "}
+              -{" "}
+              <MarkdownBody markdown={resolutionReason} onRendered={onRendered} variant="inline" />
+            </>
+          )}{" "}
           <Timestamp at={resolution.at} />
         </p>
       )}
