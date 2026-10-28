@@ -1129,7 +1129,11 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   // The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
   // silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
   // it drops the `2>&1`, before or after a here-document opener, and a `| head` or `| tail` stage,
-  // so the CLI's JSON is all its stdout holds.
+  // so the CLI's JSON is all its stdout holds. `--dry-run` goes after the kept words, not between
+  // the subcommand and them: the CLI takes a bare issue key only as the subcommand's first
+  // argument, so a `--dry-run` there made `dispatch comment ACME-1 …` fail its dry run, which the
+  // gate lets through as an error. The parser never takes a `--` word as a flag's value, so last
+  // is safe for every command.
   const before =
     cdEnd === undefined
       ? command.slice(0, at)
@@ -1145,7 +1149,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
     command: `${command.slice(0, at)}${commandHead}${command.slice(end)}`,
-    dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, "--dry-run", ...kept.map((word) => word.raw)].join(" ")}${after}`,
+    dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, ...kept.map((word) => word.raw), "--dry-run"].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
     readsFile: files.inputs.length > 0,
     fileInputs: files.inputs,
@@ -1724,8 +1728,11 @@ const agentFacing = (text: string) =>
   clipBytes(text.replace(/<(?=[A-Za-z/!?])/g, "&lt;"), GATE_REASON_MAX_BYTES);
 // What the agent reads after each gated call: silence only for an allow or a fail-open, since a
 // pass it cannot see is indistinguishable from a gate that broke.
+// The breaker keys on the target alone (`breakerKey`: the tool and its issue, ask, artifact, project
+// or reply), not on the text, so after the second revise the next write to that target goes out
+// unreviewed whether or not its text changed.
 const SECOND_REVISE =
-  "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+  "This is the second revise on this target: the next write to it, changed or not, is sent without review and recorded.";
 /** How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the command. */
 type Override = { name: string; how: string; what: string; note?: string };
 const DEVICE_OVERRIDE: Override = {

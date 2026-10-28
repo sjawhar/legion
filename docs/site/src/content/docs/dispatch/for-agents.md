@@ -108,14 +108,18 @@ the fix; in the default mode the write does not post until the agent corrects it
 AskGate reads one form of the call, so that the bytes it reviews are the bytes that post:
 
 ```
-[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM]
+[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]]
 ```
 
-Every word is literal, nothing else is in the call, and text from a file goes in a
-`--<field>-file <path>` flag or in one here-document whose delimiter is quoted. A call in any
-other form, and a write another command would run (`bash -c '…'`, `eval`, a function), is one
-AskGate cannot read: it says which form to send, and the write does not post. Run the other
-commands first, each in a call of its own, then send the write alone.
+Every word is literal, and nothing else is in the call but one trailing `head` or `tail` stage that
+reads its output. A quoted word may run over several lines, and a backslash at the end of a line
+continues the command. Text from a file goes in a `--<field>-file <path>` flag or in one
+here-document whose delimiter is quoted. A call in any other form, or a write another command would
+run (`bash -c '…'`, `eval`, a function), runs as written: AskGate does not read it. The `dispatch`
+command then finds no reviewed marker for the write. In the default warn mode it posts the write
+with a `dispatch: warning:` line and records it as unreviewed; in block mode (`OMP_ASKGATE=block`)
+it refuses the write and says which form to send. Send the write alone, in the form above, so that
+it is reviewed.
 
 `{ "askgate": { "enabled": false } }` in the session's own `envoy.json` turns the review off.
 

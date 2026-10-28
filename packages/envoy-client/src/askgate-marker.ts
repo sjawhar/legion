@@ -292,6 +292,20 @@ export function setRecordMode(dir: string, owner: AskgateOwner, mode: AskgateMod
   writeAtomically(ownerFile(dir, owner), ownerText(owner, mode));
 }
 
+/**
+ * The check mode `owner`'s own file in session directory `dir`'s record carries, or undefined when
+ * that file is absent or is no owner file. A rebind of the same session reads it so that a block
+ * the session recorded on a main-agent call is never turned back to warn before the gate's next
+ * call sets the mode again.
+ */
+export function recordedOwnerMode(dir: string, owner: AskgateOwner): AskgateMode | undefined {
+  try {
+    return parseOwner(readFileSync(ownerFile(dir, owner), "utf-8"))?.mode;
+  } catch {
+    return undefined;
+  }
+}
+
 function ownerText(owner: AskgateOwner, mode: AskgateMode): string {
   return JSON.stringify({ v: 2, pid: owner.pid, start: owner.start, store: owner.store, mode });
 }

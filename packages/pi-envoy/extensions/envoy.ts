@@ -21,6 +21,7 @@ import {
   closeStore,
   dropAskgateRecord,
   openStore,
+  recordedOwnerMode,
   selfOwner,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
@@ -990,14 +991,17 @@ export default function envoyExtension(pi: PiApi): void {
       const dir = dispatchSessionDirectory(process.env, id);
       try {
         openStore(askgateOwner.store);
-        // The session's own check mode at the bind: block only when it chose block through
-        // OMP_ASKGATE, which survives a gate that does not load (the gate reads an arm per call, so
-        // an arm-only block session records its mode on its first main-agent call, not here). Kept
-        // per session in its owner file, so a switch never changes another session's mode.
+        // The session's own check mode at the bind: block when it chose block through OMP_ASKGATE,
+        // which survives a gate that does not load, or when this process already recorded block for
+        // this session id. The gate reads an arm per call and records it in the owner file, so a
+        // rebind (a start, a switch, a branch, a host move) keeps a recorded block rather than turn
+        // it back to warn before the gate's next call; the gate's call still sets warn when the arm
+        // is off. Kept per session in its owner file, so a switch never changes another session's.
+        const recorded = recordedOwnerMode(dir, askgateOwner);
         writeAskgateRecord(
           dir,
           askgateOwner,
-          process.env.OMP_ASKGATE?.trim() === "block" ? "block" : "warn"
+          process.env.OMP_ASKGATE?.trim() === "block" || recorded === "block" ? "block" : "warn"
         );
         askgateRecords.add(dir);
       } catch (error) {

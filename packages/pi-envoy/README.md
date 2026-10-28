@@ -379,14 +379,16 @@ session's own record (not a process-wide file, so a process that binds two sessi
 one's mode, and a switch never changes another session's) at each main-agent `bash` or `eval`
 call, where the CLI reads it, and a record with no mode is warn. pi-envoy also writes
 `OMP_ASKGATE=block` into the record at the bind, so a session that chose block that way stays at
-block even when its gate does not load. An `experiments` arm does not: only the loaded gate reads
-the arm, so a session that chose block through the arm alone has no mode on disk until the gate's
-first main-agent `bash` or `eval` call, and none at all when the gate does not load — a write
-outside the literal form there posts with a warning. **An operator who selects block through the
-arm should also set `OMP_ASKGATE=block` for a hard guarantee**, which holds from the session's
-start and through a failed load. Two other refusals follow neither mode: no model role, and a gate
-that did not load, which refuses each literal call it would review in both modes, since neither can
-review anything.
+block even when its gate does not load. A later bind of a session id that recorded block (a switch
+back to it, or a branch or host move that keeps the id) keeps block, so its mode never goes back to
+warn before the gate's next call. An `experiments` arm alone does not reach the record at the
+bind: only the loaded gate reads the arm, so a session that chose block through the arm alone has
+no mode on disk until the gate's first main-agent `bash` or `eval` call, and none at all when the
+gate does not load — a write outside the literal form there posts with a warning. **An operator
+who selects block through the arm should also set `OMP_ASKGATE=block` for a hard guarantee**,
+which holds from the session's start and through a failed load. Two other refusals follow neither
+mode: no model role, and a gate that did not load, which refuses each literal call it would review
+in both modes, since neither can review anything.
 
 **The model.** The gate asks the session's `askgate` model role (`modelRoles.askgate`). When that
 role is not set, it asks the `default` role. A model that answers with an error passes the request

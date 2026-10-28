@@ -4080,6 +4080,30 @@ console.log(JSON.stringify(args));
       expect(existsSync(store)).toBe(false);
       expect(notifications).toEqual([]);
     }, 30_000);
+    // The independent review at 6fd926853, item 1: every session start, switch, branch and host
+    // move rebinds a session, and the rebind wrote this process's owner file from OMP_ASKGATE
+    // alone. A session on block through its experiments arm then read warn on disk until its main
+    // agent's next bash or eval call, and an unmarked write from a subagent or a background job
+    // posted in that window. A rebind of the same session id keeps the block that session recorded.
+    test("a rebind of the same session keeps a block it recorded, never turning it back to warn", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-rebind");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const [own] = recordOf("ses_askgate") ?? [];
+      // The gate records block for this session on a main-agent call, as an arm that is on does.
+      writeFileSync(
+        own?.file ?? "",
+        JSON.stringify({ ...JSON.parse(readFileSync(own?.file ?? "", "utf8")), mode: "block" })
+      );
+      // A switch back onto the same session rebinds it, as a resume or a branch does.
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, context);
+      expect(recordOf("ses_askgate")).toMatchObject([{ pid: process.pid, mode: "block" }]);
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+    }, 30_000);
     // A record AskGate cannot write after a switch turns the CLI's check off for that session, so
     // the user is told at once, as at session start, and not only in the log.
     test("a record that cannot be written after a switch reaches the user as a notice", async () => {

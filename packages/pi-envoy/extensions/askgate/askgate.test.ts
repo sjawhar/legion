@@ -825,15 +825,15 @@ describe("breaker (test 7)", () => {
     ]);
     expect(g.entries[3].revisesForKey).toBe(2);
   });
-  test("the second revise on a target says the third unchanged resend goes out unreviewed, in both modes", async () => {
+  test("the second revise on a target says the next write to it goes out unreviewed, changed or not, in both modes", async () => {
     const SECOND =
-      "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+      "This is the second revise on this target: the next write to it, changed or not, is sent without review and recorded.";
     const block = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     const first =
       (await block.device("a", "dispatch_comment", { issue: "X-1", body: "one" }))?.reason ?? "";
     const second =
       (await block.device("b", "dispatch_comment", { issue: "X-1", body: "two" }))?.reason ?? "";
-    expect(first).not.toContain("third");
+    expect(first).not.toContain("second revise");
     expect(second.trimEnd().endsWith(SECOND)).toBe(true);
     const warn = bind({ complete: async () => ({ text: REVISE }) });
     await warn.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
@@ -1547,7 +1547,7 @@ console.log(JSON.stringify(args, null, 2));
     expect(await g.bash("b1", ASK)).toBeUndefined();
     expect(g.dryRuns).toEqual([
       {
-        script: `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`,
+        script: `dispatch ask --issue X-1 --question-file - --dry-run <<'EOF'\n${QUESTION}EOF`,
         cwd: work,
         timeoutMs: 10_000,
       },
@@ -1844,8 +1844,8 @@ console.log(JSON.stringify(args, null, 2));
     for (const [index, command] of quoted.entries())
       expect(await g.bash(`q${index}`, command)).toBeUndefined();
     expect(g.dryRuns.map((run) => run.script)).toEqual([
-      'di""spatch comment --dry-run --issue X-1 --body hi',
-      "'dispatch' comment --dry-run --issue X-1 --body hi",
+      'di""spatch comment --issue X-1 --body hi --dry-run',
+      "'dispatch' comment --issue X-1 --body hi --dry-run",
     ]);
     expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
       Array(quoted.length).fill(["dispatch_comment", "verdict", "allow"])
@@ -2057,10 +2057,10 @@ console.log(JSON.stringify(args, null, 2));
     ).toBeUndefined();
     expect(await g.bash("cd", "cd bin && ./dispatch ask --issue X-1 --question q")).toBeUndefined();
     expect(g.dryRuns.map((r) => r.script)).toEqual([
-      `${bin}/dispatch message --dry-run --issue X-1 --body 'The run finished.'`,
-      "./bin/dispatch comment --dry-run --issue X-1 --body hi",
-      `'${bin}/dispatch' comment --dry-run --issue X-1 --body hi`,
-      "cd bin >/dev/null && ./dispatch ask --dry-run --issue X-1 --question q",
+      `${bin}/dispatch message --issue X-1 --body 'The run finished.' --dry-run`,
+      "./bin/dispatch comment --issue X-1 --body hi --dry-run",
+      `'${bin}/dispatch' comment --issue X-1 --body hi --dry-run`,
+      "cd bin >/dev/null && ./dispatch ask --issue X-1 --question q --dry-run",
     ]);
     expect(g.calls[0].user).toContain('"body": "The run finished."');
     // A literal path in a call outside the grammar runs unread, as any such call does.
@@ -2183,8 +2183,8 @@ console.log(JSON.stringify(args, null, 2));
     ).toBeUndefined();
     expect(await g.bash("js", "./bin/dispatch.js ask --issue X-1 --question q")).toBeUndefined();
     expect(g.dryRuns.map((r) => r.script)).toEqual([
-      `bun ${bin}/dispatch.js comment --dry-run --issue X-1 --body hi`,
-      "./bin/dispatch.js ask --dry-run --issue X-1 --question q",
+      `bun ${bin}/dispatch.js comment --issue X-1 --body hi --dry-run`,
+      "./bin/dispatch.js ask --issue X-1 --question q --dry-run",
     ]);
     expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([
       ["dispatch_comment", "verdict"],
@@ -2198,9 +2198,9 @@ console.log(JSON.stringify(args, null, 2));
     await g.bash("inline", "dispatch issue --project P --title t --spec='# Spec'");
     await g.bash("spaced", 'dispatch issue --project P --title t --spec "# Spec"');
     expect(g.dryRuns.map((r) => r.script)).toEqual([
-      "dispatch issue --dry-run --project P --title t --spec-file - <<'EOF'\n# Spec\nEOF",
-      "dispatch issue --dry-run --project P --title t --spec='# Spec'",
-      'dispatch issue --dry-run --project P --title t --spec "# Spec"',
+      "dispatch issue --project P --title t --spec-file - --dry-run <<'EOF'\n# Spec\nEOF",
+      "dispatch issue --project P --title t --spec='# Spec' --dry-run",
+      'dispatch issue --project P --title t --spec "# Spec" --dry-run',
     ]);
     expect(g.entries.map((e) => [e.toolCallId, e.tool])).toEqual([
       ["file", "dispatch_issue"],
@@ -2278,7 +2278,7 @@ console.log(JSON.stringify(args, null, 2));
     expect(result?.additionalContext).toContain('outcome="rebuttal"');
     expect(result?.additionalContext).toContain('"the plan is linked in the question"');
     expect(g.dryRuns[0].script).toBe(
-      `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`
+      `dispatch ask --issue X-1 --question-file - --dry-run <<'EOF'\n${QUESTION}EOF`
     );
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
@@ -2359,7 +2359,7 @@ console.log(JSON.stringify(args, null, 2));
       });
       // The dry run names the file as the call wrote it: the gate copies nothing.
       expect(g.dryRuns[1]?.script).toBe(
-        "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt"
+        "cd sub >/dev/null && dispatch message --issue X-1 --body-file note.txt --dry-run"
       );
       expect(g.dryRuns[2]).toMatchObject({
         script: "cd inner >/dev/null && pwd -P",
@@ -2367,7 +2367,7 @@ console.log(JSON.stringify(args, null, 2));
         timeoutMs: 10_000,
       });
       expect(g.dryRuns[3]?.script).toBe(
-        "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt"
+        "cd inner >/dev/null && dispatch message --issue X-1 --body-file note.txt --dry-run"
       );
       expect(g.calls).toHaveLength(5);
       expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
@@ -2395,7 +2395,7 @@ console.log(JSON.stringify(args, null, 2));
     );
     expect(after?.command).toBe("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
     expect(after?.dryRunScript).toBe(
-      "dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF"
+      "dispatch comment --issue X-1 --body-file - --dry-run <<'EOF'\nhi\nEOF"
     );
   });
   test("a revise of a command that names a file says the file was read before the rest of its batch ran", async () => {
@@ -2451,21 +2451,21 @@ console.log(JSON.stringify(args, null, 2));
       command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1",
     });
     expect(g.dryRuns[0].script).toBe(
-      "cd 'sub' >/dev/null && dispatch comment --dry-run --issue X-1 --body hi"
+      "cd 'sub' >/dev/null && dispatch comment --issue X-1 --body hi --dry-run"
     );
     expect(
       core.scopedCommand("cd 'dispatch comment --body x' && dispatch comment --body x")
     ).toMatchObject({
       command: "cd 'dispatch comment --body x' && dispatch comment --body x",
       dryRunScript:
-        "cd 'dispatch comment --body x' >/dev/null && dispatch comment --dry-run --body x",
+        "cd 'dispatch comment --body x' >/dev/null && dispatch comment --body x --dry-run",
     });
     expect(core.scopedCommand('cd "my dir" && dispatch comment --body x')?.dryRunScript).toBe(
-      'cd "my dir" >/dev/null && dispatch comment --dry-run --body x'
+      'cd "my dir" >/dev/null && dispatch comment --body x --dry-run'
     );
     // A `2>&1` inside the command's quotes is its text, not the wrapper.
     expect(core.scopedCommand("dispatch comment --body 'a 2>&1'")?.dryRunScript).toBe(
-      "dispatch comment --dry-run --body 'a 2>&1'"
+      "dispatch comment --body 'a 2>&1' --dry-run"
     );
     expect(core.scopedCommand("dispatch comment --body 'a 2>&1")).toBeUndefined();
   });
@@ -3275,52 +3275,52 @@ describe("the literal grammar, widened to forms with no expansion", () => {
     [
       "a single-quoted word over several lines, which may hold $, a backtick and \\",
       "dispatch comment --issue X-1 --body 'First line.\nSecond line keeps $HOME, `date` and \\n as text.'",
-      "dispatch comment --dry-run --issue X-1 --body 'First line.\nSecond line keeps $HOME, `date` and \\n as text.'",
+      "dispatch comment --issue X-1 --body 'First line.\nSecond line keeps $HOME, `date` and \\n as text.' --dry-run",
     ],
     [
       "a double-quoted word over several lines with no $, backtick or \\",
       'dispatch message --issue X-1 --body "First line.\n\nThird line, after a blank one."',
-      'dispatch message --dry-run --issue X-1 --body "First line.\n\nThird line, after a blank one."',
+      'dispatch message --issue X-1 --body "First line.\n\nThird line, after a blank one." --dry-run',
     ],
     [
       "backslash-newline continuations between words",
       "dispatch ask --issue X-1 \\\n  --question 'Which one? Recommendation: A.' \\\n  --option 'A: the first' \\\n  --option 'B: the second'",
-      "dispatch ask --dry-run --issue X-1 --question 'Which one? Recommendation: A.' --option 'A: the first' --option 'B: the second'",
+      "dispatch ask --issue X-1 --question 'Which one? Recommendation: A.' --option 'A: the first' --option 'B: the second' --dry-run",
     ],
     [
       "a continuation inside a word, which bash removes",
       "dispatch comment --issue X-1 --bo\\\ndy hi",
-      "dispatch comment --dry-run --issue X-1 --bo\\\ndy hi",
+      "dispatch comment --issue X-1 --bo\\\ndy hi --dry-run",
     ],
     [
       "continuations before a here-document opener",
       "dispatch ask --issue X-1 --question-file - \\\n  --option 'A: a' \\\n  --option 'B: b' <<'EOF'\nWhich one?\nEOF",
-      "dispatch ask --dry-run --issue X-1 --question-file - --option 'A: a' --option 'B: b' <<'EOF'\nWhich one?\nEOF",
+      "dispatch ask --issue X-1 --question-file - --option 'A: a' --option 'B: b' --dry-run <<'EOF'\nWhich one?\nEOF",
     ],
     [
       "a trailing | head -n N",
       "dispatch comment --issue X-1 --body hi | head -n 5",
-      "dispatch comment --dry-run --issue X-1 --body hi",
+      "dispatch comment --issue X-1 --body hi --dry-run",
     ],
     [
       "a trailing | tail -nN after 2>&1",
       "dispatch comment --issue X-1 --body hi 2>&1 | tail -n2",
-      "dispatch comment --dry-run --issue X-1 --body hi",
+      "dispatch comment --issue X-1 --body hi --dry-run",
     ],
     [
       "a trailing | head -N",
       "dispatch comment --issue X-1 --body hi | head -3",
-      "dispatch comment --dry-run --issue X-1 --body hi",
+      "dispatch comment --issue X-1 --body hi --dry-run",
     ],
     [
       "a trailing | tail alone",
       "dispatch comment --issue X-1 --body hi | tail",
-      "dispatch comment --dry-run --issue X-1 --body hi",
+      "dispatch comment --issue X-1 --body hi --dry-run",
     ],
     [
       "a here-document, 2>&1 and | head on the opener's line",
       "cd /tmp && dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1 | head -n 20\nText.\nEOF",
-      "cd /tmp >/dev/null && dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nText.\nEOF",
+      "cd /tmp >/dev/null && dispatch comment --issue X-1 --body-file - --dry-run <<'EOF'\nText.\nEOF",
     ],
   ];
   for (const [form, command, dryRun] of LITERAL)
@@ -3610,7 +3610,7 @@ describe("sessions", () => {
     expect(result?.reason).toContain("AskGate ran the command it names with `--dry-run`");
     expect(result?.reason).toContain("the write itself was not sent");
     expect(g.dryRuns.map((run) => run.script)).toEqual([
-      "./dispatch comment --dry-run --issue X-1 --body hi",
+      "./dispatch comment --issue X-1 --body hi --dry-run",
     ]);
     // A device call runs no command, so its refusal says nothing about a dry run.
     expect((await g.device("device", "dispatch_comment", COMMENT))?.reason).not.toContain(
@@ -4285,6 +4285,21 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     expect(posted.sent).toEqual([{ path: "/api/v1/issues/DSP-1/artifacts", body: BRIEF }]);
     // The marker is spent: the same call again is refused.
     expect((await post(command, g.store)).code).toBe(1);
+  }, 30_000);
+
+  // The independent review at 6fd926853, its blocker: the CLI takes a bare issue key only as the
+  // first argument after the subcommand (`dispatch-command.ts`), so a dry run that put `--dry-run`
+  // between the subcommand and that key failed, the gate read the failure as an error to let
+  // through, and the write posted unreviewed, in block mode too. The dry run keeps the key first.
+  test("a write whose issue key comes first is reviewed, so a revise verdict blocks it", async () => {
+    const command = "dispatch comment DSP-1 --body 'The run finished.'";
+    const g = bind({ env: gateEnv, cwd: work, complete: async () => ({ text: REVISE }) });
+    const result = await g.bash("bare", command);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_comment", outcome: "verdict", decision: "revise" },
+    ]);
+    expect(result?.block).toBe(true);
+    expect(g.dryRuns[0]?.script).toBe(`${command} --dry-run`);
   }, 30_000);
 
   test("a reviewed --body-file posts the text the model reviewed, once", async () => {
