@@ -83,9 +83,11 @@
 # directory and env: blocks), the job's and workflow's env and defaults, and the scripts and steps
 # the table pins. It does not read the environment a local action or a repository script writes
 # (a composite action's own $GITHUB_ENV or $GITHUB_PATH, a script's export), nor what such a
-# script runs beyond its pinned line. It answers accidental drift: a new import, file or command
-# that silently stops a job running on its own inputs. A committer who deliberately hides a
-# command or a flag where this check does not read is the review's to catch.
+# script runs beyond its pinned line. A pinned repository script is read the way Python splits
+# lines, so a \r hidden inside one is outside what it reads too. It answers accidental drift: a
+# new import, file or command that silently stops a job running on its own inputs. A committer
+# who deliberately hides a command or a flag where this check does not read is the review's to
+# catch.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party

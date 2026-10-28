@@ -67,7 +67,7 @@ const widgetCalls: { readonly key: string; readonly lines: string[] | undefined 
 function recordWidget(key: string, lines: string[] | undefined): void {
   widgetCalls.push({ key, lines });
 }
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   nkeyAuthenticator,

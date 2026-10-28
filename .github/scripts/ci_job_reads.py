@@ -333,6 +333,14 @@ SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pul
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
 BUILD_BINARIES = "docs/site/scripts/build-binaries.sh"
 DISPATCH_SERVER_BUILD = "flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch"
+SIGNIN_ISSUER = "packages/dispatch/e2e/run-signin-issuer.sh"
+BROWSER_MP = "dispatch-browser-multiprocess"
+BROWSER_MP_SPECS = "Browser-test dispatch dashboard against two server processes"
+BROWSER_MP_SIGNIN = "Browser-test a sign-in across two server processes"
+STALL = "envoy-session-stall"
+STALL_CLIENT = "Stall test of envoy-client's NATS connection options"
+LOADTEST_RUN_STEP = "One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)"
+LOADTEST_LOCK = "Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)"
 CHECK_STEP = "Check every CI filter matches every file its job reads"
 
 # docs-pages.yaml builds and publishes main's site in a workflow of its own (its header says why),
@@ -529,7 +537,7 @@ GATES = [
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts:74, which e2e/run.ts starts in "
                    f"{at('dispatch', 'Browser-test dispatch dashboard')}", ENVOY, ["./cmd/dispatch"], mode="build"),
     ], reads=reads(
-        ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes and Playwright in packages/dispatch"),
+        ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
         ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:73-87"),
         (CONTRACTS_SRC, f"{at('dispatch', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:63-72 aliases"),
         (f"{FIX}/delivery-live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
@@ -542,6 +550,27 @@ GATES = [
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),
+
+    # Its "Build the Dispatch server" step names an output (-o), which the simple form does not
+    # reduce, so the step is pinned whole.
+    gate("dispatch_browser_multiprocess", BROWSER_MP, runs=[
+        script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts:50, which e2e/run.ts starts in "
+                   f"{at(BROWSER_MP, BROWSER_MP_SPECS)} and {at(BROWSER_MP, BROWSER_MP_SIGNIN)}", ENVOY, ["./cmd/dispatch"], mode="build"),
+        script_run(SIGNIN_ISSUER, "flock ./.dev-oidc-issuer-e2e.lock go build -o ./dev-oidc-issuer-e2e ./cmd/dev-oidc-issuer",
+                   f"started by packages/dispatch/e2e/harness-listeners.ts:130 under DISPATCH_E2E_SIGNIN=oidc, in {at(BROWSER_MP, BROWSER_MP_SIGNIN)}",
+                   ENVOY, ["./cmd/dev-oidc-issuer"], mode="build"),
+    ], exact=[
+        pinned_step(BROWSER_MP, "Build the Dispatch server", ENVOY, "go build -o ./dispatch-e2e ./cmd/dispatch", [
+            (ENVOY, ["./cmd/dispatch"], "go build -o ./dispatch-e2e ./cmd/dispatch", {"mode": "build"}),
+        ]),
+    ], reads=reads(
+        ("packages/dispatch/**", f"{at(BROWSER_MP, BROWSER_MP_SPECS)} (build:web twice and Playwright) and {at(BROWSER_MP, BROWSER_MP_SIGNIN)} in packages/dispatch"),
+        ("packages/proof-editor/**", "packages/dispatch/web/vite.config.ts:73-87 (build:web)"),
+        (CONTRACTS_SRC, f"{at(BROWSER_MP, 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:63-72 aliases"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-tables.ts:9-10"),
+        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
+        ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
+    ) + setup_go(BROWSER_MP, f"{ENVOY}/go.mod") + bun_job(BROWSER_MP) + CI_SELF),
 
     gate("claude_envoy", "claude-envoy", reads=CLAUDE_ENVOY_BUILD + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
 
@@ -575,6 +604,11 @@ GATES = [
         (f"{ENVOY}/internal/dispatch/pmdoc/gen/**", f"{at('envoy-go', 'Check pmdoc fixtures are up to date')} (gen.ts --check)"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/gen.ts:4-5 imports @legion/proof-editor (exports -> src/lib.ts, src/lib-headless.ts)"),
         (".github/actions/pull-test-images/**", at("envoy-go", "Pull test container images")),
+        (f"{ENVOY}/loadtest/run-step.test.sh", at("envoy-go", LOADTEST_RUN_STEP)),
+        (f"{ENVOY}/loadtest/run-step.sh", "packages/envoy/loadtest/run-step.test.sh runs it"),
+        (f"{ENVOY}/loadtest/run-series.sh", "packages/envoy/loadtest/run-step.test.sh runs it"),
+        (f"{ENVOY}/loadtest/common.test.sh", at("envoy-go", LOADTEST_LOCK)),
+        (f"{ENVOY}/loadtest/common.sh", "packages/envoy/loadtest/common.test.sh sources it; run-step.sh and run-series.sh source it"),
         (NOTICES, f"{at('envoy-go', 'Pack envoy binaries')} runs it"),
         (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
     ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
@@ -671,6 +705,19 @@ GATES = [
         (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:445-450 runs bun in packages/envoy-client importing @legion/envoy-client/delivery"),
         (CONTRACTS_SRC, "packages/envoy-client/src/delivery.ts imports @legion/contracts"),
     ) + setup_go("envoy-e2e-local", f"{ENVOY}/go.mod") + bun_job("envoy-e2e-local") + CI_SELF),
+
+    gate("envoy_session_stall", STALL, runs=[
+        script_run("packages/envoy-client/test/envoy-stack.ts",
+                   'const build = Bun.spawn(["go", "build", "-o", `${bin}${path.sep}`, ...packages], {',
+                   f"buildBinaries, run by {at(STALL, STALL_CLIENT)}, {at(STALL, 'Stall test of pi-envoy')} and "
+                   f"{at(STALL, 'Stall test of claude-envoy')}", ENVOY, ["./internal/testnats/cmd/natsd", "./cmd/listener"], mode="build"),
+    ], reads=reads(
+        ("packages/envoy-client/**", f"{at(STALL, STALL_CLIENT)}: src/__tests__/nats-stall.test.ts and test/*.ts, which the other two import"),
+        ("packages/pi-envoy/**", at(STALL, "Stall test of pi-envoy")),
+        ("packages/claude-envoy/**", f"{at(STALL, 'Stall test of claude-envoy')} (tests/envoy-channel-stall.test.ts runs bin/envoy-channel.ts)"),
+        ("packages/pi-shared/src/**", "packages/pi-envoy and packages/claude-envoy import @legion/pi-shared/*"),
+        ("packages/contracts/**", at(STALL, "Build contracts for the stall suites")),
+    ) + setup_go(STALL, f"{ENVOY}/go.mod") + bun_job(STALL) + CI_SELF),
 
     gate("go_notices", "lint", step=NOTICES_STEP, runs=go_notices_runs(), reads=reads(
         (NOTICES, f"{at('lint', NOTICES_STEP)} runs it"),

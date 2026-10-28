@@ -173,9 +173,10 @@ fails the pull request that adds it.
 
   The check reads `ci.yaml`'s own steps, `env:` blocks and defaults and the scripts and steps the
   table pins. It does not read the environment a local action or a repository script writes (a
-  composite action's own `$GITHUB_ENV`, a script's `export`). It answers accidental drift, a new
-  import that silently stops a job running on it; a command or flag hidden on purpose where it
-  does not read is the review's to catch.
+  composite action's own `$GITHUB_ENV`, a script's `export`), and it reads a pinned repository
+  script the way Python splits lines, so a `\r` hidden inside one is outside it too. It answers
+  accidental drift, a new import that silently stops a job running on it; a command or flag
+  hidden on purpose where it does not read is the review's to catch.
 
   A step whose go commands are in no simple form (a loop, a pipe, `GOOS=... go build`) gets an
   exact entry instead of `step_run`s: add `pinned_step(job, step, workdir, script, runs)` to the
