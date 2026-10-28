@@ -237,3 +237,10 @@ test("front matter closed by ... is front matter to check and --write", async ()
   expect(result.text).toBe("---\ntitle: One. Two\ndescription: x\n...\n\nBody.\nMore.\n");
   expect(result.exitCode).toBe(0);
 });
+
+test("a second --write changes nothing when a paragraph holds a tag alone on its line", async () => {
+  // packages/pi-envoy/extensions/askgate/askgate-request.md has this shape.
+  const once = await written("Intro line:\n<tag>\nvalue\n</tag>\nMore text here.\n");
+  const twice = await written(once.text);
+  expect(twice.text).toBe(once.text);
+});
