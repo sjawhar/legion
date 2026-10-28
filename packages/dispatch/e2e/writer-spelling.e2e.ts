@@ -23,9 +23,10 @@ const agentSession = {
 /** `p \~\a*~* q` and `p \a*~*\* q`, one backslash each. */
 const paragraphs = "p \\~\\a*~* q\n\np \\a*~*\\* q\n";
 
-/** The document's stored markdown, exactly. The bytes are recorded here once the writer spells
- *  this document; while it is empty, only the read-back drawing below is asserted. */
-const storedSpelling = "";
+/** The document's stored markdown, exactly: each letter beside a run is a character reference,
+ *  the literal backslash before it is written `\\` so that it does not escape the reference's
+ *  `&`, and each escaped tilde is its reference. */
+const storedSpelling = "p &#126;\\\\&#97;*&#126;* q\n\np \\\\&#97;*&#126;*\\* q\n";
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -135,7 +136,7 @@ test("a comment with escapes beside emphasis around a tilde draws the runs the e
 test("the stored document reads back to the same runs", async ({ browser }, testInfo) => {
   const { artifactId, issueKey } = await seed();
   const { markdown } = await getArtifactText(artifactId);
-  if (storedSpelling) expect(markdown).toBe(storedSpelling);
+  expect(markdown).toBe(storedSpelling);
   // The stored text, posted as a comment, draws what the written paragraphs draw.
   const readBack = await createComment(issueKey, { body: markdown }, agentSession);
   await withAlice(browser, (page) =>
