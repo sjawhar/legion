@@ -269,4 +269,11 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
 
+echo "case: a package added to a go command the table claims, outside the job's filter"
+root=$(fixture appended-package)
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test ./cmd/app ./lib ./other"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the package the job now also tests" "$(contains "$out" 'other')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
