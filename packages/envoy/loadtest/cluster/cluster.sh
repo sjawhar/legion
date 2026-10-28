@@ -18,21 +18,30 @@
 #   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only]
 #       Reset, then one loadgen run at FACTOR × (4 events/s, 60 requests/s) with the
 #       series-sessions count (--reads-only: 0 events), then the crash check, cgroup-merge, tables.
-#   cluster.sh series --namespace NS [--duration 10m]   1x 2x 3x 5x 7x 10x, then 10x-reads.
+#       FACTOR may be fractional (8.5).
+#   cluster.sh series --namespace NS [--duration 10m]   1x 2x 3x 5x 7x 10x, then 10x-reads, then
+#       the refinement: loadgen curves over the series writes refine.txt (one factor per knee whose
+#       bracket it can narrow, at most two per knee); each factor F runs as step <F>x for
+#       --duration, then curves again, until refine.txt is empty.
 #   cluster.sh soak --namespace NS [--duration 60m]     the step 10x-hour.
 #   cluster.sh db-size --namespace NS CPU MEMORY        Postgres resized to the Cloud SQL tier of
 #                                                       CPU and MEMORY (Gi), on the same PVC.
 #   cluster.sh redeploy --namespace NS --dispatch-commit SHA   Dispatch's image only, then a reset.
 #   cluster.sh collect --namespace NS [--upload-issue KEY]
-#       The cross-step TABLES.md, and each phase's step directories as zstd tar parts under
-#       24 MiB in <run>/upload/; with --upload-issue, each part goes to that Dispatch issue.
+#       Every step in the order the steps ran (meta.json start): the cross-step TABLES.md,
+#       loadgen curves into <run>/curves, loadgen codepaths in each step directory; then each
+#       phase's step directories, and the results (curves/, TABLES.md, each step's CODEPATHS.md and
+#       codepaths.json), as zstd tar parts under 24 MiB in <run>/upload/; with --upload-issue, each
+#       part goes to that Dispatch issue. A loadgen failure is reported, the rest still runs, and
+#       collect exits 1.
 #   cluster.sh status --namespace NS          the lock, the run, its daemons and its pods.
 #   cluster.sh down --namespace NS [--run ID] deletes everything labelled with the run id and the
 #       lock, and waits until nothing of the run is left. A lock of another run is deleted only
 #       when --run names that run.
 #   cluster.sh all --namespace NS <up's flags> --profile quick|full [--upload-issue KEY] [--keep]
-#       up, seed, the series, soak, db-size 4 15Gi, step 1x-db4, collect, down; any exit runs
-#       down unless --keep. quick: 2 min steps and a 5 min hour; full: 10 and 60 min.
+#       up, seed, the series, the refinement (full only), soak, db-size 4 15Gi, step 1x-db4,
+#       collect, down; any exit runs down unless --keep. quick: 2 min steps and a 5 min hour;
+#       full: 10 and 60 min.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
@@ -949,6 +958,64 @@ run_series() {
   run_step_logged 10x-reads 10 "$duration" true series
 }
 
+# phase_dirs PHASE...: the step directories that the phases' lists (phases/<phase>) name and that
+# exist, into DIRS.
+phase_dirs() {
+  local p name
+  DIRS=()
+  for p in "$@"; do
+    [ -f "$RUN_DIR/phases/$p" ] || continue
+    while read -r name; do
+      if [ -d "$RUN_DIR/steps/$name" ]; then DIRS+=("$RUN_DIR/steps/$name"); fi
+    done <"$RUN_DIR/phases/$p"
+  done
+}
+
+# steps_in_run_order: every step directory of the run, in the order the steps ran, into DIRS: by
+# meta.json's start, else by reset.json's started (a step whose loadgen run wrote no meta.json);
+# a directory with neither goes last.
+steps_in_run_order() {
+  local d key
+  DIRS=()
+  while IFS=$'\t' read -r key d; do
+    DIRS+=("$d")
+  done < <(
+    for d in "$RUN_DIR"/steps/*/; do
+      [ -d "$d" ] || continue
+      d=${d%/}
+      key=$(jq -r '.start // empty' "$d/meta.json" 2>/dev/null || true)
+      [ -n "$key" ] || key=$(jq -r '.started // empty' "$d/reset.json" 2>/dev/null || true)
+      printf '%s\t%s\n' "${key:-~}" "$d"
+    done | sort
+  )
+}
+
+# refine_run DURATION: plan D7's refinement, after the grid and the control. loadgen curves over
+# the steps of the phases series and refinement writes KNEES.md and refine.txt into <run>/curves:
+# one factor per knee whose bracket it can still narrow, at most two refinement steps per knee.
+# Each factor F runs as step <F>x for DURATION, then curves again, until refine.txt is empty.
+refine_run() {
+  local duration=$1 f factors=()
+  while :; do
+    phase_dirs series refinement
+    ((${#DIRS[@]})) || die "refinement: no step of the series has a directory, so there is nothing to refine"
+    loadgen_local curves -out "$RUN_DIR/curves" "${DIRS[@]}" || die "refinement: loadgen curves failed"
+    [ -f "$RUN_DIR/curves/refine.txt" ] || die "refinement: loadgen curves wrote no $RUN_DIR/curves/refine.txt"
+    mapfile -t factors < <(grep -v '^[[:space:]]*$' "$RUN_DIR/curves/refine.txt")
+    ((${#factors[@]})) || break
+    note "refinement: refine.txt names the factors ${factors[*]}"
+    for f in "${factors[@]}"; do
+      valid factor "$f" || die "refinement: refine.txt line '$f' is not a factor"
+      # A factor that comes back, or a step that leaves no directory, would loop for ever.
+      [ ! -e "$RUN_DIR/steps/${f}x" ] || die "refinement: refine.txt names factor $f again, but step ${f}x has run; stopping"
+      run_step_logged "${f}x" "$f" "$duration" false refinement
+      [ -d "$RUN_DIR/steps/${f}x" ] || die "refinement: step ${f}x did not start; stopping"
+    done
+  done
+  phase_dirs refinement
+  note "refinement done: refine.txt is empty; refinement steps run: ${#DIRS[@]}; $RUN_DIR/curves/KNEES.md names the knees"
+}
+
 # resize_postgres CPU GI: the Postgres StatefulSet at the tier of CPU and GI (resources and
 # settings), restarted on the same PVC; cpu.max must then read CPU × 100000 per 100000.
 resize_postgres() {
@@ -973,19 +1040,7 @@ resize_postgres() {
 
 # ---- hooks for the phases other tasks add -----------------------------------------------------------
 
-loadgen_has_curves() { loadgen_local curves -h >/dev/null 2>&1; }
 loadgen_has_replay() { loadgen_local run -h 2>&1 | grep -q -- '-source'; }
-
-# HOOK (refinement, plan D7): after the grid, `loadgen curves` names each knee, and a knee whose
-# bracket spans more than one grid interval gets up to two 10-minute steps at the midpoint factor.
-# Another task adds `loadgen curves`; the call to it belongs here.
-phase_refinement() {
-  if loadgen_has_curves; then
-    note "skipped phase refinement: loadgen has curves, but this cluster.sh does not call it yet (hook phase_refinement)"
-  else
-    note "skipped phase refinement: loadgen has no curves command yet"
-  fi
-}
 
 # HOOK (replay, plan D8): replay-prepare (INFRA-639's seed restored into dispatch_replay), replay
 # r16 before db-size and replay r4 after it, each `loadgen run -source replay`. They come from
@@ -998,15 +1053,6 @@ phase_replay() {
   fi
 }
 
-# HOOK (curves, plan D9): collect's CURVES.md, KNEES.md and curves.csv from `loadgen curves`.
-collect_curves() {
-  if loadgen_has_curves; then
-    note "skipped curves: loadgen has curves, but this cluster.sh does not call it yet (hook collect_curves)"
-  else
-    note "skipped curves: loadgen has no curves command yet"
-  fi
-}
-
 # ---- collect --------------------------------------------------------------------------------------
 
 # zstd_compress: stdin to stdout as zstd (level 19), through the zstandard wheel at a pinned
@@ -1016,51 +1062,101 @@ zstd_compress() {
     'import sys, zstandard; zstandard.ZstdCompressor(level=19, threads=-1).copy_stream(sys.stdin.buffer, sys.stdout.buffer)'
 }
 
-# pack_phase PHASE [ISSUE]: the phase's step directories as one zstd tar, split into parts under
-# 24 MiB (upload/cluster-load-test-<date>-raw-<phase>.tar.zst.partNN); with ISSUE, each part
-# goes to that Dispatch issue. A phase packed and uploaded since its last step is left alone.
-pack_phase() {
-  local phase=$1 issue=${2:-} list=$RUN_DIR/phases/$1 up=$RUN_DIR/upload names=() name base part
-  [ -f "$list" ] || return 0
-  while read -r name; do
-    [ -d "$RUN_DIR/steps/$name" ] && names+=("$name")
-  done <"$list"
-  ((${#names[@]})) || return 0
+# pack_tar NAME ISSUE STAMP DIR PATH...: the PATHs under DIR as one zstd tar, split into parts
+# under 24 MiB (upload/cluster-load-test-<date>-raw-<NAME>.tar.zst.partNN); with ISSUE, each part
+# goes to that Dispatch issue. A tar packed and uploaded since the file STAMP last changed is left
+# alone; with no STAMP, it is packed and uploaded again.
+pack_tar() {
+  local name=$1 issue=$2 stamp=$3 dir=$4 up=$RUN_DIR/upload base part
+  shift 4
   mkdir -p -- "$up"
-  base=$up/cluster-load-test-$(state '.created[0:10]')-raw-$phase.tar.zst.part
-  if [ ! -f "$up/$phase.packed" ] || [ "$list" -nt "$up/$phase.packed" ]; then
-    rm -f -- "$base"[0-9][0-9] "$up/$phase.uploaded"
-    tar -C "$RUN_DIR/steps" -cf - "${names[@]}" | zstd_compress | split -b 24000000 -d -a 2 - "$base" ||
-      die "packing phase $phase failed"
-    : >"$up/$phase.packed"
-    note "phase $phase packed: $(printf '%s ' "$base"[0-9][0-9])"
+  base=$up/cluster-load-test-$(state '.created[0:10]')-raw-$name.tar.zst.part
+  if [ -z "$stamp" ] || [ ! -f "$up/$name.packed" ] || [ "$stamp" -nt "$up/$name.packed" ]; then
+    rm -f -- "$base"[0-9][0-9] "$up/$name.uploaded"
+    tar -C "$dir" -cf - "$@" | zstd_compress | split -b 24000000 -d -a 2 - "$base" ||
+      die "packing phase $name failed"
+    : >"$up/$name.packed"
+    note "phase $name packed: $(printf '%s ' "$base"[0-9][0-9])"
   fi
-  if [ -n "$issue" ] && [ ! -f "$up/$phase.uploaded" ]; then
+  if [ -n "$issue" ] && [ ! -f "$up/$name.uploaded" ]; then
     for part in "$base"[0-9][0-9]; do
       dispatch artifact --issue "$issue" --name "${part##*/}" --path "$part" >/dev/null ||
         die "dispatch artifact of ${part##*/} to $issue failed"
     done
-    : >"$up/$phase.uploaded"
-    note "phase $phase uploaded to $issue"
+    : >"$up/$name.uploaded"
+    note "phase $name uploaded to $issue"
   fi
 }
 
-collect_run() {
-  local issue=${1:-} dirs=() d p
-  for d in "$RUN_DIR"/steps/*/; do
-    [ -f "$d/summary.json" ] && dirs+=("${d%/}")
+# pack_phase PHASE [ISSUE]: the phase's step directories (pack_tar), packed again only when the
+# phase has run a step since.
+pack_phase() {
+  local phase=$1 list=$RUN_DIR/phases/$1 names=() name
+  [ -f "$list" ] || return 0
+  while read -r name; do
+    if [ -d "$RUN_DIR/steps/$name" ]; then names+=("$name"); fi
+  done <"$list"
+  ((${#names[@]})) || return 0
+  pack_tar "$phase" "${2:-}" "$list" "$RUN_DIR/steps" "${names[@]}"
+}
+
+# pack_results [ISSUE]: the phase results (pack_tar), packed and uploaded again on every collect:
+# curves/, TABLES.md, and each step's CODEPATHS.md and codepaths.json, which collect writes after
+# the step's own phase was packed.
+pack_results() {
+  local paths=() f
+  [ ! -d "$RUN_DIR/curves" ] || paths+=(curves)
+  [ ! -f "$RUN_DIR/TABLES.md" ] || paths+=(TABLES.md)
+  for f in "$RUN_DIR"/steps/*/CODEPATHS.md "$RUN_DIR"/steps/*/codepaths.json; do
+    if [ -f "$f" ]; then paths+=("${f#"$RUN_DIR"/}"); fi
   done
-  if ((${#dirs[@]})); then
-    loadgen_local tables -tops=false -out "$RUN_DIR/TABLES.md" "${dirs[@]}" || die "loadgen tables across the steps failed"
-    note "wrote $RUN_DIR/TABLES.md over ${#dirs[@]} steps"
+  ((${#paths[@]})) || return 0
+  pack_tar results "${1:-}" "" "$RUN_DIR" "${paths[@]}"
+}
+
+# collect_run [ISSUE]: the cross-step outputs, with every step in the order the steps ran:
+# TABLES.md over the steps that wrote summary.json, loadgen curves over every step directory into
+# <run>/curves, and loadgen codepaths in each step directory that holds summary.json (a step that
+# wrote none has no profile); then each phase's tar and the results tar. A loadgen failure is
+# reported, the rest still runs, and collect_run returns 1.
+collect_run() {
+  local issue=${1:-} ran=() names=() d p rc=0
+  steps_in_run_order
+  for d in "${DIRS[@]}"; do
+    if [ -f "$d/summary.json" ]; then ran+=("$d") names+=("${d##*/}"); fi
+  done
+  if ((${#ran[@]})); then
+    if loadgen_local tables -tops=false -out "$RUN_DIR/TABLES.md" "${ran[@]}"; then
+      note "wrote $RUN_DIR/TABLES.md over ${#ran[@]} steps, in the order they ran: ${names[*]}"
+    else
+      note "loadgen tables across the steps failed"
+      rc=1
+    fi
   else
     note "no step directory holds summary.json; no TABLES.md"
   fi
-  collect_curves
-  for p in "$RUN_DIR"/phases/*; do
-    [ -f "$p" ] && pack_phase "${p##*/}" "$issue"
+  if ((${#DIRS[@]})); then
+    if loadgen_local curves -out "$RUN_DIR/curves" "${DIRS[@]}"; then
+      note "wrote $RUN_DIR/curves over ${#DIRS[@]} step directories"
+    else
+      note "loadgen curves over the step directories failed"
+      rc=1
+    fi
+  else
+    note "no step directory; no curves"
+  fi
+  for d in "${ran[@]}"; do
+    loadgen_local codepaths -step "$d" -out "$d" || {
+      note "step ${d##*/}: loadgen codepaths failed"
+      rc=1
+    }
   done
-  return 0
+  for p in "$RUN_DIR"/phases/*; do
+    if [ -f "$p" ]; then pack_phase "${p##*/}" "$issue"; fi
+  done
+  pack_results "$issue"
+  ((rc == 0)) || note "collect: a loadgen command failed (above); every other output was written"
+  return "$rc"
 }
 
 # ---- down -----------------------------------------------------------------------------------------
@@ -1269,6 +1365,7 @@ cmd_series() {
   local d=${OPT[duration]:-10m}
   valid duration "$d" || die "--duration '$d' is not a whole number of s, m or h"
   run_series "$d"
+  refine_run "$d"
 }
 
 cmd_soak() {
@@ -1372,10 +1469,10 @@ cmd_down() {
 cmd_all() {
   parse "namespace storage-class dispatch-commit pg-major production-repo listener-image profile upload-issue" "keep" "$@"
   positional 0 "no positional arguments"
-  local step_d hour_d issue=${OPT[upload-issue]:-}
+  local step_d hour_d refine collect_rc issue=${OPT[upload-issue]:-}
   case ${OPT[profile]:-} in
-    quick) step_d=2m hour_d=5m ;;
-    full) step_d=10m hour_d=60m ;;
+    quick) step_d=2m hour_d=5m refine=false ;;
+    full) step_d=10m hour_d=60m refine=true ;;
     *) die "all: --profile quick or --profile full is required" ;;
   esac
   [ -z "$issue" ] || valid issue "$issue" || die "--upload-issue '$issue' is not an issue key"
@@ -1386,7 +1483,13 @@ cmd_all() {
   seed_run
   run_series "$step_d"
   pack_phase series "$issue"
-  phase_refinement
+  if [ "$refine" = true ]; then
+    isolated refine_run "$step_d"
+    ((ISOLATED_RC == 0)) || note "the refinement did not complete (exit $ISOLATED_RC); the run goes on"
+    pack_phase refinement "$issue"
+  else
+    note "skipped phase refinement: profile quick runs no refinement steps"
+  fi
   run_step_logged 10x-hour 10 "$hour_d" false soak
   pack_phase soak "$issue"
   phase_replay replay-prepare
@@ -1399,11 +1502,13 @@ cmd_all() {
   fi
   pack_phase db4 "$issue"
   phase_replay "replay r4"
-  collect_run "$issue"
+  isolated collect_run "$issue"
+  collect_rc=$ISOLATED_RC
   if [ -z "$ALL_KEEP" ]; then
     down_run
     RUN_TAKEN=""
   fi
+  ((collect_rc == 0)) || die "all: collect ended with exit $collect_rc; its messages above name what failed"
 }
 
 # all_exit: all's trap: any exit with a run taken runs down, unless --keep.

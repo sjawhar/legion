@@ -14,12 +14,16 @@
 # heartbeat's age, and past 15 min calling it stale and naming the down command; down refuses
 # another run's lock; (c) up, seed, step, db-size, collect, status, down and all run through to
 # the end, and every kubectl call any of them makes, the background heartbeat and sampler
-# included, carries `-n <namespace>`; (d) every manifest renders with no placeholder left and
-# every image by digest, and a value of the wrong shape is refused; (e) a container restart
-# between the before and after reads writes step-failed.json with kind restart; (f) the sampler
-# writes an error line with no number when its exec fails, and a numeric line when it reads; (g)
-# when go and the network reach helm, render-nats.sh re-renders nats.yaml equal to the committed
-# file (else it says it skipped that).
+# included, carries `-n <namespace>`; collect runs loadgen tables and curves over the steps in the
+# order they ran (meta.json start, not the directory names' order), loadgen codepaths in each step
+# directory, and packs and uploads curves/ and TABLES.md as phase results; all --profile quick runs
+# no refinement and says so, and all --profile full, given a refine.txt with one factor and then
+# an empty one, runs exactly one refinement step <factor>x; (d) every manifest renders with no
+# placeholder left and every image by digest, and a value of the wrong shape is refused; (e) a
+# container restart between the before and after reads writes step-failed.json with kind restart;
+# (f) the sampler writes an error line with no number when its exec fails, and a numeric line when
+# it reads; (g) when go and the network reach helm, render-nats.sh re-renders nats.yaml equal to
+# the committed file (else it says it skipped that).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -135,7 +139,12 @@ case $verb in
       "cat /work/logs/"*.rc) echo 0 ;;
       "cat /work/logs/"*) echo 'fake runner log' ;;
       "cat /work/seed.json") echo '{"projects": ["LGA"]}' ;;
-      "tar -C /work/steps/"*) tar -C "$FAKE_DIR/stepdir" -cf - . ;;
+      "tar -C /work/steps/"*)
+        # Each step's meta.json starts now, so the steps' start order is the order they ran.
+        jq --arg start "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" '.start = $start' "$FAKE_DIR/stepdir/meta.json" >"$FAKE_DIR/meta.tmp"
+        mv "$FAKE_DIR/meta.tmp" "$FAKE_DIR/stepdir/meta.json"
+        tar -C "$FAKE_DIR/stepdir" -cf - .
+        ;;
       chmod* | mkdir*) ;;
       *)
         echo "fake kubectl exec: unexpected command: $c" >&2
@@ -213,13 +222,32 @@ done
 cat >"$out" <<'LOADGEN'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_DIR/loadgen.log"
+if [ "${FAKE_LOADGEN_FAIL:-}" = "$1" ]; then
+  echo "fake loadgen: $1 failed" >&2
+  exit 1
+fi
+out="" prev=""
+for a in "$@"; do
+  [ "$prev" = -out ] && out=$a
+  prev=$a
+done
 case $1 in
   series-sessions) echo 400 ;;
   run) [ "${2:-}" != -h ] || echo '  -events float' >&2 ;;
+  tables) [ -z "$out" ] || echo '# Load test tables' >"$out" ;;
   curves)
-    echo 'loadgen: unknown command "curves"' >&2
-    exit 2
+    # refine.txt is the first fixture FAKE_DIR/refine.<n> left, which this call uses up; else empty.
+    mkdir -p "$out"
+    echo '# Scaling curves' >"$out/CURVES.md"
+    echo '# Knees' >"$out/KNEES.md"
+    : >"$out/refine.txt"
+    for f in "$FAKE_DIR"/refine.[0-9]*; do
+      [ -f "$f" ] || break
+      mv "$f" "$out/refine.txt"
+      break
+    done
     ;;
+  codepaths) echo '# Code paths' >"$out/CODEPATHS.md" ;;
 esac
 exit 0
 LOADGEN
@@ -247,7 +275,7 @@ export FAKE_DIR=$fake FAKE_NS=$ns
 export LOADTEST_CLUSTER_ROOT=$tmp/root
 export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
-unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR
+unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL
 
 readonly commit_ok=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly commit_none=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -278,7 +306,7 @@ write_pods() {
 }
 
 reset_fake() {
-  rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log"
+  rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]*
   write_pods
   echo '1600000 100000' >"$fake/cpu.max"
 }
@@ -294,6 +322,17 @@ run_cluster() {
 # no_create: no kubectl call so far created or applied anything.
 no_create() {
   ! grep -qE "^-n $ns (create|apply) " "$fake/kubectl.log" 2>/dev/null
+}
+
+# logged_steps PREFIX: the step names, in argument order, of the last loadgen call that started
+# with PREFIX.
+logged_steps() {
+  local words=() w names=()
+  read -ra words < <(grep -- "^$1 " "$fake/loadgen.log" | tail -n1)
+  for w in "${words[@]}"; do
+    if [[ $w == */steps/* ]]; then names+=("${w##*/}"); fi
+  done
+  printf '%s\n' "${names[*]}"
 }
 
 up_args=(--namespace "$ns" --storage-class premium-rwo --pg-major 16 --production-repo example/deploy)
@@ -418,7 +457,33 @@ run_cluster collect --namespace "$ns" --upload-issue TEST-1
 part=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-steps.tar.zst.part00' | head -n1)
 [ -n "$part" ] || fail "collect wrote no part of phase steps"
 grep -q -- "artifact --issue TEST-1 --name ${part##*/} --path $part" "$fake/dispatch.log" || fail "collect did not upload ${part##*/}"
-grep -q 'skipped curves' "$tmp/out" || fail "collect did not say it skipped the curves"
+[ "$(logged_steps 'tables -tops=false')" = "smoke reads" ] ||
+  fail "collect's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran (smoke reads)"
+[ "$(logged_steps 'curves -out')" = "smoke reads" ] ||
+  fail "collect's loadgen curves got the steps as '$(logged_steps 'curves -out')', not in the order they ran (smoke reads)"
+grep -qx -- "curves -out $run_dir/curves $run_dir/steps/smoke $run_dir/steps/reads" "$fake/loadgen.log" ||
+  fail "collect did not run loadgen curves -out <run>/curves over every step directory"
+[ -f "$run_dir/curves/CURVES.md" ] || fail "collect wrote no curves/CURVES.md"
+for s in smoke reads; do
+  grep -qx -- "codepaths -step $run_dir/steps/$s -out $run_dir/steps/$s" "$fake/loadgen.log" ||
+    fail "collect ran no loadgen codepaths -step <dir> -out <dir> in step $s"
+  [ -f "$run_dir/steps/$s/CODEPATHS.md" ] || fail "collect wrote no CODEPATHS.md in step $s"
+done
+results=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-results.tar.zst.part00' | head -n1)
+[ -n "$results" ] || fail "collect wrote no part of phase results"
+for f in curves/CURVES.md curves/refine.txt TABLES.md steps/smoke/CODEPATHS.md steps/reads/CODEPATHS.md; do
+  tar -tf "$results" | grep -qx -- "$f" || fail "the results tar lacks $f: $(tar -tf "$results" | tr '\n' ' ')"
+done
+grep -q -- "artifact --issue TEST-1 --name ${results##*/} --path $results" "$fake/dispatch.log" || fail "collect did not upload ${results##*/}"
+! grep -q 'curves command' "$tmp/out" || fail "collect still says loadgen has no curves command"
+
+: >"$fake/dispatch.log"
+FAKE_LOADGEN_FAIL=curves run_cluster collect --namespace "$ns" --upload-issue TEST-1
+((RC == 1)) || fail "collect with a failing loadgen curves exited $RC, not 1"
+grep -q 'loadgen curves over the step directories failed' "$tmp/out" || fail "collect did not report the failed loadgen curves"
+[ "$(grep -c '^codepaths ' "$fake/loadgen.log")" = 4 ] || fail "collect did not go on to loadgen codepaths after curves failed"
+grep -q -- "--name ${results##*/}" "$fake/dispatch.log" || fail "collect did not go on to pack and upload the results after curves failed"
+pass "collect runs tables, curves and codepaths over the steps in the order they ran and uploads the results; a loadgen failure is reported, the rest runs, and it exits 1"
 
 run_cluster status --namespace "$ns"
 ((RC == 0)) || fail "status exited $RC"
@@ -439,7 +504,7 @@ echo '400000 100000' >"$fake/cpu.max"
 export LOADTEST_CLUSTER_ROOT=$tmp/root-all
 run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile quick
 ((RC == 0)) || fail "all exited $RC"
-for line in 'skipped phase refinement' 'skipped phase replay-prepare' 'skipped phase replay r16' 'skipped phase replay r4' 'skipped curves'; do
+for line in 'skipped phase refinement: profile quick runs no refinement steps' 'skipped phase replay-prepare' 'skipped phase replay r16' 'skipped phase replay r4'; do
   grep -q "$line" "$tmp/out" || fail "all did not print '$line'"
 done
 run_dir=$(find "$LOADTEST_CLUSTER_ROOT" -mindepth 1 -maxdepth 1 -type d)
@@ -448,8 +513,37 @@ for s in 1x 2x 3x 5x 7x 10x 10x-reads 10x-hour 1x-db4; do
 done
 grep -q '^step-10x-hour .*-duration 5m ' "$fake/runner-starts" || fail "quick's hour is not 5 min"
 grep -q '^step-1x-db4 .*-duration 2m ' "$fake/runner-starts" || fail "quick's steps are not 2 min"
+[ ! -e "$run_dir/phases/refinement" ] || fail "all --profile quick ran a refinement step"
+[ "$(grep -c '^curves -out ' "$fake/loadgen.log")" = 1 ] || fail "all --profile quick ran loadgen curves outside collect"
+[ "$(logged_steps 'tables -tops=false')" = "1x 2x 3x 5x 7x 10x 10x-reads 10x-hour 1x-db4" ] ||
+  fail "all's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran"
+[ -f "$run_dir/steps/1x/CODEPATHS.md" ] || fail "all's collect wrote no CODEPATHS.md"
 [ ! -f "$fake/lock.json" ] || fail "all left the lock"
 pass "all runs up, seed, the series, soak, db-size, 1x-db4, collect and down, one line per skipped phase"
+
+reset_fake
+echo '400000 100000' >"$fake/cpu.max"
+printf '8.5\n' >"$fake/refine.1"
+export LOADTEST_CLUSTER_ROOT=$tmp/root-full
+run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile full
+((RC == 0)) || fail "all --profile full exited $RC"
+run_dir=$(find "$LOADTEST_CLUSTER_ROOT" -mindepth 1 -maxdepth 1 -type d)
+[ "$(cat "$run_dir/phases/refinement" 2>/dev/null)" = 8.5x ] ||
+  fail "the refinement ran '$(cat "$run_dir/phases/refinement" 2>/dev/null)', not exactly the one step 8.5x"
+[ "$(grep -c '^step-' "$fake/runner-starts")" = 10 ] ||
+  fail "all --profile full ran $(grep -c '^step-' "$fake/runner-starts") steps, not the nine of the plan and one refinement step"
+start=$(grep '^step-8.5x ' "$fake/runner-starts") || fail "the refinement started no loadgen run for 8.5x"
+[[ $start == *"-events 34 "* && $start == *"-requests 510 "* && $start == *"-duration 10m "* ]] ||
+  fail "step 8.5x is not 34 events/s and 510 requests/s for 10 min: $start"
+[ "$(grep -c '^curves -out ' "$fake/loadgen.log")" = 3 ] ||
+  fail "loadgen curves ran $(grep -c '^curves -out ' "$fake/loadgen.log") times, not twice in the refinement and once in collect"
+grep -q 'refinement done: refine.txt is empty; refinement steps run: 1;' "$tmp/out" || fail "all did not say the refinement is done"
+[ "$(logged_steps 'tables -tops=false')" = "1x 2x 3x 5x 7x 10x 10x-reads 8.5x 10x-hour 1x-db4" ] ||
+  fail "all --profile full's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran"
+grep -q '^step-10x-hour .*-duration 60m ' "$fake/runner-starts" || fail "full's hour is not 60 min"
+[ -n "$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-refinement.tar.zst.part00')" ] || fail "all packed no phase refinement"
+[ ! -f "$fake/lock.json" ] || fail "all --profile full left the lock"
+pass "all --profile full runs one refinement step per refine.txt factor, then curves again, until refine.txt is empty"
 
 [ -s "$fake/kubectl.log" ] || fail "no kubectl call was recorded"
 if [ -s "$fake/kubectl-no-ns.log" ]; then
