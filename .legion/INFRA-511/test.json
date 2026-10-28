@@ -2,41 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T16:40:00Z",
+  "completed": "2026-10-28T13:56:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 11 at PR head c4411ec8 (code ce61a779). The change is a docs revert answering the review: the three skill and role-prompt files go back to main's text, and their edits move to sjawhar/legion pull request #2420, following the operator's rule that skill changes merge in their own pull request. Between bbc7410b (round 10's tested code) and ce61a779 only those three files and .legion/ changed, so round 10's real-binary proof of the code stands. I checked the move on GitHub and in the tree, and ran the built CLI smoke at this head, because the controller's role prompt is embedded in the `legion` binary."
+    "how": "Round 12 at PR head a038ece8 (code 3d60177d), a forward merge of main after GitHub reported the pull request conflicting. Unchanged-diff fingerprint (skill://legion-worker/references/conflicts-and-rewrites.md), computed myself: 7a720a5d (my round-11 head) f013c87ed90e…, a038ece8 9fc5f559f15d…. That is changed, so this is a full round. Diff-of-diffs: the three CHANGELOG entries became `.changes/unreleased/pr2300-*.yaml` changie fragments (main moved to changie), 'INFRA-511' was removed from two comments, and one code line changed: controller-session.ts:318 `\"isIdle\" in context && !context.isIdle()` became `context.isIdle?.() === false`, because main made SessionContext.isIdle optional. The two forms decide the same for a context with or without isIdle. GitHub reports the PR MERGEABLE. My workspace was recreated before this round, so I rebuilt my rigs (my earlier scratch was gone). I used Bun 1.4.4, which the merged .bun-version pins. I re-ran the implementer's real-binary command: 9 pass, 0 fail (74.5 s)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review finding (round 10 review): #2300 carries no skill or role-prompt edit; the three files match main, and their edits are carried, unchanged, by a separate pull request",
-      "surface": "the pull request's file list on GitHub, the files at the head, and #2420's branch",
-      "command": "gh pr view 2300 --repo sjawhar/legion --json files; jj diff --stat --from main@origin --to ce61a779 -- <each file>; gh pr view 2420 --repo sjawhar/legion --json files,state,headRefName; sha256 of each file at 3013244d (the reviewed head) and at legion/INFRA-511-skill-text@origin",
-      "observed": "#2300 lists 36 files, none under skills/, packages/daemon/internal/prompts/ or packages/claude-envoy/legion/. Each of the three files shows 0 changes against main@origin at ce61a779. #2420 (OPEN, branch legion/INFRA-511-skill-text, 'docs(legion-controller): the controller's role prompt and takeover note say when each launch claims') changes exactly those three files. Each file's text there is byte-identical to the edit the review saw: session.md 6c7fc316639b for both copies, controller-root.md 8624bfe1a7ac. No Go or TypeScript test references the moved text.",
-      "headSha": "c4411ec86a34948efb394cb3af2c6d30339151f1",
-      "negativeControl": "At the reviewed head 719564d2 the three files differed from main: the reviewer's finding, and this round's diff from 3013244d to ce61a779 shows 3 files, +6/−7."
+      "criterion": "After the merge, the real-binary proof holds: start turn after startup and shown, typing, Esc, start message first and once, card and notice after it, claim refusal on screen, the /new re-claim cases, and the focused-subagent /new case",
+      "surface": "the committed controller-start-omp.test.ts at the merged head, real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, stand-ins, real NATS, Bun 1.4.4",
+      "command": "cd packages/pi-legion && PATH=/legion/scratch/tmp/bun-1.4.4/bin:$PATH LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts",
+      "observed": "9 pass, 0 fail, 74.5 s",
+      "headSha": "a038ece81c8658670f57a13072a32b1656908634",
+      "negativeControl": "Its refused-claim case: a 403 at registration shows the warning on screen and makes 0 Messages requests."
     },
     {
-      "criterion": "The built `legion controller start` with the reverted embedded role prompt still launches the controller whose first turn is the start message after startup",
-      "surface": "legion built from this head (`go build -o /legion/scratch/tmp/i511t/legion ./cmd/legion`), both plugins re-packed and installed from this head with scripts/e2e/lib/install-plugin-profile.sh, my Bun.Terminal driver and stand-in, real NATS",
-      "command": "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/legion bun /legion/scratch/tmp/i511t/drive.ts pos",
-      "observed": "SMOKE PASS. The argv ends --append-system-prompt <2415 chars> /legion-controller-start (2507 before the revert, 92 characters shorter). Order: register, then role claim, then the first turn; pluginContract 41. The start message and Working… are on screen while the turn is held. /legion-controller-start again says 'nothing to do' with 1 registration and 1 turn. The start message appears once. The prompt snapshot under the controller's state directory holds main's line 'claims the controller role during session startup'.",
-      "headSha": "c4411ec86a34948efb394cb3af2c6d30339151f1",
-      "negativeControl": "Round 1, same CLI code: stdin a pipe or /dev/null gave exit 1, 'stdin is not a terminal', 0 daemon requests. A pi-legion at contract 40 or 42 was refused before the mint."
+      "criterion": "The changed isIdle line and the behaviour every earlier round fixed, driven again at the merged head",
+      "surface": "same rig, with a stand-in that gives each registration its own secret and refuses grants with any other",
+      "command": "same command on zz-tester-probe-r12.test.ts (copy of /legion/scratch/tmp/i511t2/probe-r12.test.ts, removed after)",
+      "observed": "6 pass. T-P1: text typed while the registration is held becomes the first turn, and the start message follows it once, which is the isIdle-false follow-up branch. T-P6, for both /legion-controller-start and /legion-claim-controller typed during the held claim: the waiting notice shows, there is 1 registration while held and at most 1 in flight, set_status is written with the current secret, and the start message appears once. T-R: a role claim refused after the send shows the after-send warning, the start turn's set_status is written, and /legion-claim-controller recovers. T-N: /new during the held claim shows the waiting notice and then the hand-over line, the start message goes to the new session, whose set_status works, and the line stays through the start turn and goes at the next run. T-RS: after /new with the re-claim refused, the widget shows; /resume back to the registered session takes it down with no new registration, and set_status works there.",
+      "headSha": "a038ece81c8658670f57a13072a32b1656908634",
+      "negativeControl": "Each of these cases failed at its earlier head (rounds 1, 4, 8 and 10: overlapping registrations with 403 'invalid controller secret'; no warning after /new; the widget staying after /resume). The T-RS behaviour failed at ce943410's controller-session.ts in round 10."
     },
     {
-      "criterion": "The code's real-binary proof (no code change since round 10)",
-      "surface": "round 10 at 7e583d0c",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts; /legion/scratch/tmp/i511t/probe-r10.test.ts",
-      "observed": "9 pass, 0 fail (346 s). /resume back to the registered session takes the refusal widget down, and set_status works there.",
-      "headSha": "c4411ec86a34948efb394cb3af2c6d30339151f1",
-      "negativeControl": "The reviewed head's controller-session.ts left the widget up after /resume (round 10)."
+      "criterion": "A12 and census 1: the built `legion controller start` at the merged head launches the controller whose first turn is the start message, and refuses a non-terminal stdin before any daemon request",
+      "surface": "legion built from this head (`go build -o /legion/scratch/tmp/i511t2/legion ./cmd/legion`), both plugins packed and installed from this head with scripts/e2e/lib/install-plugin-profile.sh (@sjawhar/pi-envoy and pi-legion 11.5.3), my Bun.Terminal driver and stand-in, real NATS",
+      "command": "env -i PATH=/legion/scratch/tmp/bun-1.4.4/bin:/usr/local/bin:/usr/bin:/bin HOME=/home/legion bun /legion/scratch/tmp/i511t2/drive.ts pos (then devnull, pipe)",
+      "observed": "pos: SMOKE PASS. The Oh My Pi argv is 4 words, ending --append-system-prompt <2415 chars> /legion-controller-start, with no --resume or --mode. Order: register, then role claim, then the first turn. pluginContract 41. The start message and Working… are on screen while the turn is held. A second /legion-controller-start says 'nothing to do' with 1 registration and 1 turn. No request carries the word.",
+      "headSha": "a038ece81c8658670f57a13072a32b1656908634",
+      "negativeControl": "devnull and pipe: exit 1, 'legion controller start: stdin is not a terminal: Oh My Pi would run headless print mode…', and 0 stand-in requests."
     }
   ],
   "observations": [
-    "Until #2420 merges, main's controller-root.md says the extension claims 'during session startup', while the operator-launched controller now claims from /legion-controller-start once startup is over. #2420 carries that correction, so I record it here rather than as a failure.",
-    "CI at code head ce61a779: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T16:32Z; not waited on. PR head c4411ec8 is handoff-only."
+    "Not re-run this round, since no code in those paths changed in the PR's diff: the contract 40/42 and interface-3 skew refusals (rounds 1 and 3).",
+    "CI at the merge head 3d60177d: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-28T13:54Z; not waited on. PR head a038ece8 is handoff-only."
   ]
 }
