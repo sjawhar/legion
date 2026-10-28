@@ -2,26 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-194",
-  "completed": "2026-10-28T10:22:38Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
-  "reviewedBranchHead": "4a0ba24ca4e186345253ca0dee6ce35d7b1b8386",
+  "completed": "2026-10-28T11:23:06Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedCodeHead": "7e042950d6b60dcb3017ff1ef5922690f032642e",
+  "reviewedBranchHeadBeforeHandoff": "f713201a6192182799571e942b125def77ef2b43",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "scripts/dispatch/README.md:66,74-76,156-158; scripts/dispatch/meaning-search-check.ts:16,78",
-      "description": "The files this PR adds name Dispatch issue keys of the deployment's private project (the root issue, the coverage child, and the three pre-registered pair keys) in a public repository. The architect raised it under the rule that only new leaks are stopped (dispatch://INFRA-472). The code never depends on them: the keys are operator input (--pair KEY=QUERY). Remove every Dispatch key and dispatch:// link from the files the PR adds: placeholders in the example command (--pair 'KEY=QUERY'), the pairs table without keys and described as the pre-registered pairs recorded on the deployment's issue (queries kept), and comments naming no issue key. Re-run the production proof at the new head with the real keys given only at run time. Leave the PR title and body alone (INFRA-472 owns that clean-up)."
-    }
+  "keyFindings": [],
+  "roundThreeFinding": "Fixed at 7e042950: the two code comments and the README name no Dispatch issue key; the example uses --pair 'KEY=QUERY' (refused as a usage error, exit 2, before any request when pasted unchanged); the queries are listed and the keys are recorded on the deployment's issue. A grep of the PR's added lines finds only the ACME-n fixtures, the PAIR_KEY pattern and the usage example ABC-12.",
+  "declined": [
+    "Deep review Minor: the PR body still carries the keys. Not this round's: the architect assigned title and body clean-up to INFRA-472.",
+    "Placeholder style '<KEY>=<query>': wording only, not a defect."
   ],
-  "roundTwoFindings": "All fixed at 8ab64781: errorCategory checks transientStatus first (:269), the non-JSON test drives the real readJson through liveDispatch and Bun.serve, the readJson comment, A1Judgement carries category no-results and config is typed, README shared=unchecked line. All seven open threads answered and accepted.",
-  "ci": "Required set: lint, typecheck, test, pr-title. Code head 8ab64781 (newest pull_request CI head; compare to 4a0ba24c handoffsOnly true, 2 files): lint, typecheck, test, pr-title success at 10:22Z. The package jobs this round's dispatch-http.ts change starts (envoy-client, pi-envoy, pi-shared, claude-envoy, envoy-plugin) were still queued; none is in the required set.",
+  "threads": "18 threads, all resolved, each ending with the reviewer's answer; the five round-3 threads (PRRT_kwDORFy7ds6xE1JI, _E1JT, _E1JX, _E1Jd, _E1Jn) accepted.",
+  "ci": "Required set: lint, typecheck, test, pr-title. Code head 7e042950 (newest pull_request CI head; compare to f713201a handoffsOnly true, 2 files): lint, typecheck, test success, newest pr-title success (older pr-title runs cancelled) at 2026-10-28T11:22Z.",
+  "evidence": {
+    "e2eImplementer": "present; proof at 7e042950 on production (build 9b92ac14), 2026-10-28T10:26:14Z, A1/A2/A3 pass, exit 0",
+    "e2eTester": "present; tester re-ran at 29294eaa (code head 7e042950)"
+  },
   "thermonuclear": {
-    "head": "4a0ba24c (code head 8ab64781)",
-    "deepReview": "Verdict: APPROVE. Minors: stale PR body lines (updated by the reviewer) and the three plugin minor releases the transientStatus export triggers (named under Not proven / risk). 60 tests pass, tsc and biome clean, claude-envoy check-dist passes.",
-    "codeQuality": "Verdict: APPROVE; every round 2 item fixed, both new exports harmless."
+    "head": "f713201a (code head 7e042950)",
+    "deepReview": "Verdict: APPROVE; comments and README only, 60 tests pass, no key left.",
+    "codeQuality": "Verdict: APPROVE."
   }
 }
