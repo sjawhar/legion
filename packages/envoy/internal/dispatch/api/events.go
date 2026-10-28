@@ -494,8 +494,9 @@ type decodedAskEventPayload struct {
 
 // attachAskEventFields fills the ask fields an event payload cannot carry from the write that
 // appended it: the id of the event that opened the ask, its inbound backlink count, and its anchor
-// document. Ask payloads are decoded because those fields are added; every other payload passes
-// through as the database returned it.
+// document. Ask payloads are decoded because those fields are added, and an ask.answered payload's
+// selected lists are read as model.AskAnswer reads them (normalizeAnsweredSelected); every other
+// payload passes through as the database returned it.
 func (s *server) attachAskEventFields(ctx context.Context, events []model.Event) error {
 	asks := []model.Ask{}
 	payloads := []decodedAskEventPayload{}
@@ -512,6 +513,11 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		payload := map[string]any{}
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			return fmt.Errorf("decode %s payload: %w", events[index].Type, err)
+		}
+		if events[index].Type == "ask.answered" {
+			if err := normalizeAnsweredSelected(raw, payload); err != nil {
+				return err
+			}
 		}
 		askID, ok := payload["id"].(string)
 		if !ok || askID == "" {
@@ -544,6 +550,28 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		}
 		payload.event.Payload = json.RawMessage(encoded)
 	}
+	return nil
+}
+
+// normalizeAnsweredSelected writes model.AskAnswer's reading of selected into an ask.answered
+// payload's answer and previous_answer: an ask.answered event written before answers stored an
+// empty list holds null there, and a client reads the list's length. Every other field of either
+// answer stays as the payload holds it, and an answer the payload does not carry stays absent.
+func normalizeAnsweredSelected(raw json.RawMessage, payload map[string]any) error {
+	var answers struct {
+		Answer         *model.AskAnswer `json:"answer"`
+		PreviousAnswer *model.AskAnswer `json:"previous_answer"`
+	}
+	if err := json.Unmarshal(raw, &answers); err != nil {
+		return fmt.Errorf("decode ask.answered answers: %w", err)
+	}
+	setSelected := func(key string, answer *model.AskAnswer) {
+		if fields, ok := payload[key].(map[string]any); ok && answer != nil {
+			fields["selected"] = answer.Selected
+		}
+	}
+	setSelected("answer", answers.Answer)
+	setSelected("previous_answer", answers.PreviousAnswer)
 	return nil
 }
 

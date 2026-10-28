@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -168,6 +170,168 @@ func TestIssueReferencesTruncateBeyondDepthEight(t *testing.T) {
 	for index, member := range value.Members {
 		if member.Depth != index+1 {
 			t.Fatalf("member %d depth = %d; want %d", index, member.Depth, index+1)
+		}
+	}
+}
+
+// referenceAuthorLists is the cycle of stored author lists the members' versions carry: JSON null
+// and an empty list kept apart, several actors in one list, and actors with an origin, an owner
+// and a service.
+var referenceAuthorLists = []string{
+	`null`,
+	`[]`,
+	`[{"kind":"human","id":"alice"}]`,
+	`[{"kind":"human","id":"alice"},{"kind":"session","id":"session-a"}]`,
+	`[{"kind":"session","id":"session-b","origin":{"host":"example-host-a","machine":"example-machine-a","cwd":"/work/example","session_title":"Example session"}}]`,
+	`[{"kind":"human","id":"bob"}]`,
+	`[{"kind":"human","id":"carol","owner":"alice"}]`,
+	`[{"kind":"service","id":"service-a","service":"example-service"}]`,
+	`[{"kind":"session","id":"session-c"}]`,
+	`[{"kind":"human","id":"bob"},{"kind":"human","id":"alice"}]`,
+	`[{"kind":"session","id":"session-a"}]`,
+	`[{"kind":"human","id":"dave"}]`,
+}
+
+// seedReferenceDocumentHistory gives a document versions 2 through versions, rewrites version 1's
+// authors, and sets its creator. Version n stores referenceAuthorLists[((n-1)/2+offset) mod len],
+// so consecutive versions repeat a list. Every version keeps version 1's markdown, so the live
+// document still matches its latest version and a settlement writes no version of its own.
+func seedReferenceDocumentHistory(t *testing.T, database *store.Store, artifactID string, versions, offset int, createdBy string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `update artifacts set created_by = $2::jsonb where id = $1`, artifactID, createdBy); err != nil {
+		t.Fatalf("set document creator: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update artifact_versions set authors = (($2::text[])[($3::int % cardinality($2::text[])) + 1])::jsonb
+		where artifact_id = $1 and number = 1
+	`, artifactID, referenceAuthorLists, offset); err != nil {
+		t.Fatalf("set first version authors: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, created_at, doc_update_version)
+		select first.artifact_id, n, first.markdown,
+		       (($2::text[])[(((n - 1) / 2 + $3::int) % cardinality($2::text[])) + 1])::jsonb,
+		       n % 7 = 0, case when n % 3 = 0 then 'Summary ' || n end,
+		       first.created_at + n * interval '1 millisecond', first.doc_update_version
+		from artifact_versions first, generate_series(2, $4::int) n
+		where first.artifact_id = $1 and first.number = 1
+	`, artifactID, referenceAuthorLists, offset, versions); err != nil {
+		t.Fatalf("insert document versions: %v", err)
+	}
+}
+
+func TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	ctx := context.Background()
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	documents := []struct {
+		name      string
+		versions  int
+		offset    int
+		createdBy string
+	}{
+		{"Single version", 1, 3, `{"kind":"human","id":"creator-human"}`},
+		{"Forty versions", 40, 0, `{"kind":"session","id":"creator-session","origin":{"host":"example-host-b","machine":"example-machine-b","cwd":"/work/example-b","session_title":"Creator session"}}`},
+		{"Long history", 3217, 5, `{"kind":"service","id":"creator-service","service":"example-service-b"}`},
+	}
+	wantVersions := map[string]int{}
+	var forty model.Artifact
+	var citations []string
+	for _, document := range documents {
+		artifact := createProjectDocument(t, handler, "OPS", document.name, "# "+document.name+"\n")
+		seedReferenceDocumentHistory(t, database, artifact.ID, document.versions, document.offset, document.createdBy)
+		wantVersions[artifact.ID] = document.versions
+		if document.versions == 40 {
+			forty = artifact
+		}
+		citations = append(citations, "dispatch://OPS/artifact/"+artifact.Slug)
+	}
+	createReferenceAPIComment(t, handler, issue.Key, strings.Join(citations, "\n"))
+
+	response := issueReferencesRequest(t, handler, issue.Key, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("get issue references: status=%d body=%s", response.Code, response.Body.String())
+	}
+	value := decodeBody[struct {
+		Members []struct {
+			Artifact struct {
+				ID        string          `json:"id"`
+				CreatedBy json.RawMessage `json:"created_by"`
+				Versions  json.RawMessage `json:"versions"`
+			} `json:"artifact"`
+		} `json:"members"`
+	}](t, response)
+	if len(value.Members) != len(documents) {
+		t.Fatalf("issue references members = %d; want %d", len(value.Members), len(documents))
+	}
+	for _, member := range value.Members {
+		artifact := member.Artifact
+		want, found := wantVersions[artifact.ID]
+		if !found {
+			t.Fatalf("unexpected reference member %q", artifact.ID)
+		}
+		delete(wantVersions, artifact.ID)
+
+		versions, err := served.loadVersions(ctx, database.Pool, artifact.ID)
+		if err != nil {
+			t.Fatalf("load versions of %q: %v", artifact.ID, err)
+		}
+		if len(versions) != want {
+			t.Fatalf("stored versions of %q = %d; want %d", artifact.ID, len(versions), want)
+		}
+		wantVersionsJSON, err := json.Marshal(versions)
+		if err != nil {
+			t.Fatalf("encode versions: %v", err)
+		}
+		gotVersionsJSON, err := json.Marshal(artifact.Versions)
+		if err != nil {
+			t.Fatalf("encode member versions: %v", err)
+		}
+		if !bytes.Equal(gotVersionsJSON, wantVersionsJSON) {
+			t.Fatalf("member %q versions differ from the per-version load:\n got %.600s\nwant %.600s", artifact.ID, gotVersionsJSON, wantVersionsJSON)
+		}
+
+		var storedCreator []byte
+		if err := database.Pool.QueryRow(ctx, `select created_by from artifacts where id = $1`, artifact.ID).Scan(&storedCreator); err != nil {
+			t.Fatalf("read creator of %q: %v", artifact.ID, err)
+		}
+		var creator model.Actor
+		if err := json.Unmarshal(storedCreator, &creator); err != nil {
+			t.Fatalf("decode creator of %q: %v", artifact.ID, err)
+		}
+		wantCreatorJSON, err := json.Marshal(creator)
+		if err != nil {
+			t.Fatalf("encode creator: %v", err)
+		}
+		gotCreatorJSON, err := json.Marshal(artifact.CreatedBy)
+		if err != nil {
+			t.Fatalf("encode member creator: %v", err)
+		}
+		if !bytes.Equal(gotCreatorJSON, wantCreatorJSON) {
+			t.Fatalf("member %q created_by = %s; want %s", artifact.ID, gotCreatorJSON, wantCreatorJSON)
+		}
+
+		if artifact.ID != forty.ID {
+			continue
+		}
+		var fortyVersions []struct {
+			Number  int             `json:"number"`
+			Authors json.RawMessage `json:"authors"`
+		}
+		if err := json.Unmarshal(artifact.Versions, &fortyVersions); err != nil {
+			t.Fatalf("decode member versions: %v", err)
+		}
+		// Offset 0: versions 1-2 store JSON null and versions 3-4 an empty list.
+		for _, check := range []struct {
+			number  int
+			authors string
+		}{{1, `null`}, {2, `null`}, {3, `[]`}, {4, `[]`}} {
+			if got := string(fortyVersions[check.number-1].Authors); fortyVersions[check.number-1].Number != check.number || got != check.authors {
+				t.Fatalf("version %d authors in the response = %s (number %d); want %s", check.number, got, fortyVersions[check.number-1].Number, check.authors)
+			}
 		}
 	}
 }

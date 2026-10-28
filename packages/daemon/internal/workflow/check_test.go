@@ -265,9 +265,9 @@ func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
 	}
 }
 
-// Dispatch's start on a build queues a compare for each open check of the repository the daemon is
-// built from and no other, each naming the check it is of, and none with no commit or with no
-// repository configured.
+// Dispatch's announcement of the build every server process serves queues a compare for each open
+// check of the repository the daemon is built from and no other, each naming the check it is of,
+// and none with no commit or with no repository configured.
 func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
@@ -350,6 +350,20 @@ func TestACheckWakeOnTheSameBuildWakesOnce(t *testing.T) {
 	rig.apply("new-build", intake.CheckWake{Issue: "LEGION-209", Look: 2, Cause: "dispatch build", Detail: "c0de"})
 	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 3 || !check.LookOpen || check.LastWakeDetail != "c0de" {
 		t.Fatalf("the check after another build = %+v, want look 3 open on c0de", check)
+	}
+}
+
+// A look Dispatch's server.started wakes tells the implementer what that announcement means: the
+// build every Dispatch server process serves, not one process's start.
+func TestADispatchStartWakeNamesTheBuildEveryServerProcessServes(t *testing.T) {
+	rig := childCheckRig(t, "sjawhar/legion")
+	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
+	rig.apply("start-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "dispatch start", Detail: "b00f"})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "dispatch start" {
+		t.Fatalf("the check after Dispatch's announcement = %+v, want look 2 open, woken by `dispatch start`", check)
+	}
+	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 || !strings.Contains(starts[1].Task, "woken by Dispatch serving build b00f on every server process.") {
+		t.Fatalf("start rows = %+v, want look 2's naming the build every Dispatch server process serves", starts)
 	}
 }
 

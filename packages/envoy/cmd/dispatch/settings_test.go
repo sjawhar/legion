@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,12 +305,15 @@ func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) ht
 	return handler
 }
 
+// testSigningKey is the one-key set appContextFor gives the router.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 // appContextFor is routes.BuildAppContext as main calls it, with the signing key, the session store
 // and the request identity main builds for boot (requestIdentityFor) filled in, so a request
 // carrying signedIn's cookie is that person's. built.People is a store with no database unless the
 // case's requests record people (dev sign-in, a pool sign-in, header identity).
 func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.AppContext, error) {
-	built.SigningKey = "signing-key"
+	built.SigningKey = testSigningKey
 	if built.People == nil {
 		built.People = store.NewPgPeopleStore(nil, built.SigningKey, nil)
 	}
@@ -318,11 +322,20 @@ func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.App
 	return routes.BuildAppContext(appContextOptions(boot, built))
 }
 
+// testPeople is a people store over a fresh test database, with the pool it writes through, so a
+// test can date a confirmation back in SQL (ageConfirmation): the store dates every confirmation
+// by the database's clock.
+type testPeople struct {
+	*store.PgPeopleStore
+	pool *store.Pool
+}
+
 // peopleStore is a people store over a fresh test database, for a case whose requests record people,
 // sealing refresh tokens under the signing key appContextFor gives the router, as main does.
-func peopleStore(t *testing.T) auth.PeopleStore {
+func peopleStore(t *testing.T) testPeople {
 	t.Helper()
-	return store.NewPgPeopleStore(storetest.Open(t).Pool, "signing-key", nil)
+	pool := storetest.Open(t).Pool
+	return testPeople{PgPeopleStore: store.NewPgPeopleStore(pool, testSigningKey, nil), pool: pool}
 }
 
 // currentSessions is a session store holding every login's session at generation 0, as a fresh
@@ -340,7 +353,7 @@ func (currentSessions) RevokeSessions(context.Context, string) error { return ni
 // signedIn adds to request the session cookie a sign-in as login sets.
 func signedIn(t *testing.T, request *http.Request, login string) *http.Request {
 	t.Helper()
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, testSigningKey, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,12 +382,12 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 }
 
 // signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
-// main discovers from boot's DISPATCH_SIGNIN_* settings (discoverSignIn).
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow).
 func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
-	flow, err := discoverSignIn(context.Background(), boot)
-	if err != nil || flow == nil {
-		t.Fatalf("discover the sign-in pool %s: %v, %v", boot.SignInIssuer, flow, err)
+	flow := signInFlow(boot)
+	if flow == nil {
+		t.Fatalf("boot configures no sign-in pool: %+v", boot)
 	}
 	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
 }
@@ -445,21 +458,15 @@ func whoamiAfter(handler http.Handler, signIn *httptest.ResponseRecorder) *httpt
 	return response
 }
 
-// ageConfirmation dates email's last confirmation two hours back, so their next request finds it
-// older than the hour.
-func ageConfirmation(t *testing.T, people auth.PeopleStore, email string) {
+// ageConfirmation dates email's last confirmation two hours back by the database's clock, so their
+// next request finds it older than the hour.
+func ageConfirmation(t *testing.T, people testPeople, email string) {
 	t.Helper()
 	membership, found, err := people.Membership(context.Background(), email)
 	if err != nil || !found || membership.RefreshToken == "" {
 		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
 	}
-	if membership.Subject != "" {
-		if err := people.ConfirmSubject(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if err := people.Confirm(context.Background(), email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+	if _, err := people.pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where email = $1`, email); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -610,14 +617,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Cookie identity is Google sign-in: with none of the sign-in settings, the server refuses to start.
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""},
 				"cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required")
-			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
+			// The pool main builds the code flow for: /auth/start sends the browser to its
+			// authorization endpoint. A pool whose discovery fails does not stop the router being
+			// built: /auth/start answers 503 SIGNIN_UNAVAILABLE until the pool answers.
 			t.Run("router", func(t *testing.T) {
 				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
 					t.Errorf("DISPATCH_SIGNIN_ISSUER=%s: GET /auth/start redirected to %q, want the pool's authorization endpoint", pool.URL(), location)
 				}
 				pool.FailDiscovery(http.StatusServiceUnavailable)
-				if _, err := discoverSignIn(context.Background(), boot); err == nil || !strings.Contains(err.Error(), pool.URL()) {
-					t.Errorf("a pool whose discovery fails: err = %v, want a refusal naming %s", err, pool.URL())
+				response := httptest.NewRecorder()
+				signInRouter(t, boot, peopleStore(t)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+				if response.Code != http.StatusServiceUnavailable || errorCode(response) != "SIGNIN_UNAVAILABLE" {
+					t.Errorf("a pool whose discovery fails: GET /auth/start answered %d %s, want 503 SIGNIN_UNAVAILABLE", response.Code, response.Body.String())
 				}
 			})
 		},
@@ -1126,35 +1137,79 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 		},
 		"DISPATCH_SIGNING_KEY": func(t *testing.T) {
 			dataDir := t.TempDir()
-			if key, err := sessionSigningKey(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "table-key"}), dataDir); err != nil || key != "table-key" {
-				t.Errorf("set: key %q, %v", key, err)
+			fingerprints := func(setting string) []string {
+				t.Helper()
+				keys, err := auth.ParseSigningKeys(setting)
+				if err != nil {
+					t.Fatalf("ParseSigningKeys(%q): %v", setting, err)
+				}
+				return keys.Fingerprints()
+			}
+			for _, setting := range []string{"table-key", "new-key table-key", "new-key\ntable-key\n"} {
+				key, err := sessionSigningKey(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": setting}), dataDir)
+				if want := fingerprints(setting); err != nil || !slices.Equal(key.Fingerprints(), want) {
+					t.Errorf("set to %q: keys %q, %v; want %q", setting, key.Fingerprints(), err, want)
+				}
+			}
+			for setting, naming := range map[string]string{"new-key  table-key": "entry 2 of 3 is empty", "table-key new-key table-key": "entry 3 of 3 repeats entry 1"} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": setting}))
+				if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") || !strings.Contains(err.Error(), naming) {
+					t.Errorf("set to %q: err = %v, want a refusal naming DISPATCH_SIGNING_KEY and %q", setting, err, naming)
+				} else if strings.Contains(err.Error(), "table-key") || strings.Contains(err.Error(), "new-key") {
+					t.Errorf("set to %q: the refusal %q names a key", setting, err)
+				}
 			}
 			if _, err := os.Stat(filepath.Join(dataDir, "signing-key")); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("set: the data dir's signing-key file was touched (%v)", err)
 			}
 			first, err := sessionSigningKey(resolveWith(t, nil), dataDir)
-			if err != nil || first == "" {
-				t.Fatalf("unset: key %q, %v", first, err)
+			if err != nil || len(first.Fingerprints()) != 1 {
+				t.Fatalf("unset: keys %q, %v; want the file's one key", first.Fingerprints(), err)
 			}
-			if again, err := sessionSigningKey(resolveWith(t, nil), dataDir); err != nil || again != first {
-				t.Errorf("unset again: key %q, %v; want the file's %q", again, err, first)
+			if again, err := sessionSigningKey(resolveWith(t, nil), dataDir); err != nil || !slices.Equal(again.Fingerprints(), first.Fingerprints()) {
+				t.Errorf("unset again: keys %q, %v; want the file's %q", again.Fingerprints(), err, first.Fingerprints())
 			}
 			if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "table-key"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
 				t.Errorf("dev sign-in with a key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
 			}
-			// The people store main builds (openPeople) seals under the key main signs cookies with:
-			// it opens a refresh token sealed under DISPATCH_SIGNING_KEY.
+			// The people store main builds (openPeople) seals under the keys main signs cookies with:
+			// with a new key put first, it still opens a refresh token sealed under the key before.
 			t.Run("people store", func(t *testing.T) {
 				database := storetest.Open(t)
-				if err := store.NewPgPeopleStore(database.Pool, "table-key", nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed", time.Now()); err != nil {
+				if err := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("table-key"), nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed"); err != nil {
 					t.Fatal(err)
 				}
-				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "table-key"}), t.TempDir(), database.Pool, nil)
-				if err != nil || key != "table-key" {
-					t.Fatalf("openPeople: key %q, %v; want table-key", key, err)
+				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "new-key table-key"}), t.TempDir(), database.Pool, nil)
+				if want := fingerprints("new-key table-key"); err != nil || !slices.Equal(key.Fingerprints(), want) {
+					t.Fatalf("openPeople: keys %q, %v; want %q", key.Fingerprints(), err, want)
 				}
 				if membership, _, err := people.Membership(context.Background(), "alice@example.com"); err != nil || membership.RefreshToken != "refresh-sealed" {
-					t.Errorf("the people store main builds read %#v, %v; want the token sealed under DISPATCH_SIGNING_KEY", membership, err)
+					t.Errorf("the people store main builds read %#v, %v; want the token sealed under the earlier key", membership, err)
+				}
+			})
+			// Unset, with an empty signing-key file in the data dir, the boot exits 1 naming the
+			// file, before the people store would panic on the empty key set.
+			t.Run("an empty signing-key file", func(t *testing.T) {
+				database := storetest.Open(t)
+				home := t.TempDir()
+				keyFile := filepath.Join(home, ".local", "share", "dispatch", "signing-key")
+				if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(keyFile, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{Env: map[string]string{"HOME": home}})
+				process.WaitExit(t, "its start with an empty signing-key file")
+				output := process.Output.String()
+				if code := process.Cmd.ProcessState.ExitCode(); code != 1 {
+					t.Errorf("the boot with an empty signing-key file exited %d, want 1:\n%s", code, output)
+				}
+				if !strings.Contains(output, `msg="dispatch: load signing key"`) || !strings.Contains(output, keyFile) || !strings.Contains(output, "is empty") {
+					t.Errorf("the boot with an empty signing-key file did not refuse it by name (%s):\n%s", keyFile, output)
+				}
+				if strings.Contains(output, "panic") {
+					t.Errorf("the boot with an empty signing-key file panicked:\n%s", output)
 				}
 			})
 			// The key the router's sign-in seals the pool's refresh token under (main hands it to the
@@ -1185,7 +1240,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					handler.ServeHTTP(response, request)
 					return response
 				}
-				handler := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "signing-key", nil))
+				handler := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, testSigningKey, nil))
 				member := poolSignIn(t, handler, pool, "dispatch-members")
 				if member.Code != http.StatusFound || !sessionCookieSet(member) {
 					t.Fatalf("sign-in: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
@@ -1202,7 +1257,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh with the opened token", response.Code, response.Body.String(), pool.Refreshes())
 				}
 				// The refresh just confirmed the membership; the rotated store opens none of it all the same.
-				rotated := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "rotated-signing-key", nil))
+				rotated := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("rotated-signing-key"), nil))
 				if response := whoami(rotated, member); response.Code != http.StatusUnauthorized || errorCode(response) != "NO_IDENTITY" || pool.Refreshes() != 1 {
 					t.Errorf("a refresh token sealed under another key: whoami answered %d %s after %d refreshes, want 401 NO_IDENTITY with the pool not asked", response.Code, response.Body.String(), pool.Refreshes())
 				}
@@ -1476,6 +1531,42 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
+				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=1: ListenerRosterUncached false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "true"}); boot.ListenerRosterUncached {
+				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=true: ListenerRosterUncached true, want only 1 to set it")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_ROSTER_UNCACHED": "1"}, "DISPATCH_TEST_HOOKS=1 required")
+			// Its reader: two agents lists within the copy's five seconds ask the listener twice
+			// with the copy off, once with it on.
+			t.Run("router", func(t *testing.T) {
+				for value, want := range map[string]int32{"1": 2, "": 1} {
+					var calls atomic.Int32
+					listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						_, _ = w.Write([]byte("[]"))
+					}))
+					t.Cleanup(listener.Close)
+					router := routerFor(t, resolveWith(t, map[string]string{
+						"DISPATCH_TEST_HOOKS":           "1",
+						"DISPATCH_TEST_ROSTER_UNCACHED": value,
+						"ENVOY_URL":                     listener.URL,
+					}), routes.AppContextOptions{})
+					for range 2 {
+						response := httptest.NewRecorder()
+						router.ServeHTTP(response, signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice"))
+						if response.Code != http.StatusOK {
+							t.Fatalf("DISPATCH_TEST_ROSTER_UNCACHED=%q: GET /api/v1/agents: %d %s", value, response.Code, response.Body.String())
+						}
+					}
+					if got := calls.Load(); got != want {
+						t.Errorf("DISPATCH_TEST_ROSTER_UNCACHED=%q: two GET /api/v1/agents called the listener %d times, want %d", value, got, want)
+					}
+				}
+			})
 		},
 	}
 	for _, row := range settings {
