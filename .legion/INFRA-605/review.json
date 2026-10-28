@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-605",
+  "completed": "2026-10-28T21:06:06Z",
+  "round": 1,
+  "reviewedHead": "f21252c446b9e3db4fe3c6547c95b672523f2f2d (Go code of 5e119d381598; INFRA-605 diff 9692d2fd..f21252c4, .legion/ excluded)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 8,
+  "ci": "No required check ran on any head. Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection: none. actions/runs?branch=legion/INFRA-605&event=pull_request: total_count 0. GitHub: mergeable CONFLICTING (DIRTY). sjawhar/legion#2369 merged at 2026-10-28T20:36:32Z (c24ea568), so the forward merge is unblocked.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at f21252c4 - 2 Medium (head notice dropped while a room loads; listener goroutine held by woke/connected lock waits), 1 Minor (room-scan hook never called)",
+    "codeQuality": "Verdict: CHANGES at f21252c4 - room-scan assertions cannot fail, addConnection is a test-only registration path, sleeps in no-read tests, file growth, liveness logic split across files, defer-order coupling, duplicate queue helper, health special case in separate, string-keyed anchor tables, overwritten gate argument"
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "(branch)", "description": "Head conflicts with main and no required check (lint, typecheck, test, pr-title) has ever run. Merge main forward (it now carries #2369); count roomAppendsPoolSize in store.ConnectionsPerProcess and infra/gcp dispatchConnectionsPerPod; correct the 91/83 figures in README, running-dispatch.md, the changie fragment and the PR body; CI green at the merged head."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/stale_room.go:507", "description": "roomHolds (and documentChanged:603-608) answers 'held' when GetDoc is nil, which is also a room still loading (pending_authors.go:194-195). Another process's write whose notice arrives during the load is dropped; the room becomes resident behind the store and nothing re-checks it. takePreload's tracker head (websocket.go:207) adds the delivery delay to that window. Keep heads heard on the open roomLoad and re-examine after keepInstance; test with a second process committing during a load."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/stale_room.go:412", "description": "woke (412-417) and connected (382-390) run documentChanged on the listener goroutine, including roomBehindDurableHead's pg_advisory_xact_lock wait with no deadline (719-733). Notifications stay unread meanwhile, the tracker stays trusted for up to 3 s on a healthy connection, and dispatch-docs.md:11 / AGENTS.md:543-544 claim otherwise. Route the re-examinations through the per-room decision goroutines."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go:247", "description": "roomScanned is never called by production code, so the scans==0 assertions in docs/socket_admission_test.go:261 and api/socket_admission_test.go:141 cannot fail. Delete the hook and the assertions, or call it from a real walk."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go:817", "description": "addConnection has no production caller; production registers in authorize (419-423) with the count reserved by reserveConnection. About 13 test files register browsers through a path production never takes. One register function used by authorize, and a test helper that reserves then registers."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/head_tracker_test.go:120", "description": "awaitDecided's comment is false since decisions run on per-room goroutines; the tests cover it with time.Sleep(100ms) before asserting zero head reads (200, 244), which passes falsely when a decision is slower. Wait until evictor.deciding is empty; notifyDocumentChangedStatement (stale_room.go:33-35) is now test-only."},
+    {"severity": "minor", "file": "(PR body)", "description": "No '## Contract change census': VersionedStore.AppendUpdateWithCredit -> AppendUpdatesWithCredit, the socket cap refusal 401 -> 503, and the dispatch_doc_head / dispatch_doc_ping channels across a roll with older builds."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/room_appends.go:185", "description": "Correctness depends on the order of the defers at 186-229 (write.end before unlock, spent after unlock). One finish() in written order; share the lock preamble with lockRoom."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go:275", "description": "queueAppendGate's through argument is always replaced by throughUnderLock in the batch path (room_appends.go:236,245)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/stale_room.go:53", "description": "Ping, quiet window and trust window live in two files (stale_room.go:53-64,312-367 and head_tracker.go:136-143); move the liveness code beside headTrustWindow."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "persistence.go (1,064 lines) and pending_authors.go (1,087) cross 1,000 lines; move the append gate/write set and the room-cursor section to their own files; split head_tracker_test.go (1,019)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/events/broker.go:235", "description": "queueExec duplicates writeStatement.queue (persistence.go:415-424)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/store/pool.go:352", "description": "separate() carries a branch for the health pool alone; move the health close rule to Healthy or a healthPool() method."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/marks.go:503", "description": "String-keyed maps over \"asks\"/\"comments\"; split the changed anchors once into typed slices."}
+  ],
+  "threads": "No review threads exist on the pull request (GraphQL reviewThreads: none); nothing to answer or accept."
+}
