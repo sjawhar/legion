@@ -186,7 +186,12 @@ func (s *server) createStoredMessage(
 	if message.InReplyTo != nil {
 		eventType = "message.answered"
 	}
-	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)))
+	payload := thread.payload(message, referenceChanges)
+	payload.ThreadLogins, err = messageThreadLogins(ctx, tx, message)
+	if err != nil {
+		return model.Message{}, nil, err
+	}
+	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, payload))
 	if err != nil {
 		return model.Message{}, nil, err
 	}
@@ -778,7 +783,7 @@ func (s *server) indexMessage(ctx context.Context, tx pgx.Tx, message model.Mess
 		_, err := refs.IndexItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, message.CreatedAt, nil, nil)
 		return model.ReferenceChanges{}, err
 	}
-	return refs.ReplaceCountedItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, s.deps.ServerURL, message.CreatedAt, nil)
+	return refs.ReplaceCountedItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, s.deps.ServerURL, message.CreatedAt)
 }
 
 // loadMessageReplyChains reads, for each seed message, every message transitively replying to

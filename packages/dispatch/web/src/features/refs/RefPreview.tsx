@@ -22,7 +22,9 @@ import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-pre
 import {
   artifactTextQuery,
   blockText,
+  issueQuery,
   prefetchReference,
+  useBlockDocument,
   useReferenceData,
   useReferencePath,
 } from "./reference-target";
@@ -251,8 +253,11 @@ function Body({ markdown }: { markdown: string }): ReactNode {
   );
 }
 
+/** The issue's full read, not the summary its links share: the card shows priority, labels, open
+ *  asks and the spec, and holds that read only while it is shown. */
 function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { issue } = useReferenceData(route);
+  const key = "key" in route ? route.key : undefined;
+  const { data: issue } = useQuery({ ...issueQuery(key), enabled: key !== undefined });
   const spec = primarySpec(issue);
   const specText = useQuery({
     ...artifactTextQuery(spec?.id, undefined),
@@ -313,19 +318,19 @@ function documentOwner(route: DispatchReferenceRoute): ReactNode {
 }
 
 function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { artifact, markdown } = useReferenceData(route);
+  const { artifact, markdown } = useReferenceData(route, { text: true });
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
   const owner = documentOwner(route);
-  const latest = artifact.versions.at(-1)?.number;
+  const latest = artifact.latest_version;
   return (
     <>
       <Heading>
         <span className={`font-normal ${textMutedOnSurface}`}>{owner} · </span>
         {artifact.name}
       </Heading>
-      {latest === undefined ? null : (
+      {latest === null ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
       {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
@@ -335,11 +340,14 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
 
 /** A block of a document: its document, then for a pinned reference the version it pins and how
  *  the block stands since (`BlockPin.state`), then its text - the pinned version's for a pinned
- *  reference, its current text otherwise. A block of a comment or message heads with its item and
- *  author in place of the document, a comment's pin naming a revision of the comment; its text is
- *  the one its graph node carries, as a document block's is. */
+ *  reference, its current text otherwise. The document's name is the card's own read of its
+ *  summary, which no link to the block reads. A block of a comment or message heads with its item
+ *  and author in place of the document, and reads no summary (`useBlockDocument`), a comment's pin
+ *  naming a revision of the comment; its text is the one its graph node carries, as a document
+ *  block's is. */
 function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { artifact, block } = useReferenceData(route);
+  const { block } = useReferenceData(route, { text: false });
+  const artifact = useBlockDocument(route);
   const item = itemOfBlock(route);
   const holder =
     item === undefined ? artifact?.name : item.kind === "comment" ? "Comment" : "Message";
@@ -383,7 +391,7 @@ function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
 }
 
 function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { ask } = useReferenceData(route);
+  const { ask } = useReferenceData(route, { text: false });
   if (ask === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -402,7 +410,7 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
 }
 
 function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { comment } = useReferenceData(route);
+  const { comment } = useReferenceData(route, { text: false });
   if (comment === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -417,7 +425,7 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
 }
 
 function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { message } = useReferenceData(route);
+  const { message } = useReferenceData(route, { text: false });
   if (message === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }

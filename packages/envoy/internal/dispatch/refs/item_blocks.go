@@ -57,25 +57,69 @@ type CarriedEdit struct {
 }
 
 // ReplaceCountedItem indexes a comment's or an issue message's body, which the calling
-// transaction has just written: its blocks and the mentions each holds (IndexItem), then the
-// item's own references (ReplaceCountedRefs), from one extraction of body. The counted targets it
-// resolves are those either moved, so the event the caller appends names a link that moved between
-// two blocks of the item as well as one the item gained or lost. A direct message, which writes no
-// mention, calls IndexItem alone with no located mentions.
+// transaction has just inserted: its blocks and the mentions each holds (IndexItem), then the
+// item's own references (replaceRefs), from one extraction of body. The counted targets it
+// resolves are those either moved. A direct message, which writes no mention, calls IndexItem
+// alone with no located mentions.
 func ReplaceCountedItem(
 	ctx context.Context,
 	tx pgx.Tx,
 	kind ItemKind,
 	itemID, body, serverURL string,
 	at time.Time,
-	carried *CarriedEdit,
 ) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(body, serverURL)
-	moved, err := IndexItem(ctx, tx, kind, itemID, body, at, located, carried)
+	changed, err := replaceItemRefs(ctx, tx, kind, itemID, body, at, located, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return ReplaceCountedRefs(ctx, tx, string(kind), itemID, text.Refs(located), nil, moved)
+	return CountedChanges(ctx, tx, changed)
+}
+
+// ReplaceCountedItemEdit is ReplaceCountedItem for an edit of a comment from previous to body,
+// written at `at`, with the block ids the editor carried (carried; nil: the ids follow the text,
+// IndexItem). The counted targets it resolves are every kind the edit moves: the targets whose
+// edges or block mentions it inserted or deleted - so a link that moved from one block of the
+// comment to another is named as well as one the comment gained or lost - and, when the edit
+// moves the head of the comment's text, every target the comment still cites
+// (editedHeadTargets). A carried id IndexItem refuses returns its *itemblocks.CarriedError.
+func ReplaceCountedItemEdit(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind ItemKind,
+	itemID, previous, body, serverURL string,
+	at time.Time,
+	carried *CarriedEdit,
+) (model.ReferenceChanges, error) {
+	located := text.ExtractAt(body, serverURL)
+	changed, err := replaceItemRefs(ctx, tx, kind, itemID, body, at, located, carried)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return CountedChanges(ctx, tx, append(changed, editedHeadTargets(previous, body, text.Refs(located))...))
+}
+
+// replaceItemRefs indexes the item's blocks and their mentions (IndexItem) and reconciles its own
+// references (replaceRefs) to located, the mentions of body, and returns the targets either
+// inserted or deleted.
+func replaceItemRefs(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind ItemKind,
+	itemID, body string,
+	at time.Time,
+	located []text.Located,
+	carried *CarriedEdit,
+) ([]Target, error) {
+	moved, err := IndexItem(ctx, tx, kind, itemID, body, at, located, carried)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := replaceRefs(ctx, tx, string(kind), itemID, text.Refs(located), nil)
+	if err != nil {
+		return nil, err
+	}
+	return append(changed, moved...), nil
 }
 
 // IndexItem records body, written at `at` (the created_at of an insert, the edited_at of an
@@ -114,7 +158,7 @@ func ReplaceCountedItem(
 // owed_at.
 //
 // It returns the targets of the block mentions it inserted or deleted, which the caller's event
-// counts (ReplaceCountedRefs' moved).
+// counts (ReplaceCountedItem, ReplaceCountedItemEdit).
 func IndexItem(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -136,8 +180,9 @@ func IndexItem(
 	// them in the transaction that marks the state indexed, and a state row goes only with its
 	// item.
 	stored := []itemblocks.Stored{}
+	var excerpts map[string]string // each current block's stored excerpt, by id
 	if state.indexed {
-		if stored, err = storedItemBlocks(ctx, tx, kind, tables, itemID); err != nil {
+		if stored, excerpts, err = storedItemBlocks(ctx, tx, kind, tables, itemID); err != nil {
 			return nil, err
 		}
 	}
@@ -203,9 +248,24 @@ func IndexItem(
 			return nil, err
 		}
 	}
-	moved, err := replaceItemBlockRefs(ctx, tx, kind, tables, itemID, at, !state.indexed, itemBlockPairs(next, ids, located))
+	pairs := itemBlockPairs(next, ids, located)
+	moved, err := replaceItemBlockRefs(ctx, tx, kind, tables, itemID, at, !state.indexed, pairs)
 	if err != nil {
 		return nil, err
+	}
+	// A link a block keeps shows that block's excerpt in its target's referenced-by panel, so a
+	// block that keeps its id while its excerpt changes names the targets of the links it holds,
+	// as a document's reworded block does; a change past the excerpt's runes names none.
+	newExcerpts := make(map[string]string, len(written))
+	for _, row := range written {
+		newExcerpts[row.id] = row.excerpt
+	}
+	for _, pair := range pairs {
+		if previous, held := excerpts[pair.blockID]; held {
+			if excerpt, rewritten := newExcerpts[pair.blockID]; rewritten && excerpt != previous {
+				moved = append(moved, pair.target)
+			}
+		}
 	}
 	if err := storeItemState(ctx, tx, kind, itemID, revision, counter, bodySum); err != nil {
 		return nil, err
@@ -264,25 +324,30 @@ func lockItemState(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTab
 // storedItemBlocks is every block the item ever held, current ones first in body order, then
 // removed ones, the most recently removed first, so Align's first untaken match prefers the block
 // in place and, among removed blocks of equal text, the last removed.
-func storedItemBlocks(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTables, itemID string) ([]itemblocks.Stored, error) {
+func storedItemBlocks(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTables, itemID string) ([]itemblocks.Stored, map[string]string, error) {
 	rows, err := tx.Query(ctx, `
-		select block_id, type, text_sha256, coalesce(position, -1) from `+tables.blocks+`
+		select block_id, type, text_sha256, coalesce(position, -1), excerpt from `+tables.blocks+`
 		where `+tables.item+` = $1::uuid
 		order by position nulls last, removed_at desc, length(block_id), block_id
 	`, itemID)
 	if err != nil {
-		return nil, fmt.Errorf("read the blocks of %s %s: %w", kind, itemID, err)
+		return nil, nil, fmt.Errorf("read the blocks of %s %s: %w", kind, itemID, err)
 	}
 	defer rows.Close()
 	stored := []itemblocks.Stored{}
+	excerpts := map[string]string{}
 	for rows.Next() {
 		var block itemblocks.Stored
-		if err := rows.Scan(&block.ID, &block.Type, &block.Hash, &block.Position); err != nil {
-			return nil, fmt.Errorf("scan a block of %s %s: %w", kind, itemID, err)
+		var excerpt string
+		if err := rows.Scan(&block.ID, &block.Type, &block.Hash, &block.Position, &excerpt); err != nil {
+			return nil, nil, fmt.Errorf("scan a block of %s %s: %w", kind, itemID, err)
 		}
 		stored = append(stored, block)
+		if block.Position >= 0 {
+			excerpts[block.ID] = excerpt
+		}
 	}
-	return stored, rows.Err()
+	return stored, excerpts, rows.Err()
 }
 
 // blockNumber is the number of block id b<N>.

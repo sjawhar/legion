@@ -8,6 +8,7 @@ import {
   createIssueArtifact,
   createProject,
   editArtifact,
+  editComment,
   getArtifact,
   getArtifactText,
   getIssue,
@@ -228,4 +229,39 @@ test("a pinned link keeps the text of the version it pins, says how the block st
   const removedCard = await openCard(page, removed);
   await expect(removedCard).toContainText(`Removed in version ${pinned + 2}`);
   await expect(removedCard).toContainText("P ships on Friday.");
+});
+
+// A link to a block of a comment reads the block's graph read, which is fetched again only by an
+// event that can change it (`blockQuery`, staleTime Infinity). The comment's own edit is one: the
+// open card, and the link's own title, show the reworded paragraph with no reload.
+test("a link to a block of a comment shows the block's new text once its author edits it, with no reload", async ({
+  page,
+}) => {
+  const issue = await createIssue({ project: "CORE", title: "Comment block text" });
+  const cited = await createComment(issue.key, { body: "Alpha first.\n\nBeta as first written." });
+  await createComment(issue.key, {
+    body: `The detail is in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
+  });
+
+  // The server subscribes the stream before it answers, so every write after this reaches the page.
+  const stream = page.waitForResponse(
+    (response) => /\/api\/v1\/events(\?|$)/.test(response.url()) && response.status() === 200
+  );
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await stream;
+  const turns = page.getByRole("list", { name: "Conversation turns" });
+  const link = turns.getByRole("link", { name: "Beta as first written." });
+  await expect(link).toHaveAttribute("href", `/issues/${issue.key}/comments/${cited.id}#b-b2`);
+  const card = await openCard(page, link);
+  await expect(card).toContainText("Comment · alice");
+  await expect(card).toContainText("Beta as first written.");
+
+  // The author rewords the cited paragraph; b1 stays, so the reworded paragraph keeps b2.
+  await editComment(cited.id, { body: "Alpha first.\n\nBeta as reworded." });
+  await expect(card).toContainText("Beta as reworded.", { timeout: 5_000 });
+  await expect(card).not.toContainText("as first written");
+  await expect(turns.getByRole("link", { name: "Beta as reworded." })).toHaveAttribute(
+    "href",
+    `/issues/${issue.key}/comments/${cited.id}#b-b2`
+  );
 });

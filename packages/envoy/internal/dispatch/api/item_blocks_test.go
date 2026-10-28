@@ -572,6 +572,67 @@ func TestAMentionStartsAtItsBlock(t *testing.T) {
 	requireReferencesChanged(t, handler, issue.Key, "comment.edited", once.ID, []model.ChangedReference{{Kind: "issue", ID: target.Key}})
 }
 
+// A comment's edit names, in one event, both kinds of target it moves: every target the comment
+// still cites when the edit moves the head of its text (each edge's excerpt), and a target whose
+// link moved from one block to another. An edit that moves a link past the head names that target
+// alone, and one that moves only the head names every cited target though no block row moved.
+func TestACommentEditNamesItsMovedHeadAndItsMovedLinks(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Edits that move links", "before")
+	headTarget := createInteractionIssue(t, handler, "ACME", "Cited in the head", "before")
+	movedTarget := createInteractionIssue(t, handler, "OPS", "Cited further down", "before")
+	inHead, moving := "dispatch://"+headTarget.Key, "dispatch://"+movedTarget.Key
+	// The first paragraph is longer than the 240-rune head an edge's excerpt shows, so the
+	// paragraphs after it lie past the head.
+	tail := " " + strings.Repeat("x", 260)
+	headNamed := model.ChangedReference{Kind: "issue", ID: headTarget.Key}
+	movedNamed := model.ChangedReference{Kind: "issue", ID: movedTarget.Key}
+
+	comment := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Waiting on " + inHead + "." + tail + "\n\nSecond cites " + moving + ".\n\nThird is plain.",
+	}, "alice")
+	links := func(step, want string) {
+		t.Helper()
+		if got := strings.Join(itemBlockRefs(t, database, "comment", comment.ID), ","); got != want {
+			t.Fatalf("%s: block mentions = %s, want %s", step, got, want)
+		}
+	}
+	links("created", "b1->issue:"+headTarget.Key+",b2->issue:"+movedTarget.Key)
+
+	// The head is reworded and the link moves from b2 to b3: both targets are named.
+	requireEdit(t, "reword the head and move the link", editCommentAs(t, handler, comment.ID,
+		"Still waiting on "+inHead+"."+tail+"\n\nSecond is plain.\n\nThird cites "+moving+".", nil, nil))
+	links("head and link moved", "b1->issue:"+headTarget.Key+",b3->issue:"+movedTarget.Key)
+	requireReferencesChanged(t, handler, issue.Key, "comment.edited", comment.ID, []model.ChangedReference{movedNamed, headNamed})
+
+	// The head stays and the link moves back from b3 to b2: only the moved link's target is named.
+	requireEdit(t, "move the link alone", editCommentAs(t, handler, comment.ID,
+		"Still waiting on "+inHead+"."+tail+"\n\nSecond cites "+moving+" again.\n\nThird is plain again.", nil, nil))
+	links("link moved", "b1->issue:"+headTarget.Key+",b2->issue:"+movedTarget.Key)
+	requireReferencesChanged(t, handler, issue.Key, "comment.edited", comment.ID, []model.ChangedReference{movedNamed})
+
+	// The head is reworded and no block row moves: every cited target is named.
+	requireEdit(t, "reword the head alone", editCommentAs(t, handler, comment.ID,
+		"Now waiting on "+inHead+"."+tail+"\n\nSecond cites "+moving+" again.\n\nThird is plain again.", nil, nil))
+	links("head moved", "b1->issue:"+headTarget.Key+",b2->issue:"+movedTarget.Key)
+	requireReferencesChanged(t, handler, issue.Key, "comment.edited", comment.ID, []model.ChangedReference{headNamed, movedNamed})
+
+	// A block past the head is reworded and keeps its link: the panel shows that block's excerpt,
+	// so its target is named, and the head's target is not.
+	requireEdit(t, "reword a block past the head", editCommentAs(t, handler, comment.ID,
+		"Now waiting on "+inHead+"."+tail+"\n\nSecond still cites "+moving+".\n\nThird is plain again.", nil, nil))
+	links("block reworded", "b1->issue:"+headTarget.Key+",b2->issue:"+movedTarget.Key)
+	requireReferencesChanged(t, handler, issue.Key, "comment.edited", comment.ID, []model.ChangedReference{movedNamed})
+
+	// A change past a block's 480-rune excerpt moves nothing the panel shows: nothing is named.
+	long := "Second still cites " + moving + ". " + strings.Repeat("y", 500)
+	requireEdit(t, "lengthen a block", editCommentAs(t, handler, comment.ID,
+		"Now waiting on "+inHead+"."+tail+"\n\n"+long+" One.\n\nThird is plain again.", nil, nil))
+	requireEdit(t, "edit past the block's excerpt", editCommentAs(t, handler, comment.ID,
+		"Now waiting on "+inHead+"."+tail+"\n\n"+long+" Two.\n\nThird is plain again.", nil, nil))
+	requireReferencesChanged(t, handler, issue.Key, "comment.edited", comment.ID, nil)
+}
+
 // A block of a comment or an issue message is a node a reference names: ?to= the block lists the
 // mention of it, from the block of the comment that holds the link, and reads the block with its
 // whole text and R12's facts; ?to= its item lists the same edge at the block. A block the item

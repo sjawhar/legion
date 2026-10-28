@@ -619,7 +619,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			return
 		}
 	}
-	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, comment.ID, comment.Body, s.deps.ServerURL, comment.CreatedAt, nil)
+	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, comment.ID, comment.Body, s.deps.ServerURL, comment.CreatedAt)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -661,6 +661,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	payload.SuppressedAuthors = suppressedAuthors
 	payload.SuppressedRoute = suppressedRoute
 	payload.SuppressedRouteSessionID = suppressedRouteSessionID
+	payload.ThreadLogins, err = commentThreadLogins(r.Context(), tx, comment)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, owner.event(
 		"comment.created",
 		actor,

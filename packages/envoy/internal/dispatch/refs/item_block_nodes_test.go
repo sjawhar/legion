@@ -29,7 +29,7 @@ func insertIndexedItem(t *testing.T, tx pgx.Tx, kind ItemKind, issueKey, body st
 	if err := tx.QueryRow(ctx, `insert into `+table+` (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', $2) returning id::text, created_at`, issueKey, body).Scan(&id, &createdAt); err != nil {
 		t.Fatalf("insert %s: %v", kind, err)
 	}
-	if _, err := ReplaceCountedItem(ctx, tx, kind, id, body, itemBlockServer, createdAt, nil); err != nil {
+	if _, err := ReplaceCountedItem(ctx, tx, kind, id, body, itemBlockServer, createdAt); err != nil {
 		t.Fatalf("index %s %s: %v", kind, id, err)
 	}
 	return id

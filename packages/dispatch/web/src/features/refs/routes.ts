@@ -777,9 +777,9 @@ export function shortForm(route: DispatchReferenceRoute): string {
  *  of a comment opens the live comment at the block, a comment's revisions having no page of
  *  their own. A block of a project document's comment opens the comment (`?comment=<id>`) with no
  *  fragment: that page's `#b-` names a block of the document. An issue's spec keeps its versions
- *  under its own slug, which a spec route does not carry: `specSlug` names it once the issue is
- *  read (`useReferencePath`), and until then a pinned block of the spec opens the live spec at
- *  the block. */
+ *  under its own slug, which a spec route does not carry: `specSlug` names it once the issue's
+ *  summary is read (`useReferencePath`), and until then a pinned block of the spec opens the live
+ *  spec at the block. */
 export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;

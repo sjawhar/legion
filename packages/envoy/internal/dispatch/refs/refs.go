@@ -12,7 +12,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,41 +37,98 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it or
-// ReplaceCountedRefs, so no producer can reconcile the graph without holding what moved:
-// replaceRefs itself is unexported.
+// that source appends has to name. Every write that indexes a body goes through it or one of its
+// variants, so no producer can reconcile the graph without holding what moved: replaceRefs itself
+// is unexported. It names the targets whose edges it inserted or deleted, which is all a first
+// write of a body moves; an edit whose event names what it moved goes through ReplaceCountedEdit
+// (ReplaceCountedItemEdit for a comment), and a document's version through
+// ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's or an issue
+// message's first write goes through ReplaceCountedItem, which indexes its blocks as well.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	return ReplaceCountedRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil, nil)
-}
-
-// ReplaceCountedRefs is ReplaceCounted for references a caller has already extracted: a new edge
-// takes insertedAt as its created_at (nil: the transaction's time), and the counted targets it
-// resolves are those replaceRefs moved together with moved, the targets the same write moved
-// elsewhere - a document version's block mentions (IndexBlocks) - so its event names them all.
-func ReplaceCountedRefs(
-	ctx context.Context,
-	tx pgx.Tx,
-	fromKind, fromID string,
-	found []text.Ref,
-	insertedAt *time.Time,
-	moved []Target,
-) (model.ReferenceChanges, error) {
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, insertedAt)
+	changed, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return CountedChanges(ctx, tx, append(changed, moved...))
+	return CountedChanges(ctx, tx, changed)
+}
+
+// ReplaceCountedEdit is ReplaceCounted for an edit of an ask's question from previous to body. It
+// names the targets whose edges the edit inserted or deleted and those whose excerpt it moved
+// (editedHeadTargets).
+func ReplaceCountedEdit(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, previous, body, serverURL string,
+) (model.ReferenceChanges, error) {
+	found := text.Extract(body, serverURL)
+	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return CountedChanges(ctx, tx, append(changed, editedHeadTargets(previous, body, found)...))
+}
+
+// editedHeadTargets is what an edit of an ask's question or a comment's body from previous to body,
+// which cites found, moves although its edges stay. Every edge such a source writes shows the head
+// of its text as its excerpt (Edges, excerptRunes), so when the edit moves that head, the panel of
+// every target the source still cites changes: each of found is returned then, and none otherwise.
+func editedHeadTargets(previous, body string, found []text.Ref) []Target {
+	if text.HeadRunes(previous, excerptRunes) == text.HeadRunes(body, excerptRunes) {
+		return nil
+	}
+	kinds, ids := refTargets(found)
+	targets := make([]Target, len(kinds))
+	for index := range kinds {
+		targets[index] = Target{Kind: kinds[index], ID: ids[index]}
+	}
+	return targets
+}
+
+// ReplaceDocumentCounted is ReplaceCounted for a document's version, written at versionAt, whose
+// mentions are found (a new edge takes versionAt as its created_at). It also stores the excerpt of
+// each mention the version writes (RecordExcerpts), or, with excerpts nil (a version with no
+// rendering to cut them from), marks them owed (ClearExcerpts). A document mention shows the block
+// holding it as its excerpt, so a target whose kept edge now stores another block is named beside
+// the ones whose edges the version inserted or deleted, and so is each of moved, the targets the
+// same write moved elsewhere - the version's blocks and their mentions (IndexBlocks) - so its event
+// names them all.
+func ReplaceDocumentCounted(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	version int,
+	versionAt time.Time,
+	found []text.Ref,
+	moved []Target,
+	excerpts map[Target]model.GraphExcerpt,
+) (model.ReferenceChanges, error) {
+	changed, err := replaceRefs(ctx, tx, "artifact", artifactID, found, &versionAt)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	changed = append(changed, moved...)
+	if excerpts == nil {
+		if err := ClearExcerpts(ctx, tx, artifactID); err != nil {
+			return model.ReferenceChanges{}, err
+		}
+		return CountedChanges(ctx, tx, changed)
+	}
+	recorded, err := RecordExcerpts(ctx, tx, artifactID, version, excerpts)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return CountedChanges(ctx, tx, append(changed, recorded...))
 }
 
 // replaceRefs reconciles the Dispatch references written by one source with found: targets no
 // longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
-// edges moved — deleted or inserted, oldest state first — so ReplaceCountedRefs can resolve the
-// ones whose readers carry a batched backlink count.
+// edges moved — deleted or inserted, oldest state first — so ReplaceCounted and its variants can
+// resolve the ones a reader refreshes by name (CountedChanges).
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
 	kinds, ids := refTargets(found)
 	changed, err := scanTargets(tx.Query(ctx, `
@@ -183,17 +242,28 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 	return nil
 }
 
-// CountedChangeLimit bounds the targets one event names. A body citing more counted nodes than
-// this is rare enough that carrying an unbounded array on every event is the wrong trade: the
-// event says it was truncated and the reader refreshes its lists wholesale instead.
-const CountedChangeLimit = 20
+// CountedChangeLimit bounds the targets of one kind (issue, ask, artifact, block) an event names,
+// so an event carries at most four times as many. Each kind is capped on its own: an index whose
+// one paragraph cites forty documents still names every one and every issue beside them, and a
+// reader falls back only for the kind it was not told about. A hundred entries of the longest
+// kind, a block (its node id, its reference and its document's uuid, about 200 bytes), is some
+// 20 KB, so a full event of four kinds stays under 100 KB: about what a comment at
+// contracts.DispatchBodyMax already carries, and far under NATS's 1 MiB maximum payload that the
+// outbox publishes it through. A body citing more is rare enough that carrying an unbounded array
+// on every event is the wrong trade.
+const CountedChangeLimit = 100
 
-// CountedChanges names the changed targets whose readers carry a batched backlink count — an
-// issue (its detail) and an ask (every list that carries the ask row, plus the human Inbox) —
-// in the shape those readers are keyed by. Other kinds are dropped: nothing counts a comment,
-// a message or a document, and the panels that list their edges refresh on the graph itself.
-// Past CountedChangeLimit it returns truncated, and the reader falls back to refreshing every
-// such list rather than carrying an unbounded array on an event.
+// countedKinds is the order CountedChanges lists the kinds it truncated in.
+var countedKinds = [...]string{"issue", "ask", "artifact", "block"}
+
+// CountedChanges names the changed targets a reader refreshes by name — an issue (its detail and
+// its count), an ask (every list that carries the ask row, plus the human Inbox), a document or
+// file (its Referenced by panel) and a block of a document (its own panel and every link to it,
+// which read one graph read, and its document's panel, which lists the edges at its blocks) — in
+// the shape those readers are keyed by. Comments, messages and components are dropped: nothing
+// counts them, and their panels refresh on the graph itself. A kind with more than
+// CountedChangeLimit named targets names none of them and is listed in TruncatedKinds, and the
+// reader falls back to refreshing every read of that kind; the other kinds are still named.
 //
 // A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
 // parses and is stored, so every lookup here compares text and a target that resolves to no
@@ -201,6 +271,7 @@ const CountedChangeLimit = 20
 func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.ReferenceChanges, error) {
 	issueKeys := []string{}
 	askIDs := []string{}
+	artifactKeys := []string{}
 	ordered := make([]Target, 0, len(changed))
 	seen := make(map[[2]string]struct{}, len(changed))
 	for _, target := range changed {
@@ -215,6 +286,14 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 		case "ask":
 			askIDs = append(askIDs, target.ID)
 			ordered = append(ordered, target)
+		case "artifact":
+			artifactKeys = append(artifactKeys, target.ID)
+			ordered = append(ordered, target)
+		case "block":
+			// A block is resolved through its document, the ref_key before the first '#'.
+			document, _, _ := strings.Cut(target.ID, "#")
+			artifactKeys = append(artifactKeys, document)
+			ordered = append(ordered, target)
 		}
 	}
 	issues, err := resolveIssueTargets(ctx, q, issueKeys)
@@ -225,25 +304,88 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
+	artifacts, err := resolveArtifactTargets(ctx, q, artifactKeys)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
 	references := make([]model.ChangedReference, 0, len(ordered))
 	for _, target := range ordered {
-		if target.Kind == "issue" {
+		switch target.Kind {
+		case "issue":
 			if _, found := issues[target.ID]; found {
 				references = append(references, model.ChangedReference{Kind: "issue", ID: target.ID})
 			}
+		case "ask":
+			if reference, found := asks[target.ID]; found {
+				references = append(references, reference)
+			}
+		case "artifact":
+			if reference, found := artifacts[target.ID]; found {
+				references = append(references, reference)
+			}
+		case "block":
+			document, blockID, _ := strings.Cut(target.ID, "#")
+			if reference, found := artifacts[document]; found {
+				references = append(references, model.ChangedReference{
+					Kind:       "block",
+					ID:         target.ID,
+					ArtifactID: &reference.ID,
+					Ref:        BlockRef(reference.Ref, blockID),
+				})
+			}
+		}
+	}
+	named := make(map[string]int, len(countedKinds))
+	for _, reference := range references {
+		named[reference.Kind]++
+	}
+	changes := model.ReferenceChanges{}
+	for _, kind := range countedKinds {
+		if named[kind] > CountedChangeLimit {
+			changes.TruncatedKinds = append(changes.TruncatedKinds, kind)
+		}
+	}
+	for _, reference := range references {
+		if named[reference.Kind] <= CountedChangeLimit {
+			changes.Targets = append(changes.Targets, reference)
+		}
+	}
+	return changes, nil
+}
+
+// MergeChanges is what two counted parts of one write moved, for an event that reports both: each
+// target once, first's before second's. A kind either part truncated stays truncated and names
+// none of its targets, and a kind whose merged targets pass CountedChangeLimit is truncated, as
+// CountedChanges would have left it.
+func MergeChanges(first, second model.ReferenceChanges) model.ReferenceChanges {
+	truncated := make(map[string]bool, len(countedKinds))
+	for _, kind := range slices.Concat(first.TruncatedKinds, second.TruncatedKinds) {
+		truncated[kind] = true
+	}
+	references := make([]model.ChangedReference, 0, len(first.Targets)+len(second.Targets))
+	seen := make(map[[2]string]struct{}, len(first.Targets)+len(second.Targets))
+	named := make(map[string]int, len(countedKinds))
+	for _, reference := range slices.Concat(first.Targets, second.Targets) {
+		key := [2]string{reference.Kind, reference.ID}
+		if _, duplicate := seen[key]; duplicate || truncated[reference.Kind] {
 			continue
 		}
-		if reference, found := asks[target.ID]; found {
-			references = append(references, reference)
+		seen[key] = struct{}{}
+		references = append(references, reference)
+		named[reference.Kind]++
+	}
+	merged := model.ReferenceChanges{}
+	for _, kind := range countedKinds {
+		if truncated[kind] || named[kind] > CountedChangeLimit {
+			merged.TruncatedKinds = append(merged.TruncatedKinds, kind)
 		}
 	}
-	if len(references) > CountedChangeLimit {
-		return model.ReferenceChanges{Truncated: true}, nil
+	for _, reference := range references {
+		if named[reference.Kind] <= CountedChangeLimit {
+			merged.Targets = append(merged.Targets, reference)
+		}
 	}
-	if len(references) == 0 {
-		return model.ReferenceChanges{}, nil
-	}
-	return model.ReferenceChanges{Targets: references}, nil
+	return merged
 }
 
 func resolveIssueTargets(ctx context.Context, q Queryer, keys []string) (map[string]struct{}, error) {
@@ -298,6 +440,40 @@ func resolveAskTargets(ctx context.Context, q Queryer, ids []string) (map[string
 			return nil, fmt.Errorf("scan changed ask reference: %w", err)
 		}
 		found[reference.ID] = reference
+	}
+	return found, rows.Err()
+}
+
+// resolveArtifactTargets resolves cited artifacts by the ref_key `refs` stores for them, the
+// address GET /api/v1/references?to= resolves too, into the entry a Referenced by panel is
+// matched by: the artifact's uuid (its node id in that read) and its dispatch:// address (the
+// reference the dashboard opens the panel on, refs.ArtifactRef). Keyed by ref_key.
+func resolveArtifactTargets(ctx context.Context, q Queryer, refKeys []string) (map[string]model.ChangedReference, error) {
+	found := map[string]model.ChangedReference{}
+	if len(refKeys) == 0 {
+		return found, nil
+	}
+	rows, err := q.Query(ctx, `
+		select id::text, ref_key, issue_key, coalesce(project_key, ''), session_id, slug, kind, is_primary
+		from artifacts
+		where ref_key = any($1)
+	`, refKeys)
+	if err != nil {
+		return nil, fmt.Errorf("resolve changed artifact references: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, refKey, project, slug, kind string
+		var issueKey, session *string
+		var primary bool
+		if err := rows.Scan(&id, &refKey, &issueKey, &project, &session, &slug, &kind, &primary); err != nil {
+			return nil, fmt.Errorf("scan changed artifact reference: %w", err)
+		}
+		found[refKey] = model.ChangedReference{
+			Kind: "artifact",
+			ID:   id,
+			Ref:  ArtifactRef(issueKey, project, session, slug, kind, primary),
+		}
 	}
 	return found, rows.Err()
 }

@@ -785,7 +785,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, reply.ID, reply.Body, s.deps.ServerURL, reply.CreatedAt, nil)
+	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, reply.ID, reply.Body, s.deps.ServerURL, reply.CreatedAt)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -805,6 +805,11 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.commentEventPayload(
 		r.Context(), tx, &reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	payload.ThreadLogins, err = commentThreadLogins(r.Context(), tx, reply)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
