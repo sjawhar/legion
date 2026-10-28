@@ -18,8 +18,11 @@
 //   8. the same script checks it.
 //
 // Every edit is anchored by text, never by line number. --strict fails, writing nothing, on any
-// anchor that is missing or not unique and on any finding of step 8; --lenient warns and skips
-// the edit, so an open pull request can port its old-layout files onto the new layout.
+// anchor that is missing or not unique, on any refusal of step 7 and on any finding of step 8;
+// --lenient warns and skips the edit, so an open pull request can port its old-layout files onto
+// the new layout. When step 7 refuses a file (its re-layout would render differently), --lenient
+// writes that output with the result of steps 1-6, warns with the refused block's line in that
+// output, skips step 8 for it, writes the other outputs as usual and exits 2.
 // --structural-only writes the result of steps 1-6, the intermediate commit a reviewer reads.
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -1058,6 +1061,7 @@ async function main(argv: string[]): Promise<number> {
   try {
     const results: { output: string; text: string }[] = [];
     let failed = false;
+    let refused = false;
     for (const [n, [input, output]] of pairs.entries()) {
       const text = await readFile(input, "utf8");
       const guide = guideOf(text);
@@ -1082,9 +1086,21 @@ async function main(argv: string[]): Promise<number> {
         const temp = join(scratch, `${n}-${guide}.md`);
         await writeFile(temp, next);
         const write = runLineBreaks(lineBreaks, ["--write", temp]);
+        // A refusal exits 2 and names the file; exit 2 without one (no parser) is no refusal.
+        const refusal = write.status === 2 && write.stderr.includes(`${temp}: refusing to write: `);
+        if (refusal && !strict) {
+          process.stderr.write(
+            `warning: ${output}: semantic-line-breaks.ts --write refused it; ${output} holds the structural text, not re-laid out\n${write.stderr.replaceAll(temp, output)}`
+          );
+          refused = true;
+          results.push({ output, text: next });
+          continue;
+        }
         if (write.status !== 0) {
+          const said = `${write.stdout}${write.stderr}`.replaceAll(temp, input);
+          const where = refusal ? " (line numbers count the text --structural-only writes)" : "";
           fail(
-            `${input}: semantic-line-breaks.ts --write exited ${write.status}\n${write.stdout}${write.stderr}`,
+            `${input}: semantic-line-breaks.ts --write exited ${write.status}${where}\n${said}`,
             write.status
           );
         }
@@ -1112,7 +1128,7 @@ async function main(argv: string[]): Promise<number> {
       await mkdir(dirname(output), { recursive: true });
       await writeFile(output, text);
     }
-    return 0;
+    return refused ? 2 : 0;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
