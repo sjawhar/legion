@@ -11,7 +11,6 @@ date: 2026-10-28
 status: active
 module: packages/envoy-client
 related_issues:
-  - "INFRA-548"
   - "sjawhar/legion#2331"
 ---
 
@@ -41,11 +40,11 @@ fixture from a dead route.
 ## Evidence
 
 - `packages/envoy-client/test/stall-proxy.ts` `freeze()` pauses `client` and `target`.
-  - The first version read and discarded both sides. The plan's gap analysis chose that (".legion/
-    INFRA-548/plan.json", "The proxy reads and discards both sides of a frozen connection") to keep
-    nats.js's close from waiting on a full buffer.
+  - The first version read and discarded both sides. The plan's gap analysis chose that ("The
+    proxy reads and discards both sides of a frozen connection") to keep nats.js's close from
+    waiting on a full buffer.
   - Review round 1 (thread PRRT_kwDORFy7ds6wkMTS) showed that this hid the stale-close hang that
-    `docs/solutions/envoy/nats-js-2-29-3-never-finishes-a-stale-close-behind-a-dead-path-and-leaks-an-abandoned-dial-patch-both-INFRA-548.md`
+    `docs/solutions/envoy/nats-js-2-29-3-never-finishes-a-stale-close-behind-a-dead-path-and-leaks-an-abandoned-dial-patch-both-pr2331.md`
     describes.
 - `packages/envoy-client/src/__tests__/nats-stall.test.ts`, row C:
   - Written at 4 MiB on Bun 1.3.14, where it failed without the patch.

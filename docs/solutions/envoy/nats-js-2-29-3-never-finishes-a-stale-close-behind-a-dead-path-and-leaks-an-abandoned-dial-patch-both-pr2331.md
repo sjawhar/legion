@@ -11,7 +11,6 @@ date: 2026-10-28
 status: active
 module: packages/envoy-client
 related_issues:
-  - "INFRA-548"
   - "sjawhar/legion#2331"
 ---
 
@@ -50,4 +49,4 @@ related_issues:
     15 s after SIGTERM before the patch.
 - The stale-close defect came in review round 1 (thread PRRT_kwDORFy7ds6wkMTK), after the first
   proof had passed on a proxy that drained the backlog (see
-  `docs/solutions/testing/freeze-a-network-path-by-pausing-both-sockets-and-size-a-backlog-past-the-runtime-buffers-INFRA-548.md`).
+  `docs/solutions/testing/freeze-a-network-path-by-pausing-both-sockets-and-size-a-backlog-past-the-runtime-buffers-pr2331.md`).

@@ -10,7 +10,6 @@ date: 2026-10-28
 status: active
 module: packages/envoy-client
 related_issues:
-  - "INFRA-548"
   - "sjawhar/legion#2331"
 ---
 
@@ -36,4 +35,4 @@ related_issues:
 - The first `bun install` afterwards left the reverted line in place. The file's link count was 2,
   and its other link was in `nats@2.29.3@@@1_patch_hash=257c91f8b5726726`.
 - Deleting that entry and reinstalling brought the patch back, and rows A, B and C passed.
-- The handoff `.legion/INFRA-548/implement.json` recorded this under `discoveredComplexity`.
+- The implementer's handoff (`implement.json`) recorded this under `discoveredComplexity`.
