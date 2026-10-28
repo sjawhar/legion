@@ -2,37 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T17:34:11Z",
-  "decision": "changes_requested",
-  "round": 8,
-  "reviewedCodeHead": "402c06ae0eaa",
+  "completed": "2026-10-28T19:07:01Z",
+  "decision": "approved",
+  "round": 9,
+  "reviewedCodeHead": "9b1cba4fa9cee37648f96556b43adff97e0adff5",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js",
-      "description": "Main's #2423 (merged in 402c06ae) makes the rule: 'A pull request never commits dist/ or legion/' (packages/claude-envoy/AGENTS.md:151). A pull request that already carries such changes drops them at its next merge of main, and a reviewer asks for that (:159-163). The branch still changes each of the three bundles by 266 lines against main. Main's rebuild workflow commits these files after each merge, so every rebuild before this pull request lands is a new conflict on generated files. No CI check compares the committed bundle with a build. If kept, the plugin bytes on main change at the merge, not at the rebuild, so the rebuild has nothing to push and the production check has no rebuild commit to name. Fix: in a new commit, jj restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion."
-    },
-    {
-      "severity": "minor",
-      "file": ".dispatch/architecture/claude-envoy-bridge.md:9",
-      "description": "'so dist/ is rebuilt in the same change' contradicts the new rule. The changes reach Claude Code with main's rebuild after the merge."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/claude-envoy/.changes/unreleased/pr2397-Added-20261028-101453.yaml:6",
-      "description": "'since dist/ was regenerated' becomes false once dist is dropped. Say main's rebuild carries the new bundle."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": {
-    "fingerprint": "Last review commit_id 68162a8a: 5d641f7c...; code head 402c06ae: a83c1ac7..., changed. New narrowed round; thermonuclear pair run.",
-    "merge": "asks.go keeps main's s.publish(appended...) with the branch's related-check comment. routes_table_test.go pins 144 routes (main's 141 plus the branch's 3). go vet ./internal/dispatch/... and TestRoutesTablePinsEveryRegisteredRoute pass in a scratch copy. The pair found no semantic conflict with #2452, #2455, #2451, #2324 or #2361.",
-    "dist": "The branch's dist equals a fresh build of the head source (bun 1.4.4 build.ts --out), so the finding is the rule and the conflicts, not stale bytes.",
-    "counts": "dispatchConnectionsPerPod 87 = store.ConnectionsPerProcess.",
-    "ci": "Required checks at 402c06ae were queued when read; a request for changes does not wait.",
-    "thermonuclear": "deep-review CHANGES and code-quality CHANGES, both on the dist finding (code quality also raised the two text lines above).",
-    "threads": "All seven earlier threads resolved."
+    "scope": "Narrowed to round 8's items. 9b1cba4f is the only code commit since c148b095. It restores packages/claude-envoy/dist from main, removes the 'dist/ is rebuilt in the same change' line from .dispatch/architecture/claude-envoy-bridge.md, and drops 'since dist/ was regenerated' from the claude-envoy fragment.",
+    "dist": "packages/claude-envoy/dist and legion equal the fork point 53f39ba0 (jj diff --stat empty). GitHub's file list for the pull request holds nothing under either directory, and claude-envoy-bridge.md equals the fork point's.",
+    "thermonuclear": "Not run: the round's diff removes generated output and changes two lines of text, with no runtime code.",
+    "ci": "Required lint, typecheck, test and pr-title all success at the CI head 66f1787d (the implement handoff push that started the pull_request runs). The compare from 66f1787d to 597f2b78 changes only .legion/ (1 file). MERGEABLE at 19:06Z.",
+    "threads": "PRRT_kwDORFy7ds6xPmwr, PRRT_kwDORFy7ds6xPmww and PRRT_kwDORFy7ds6xPmw4 each carry my accepting reply and are resolved. All ten threads are resolved.",
+    "e2eLines": "E2E (implementer) and E2E (tester) present."
   }
 }
