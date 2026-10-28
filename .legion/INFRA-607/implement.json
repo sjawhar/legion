@@ -2,58 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T21:16:00Z",
+  "completed": "2026-10-28T22:32:00Z",
   "proof": [
     {
-      "criterion": "Shutdown waits for every running intake handler before the database pool closes (review thread PRRT_kwDORFy7ds6xSaz8)",
-      "surface": "The real envoy-dispatch binary, config B (fake GitHub holding a merged pull request's fetch), one idle process, SIGTERM during the hold",
-      "command": "headproof6 check 1 (dispatch://INFRA-607/artifact/stop-path-proof-md, raw runs stop-path-proof-raw-tar-gz); go test ./cmd/dispatch/ -run TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool",
-      "observed": "At 67c3d0f2: the fake answered 3 s after SIGTERM, the delivery_pull_requests row was written and last_event_at set, the message acknowledged (ack floor 1/1), and only then the process deregistered and closed its pool; exit 3.06 s after SIGTERM, no 'closed pool' line. The test passes.",
-      "headSha": "67c3d0f2d94b5aba9a588e4dbf42e5a312a8d198",
-      "negativeControl": "At 4f9bd6e8 the process deregistered 0.6 s after the signal while the handler waited on GitHub, then logged 'process event ... closed pool' and acknowledged the message with no row and a null last_event_at; the test failed on the old order with that output."
+      "criterion": "A panic during startup cancels the context before the intakes' stop and the process exits with the panic printed (review thread PRRT_kwDORFy7ds6xVRpw)",
+      "surface": "The real delivery.StartIntakes on in-process NATS and Postgres under main's deferred stop (stopIntakesOnExit), with a panic in the deferring goroutine",
+      "command": "go test ./cmd/dispatch/ -run TestAPanicAfterTheIntakesStartEndsTheProcess -count=1 -v",
+      "observed": "PASS in 0.59 s: the panic is recovered and the context ended; main defers stopIntakesOnExit(cancel, waitIntakes), which cancels and then waits.",
+      "headSha": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
+      "negativeControl": "With the old wait-only deferred stop the test failed after 20.46 s: 'a panic after the intakes started never got past their deferred stop: it waited for intakes nothing had stopped'."
     },
     {
-      "criterion": "A stop drains the subscription the bus holds after a connection replacement, not the dead original (review thread PRRT_kwDORFy7ds6xSa0G)",
-      "surface": "The real binary with its intake's NATS connection closed by a TCP proxy's -ERR so the client replaces it and restores the subscription, then SIGTERM while a pull request's fetch is held",
-      "command": "headproof6 check3.sh and check3b.sh; go test ./internal/dispatch/delivery/ -run TestAStopAfterTheConnectionWasReplacedDrainsTheRestoredSubscription; go test ./internal/bus/ -run TestDrainSubscriptionDrainsTheHandleARestoreBound",
-      "observed": "At 67c3d0f2: after 'resubscribing' and 'recovery successful', no drain ERROR at SIGTERM; the durable lost its subscriber 15 ms after the signal; a message published after SIGTERM was not delivered to the stopping process; the next process handled the held messages once each and wrote the row.",
-      "headSha": "67c3d0f2d94b5aba9a588e4dbf42e5a312a8d198",
-      "negativeControl": "At 4f9bd6e8: 'drain the intake's subscription error=\"nats: connection closed\"' right after the signal, the subscription stayed bound until the client closed, and the message published after SIGTERM was delivered to the stopping process; the delivery test failed on the old code ('the stopping intake's subscription stayed bound to the durable')."
-    },
-    {
-      "criterion": "A handler cut off by the stop deadline hands its message back",
-      "surface": "The real binary, GitHub holding a fetch 50 s, SIGTERM 2 s after publishing",
-      "command": "headproof6 check 2",
-      "observed": "Exit 15.08 s after SIGTERM with the hand-back line; the message stayed unacknowledged (num_ack_pending 1); a fresh process was redelivered it once and wrote the row.",
-      "headSha": "67c3d0f2d94b5aba9a588e4dbf42e5a312a8d198",
-      "negativeControl": "With GitHub answering at once the process exits in about 0.07 s with no hand-back line (headproof4 and round 3 checks)."
+      "criterion": "The intake stop budget runs from the signal and bounds a bind in flight, so deregister and pool.Close stay inside stopGrace (review thread PRRT_kwDORFy7ds6xVRrU)",
+      "surface": "The intake against in-process NATS and Postgres with its bind held past the signal; the real binary's stop paths",
+      "command": "go test ./internal/dispatch/delivery/ -run TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal -count=1 -v; headproof7 checks 1-4 (dispatch://INFRA-607/artifact/stop-path-proof-round-2-md, raw runs stop-path-proof-round-2-raw-tar-gz)",
+      "observed": "Test passes: with the budget shrunk to 3 s and the bind returning 2 s after the signal, Run returns within budget + 1 s of the signal, the held fetch is given up and the message redelivered at once. Real binary: GitHub answering 3 s after SIGTERM, the write landed before the pool closed, exit 3.06 s; GitHub holding 50 s, exit 15.05 s with the hand-back line; after a forced connection replacement, no drain ERROR and the subscriber gone within 21 ms of SIGTERM; a standby on its bind poll exits 0.05 s after SIGTERM with no error.",
+      "headSha": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
+      "negativeControl": "On the old code the test failed: 'Run returned 5.002s after its ctx ended, its bind 2s after it; want within 4s: the stop budget ran from the bind's return, not from ctx's end'."
     },
     {
       "criterion": "Every changed loop is silent at idle; the remaining timers are named",
       "surface": "Two head and two fork-point processes side by side, statements by source over 10 minutes",
       "command": "dispatch://INFRA-607/artifact/idle-by-source-round-5-md (raw runs idle-by-source-round-5-raw-tar-gz); dispatch://INFRA-607/artifact/edit-notice-check-md",
-      "observed": "4.50 -> 3.34 statements per second per process; embedding scan, coverage, task progress, reference excerpts, suggestion outcomes and edit notices at zero; edit notice sent 10 ms after it fell due with no statement before.",
+      "observed": "4.50 -> 3.34 statements per second per process; embedding scan, coverage, task progress, reference excerpts, suggestion outcomes and edit notices at zero.",
       "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
       "negativeControl": "The fork point in the same window ran each changed loop on its timer (edit notices 481 statements, embedding scan 240)."
     }
   ],
   "filesChanged": [
-    "cmd/dispatch/shutdown.go, main.go, shutdown_test.go: shutdown waits for the intakes' stop (waitIntakes) before the pool closes; intakeStopDeadline removed, delivery.intakeStopBudget the one deadline",
-    "internal/bus/nats.go, recovery.go, release_test.go: Client.DrainSubscription drains the handle the client holds and keeps a draining registration from being re-bound",
-    "internal/dispatch/delivery/intake_delivery.go (moved from intake.go), intake_keyed_test.go, intakes.go: stop drains through DrainSubscription",
-    "Cleanups: migration header lines; pglisten Notification/OnNotification/OnDisconnected/Hub.Handle removed; duty.WokenLoop.HeldRetry removed (retry derived from MinGap)",
-    "Forward merge of main c24ea568 (14be5104): migrations renumbered to 0137-0143"
+    "cmd/dispatch/main.go, shutdown.go, shutdown_test.go: stopIntakesOnExit cancels before waiting; shutdown comments state the signal-based bound",
+    "internal/dispatch/delivery/intake.go, intake_delivery.go, jobs.go, intakes.go and tests: stopContext armed before the bind loop bounds bind, handler wait and drain; reconcile JetStream calls take the stop context; StartIntakes returns stop func(); intakeStopBudget a var for tests",
+    "internal/bus/nats.go, recovery.go, release_test.go: DrainSubscription gives up the registration itself; Release and the draining flag removed",
+    "cmd/dispatch/README.md: the intake stop paragraph"
   ],
   "trickyParts": [
-    "intakeDelivery.stopping is kept: it is set before the drain and keys.stop(), while released is set only after every handler returned; in between it keeps a message arriving during the drain from starting a handler.",
-    "A draining registration is skipped by restoreSubscriptions and subscriptionsHealthy, so a connection replaced during the stop does not re-bind it."
+    "A subscribe already in flight at the signal still finishes (one 10 s lookup at most); no new subscribe starts once ctx has ended, and the reconcile's JetStream calls end at signal + budget."
   ],
   "deviations": [
-    "The outbox's 5 s retry ticker stays: INFRA-590's #2395 is still open.",
-    "Check 3 of the stop-path proof forces the connection replacement through a TCP proxy's -ERR: a NATS server restart alone reconnects in place (MaxReconnect -1) and never replaces the connection. The previous head showed the false drain ERROR and a post-signal delivery to the stopping process, but no repeated redelivery loop."
+    "TestAMessageInItsHandlerAtShutdownIsAcknowledged had only its stop call sites changed (stop() now takes no context); its body is unchanged. The tester's two tests are untouched.",
+    "The outbox's 5 s retry ticker stays: INFRA-590's #2395 is still open."
   ],
   "openQuestions": [],
-  "discoveredComplexity": [
-    "The committed load reproduction (#2369) reached main after this PR's measurements; the idle-by-source tooling stays in the attached archives."
-  ]
+  "discoveredComplexity": []
 }
