@@ -135,6 +135,84 @@ func TestTheCompactionSweepListsOnlyDocumentsOfMoreThanOneRow(t *testing.T) {
 	}
 }
 
+// The hourly sweep is a timer that runs whether or not anything is due, so what it reads must not
+// grow with the documents that have nothing to fold: a pass over a database of many documents of one
+// row each and one due document reads that document's rows and no row of the others. A pass that
+// lists its candidates by reading every document's rows (a scan of doc_updates, by its heap or its
+// primary key) reads at least one row per document, every hour, on a table of production's size.
+func TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	const notDue = 2000
+	createDocuments(t, database, notDue)
+	due := storeAgedRows(t, database, 3, 20*time.Minute)
+	before := docUpdatesTuplesRead(t, database)
+
+	service.compactionSweepTick(ctx, excerptLeases(t, database))
+
+	if got := storedRows(t, database, due); len(got) != 1 {
+		t.Fatalf("the due document holds rows %v after the sweep, want it folded into one", rowVersions(got))
+	}
+	if read := docUpdatesTuplesRead(t, database) - before; read >= notDue {
+		t.Fatalf("the sweep read %d doc_updates rows to fold one document of 3 rows among %d documents with nothing to fold, want fewer than %d: it reads every document", read, notDue, notDue)
+	}
+}
+
+// docUpdatesTuplesRead is how many doc_updates rows the database's backends have read, by a
+// sequential scan or through any index of the table, once every compaction pool connection has
+// flushed the statistics it holds: a backend flushes them when it goes idle after
+// pg_stat_force_next_flush.
+func docUpdatesTuplesRead(t *testing.T, database *store.Store) int64 {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := database.Pool.Compaction()
+	if err != nil {
+		t.Fatalf("open the compaction pool: %v", err)
+	}
+	var held []func()
+	for range pool.Config().MaxConns {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire a compaction connection: %v", err)
+		}
+		if _, err := conn.Exec(ctx, `select pg_stat_force_next_flush()`); err != nil {
+			t.Fatalf("flush a compaction connection's statistics: %v", err)
+		}
+		held = append(held, conn.Release)
+	}
+	for _, release := range held {
+		release()
+	}
+	if _, err := database.Pool.Exec(ctx, `select pg_stat_force_next_flush()`); err != nil {
+		t.Fatalf("flush the test connection's statistics: %v", err)
+	}
+	read := func() int64 {
+		var n int64
+		if err := database.Pool.QueryRow(ctx, `
+			select coalesce(t.seq_tup_read, 0) + coalesce((
+				select sum(i.idx_tup_read) from pg_stat_user_indexes i where i.relid = t.relid
+			), 0)::bigint
+			from pg_stat_user_tables t where t.relname = 'doc_updates'
+		`).Scan(&n); err != nil {
+			t.Fatalf("read doc_updates statistics: %v", err)
+		}
+		return n
+	}
+	// The flushes land as each connection goes idle; read until two reads agree.
+	last := read()
+	for range 20 {
+		time.Sleep(100 * time.Millisecond)
+		now := read()
+		if now == last {
+			return now
+		}
+		last = now
+	}
+	return last
+}
+
 // A document whose lock another holder has when the sweep reaches it is handed to the service's
 // compaction queue, not waited for: the pass goes on and compacts the next document, and the queue
 // compacts the busy one once its lock is free.
