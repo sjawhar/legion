@@ -2,65 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T17:40:00Z",
-  "round": 2,
+  "completed": "2026-10-27T19:10:00Z",
+  "round": "ci-red pr-title at ae4b7924a9d2",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
   "head": "5cfd1080069831382a886cc5e72666f5a1274275",
   "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6448930344",
-  "reviewAnswered": "Round 2 at a946639d7678: 1 Important + 2 Minor, all fixed in 5cfd10800698; 3 threads answered and resolved one by one (the 9 round-1 threads were already resolved).",
+  "reviewAnswered": "No review this round: the required pr-title check was red (runs 40551347938 and 40551193359) because the title was not a conventional-commit subject. The title is now `feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)`; the code is unchanged since round 2.",
   "proof": [
     {
-      "criterion": "The script is committed with tests that re-run a known merge and list its conflicted files (round 2: an open PR with no update in the window is read; records without createdAt or with a non-string mergedAt are refused)",
-      "surface": "bun test scripts/conflicts (local; the CI test job runs the same three steps)",
+      "criterion": "The pull request title passes the required pr-title check (conventional-commit subject)",
+      "surface": "the pull request's title on GitHub, read by .github/workflows/pr-title.yaml on its `edited` event",
+      "command": "gh pr edit 2411 --repo sjawhar/legion --title \"feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)\"; then the workflow's own test: echo \"$TITLE\" | grep -qE '^[a-z]+(\\([^)]+\\))?!?: .+'",
+      "observed": "gh pr view shows the new title; the workflow's regex accepts it locally (exit 0). Releases version by paths (release.yaml legion-v reads packages/daemon/ and named scripts only), so `feat(scripts)` bumps no release. The workflow run for the edit had not appeared when this round completed (runners backed up); the daemon reads it",
+      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
+      "negativeControl": "the old title `Measure Legion pull requests' merge conflicts before and after a fix (scripts/conflicts, INFRA-588)` is refused by the same regex (exit 1), as pr-title run 40551347938 refused it"
+    },
+    {
+      "criterion": "The script is committed with tests that re-run a known merge and list its conflicted files",
+      "surface": "bun test scripts/conflicts (local, in the recreated workspace; the CI test job runs the same three steps)",
       "command": "cd $LEGION_WORKSPACE && bun test scripts/conflicts && bunx biome check --error-on-warnings scripts/conflicts && bunx tsc --noEmit -p scripts/conflicts",
       "observed": "40 pass, 0 fail across 4 files; biome clean on 14 files; tsc exit 0",
       "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "readRawRun with createdAt missing or null, and with mergedAt a number or missing, throws UsageError (asserted)"
+      "negativeControl": "readRawRun with createdAt missing, and with mergedAt a number, throws UsageError (asserted in summary.test.ts)"
     },
     {
       "criterion": "The port reproduces the before measurement (P1, before numbers unchanged)",
-      "surface": "the CLI on the Python run's raw records (dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json)",
-      "command": "bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/before.json\" --branch-prefix legion/",
-      "observed": "byte-identical (cmp) to round 1's output, itself byte-identical to round 0's: combined 126 / 80 / 253, tiers 89 and 108, envoy CHANGELOG 89 in 39; the driver's diffs against baseline.md Part 1 and Part 2 are empty",
+      "surface": "the CLI on the Python run's raw records, fetched again from dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json into the recreated scratch volume",
+      "command": "dispatch doc-read --issue INFRA-588 --artifact conflict-baseline-2026-10-20-to-27-json | tail -n +3 > \"$TMPDIR/i588/before.json\" && bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/i588/before.json\" --branch-prefix legion/",
+      "observed": "exit 0; 126 PRs read (68 merged, 58 other), 80 carrying, 253 conflicting merges, tiers 89 and 108, packages/envoy/CHANGELOG.md 89 events in 39 PRs: the same numbers as rounds 0-2",
       "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "before records with prs[0].createdAt removed -> 'raw records: prs[0].createdAt is missing or not a string', exit 2"
+      "negativeControl": "rounds 0-2 (PR comment 6448930344): JSON without prs and records without createdAt -> exit 2"
     },
     {
-      "criterion": "A run counts every PR open through the window, whenever it is made (round-2 finding 1)",
-      "surface": "the CLI against sjawhar/legion on GitHub, one clone, this head against the previous code head ebeda2541e7f",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T17:00:00Z --until 2026-10-27T17:20:00Z --branch-prefix legion/ --workdir \"$TMPDIR/conflicts3\" --no-fetch",
-      "observed": "61 PRs read at this head; gh pr list --state open listed 61 open legion/ PRs at 17:22Z, 41 of them with no update since 17:00Z",
+      "criterion": "Live measurement, fix states and the comparison (P2-P4)",
+      "surface": "the CLI against sjawhar/legion on GitHub",
+      "command": "as recorded in round 2 at this same code head: --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ (fresh workdir); plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'; and --since 2026-10-27T11:21:00Z --compare-with before.json",
+      "observed": "round 2 at 5cfd10800698 (code unchanged since): 141 listed, 128 read, merged section byte-equal to P1; envoy CHANGELOG 79/10/2; comparison before column 126/80/253/89/108 (https://github.com/sjawhar/legion/pull/2411#issuecomment-6448930344)",
       "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "the same command with ebeda2541e7f's scripts/conflicts (extracted with jj file show) reads 22: the open PRs nothing updated since 17:00Z are missed"
-    },
-    {
-      "criterion": "The script measures live GitHub history the same way (P2) and fix states hold (P3)",
-      "surface": "the CLI against sjawhar/legion on GitHub, fresh workdir $TMPDIR/conflicts3",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/conflicts3\"; then the same with --no-fetch --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'",
-      "observed": "exit 0, 238 s, 619 MB; 141 listed, 128 read, carrying 82, merges 259; merged section byte-equal to P1's; envoy CHANGELOG 91 = before 79 + transition 10 + after 2",
-      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "before records with merge cd3c748767ee's upstream parent absent, --fixed on --from-json -> exit 1 naming the merge and parent, no report"
-    },
-    {
-      "criterion": "The comparison the production check runs works before the merge (P4)",
-      "surface": "the CLI with --compare-with the before records",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/conflicts3\" --no-fetch --compare-with \"$TMPDIR/before.json\"",
-      "observed": "exit 0; before column 126 / 80 (63.5%) / 253 / 89 / 108, equal to P1; after 72 read / 36 carrying (50.0%)",
-      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "--compare-with a file containing 'not json' -> exit 2 (rounds 0-1)"
+      "negativeControl": "records with merge cd3c748767ee's upstream parent absent, --fixed on --from-json -> exit 1 naming the merge and parent (round 2)"
     }
   ],
-  "filesChanged": [
-    "scripts/conflicts/github.ts",
-    "scripts/conflicts/summary.ts",
-    "scripts/conflicts/measure.ts",
-    "scripts/conflicts/README.md",
-    "scripts/conflicts/__tests__/summary.test.ts",
-    "scripts/conflicts/__tests__/github.test.ts"
-  ],
-  "trickyParts": [
-    "listPullRequests unions the updated-since search with every open PR (each refused at 1000); existedInWindow then narrows to PRs that existed in the window, so the population no longer depends on when the run is made."
-  ],
+  "filesChanged": [],
+  "trickyParts": [],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
