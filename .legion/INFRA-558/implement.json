@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-558",
+  "completed": "2026-10-28T18:40:00Z",
+  "proof": [
+    {
+      "criterion": "Item 6 / acceptance 1: the two-build test exists and passes for the current build against the previous release (CLI, documents, messages both ways).",
+      "surface": "Two real envoy-dispatch processes (legion-envoy-v18.4.0 built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server, each build's dispatch CLI against the other build's server",
+      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous-18.4 && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-18.4 DISPATCH_TEST_DATABASE_URL=<local postgres> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
+      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (13.3s), TestTwoBuildsReadAndEditEachOthersDocuments PASS (43.6s: 84 corpus documents each way read, edited and opened writable on the other build's socket, approval carried, 54 refs rows survive each way), TestTwoBuildsPassMessagesBothWays PASS (115.6s: outbox event ids equal sets, 50 GitHub messages handled once across a graceful stop of each build, stream and consumer settings unchanged)",
+      "headSha": "9605d1c0ce50b018dcc0e7c63a645fc1312df227",
+      "negativeControl": "This tree's intake stop made to skip its ack: TestTwoBuildsPassMessagesBothWays FAIL '#1011 2 times [current build ... current build ...]'. Before cc73bbec (pool closed before the intake holds were released): FAIL 'the restarted current build took delivery-events from the previous build, which delivers from it under no hold'."
+    },
+    {
+      "criterion": "Item 6 browser half: each build's page works against the other build's server (sign in, issue list, comment, document edit seen by the other build, ask answer, Delivery socket).",
+      "surface": "Dispatch web app in real Chromium (Playwright) through the two-process proxy, page requests pinned to one process and API, websocket, SSE and /auth to the other; process B is legion-envoy-v18.4.0",
+      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_PORT_B=<free port> DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous-18.4/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous-18.4/web bun run e2e:multiprocess -- cross-build.multiprocess",
+      "observed": "2 passed: 'a page of this tree's build (Dispatch A) works against the server of the previous build (Dispatch B)' (11.0s) and the reverse (9.8s); the newer-content row skips by design when B is the previous build and passes in the full bun run e2e:multiprocess with both processes on this tree (8 passed)",
+      "headSha": "9605d1c0ce50b018dcc0e7c63a645fc1312df227",
+      "negativeControl": "Proxy made to ignore the page/API pin cookies and the newer-content hook route removed: all 3 rows FAIL (assets served by the wrong process; hook 404)."
+    },
+    {
+      "criterion": "Items 1-4: a test for each item, failing before and passing after.",
+      "surface": "Go packages against real Postgres and in-process nats-server (3-node JetStream cluster for replicas); web, CLI and proof-editor under bun",
+      "command": "Per item, the test-only commit then the fix commit (listed in the PR body): e.g. cd packages/envoy && go test ./internal/dispatch/api/ ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/ ./internal/dispatch/refs/ ./internal/bus/ ./internal/dispatch/delivery/ ./internal/dispatch/duty/ ./internal/dispatch/embedqueue/ ./internal/dispatch/processes/; cd packages/dispatch && bun test web/src; cd packages/envoy-client && bun test",
+      "observed": "At each test-only commit the new tests fail (e.g. 'unknown field due_date', 'close 4409: DOC_SCHEMA, want close 4425', 'replicas = 1, want 3', 'standby handled 0 of 4 within 5s', 'the inactive process called its embedder 2 times'); at 9605d1c0 every Go package passes except environment-only tests (pmdoc 10 ms-clock linearity tests, files S3 needing Docker), web 2628 pass, envoy-client 1028 pass, contracts 301 pass, proof-editor 159 pass, multiprocess ok",
+      "headSha": "9605d1c0ce50b018dcc0e7c63a645fc1312df227",
+      "negativeControl": "D9 guard: excluding every ySyncPluginKey transaction from the pending store makes 'an edit typed in the editor is kept, and the editor's repair beside it is not' fail; E-c: unchanged exclusive.go runs a 5-minute loop 10 times per period."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api (lenient bodies and frames, unknown_kinds, DOC_NEWER_CONTENT, newer-content test hook, file-store row bytes)",
+    "packages/envoy/internal/dispatch/pmdoc (manifest with since/creatable_since, write-path refusal, ErrUnknownElement, DocumentSince)",
+    "packages/envoy/internal/dispatch/docs (newer content, fleet socket admission, approval carry, excerpt skips, snapshot guard, block index log)",
+    "packages/envoy/internal/dispatch/refs (unknown-kind edges kept, drift skip)",
+    "packages/envoy/internal/bus (stream generation, replicas, ensure on reconnect, deployed subjects, Client.Release)",
+    "packages/envoy/internal/dispatch/delivery (intake under duty.Hold, fenced take-over, StopDelivering, consumer generation)",
+    "packages/envoy/internal/dispatch/duty (per-period passes, HoldToken; hold.go from INFRA-590's c8f23bf)",
+    "packages/envoy/internal/dispatch/processes, embedqueue, store (migrations 0137-0139, lease pool 16)",
+    "packages/envoy/cmd/dispatch (wiring, shutdown order, backfill-files refusal, twobuild harness)",
+    "packages/envoy/scripts/build-dispatch-build.sh",
+    "packages/dispatch/web (compiled manifest, schema_creatable, no-route retry, INVALID_FRAME reconnect, newer-content state, pending-sync repair exclusion)",
+    "packages/dispatch/e2e (per-process binary, page/API pins, cross-build spec)",
+    "packages/envoy-client, packages/contracts, packages/proof-editor, packages/claude-envoy/dist",
+    ".github/workflows/envoy-and-contracts.yaml (dispatch-two-builds job)",
+    "packages/envoy/cmd/dispatch/README.md, store/README.md, AGENTS.md files, pr2461 changie fragments"
+  ],
+  "trickyParts": [
+    "y-prosemirror 1.3.7 deletes an element its schema cannot build (sync-plugin.js createNodeFromYElement) with origin ySyncPluginKey; pending-sync tells it from a typed edit by the absent addToHistory meta.",
+    "ygo's OnTokenAuth gets only (room, token), so the HTTP-time admission is recorded per (room, schema_version) and answered to the token; the 15 s re-check closes a revoked socket with 1012 through a wrapped hijacked conn.",
+    "A take-over subscribes to a fresh deliver subject before it recreates the durable, so a previous-build standby never sees it unbound; nats-server refuses a DeliverSubject update while the old subject has interest, so it is delete and create.",
+    "The previous release (v18.4.0) exits without acking the message in its handler; the harness tolerates exactly that one redelivery and fails any duplicate whose first handling is this build's."
+  ],
+  "deviations": [
+    "Plan departures 1-3 as approved (unknown elements refused safely; text-only meaning search on an inactive embedder identity; protections bind from the release after this one).",
+    "D3 refuses only newly added not-yet-creatable elements, so a document a newer build wrote stays editable.",
+    "D7: a version write whose approved version holds newer content answers 409 DOC_NEWER_CONTENT on every write path, not only settlement, so no path drops the carry.",
+    "Owning bus clients also re-read the deployed subjects every 60 s.",
+    "Previous release for CI is now legion-envoy-v18.4.0; against v18.1.0 the block graph's 'block' refs rows are deleted by v18.1.0 (no unknown-kind guard), history not fixable here.",
+    "The previous build cannot serve on a held socket (no DISPATCH_LISTEN_FD), so the harnesses let it bind its own port (small port race in tests only)."
+  ],
+  "openQuestions": [
+    "Stack: merged legion/INFRA-559 at 8675beea; INFRA-555 is on main. This PR merges after INFRA-559; .legion/INFRA-559/ in this tree goes when INFRA-559's retro removes it and this branch merges that."
+  ]
+}
