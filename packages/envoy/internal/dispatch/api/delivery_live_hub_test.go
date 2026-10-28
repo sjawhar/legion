@@ -1011,10 +1011,10 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	held := conn.snapshot(t, 5*time.Second, "t").Body
-	rig.hub.catchUpNow()
-	if _, cursor := rig.cursors(); cursor < 300 {
-		t.Fatalf("the hub's event cursor = %d, want at least 300", cursor)
-	}
+	// One catch-up reads only up to the horizon proven so far, which a transaction another package
+	// holds open on the shared test Postgres can keep below the newest events; the gap re-read
+	// brings the cursor there.
+	rig.waitForEventCursor(t, 300, "the 300 events before the reset")
 
 	// The event log restarts at id 1, as e2e/seed.ts:20 and :150 reset it; then a title the view
 	// names changes, its event (id 1) below the hub's cursor.
