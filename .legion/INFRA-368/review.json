@@ -2,27 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T16:50:00Z",
-  "round": 4,
-  "decision": "changes_requested",
-  "reviewedHead": "23817239df7d7f85ee741aed6d816b9e32972e20",
-  "codeHead": "c64a30a2b7d95673b62d27ca970c24cd5ce530b4",
+  "completed": "2026-10-28T22:51:57Z",
+  "round": 5,
+  "decision": "approved",
+  "reviewedHead": "the handoff commit this file is pushed in (child of b7ee5494b593a111ff423947b22df5da74948a87)",
+  "codeHead": "95336ce647ab",
+  "ciHead": "d9be59ee417006f2f9eec31cd4a686f9d37bbeb0",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 0,
-  "round3Findings": "Fixed. 188066ab restores packages/claude-envoy/dist, and `git diff $(merge-base origin/main 23817239) 23817239 -- packages/claude-envoy/dist packages/claude-envoy/legion` is empty. The Production line names #2423's rebuild run and check-dist. The merge c64a30a2 lost nothing: its tree equals `git merge-tree --write-tree 188066ab 8b4a862b2`.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "skills/dispatch/SKILL.md:83",
-      "description": "The head fails packages/pi-envoy/src/skills-guard.test.ts:90-100, which envoy-and-contracts.yaml runs on skills/** changes: `bun test src/skills-guard.test.ts` → 'the three Dispatch skills total fewer than 2,000 words … Expected: < 2000 Received: 2034'. Main is at 1999, so this PR may add at most 0 net words to the dispatch, dispatch-first and dispatch-writing-specs skills. No CI run has completed on this branch since the first merge, so nothing caught it."
-    },
-    {
-      "severity": "important",
-      "file": "PR (mergeable CONFLICTING)",
-      "description": "GitHub reports the pull request CONFLICTING with main's e82b013b6 (#2324). There are 8 conflicting files: contracts dispatch-api.ts and its test, web RefPreview.tsx, reference-target.ts and routes.ts, envoy AGENTS.md, api/comment_actions.go and docs/reference_excerpts.go. GitHub runs no checks on a conflicting head. Besides the text conflicts, the merge has to combine three behaviours. (1) Main removed refs.ReplaceCountedRefs, and editComment now calls replaceEditedReferences → ReplaceCountedEdit(previous, body). The edit must keep both this PR's block index with its carried ids and moved targets, and main's naming of the cited targets. (2) Main's blockQuery uses staleTime Infinity and is refreshed only by an event that names the block. This PR's comment and message routes carry `block`, and item-block targets are stored as comment_block/message_block, which main's CountedChanges drops. Without a refresh rule, a link or card to a comment block keeps its pre-edit text after a comment.edited. (3) Main's BlockPreview, useBlockDocument and prefetchReference read a document or issue summary for a block route. The item-block early return has to survive, so an item block names its comment or message and author, not a document."
-    }
-  ],
-  "ci": "Required checks are lint, typecheck, test and pr-title. Runs at c64a30a2 were still queued, and every earlier run since 7dc21ecd was cancelled, so no required check has passed at any code head since the first merge. The conflict now means GitHub runs nothing.",
-  "thermonuclear": "deep-review: `Verdict: CHANGES at 23817239` (M1, the skills word guard: confirmed by running the test). code-quality: `Verdict: APPROVE at 23817239` (nothing new; it lists the #2324 interactions, which I carry into the conflict finding)."
+  "round4Findings": "Both are fixed. (1) 0df62d6d and b2d4017a drop the skill's reply sentence and keep the three block reference forms. `bun test src/skills-guard.test.ts` passes at 1998 words, and CI's pi-envoy job passed. (2) The forward merge b2d4017a over #2324 posted its fingerprint comment, and the migrations stay 0136-0138 after main's 0135. It keeps (a) one reconcile, refs.ReplaceCountedItemEdit (comment_actions.go:195), which carries main's editedHeadTargets and the block index; (b) event-refresh.ts commentBlockReads on comment.edited, which the tester proved in Chromium with no reload; and (c) the item-block early return at reference-target.ts:232, :305 and :409 and at RefPreview.tsx:351. Each has a test. Round 5's own fix, 7fbf45cc, clears a block read only on a 404 NOT_FOUND.",
+  "keyFindings": [],
+  "ci": "Every check at d9be59ee has completed. Required: lint, typecheck, test and pr-title all succeeded. Also succeeded: both builds (the Worker Image build after one re-run of a TLS-probe flake that #2475 addresses), changes, contracts, claude-envoy, envoy-client, envoy-plugin, envoy-smoke, envoy-e2e-local, envoy-go-race, envoy-infra-go, dispatch-memory, dispatch-multiprocess, pi-envoy, pi-legion, pi-shared, and the Broker and Daemon Postgres 16 suites. Three are red, and each is main's. (1) `dispatch`: only mermaid.e2e.ts:194, in all four browsers (1213 passed). main fixed it in #2470, which this branch does not carry. (2) and (3) `envoy-go` and the Dispatch Postgres 16 suite: only deliveryaudit_test.go:121 fails to build (auth.SigningKeys). main fixed it in #2473 (d743376f2), which this branch does not carry. Neither failing file is in this PR's diff. api, refs, store, docs, itemblocks, pmdoc and text all pass. The recipients-claim row, which #2324 fixed and this branch carries, passed.",
+  "thermonuclear": "At b7ee5494: deep-review `Verdict: APPROVE at b7ee5494` (1 Minor: the word fix needed the merge commit's two tightened sentences, which leaves 2 words of headroom). code-quality `Verdict: CHANGES at b7ee5494`. Its items are structural or wording: a single block-route rule in useReferenceData, an IndexItem helper and its doc comment, a typed reply_block read in event-refresh plus the event set AGENTS.md names, the ReplaceCountedItemEdit kind parameter, an isNotFound predicate, and an e2e helper. None changes behaviour. I took none, consistent with rounds 1-4, and the architect scoped round 5 to the two items.",
+  "threads": "All 7 of my threads carry my answer and are resolved by the implementer: PRRT_kwDORFy7ds6xKL0t, PRRT_kwDORFy7ds6xKL07, PRRT_kwDORFy7ds6xKL1J, PRRT_kwDORFy7ds6xKL1R, PRRT_kwDORFy7ds6xKL1Y, PRRT_kwDORFy7ds6xM3X_, PRRT_kwDORFy7ds6xOidK. There are no bot threads."
 }
