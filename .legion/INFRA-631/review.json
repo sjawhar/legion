@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-631",
+  "completed": "2026-10-28T18:06:06Z",
+  "round": 13,
+  "headReviewed": "the handoff commit this file is pushed in (code head 29a28301, merge of main 20ba65a6 onto retro's 45760c26)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "reason": "READY was refused READY_HEAD_CONFLICTS; this round reviews the conflict merge only, as the architect asked (2026-10-28 17:45Z)",
+  "mergeVerified": [
+    "scripts/semantic-line-breaks.ts and its two test files are identical to approved code head e6f60222",
+    "restructure.ts --strict (with the one new split anchor split-issue-events-author-routes) on main 20ba65a6's two files: exit 0, byte-identical to the head guides",
+    "the diff against main 20ba65a6 holds only this pull request's files: the two guides, the script and its tests, the pins, the CI step, the pi-envoy citation, the LEGION-752 status line, retro's four docs/solutions notes and .legion/INFRA-631/",
+    "bunx biome check and strict bunx tsc --noEmit on the script and its two test files: exit 0; bun test of both test files: 90 pass; checker exit 0 on both guides; .github/scripts/check-private-names.sh exit 0; biome on docs/solutions clean",
+    "required checks at code head 29a28301 queued at 18:05Z, none red"
+  ],
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/AGENTS.md",
+      "description": "GitHub reports the pull request CONFLICTING again: main 300ff910 (#2453, merged 18:03Z) changed packages/envoy/AGENTS.md (+20/-4), and git merge-tree conflicts there. Merge main and regenerate; restructure.ts --strict on 300ff910's files exits 0 today."
+    }
+  ],
+  "thermonuclear": "not run this round: nothing of the pull request's code changed since the approved head (the script and its tests are byte-identical to e6f60222); the merge and its regeneration are verified above"
+}
