@@ -2,51 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T09:45:00Z",
-  "testedHead": "790a7969ceb45914e5eaa20207a3798c80c87c58",
-  "round": "Full test round after the forward merge of main carrying sjawhar/legion#2228 (85713740). The fingerprint at my last E2E head 48bef8d1 was 96bdc922…, and at 790a7969 it is eb6ab1ea…: changed, because #2228's lines left the diff. A per-file interdiff of this issue's 36 source and test files (old: a92387a8→48bef8d1; new: b295a3fb→790a7969, with --context 0 and the hunk headers dropped) is identical for 35 files. The 36th, envoy-client package.json, differs only by main's new src/askgate-marker.ts build entry; the nats-auth → nats-connection swap is kept. Main now pins Bun 1.4.4, so this round ran on Bun 1.4.4 (downloaded to $TMPDIR), not the pod's 1.3.14.",
+  "completed": "2026-10-28T10:40:00Z",
+  "testedHead": "c2db05430618",
+  "round": "Answers review round 3 (314a5977). The only code change since my round-4 head a5a67218 is c2db0543, 18 lines in .github/workflows/envoy-and-contracts.yaml (jj diff --stat --from a5a67218 --to c2db0543 '~.legion': 1 file). In it, the envoy-session-stall job's Go cache follows main's #2328 rule. The product and the tests are byte-identical to round 4, so round 4's real-surface proofs (the stall suites, the two-session run of the committed Claude Code dist, the release-shaped pi-envoy bundle) still apply. This round proves the workflow change and re-runs the job's own steps.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran every command of the implementer's at 790a7969 on Bun 1.4.4, after `bun install --frozen-lockfile` (no changes; both patch hunks present). envoy-client nats-stall: 3 pass (A 30.0 s, B 50.0 s with the hung redial closed 20.0 s after the accept, C 30.2 s). claude-envoy stall: 2 pass ('resubscribed 29.9 s, missed message shown 29.9 s'; 'SIGTERM -> exited after 0.0 s'). check-dist: 'dist/ and legion/ match a fresh build'. pi-envoy -t 'NATS path freezes': 1 pass (30.0 s). Go listener and session tests: ok 18.3 s and 6.2 s. Correction to its proof: the row C negative control it records for 790a7969 ('reconnect none … [60261.41ms]') carries the same timing as its round-3 record and does not reproduce on this head's Bun. With the protocol.js hunk reverted, row C at 4 MiB PASSED on Bun 1.4.4 ('reconnect 30.0 s, first publish received 30.1 s'). I fixed the test (commit a5a67218, below). The implementer's observed results stand."
+    "how": "On Bun 1.4.4 at c2db0543 I ran the stall job's steps as the job does them (frozen install, contracts build, the three stall commands with LEGION_E2E_ENVOY_STACK=1). envoy-client: 3 pass (A 30.0 s; B 50.0 s, hung redial closed 20.0 s after the accept; C with 32 MiB 30.0 s). pi-envoy: 1 pass (29.9 s). claude-envoy: 2 pass (30.0 s; SIGTERM → exited after 0.0 s). Its row C negative control at this head ('reconnect none … [60268.24ms]' with the protocol.js hunk reverted, 32 MiB) matches what I observed at a5a67218, whose product and test code are identical: 'reconnect none … [60077.74ms]'. Its new note that editing node_modules/.bun writes through to bun's install cache holds no risk for this pod: `bun pm cache` lists nats@2.29.3@@@1 unpatched (0/0 hunk markers) and nats@2.29.3@@@1_patch_hash=257c91f8b5726726 patched (1/1), and the installed copy is patched."
   },
   "failed": 0,
   "failures": [],
-  "testChanges": [
-    {
-      "commit": "a5a67218",
-      "what": "packages/envoy-client/src/__tests__/nats-stall.test.ts row C: unackedBytes 4 MiB → 32 MiB, with a comment saying why; the envoy-client CHANGELOG line that names the size, updated to match.",
-      "why": "On Bun 1.4.4, the version this repository pins and CI runs, a 4 MiB backlog behind the frozen path still drains into the kernel, so nats.js's stale-close flush completes and the client redials even without the patch. Row C then guarded nothing. Measured with the protocol.js hunk reverted (throwaway script on a real natsd and listener): Bun 1.3.14 hangs at 4 and 16 MiB; Bun 1.4.4 recovers at 4 MiB (30.1 s) and hangs at 8, 16 and 32 MiB (never). The implementer's README says Bun silently ignores a patchedDependencies entry for a nats version that is not installed, so a nats bump would drop the patch with nothing failing. Row C is the lock against that.",
-      "evidence": "On Bun 1.4.4 at a5a67218: `cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts` → 3 pass (A 30.0 s, B 50.0 s with the hung redial closed after 20.0 s, C 30.1 s). With the protocol.js hunk reverted for one run, row C: 'reconnect none, first publish received never after the freeze', (fail) [60077.74ms]. The patched file was restored afterwards."
-    }
-  ],
   "proof": [
     {
-      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path), also when it wrote data the frozen path never acknowledged, and a redial nats.js gives up on leaves no socket open",
-      "surface": "envoy-client against a real natsd and listener built from this tree: real nats.js with patches/nats@2.29.3.patch applied by a frozen install, on Bun 1.4.4 (main's pin), behind the stall proxy",
-      "command": "cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts (at 790a7969 and at a5a67218), plus a throwaway script that sends 4–32 MiB after the freeze with each nats copy",
-      "observed": "At a5a67218: 3 pass (A 30.0 s; B 50.0 s, hung redial closed 20.0 s after the accept; C with 32 MiB unacknowledged 30.1 s). The patched nats on Bun 1.4.4 recovers at 16 and 32 MiB in 30.1 s.",
-      "headSha": "a5a67218",
-      "negativeControl": "Each hunk reverted in the installed nats for one run, then restored. The protocol.js hunk reverted: row C at 32 MiB printed 'reconnect none, first publish received never after the freeze' and failed [60077.74ms]. The node_transport.js hunks reverted: row B printed 'hung redial: accepted 30.0 s after the freeze, still open' and failed [60255.65ms]."
+      "criterion": "Review round 3 finding 1: the envoy-session-stall job restores the Go cache on every run and saves it only on main, as #2328 made every other caching Go job do, so a pull-request run writes no cache entry under refs/pull/<n>/merge",
+      "surface": "The job as GitHub Actions reads it: .github/workflows/envoy-and-contracts.yaml, checked by actionlint, its restore key computed against this repository's live Actions caches, and the job's steps run locally",
+      "command": "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/envoy-and-contracts.yaml; the hashFiles('packages/envoy/go.sum') value (sha256 of the file's sha256) compared with `gh api repos/sjawhar/legion/actions/caches?key=go-envoy-`; `gh api repos/sjawhar/legion/actions/caches?ref=refs/pull/2331/merge`; the job's steps run locally on Bun 1.4.4",
+      "observed": "actionlint exit 0, no output. The job's steps are the same as envoy-e2e-local's #2328 block (setup-go `cache: false`, actions/cache/restore with key go-envoy-<os>-<go>-<hash of go.sum> and restore-keys only off main, actions/cache/save only when github.ref is refs/heads/main and the restore missed). On this branch the key is go-envoy-Linux-1.27.1-2d2d4dd406f9a408c824dbfc3a5f4c525611ee1efd65999bb87ab212b63a1eef (go.mod 1.27.1, go.sum unchanged from main). That exact entry exists on refs/heads/main (created 2026-10-28T01:47Z), so the PR run restores main's cache, and its save step is skipped by `if:`. refs/pull/2331/merge holds 0 cache entries. No setup-go in the file uses cache-dependency-path any more. The job's steps run locally: envoy-client 3 pass, pi-envoy 1 pass, claude-envoy 2 pass.",
+      "headSha": "c2db05430618",
+      "negativeControl": "In a scratch copy of the workflow, the save step's key renamed to read steps.go_cachee.outputs.cache-primary-key: actionlint refused it with 'property \"go_cachee\" is not defined in object type {go_cache: …; setup_go: …} [expression]'. So actionlint checks this file's step-output references, and the real file's reference resolves."
     },
     {
-      "criterion": "The Claude Code plugin's code path recovers from a frozen path, shows the message missed while cut off once, replayed, registers its plugin version, and exits on SIGTERM after a hung redial",
-      "surface": "The committed claude-envoy dist/envoy-channel.js (rebuilt by the merge under Bun 1.4.4), copied into a plugin-cache path …/.claude/plugins/cache/legion-mkt/claude-envoy/0123456789ab/dist/. Two channel servers against a real natsd and listener built from this tree, sharing one stall proxy, with messages sent through POST /v1/messages/send (throwaway script, deleted after the run)",
-      "command": "LEGION_E2E_ENVOY_STACK=1 bun tests/zz-tester-drive.ts (throwaway, Bun 1.4.4): register two sessions; freeze plus one hung redial with 3 messages to each; a second freeze with 3 more each; live messages before and after each freeze; then SIGTERM both",
-      "observed": "/v1/sessions listed plugin @sjawhar/claude-envoy and plugin_version 0123456789ab for both. Round 1 (freeze plus a hung redial): every missed message shown 46.8 s after the freeze. Round 2 (second freeze): 28.0 s after it. Each session showed 9/9 messages exactly once, marked replayed only where they should be. SIGTERM → exited after 0.0 s for both. DRIVE PASS. The suite also passes: 2 pass, check-dist matches.",
-      "headSha": "790a7969ceb45914e5eaa20207a3798c80c87c58",
-      "negativeControl": "The live messages (before each freeze and after each reconnect) are shown without the replay suffix, while the frozen-window messages never arrive live. In round 1, at 55ba8a69 before the node_transport.js patch, this same drive hung at SIGTERM."
-    },
-    {
-      "criterion": "The Oh My Pi plugin's code path recovers within 60 s, the catch-up shows the missed message, and its registration carries the released version",
-      "surface": "pi-envoy suite (the real extension against a real natsd and listener through the stall proxy) and the release-shaped bundle, both on Bun 1.4.4",
-      "command": "cd packages/pi-envoy && LEGION_E2E_ENVOY_STACK=1 bun test extensions/envoy.test.ts -t \"NATS path freezes\"; then version set to 99.4.5-tester as release.yaml does, bun run build, grep dist/envoy.js, manifest restored",
-      "observed": "1 pass: 'resubscribed 30.0 s, missed message shown 30.0 s after the freeze', with the registry and session list showing plugin @sjawhar/pi-envoy and its version. The release-shaped dist/envoy.js holds '99.4.5-tester' once and calls `this.transport.close()` after StaleConnection.",
-      "headSha": "790a7969ceb45914e5eaa20207a3798c80c87c58",
-      "negativeControl": "In the suite, the messages sent before the freeze and after the reconnect are shown once without the replay suffix, and the frozen-window message never arrives live."
+      "criterion": "Review round 3 finding 2: the row C negative control is observed at the head the proof names, on Bun 1.4.4, with the 32 MiB backlog",
+      "surface": "envoy-client stall suite against a real natsd and listener built from this tree, with the installed nats's protocol.js hunk reverted for one run",
+      "command": "cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts -t \"^a NATS connection whose path freezes C:\" (Bun 1.4.4)",
+      "observed": "At a5a67218, whose product and test code equal c2db0543: patched, row C 'reconnect 30.0 s, first publish received 30.2 s'. With the hunk reverted: 'reconnect none, first publish received never after the freeze', (fail) [60077.74ms]. The implementer's record at c2db0543 shows the same refusal [60268.24ms]. At c2db0543, the patched row C reconnects at 30.0 s.",
+      "headSha": "c2db05430618",
+      "negativeControl": "The reverted run itself is the control: without the hunk, row C fails."
     }
   ],
   "observations": [
-    "CI at a76852d9 (the implementer's handoff head, which carries the merge): PR Title, Docs and Worker Image succeeded; Tests was in progress and 'Legion Envoy and Contracts' (the envoy-session-stall job) queued when I read them. My push carries a test change and no trailer, so CI runs again at its head.",
-    "Merge gate met: #2228 merged as 85713740, and main carrying it is in the branch. The reviewer's approval was of ccdc02ea, so the reviewer reads the new head."
+    "CI at daa4e513 (the PR head, carrying c2db0543): Docs, Tests and 'Legion Envoy and Contracts' (whose changes job had not started) were queued, Worker Image pending, one PR Title run cancelled and two queued, when I read them. The envoy-session-stall job and its cache steps are first exercised on GitHub in that run.",
+    "The round-3 Fast-follow cleanups (stall-proxy closedAt note and dead guards, one RECOVERY_BOUND_MS, handleAuthError in the README) stay on the PR body's Fast-follow line, as the architect narrowed the round. None changes behaviour."
   ]
 }
