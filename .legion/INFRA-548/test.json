@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-548",
+  "completed": "2026-10-28T17:40:00Z",
+  "testedHead": "e7e3d2eb6646",
+  "scope": "Rebase re-check, bare gates only. Since my round-9 head (0d4104f9, handoff d5fd2711), the commits are retro's (d504dd89 and f14ebcdc in docs/solutions/, and 8a9362d2 removing .legion/INFRA-548/) and a merge of main 53f39ba0 (e7e3d2eb). Retro's commits are never a reason to re-test. The INFRA-14 architect's standing direction (Envoy 4f033b51) scopes a merge-only change to the merge resolution plus the bare gates. The unchanged-diff fingerprint, with .legion and docs/solutions excluded and taken from each head's fork point, is b062f7dcd89dc667bf486c1257176f365ab4d01c470836a4e3d9b191d403106e at 21ac1e81 (round-9 head) and the same at e7e3d2eb: unchanged. So the real-surface verification is not repeated. Retro will need to remove .legion/INFRA-548/ again: the implementer's and this handoff re-added it.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I checked the implementer's merge account against both parents (proof 1). Its fingerprint claim (b062f7dc… unchanged) matches my own computation."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The merge of main 53f39ba0 keeps both sides of the one conflicted file and loses nothing of this issue's change",
+      "surface": "The merge commit's tree against each parent: jj diff --git --context 0, main 53f39ba0 → e7e3d2eb and branch f14ebcdc → e7e3d2eb, for packages/pi-legion/extensions/legion.test.ts",
+      "command": "jj diff --git --context 0 --from 53f39ba0205b --to e7e3d2eb6646 file:packages/pi-legion/extensions/legion.test.ts; the branch→merge diff and the fork point 690c0136→53f39ba0 diff of the same file, each normalized (hunk headers and index lines dropped) and hashed",
+      "observed": "Against main: the one line this issue changes, the comment naming @legion/envoy-client/nats-connection in place of nats-auth (line 70). That is exactly the branch's own change to the file against its fork point (line 55 there). Branch→merge equals fork point→main for this file: both hash to 2ad8bc78…, so the merge took all of main's #2300 change and nothing else. Smoke on Bun 1.4.4: `cd packages/pi-legion && bun test extensions/legion.test.ts` → 129 pass 0 fail. After `bun install --frozen-lockfile`, the installed nats still carries both patch hunks (main's bun.lock change is 3 added lines).",
+      "headSha": "e7e3d2eb6646",
+      "negativeControl": "The fingerprint check refuses a changed diff: at round 6 it moved (86ee20ea → d4c90c02) when the CHANGELOG edits became fragments, and that forced a full round. Here it is identical at both heads."
+    },
+    {
+      "criterion": "Bare gates at the new head",
+      "surface": "GitHub Actions for the PR head d683e56c (which carries e7e3d2eb)",
+      "command": "gh api repos/sjawhar/legion/actions/runs?head_sha=d683e56c1dc6bacab1152996c3eb07c4d58a9c62; gh pr view 2331 --json mergeable",
+      "observed": "Tests (40733254175) pending; Legion Envoy and Contracts (40733253776), Docs, Worker Image and PR Title queued; one earlier PR Title run cancelled, when read. GitHub reports MERGEABLE.",
+      "headSha": "e7e3d2eb6646",
+      "negativeControl": "No refusal to observe in a queued run. The merge-side control is in proof 1."
+    }
+  ],
+  "observations": [
+    "Round 9's verification of the Claude Code plugin build stands for this head, since the fingerprint is unchanged. That check built with main's verify-build, confirmed both nats patch hunks in the built dist/envoy-channel.js, and ran the stall suite and the row-B scenario against that build. The production-check note also stands: name main's post-merge claude-envoy-rebuild run and the commit it landed, and run check-dist there."
+  ]
+}
