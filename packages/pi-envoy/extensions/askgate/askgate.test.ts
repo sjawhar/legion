@@ -4254,16 +4254,17 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     );
     const sent: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-      const route = new URL(String(url)).pathname;
+      const request = new Request(url, init);
+      const route = new URL(request.url).pathname;
       if (route.endsWith("/artifacts")) {
-        const file = (init?.body as FormData).get("file") as Blob;
+        const file = (await request.formData()).get("file") as Blob;
         sent.push({ path: route, body: await file.text() });
         return Response.json({
           artifact: { id: "artifact-1", issue_key: "DSP-1", name: "brief.md", slug: "brief-md" },
           version: { number: 1 },
         });
       }
-      sent.push({ path: route, body: JSON.parse(String(init?.body)) });
+      sent.push({ path: route, body: await request.json() });
       return Response.json({
         id: "comment-1",
         issue_key: "DSP-1",
