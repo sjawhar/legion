@@ -11,6 +11,8 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch
+related_issues:
+  - "sjawhar/legion#2425"
 ---
 
 # A per-request decode memo keys on the stored bytes, clips what it shares, and leans on insert-only columns
@@ -22,8 +24,10 @@ When one read decodes the same jsonb value on many rows, decode it once per requ
   with the previous row: that depends on the query's order.
 - **A value that repeats across rows** (a list such as `artifact_versions.authors`): keep a local
   `map[string]T` from the stored bytes to the decoded value.
-  - Look up with `m[string(raw)]`. Go does not allocate for that lookup. The store copies the key,
-    so pgx reusing its buffer for the next row is safe.
+  - Look up with `m[string(raw)]`. Go does not allocate for that lookup, and the store copies the
+    key. pgx v5 already gives a `*[]byte` target a fresh copy for each row
+    (`scanPlanJSONToByteSlice` in `pgtype/json.go`), so the copy matters only when the bytes alias
+    the driver's buffer, as a `pgtype.DriverBytes` target does.
   - Use the two-value lookup and decode a miss into a fresh variable, so JSON `null` (a nil slice)
     and `[]` (an empty slice) stay two entries.
   - Store `slices.Clip(decoded)`. Then a later `append` on one row's copy allocates and does not
@@ -52,5 +56,5 @@ When one read decodes the same jsonb value on many rows, decode it once per requ
 - `referencesETag` hashes only the event sequence, the truncation flag, and each member's id and
   last version number. `artifacts.created_by` is written only by inserts (`api/artifacts.go`,
   `api/issue_create.go`). `artifact_versions.authors` is written only by inserts (`api/artifacts.go`,
-  `api/issue_create.go`, `docs/mutation.go`). No update of either column exists in the code or in
-  the migrations.
+  `api/issue_create.go`, `docs/mutation.go`). No update of either column exists in the production code or
+  in the migrations; only tests update them, to build fixtures.

@@ -10,12 +10,17 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/loadtest
+related_issues:
+  - "sjawhar/legion#2425"
 ---
 
 # A load-test CPU fix needs a seed that reaches the changed code, a load that completes it, and the function's profile share
 
-Before you compare base and head runs of `packages/envoy/loadtest`, prove that the runs execute
-the code you changed. Then judge the result by that code's share of the profile.
+Before you compare base and head runs of the Dispatch load test, `packages/envoy/loadtest`, prove
+that the runs execute the code you changed. Then judge the result by that code's share of the
+profile. On 2026-10-28 that package is only in sjawhar/legion#2369, which is not merged: export it
+from that pull request's head into each build's source tree (`git archive <head>
+packages/envoy/loadtest`) and name the commit you used.
 
 1. **The seed must reach the changed path.** Read the handler and find each early return that an
    empty input takes, such as an empty reference closure or a list with no rows. Confirm that the
@@ -25,14 +30,16 @@ the code you changed. Then judge the result by that code's share of the profile.
    counts.
 2. **The load must complete the changed path.** A step can pass the calibration tests (box busy,
    `req/s sent`) while Dispatch waits for its connection pool. Then every request to the route
-   times out and the changed function shows almost no profile time. Before the six runs, read the
+   times out and the changed function shows almost no profile time. Before the measured runs (three
+   at base and three at head, alternating, each from its own reset), read the
    route's 2xx count in `summary.json`. Also read the changed function's seconds in a calibration
    `cpu.pprof` (`go tool pprof -top -show_from=<function> <file>`). If the route fails, use the next
    lower step for all runs and tell the architect.
 3. **Judge by the profile share when the total CPU does not separate.** Most single fixes save
    less CPU than the spread of total cores between runs of the same build. Measure the changed
-   work with `-show_from=<function> -focus=<hot callee>` over the merged base and the merged head
-   profiles. Divide by each side's total samples.
+   work with `-show_from=<function> -focus=<hot callee>`, giving `go tool pprof` the three base
+   `cpu.pprof` files together and then the three head files together, so each side's runs are
+   summed into one profile. Divide by each side's total samples.
 4. **Measure memory under the function, not for the whole process.** Use
    `-sample_index=alloc_space` and `-sample_index=inuse_space` of each run's `heap.pprof`, under
    the same `-show_from`. The heap-in-use p50 of a run has a few samples only and moves by hundreds
@@ -58,7 +65,7 @@ the code you changed. Then judge the result by that code's share of the profile.
   59.7 of 60 req/s sent). But 1,703 goroutines waited for a pool connection, all 741 references
   requests failed at the 30 s client timeout, and the decode ran 0.01 s of 46.86 s. At 0.5x, 413
   of 417 references requests succeeded and the decode ran 1.44 s of 69.42 s.
-- At the merged head, the Dispatch cores were base 0.441/0.489/0.472 and head 0.462/0.457/0.464:
+- At the pull request's head after main was merged into it, the Dispatch cores were base 0.441/0.489/0.472 and head 0.462/0.457/0.464:
   a spread of 0.047 cores against an expected gain of 0.0096. The decode share fell from 2.62% to
   0.16%.
 - Round 1 heap-in-use p50 was base 607/1,044/953 MiB and head 1,202/1,050/1,103 MiB. In the same
