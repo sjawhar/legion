@@ -523,8 +523,16 @@ read while the tracker says nothing has written the document since that entry wa
 it reads the head with the same SQL as the store's own head (`headVersion`) and compares. The
 tracker hears every content-changing write through `dispatch_doc_head` and `dispatch_doc_changed`
 (below), this process's own at their end, before the call that committed returns, and trusts
-nothing while its LISTEN is down, so a read on one process lags a commit on another by at most the
-notification's delivery. Its entry carries the canonical
+nothing while its LISTEN is down, or while that connection has delivered nothing for 3 s
+(`headTrustWindow`): a half-open connection, up but silent, is otherwise noticed only by
+pglisten's idle ping after about 35 s. The evictor keeps a healthy idle connection delivering by
+listening on `dispatch_doc_ping` and, whenever its tracker has heard nothing for a second, sending
+`pg_notify('dispatch_doc_ping', <process id>)` through a shared-pool connection bounded at a
+second (a saturated pool skips the ping, and trust lapses to store reads); every process's ping
+reaches every listener, so a deployment sends about one a second at idle and none while
+notifications flow. A read on one process therefore lags a commit on another by at most the
+notification's delivery, and by at most 3 s plus that delivery on a half-open LISTEN connection.
+Its entry carries the canonical
 markdown, document token, block ranges/tokens and block paths, is immutable after construction,
 and is bounded by a weighted LRU whose budget `New` sets from the Go memory limit
 (`readBudgetFor`): one sixteenth of it, at least 64 MiB and at most 1 GiB, and 256 MiB

@@ -44,6 +44,21 @@ const documentHeadChannel = "dispatch_doc_head"
 // documentChangedChannel ($1) and the documentHeadNotice on documentHeadChannel ($2).
 const notifyDocumentHeadStatement = `select pg_notify('` + documentChangedChannel + `', $1), pg_notify('` + documentHeadChannel + `', $2)`
 
+// documentPingChannel carries the stale-room evictor's liveness ping, whose payload is the id of
+// the process that sent it (Service.ProcessID) and whose only use is to arrive: every evictor
+// listens on it on its LISTEN connection, and a delivery of it, like any other, keeps that
+// process's head tracker trusting itself (headTracker.delivered, staleRoomEvictor.pingWhileQuiet).
+const documentPingChannel = "dispatch_doc_ping"
+
+// notifyDocumentPingStatement sends one ping on documentPingChannel; the process id is the
+// parameter.
+const notifyDocumentPingStatement = `select pg_notify('` + documentPingChannel + `', $1)`
+
+// headPingAfter is how long the head tracker may hear nothing on its LISTEN before the evictor
+// pings (pingWhileQuiet), and how long a ping may take: a third of headTrustWindow, so a healthy
+// idle connection delivers a ping well before the tracker would stop trusting it.
+const headPingAfter = time.Second
+
 // documentHeadNotice is documentHeadChannel's payload, encoded as JSON with one-letter keys to keep
 // it small inside Postgres's 8000-byte notification limit: {"r":"<artifact uuid>","v":<head after
 // commit>,"p":"<process id>"}. Process is empty for a store no Service was built on, which no
@@ -113,19 +128,20 @@ const staleRoomEvictInterval = 2 * time.Second
 
 // staleRoomEvictor closes the rooms this process holds for documents another process has written,
 // and feeds the service's head tracker (headTracker). It holds one LISTEN connection, on
-// documentHeadChannel and documentChangedChannel both, and each notice decides what it can on that
-// connection's goroutine, where it costs no query: the tracker's record of the head, and a look at
-// the room's cursor (headNotified). A room this process does not hold, or one whose cursor stands
-// at the head the notice names, is the whole of nearly every notice - every write of this
-// process's own included, which its own commit already moved the room's cursor over. What is
-// left is decided off that goroutine, one decision at a time per room (decideHead): a write of
-// this process that has not finished its bookkeeping yet is waited for, with no query, and
-// anything else is the decision documentChanged makes, which reads max(version) twice - an
-// unlocked read through the pool, and for a room that read finds behind a second read under the
-// document's advisory xact lock (roomBehindDurableHead), which waits for whatever writer holds
-// that lock. pglisten calls OnNotify inline on its one listener goroutine, so a wait there would
-// be every other room's notification waiting too; on a room's own goroutine it is that room's
-// alone.
+// documentHeadChannel and documentChangedChannel both, and on documentPingChannel, whose ping it
+// sends itself to keep that connection proving it still delivers (pingWhileQuiet). Each notice
+// decides what it can on that connection's goroutine, where it costs no query: the tracker's
+// record of the head, and a look at the room's cursor (headNotified). A room this process does not
+// hold, or one whose cursor stands at the head the notice names, is the whole of nearly every
+// notice - every write of this process's own included, which its own commit already moved the
+// room's cursor over. What is left is decided off that goroutine, one decision at a time per room
+// (decideHead): a write of this process that has not finished its bookkeeping yet is waited for,
+// with no query, and anything else is the decision documentChanged makes, which reads max(version)
+// twice - an unlocked read through the pool, and for a room that read finds behind a second read
+// under the document's advisory xact lock (roomBehindDurableHead), which waits for whatever writer
+// holds that lock. pglisten calls OnNotify inline on its one listener goroutine, so a wait there
+// would be every other room's notification waiting too; on a room's own goroutine it is that
+// room's alone.
 //
 // The locked confirmation stays, because without it a write of this process's own, between its
 // commit and its own cursor advance, reads as another process's and a healthy room is closed
@@ -149,12 +165,13 @@ type staleRoomEvictor struct {
 	// the LISTEN reaches nobody, and reads handled to know that notification was decided, and how.
 	listening func()
 	handled   func(artifactID string, evicted bool)
-	// delivering runs first on each notification the listener reports, whatever its channel, before
-	// anything is decided on it; readingHead runs before each read of a document's head the evictor
-	// makes for a room it is deciding on, the unlocked read and the confirmation under the
-	// document's lock alike. Nil outside tests: a test holds a notification back in delivering, or
-	// learns from it that every notification sent before one of its own has been handed on, and
-	// counts the database reads the decisions cost in readingHead.
+	// delivering runs first on each document notification the listener reports - either document
+	// channel, not the ping, which nothing decides on - before anything is decided on it;
+	// readingHead runs before each read of a document's head the evictor makes for a room it is
+	// deciding on, the unlocked read and the confirmation under the document's lock alike. Nil
+	// outside tests: a test holds a notification back in delivering, or learns from it that every
+	// notification sent before one of its own has been handed on, and counts the database reads
+	// the decisions cost in readingHead.
 	delivering  func(channel, payload string)
 	readingHead func(artifactID string)
 
@@ -218,8 +235,17 @@ func (s *Service) RunStaleRoomEviction(ctx context.Context) {
 // connection it had has failed - pglisten reports no loss of its own, and a dial is the first
 // thing the listener does after one. A write committed between the loss and that dial notifies
 // nobody, and the tracker can trust itself that long; a reconnect starts a new epoch in which
-// nothing it heard before counts, and the sweep re-examines every room.
+// nothing it heard before counts, and the sweep re-examines every room. A connection that stands
+// and delivers nothing is a third case pglisten finds only at its idle ping, so the tracker stops
+// trusting itself headTrustWindow after the last delivery, and pingWhileQuiet, on a goroutine of
+// its own that ends with ctx, keeps a healthy idle connection delivering.
+//
+// That goroutine is a caller of the shared pool beside the listener's and the decisions', so its
+// context carries a hold mark of its own (store.WithTransactionTracking), made from the caller's
+// context as the listener's is: the ping takes no connection while its caller holds one, and no
+// read of the evictor's refuses it.
 func (e *staleRoomEvictor) run(ctx context.Context) {
+	pingCtx := store.WithTransactionTracking(ctx)
 	ctx = store.WithTransactionTracking(ctx)
 	listener := &pglisten.Listener{
 		Owner: "dispatch",
@@ -227,7 +253,7 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 			e.service.heads.disconnected()
 			return e.dial(ctx)
 		},
-		Channels:    []string{documentHeadChannel, documentChangedChannel},
+		Channels:    []string{documentHeadChannel, documentChangedChannel, documentPingChannel},
 		ListenIdle:  e.listenIdle,
 		PingTimeout: e.pingTimeout,
 		Backoff:     e.backoff,
@@ -236,9 +262,57 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 		NextWake:    e.wakeIn,
 		OnWake:      e.woke(ctx),
 	}
+	pinging := make(chan struct{})
+	go func() {
+		defer close(pinging)
+		e.pingWhileQuiet(pingCtx)
+	}()
 	listener.Run(ctx)
 	e.service.heads.disconnected()
+	<-pinging
 	e.decisions.Wait()
+}
+
+// pingWhileQuiet sends a ping on documentPingChannel (notifyDocumentPingStatement) whenever the
+// LISTEN stands and the head tracker has heard nothing on it for headPingAfter, until ctx ends. The
+// ping arrives on every process's evictor, this one's included, so a healthy idle connection
+// delivers something about once a second and its tracker goes on trusting itself
+// (headTracker.delivered), while a half-open one delivers nothing and its tracker stops within
+// headTrustWindow. A process pings only after a second of hearing nothing, and hears every other
+// process's ping, so a deployment sends about one ping a second at idle and none while
+// notifications flow.
+//
+// The ping goes through a connection of the shared pool, never the LISTEN connection, which would
+// prove only itself, and waits for it at most headPingAfter: a pool too busy to lend a connection
+// that soon skips the ping, and if it stays that busy the tracker's trust lapses and cold reads
+// and preloads read the store, which is the answer a saturated pool costs and nothing worse.
+func (e *staleRoomEvictor) pingWhileQuiet(ctx context.Context) {
+	for {
+		wait := headPingAfter
+		if quiet, listening := e.service.heads.quiet(); listening && quiet < headPingAfter {
+			wait = headPingAfter - quiet
+		} else if listening {
+			e.ping(ctx)
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// ping sends one documentPingChannel notification, bounded at headPingAfter. A ping that fails
+// is only a ping skipped (pingWhileQuiet), so it is logged at debug level: a saturated pool fails
+// one a second.
+func (e *staleRoomEvictor) ping(ctx context.Context) {
+	pingCtx, cancel := context.WithTimeout(ctx, headPingAfter)
+	defer cancel()
+	if _, err := e.service.store.Pool.Exec(pingCtx, notifyDocumentPingStatement, e.service.processID); err != nil && ctx.Err() == nil {
+		slog.Debug("dispatch: ping the document listener", "error", err)
+	}
 }
 
 // connected is the listener's OnConnected: the head tracker's new epoch (headTracker.connected),
@@ -290,7 +364,9 @@ func (e *staleRoomEvictor) woke(ctx context.Context) func() {
 	}
 }
 
-// notified is the listener's OnNotify. A documentHeadChannel notice goes to headNotified. A bare
+// notified is the listener's OnNotify. Every notification, whatever its channel, is first a
+// delivery the head tracker counts (headTracker.delivered), and a documentPingChannel ping is
+// nothing else. A documentHeadChannel notice goes to headNotified. A bare
 // documentChangedChannel id only invalidates the head tracker's entry for the document
 // (headTracker.invalidate): every write of this build sends the notice beside it, which does the
 // room's work, so the bare id alone is an older build's write during a roll, which this build's
@@ -298,6 +374,10 @@ func (e *staleRoomEvictor) woke(ctx context.Context) func() {
 // which costs no query.
 func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, payload string) {
 	return func(channel, payload string) {
+		e.service.heads.delivered()
+		if channel == documentPingChannel {
+			return
+		}
 		if e.delivering != nil {
 			e.delivering(channel, payload)
 		}

@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -26,6 +27,19 @@ import (
 // would announce a write, so nothing is trusted (disconnected), and a reconnect starts a new epoch
 // in which nothing heard before counts (connected).
 //
+// A connection can also stand and carry nothing - half-open, its socket up, no error, as a dropped
+// NAT entry or a failover leaves it - which pglisten's own idle ping finds only after about 35 s
+// (pglisten.DefaultListenIdle and DefaultPingTimeout). So the tracker trusts itself only while the
+// connection has delivered something within headTrustWindow (delivered), and the evictor keeps an
+// idle healthy connection delivering with a ping of its own on documentPingChannel whenever the
+// tracker has heard nothing for headPingAfter (staleRoomEvictor.pingWhileQuiet). Notifications
+// arrive in commit order, so a delivery says every write committed before what it carried has been
+// heard; on a half-open connection a write is served stale for at most headTrustWindow past the
+// last delivery plus one notification's delivery, about 3 s, after which every read falls back to
+// the store. At idle that costs a deployment about one ping a second - every process's ping reaches
+// every listener, and a process pings only after a second of hearing nothing - and none while
+// notifications flow.
+//
 // Per document it keeps a generation, which every write heard of moves on - drawn from one
 // process-wide counter, so an entry made again never repeats a generation an old token carries -
 // the last head heard of, or none, and how many writes of this process are between their gate and
@@ -35,9 +49,14 @@ import (
 // thousand documents, about a hundred bytes each.
 type headTracker struct {
 	mu sync.Mutex
+	// now is the clock trust is measured on: time.Now, and a unit test's own.
+	now func() time.Time
 	// listening is whether the evictor's LISTEN stands: false from the start, true from each
 	// connected, false again from each disconnected.
 	listening bool
+	// heard is when the LISTEN's connection last delivered anything: the LISTEN itself
+	// (connected) or a notification on any channel it listens on (delivered).
+	heard time.Time
 	// epoch is the number of LISTENs that have stood; a token of an earlier epoch is never
 	// unchanged, since the notifications sent while no connection stood reached nobody.
 	epoch uint64
@@ -90,8 +109,14 @@ var closedIdle = func() chan struct{} {
 	return idle
 }()
 
+// headTrustWindow is how long after its LISTEN's connection last delivered anything the tracker
+// still trusts itself: three pings' worth (headPingAfter), so one ping late or lost on a healthy
+// connection costs nothing, and short enough that a half-open connection stops being trusted well
+// inside the notification delay a reader is promised.
+const headTrustWindow = 3 * time.Second
+
 func newHeadTracker() *headTracker {
-	return &headTracker{entries: map[string]*headEntry{}}
+	return &headTracker{now: time.Now, entries: map[string]*headEntry{}}
 }
 
 // entryLocked is room's entry, made with a fresh generation when there is none. Its caller holds
@@ -113,17 +138,26 @@ func (t *headTracker) bumpLocked(entry *headEntry) {
 	entry.generation = t.generations
 }
 
-// trustedLocked is whether entry's answers hold now: the LISTEN stands, no write of this process
-// to the document is in flight, and none ended unseen since the last notice. Its caller holds t.mu.
+// trustedLocked is whether entry's answers hold now: the tracker is listening (listeningLocked), no
+// write of this process to the document is in flight, and none ended unseen since the last notice.
+// Its caller holds t.mu.
 func (t *headTracker) trustedLocked(entry *headEntry) bool {
-	return t.listening && len(entry.writes) == 0 && !entry.untracked
+	return t.listeningLocked() && len(entry.writes) == 0 && !entry.untracked
+}
+
+// listeningLocked is whether the LISTEN stands and its connection has delivered something within
+// headTrustWindow of now, so trust lapses on a silent connection with no event to end it. Its
+// caller holds t.mu.
+func (t *headTracker) listeningLocked() bool {
+	return t.listening && t.now().Sub(t.heard) < headTrustWindow
 }
 
 // connected is the evictor's LISTEN standing: a new epoch, in which every token taken before is
 // stale, and every entry dropped - the notifications sent while no connection stood reached
 // nobody, so nothing heard before says what the store holds now. An entry with a write of this
 // process in flight stays, with a fresh generation and no head, so that write's end still finds it
-// and a decision waiting on it still wakes.
+// and a decision waiting on it still wakes. The LISTEN is a round trip the connection made, so it
+// counts as the connection's first delivery (listeningLocked).
 func (t *headTracker) connected() {
 	if t == nil {
 		return
@@ -131,6 +165,7 @@ func (t *headTracker) connected() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.listening = true
+	t.heard = t.now()
 	t.epoch++
 	for room, entry := range t.entries {
 		if len(entry.writes) == 0 {
@@ -153,15 +188,35 @@ func (t *headTracker) disconnected() {
 	t.listening = false
 }
 
-// figures is whether the tracker trusts itself (its LISTEN stands) and how many documents it
-// holds an entry for, for the room figures.
+// delivered is a notification the LISTEN's connection carried, on any of its channels, the
+// evictor's ping included: the connection is still delivering, so the tracker trusts itself for
+// headTrustWindow from now (listeningLocked).
+func (t *headTracker) delivered() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.heard = t.now()
+}
+
+// quiet is how long the LISTEN's connection has delivered nothing, and whether the LISTEN stands:
+// what the evictor's ping asks before it sends one (staleRoomEvictor.pingWhileQuiet).
+func (t *headTracker) quiet() (time.Duration, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.now().Sub(t.heard), t.listening
+}
+
+// figures is whether the tracker trusts itself (listeningLocked) and how many documents it holds an
+// entry for, for the room figures.
 func (t *headTracker) figures() HeadTrackerFigures {
 	if t == nil {
 		return HeadTrackerFigures{}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return HeadTrackerFigures{Trusted: t.listening, Entries: len(t.entries)}
+	return HeadTrackerFigures{Trusted: t.listeningLocked(), Entries: len(t.entries)}
 }
 
 // observe is a documentHeadChannel notice: room's history stands at head after a write that has

@@ -385,7 +385,7 @@ curl -s http://127.0.0.1:<port>/debug/vars | jq .dispatch_rooms
 - `read_cache`: the cold reads' cache's weight in bytes (`bytes`), its entries (`entries`) and its budget (`budget`).
 - `preloads`: the cold sockets' loaded states waiting for their room's load.
 - `resident_bytes`: the encoded bytes the resident rooms took, each load and every update since.
-- `head_tracker`: whether the head tracker trusts what it heard (`trusted`, false while its LISTEN is down) and how many documents it holds (`entries`).
+- `head_tracker`: whether the head tracker trusts what it heard (`trusted`: false while its LISTEN is down, and while that connection has delivered nothing, not even the evictor's once-a-second `dispatch_doc_ping` ping, for 3 s) and how many documents it holds (`entries`).
 - `evictor_queries`: the stale-room evictor's reads of a document's head.
 - `settlement_wakeups`: the wakes of the waits for a room's appends.
 
