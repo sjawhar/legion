@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -173,6 +174,85 @@ func TestHorizonStallWarningNamesTheHolderAndNeverFailsSafe(t *testing.T) {
 		if !strings.Contains(lines[1], field) {
 			t.Fatalf("second warning lacks %s: %s", field, lines[1])
 		}
+	}
+}
+
+// A long-lived Await (the delivery hub's event seed, the relay's start and its reseed) waits on a
+// lifetime, so an observation that fails every time (a horizon pool that cannot dial) must reach
+// its caller as an error to log and retry on once observations have failed for
+// horizonAwaitFailFor, not only when ctx ends. One success between failures restarts the bound:
+// a database that fails now and then is one an Await rides out. Each observation advances the
+// clock a second: five failures, one success that proves nothing, then failures, of which Await
+// must return the first one horizonAwaitFailFor after the first since the success.
+func TestHorizonAwaitReturnsAnObservationErrorThatPersists(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	refused := errors.New("horizon pool: dial refused")
+	const tick = time.Second
+	failFor := int(horizonAwaitFailFor / tick)
+	db := &scriptedHorizonDB{}
+	for range 5 {
+		db.script = append(db.script, scriptedObservation{err: refused})
+	}
+	db.script = append(db.script, scriptedObservation{newest: 5, xmin: 10, xid: 20})
+	for range failFor + 5 {
+		db.script = append(db.script, scriptedObservation{err: refused})
+	}
+	clock := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	observations := 0
+	db.observed = func() { observations++; clock = clock.Add(tick) }
+	horizon := NewHorizon(db)
+	horizon.now = func() time.Time { return clock }
+	horizon.stallAfter = 24 * time.Hour // the stall warning is not under test
+	horizon.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	safe, err := horizon.Await(ctx)
+	if !errors.Is(err, refused) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Await while every observation fails = %d, %v; want the observation's error before ctx's deadline", safe, err)
+	}
+	if want := 5 + 1 + failFor + 1; observations != want {
+		t.Fatalf("Await returned its error after %d observations, want %d: five failures, a success, then %d s of failures",
+			observations, want, failFor)
+	}
+}
+
+// An observation that fails must say so in the log, since a long-lived Await otherwise waits
+// horizonAwaitFailFor with nothing to show why. It is logged at most once every warnEvery, since
+// Await re-observes every 250 ms, and not at all when the caller's own cancellation failed it.
+func TestHorizonLogsAFailedObservationAtMostOnceEveryWarnEvery(t *testing.T) {
+	refused := errors.New("horizon pool: dial refused")
+	db := &scriptedHorizonDB{}
+	logged := &storetest.LockedLog{}
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	horizon := NewHorizon(db)
+	horizon.now = func() time.Time { return now }
+	horizon.warnEvery = 30 * time.Second
+	horizon.logger = slog.New(slog.NewTextHandler(logged, nil))
+	warnings := func() int { return strings.Count(logged.String(), "event horizon observation failed") }
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	db.script = []scriptedObservation{{err: context.Canceled}}
+	if _, err := horizon.Safe(cancelled); err == nil {
+		t.Fatal("Safe on a cancelled context returned no error")
+	}
+	if got := warnings(); got != 0 {
+		t.Fatalf("failure warnings after the caller's own cancellation = %d, want 0; log:\n%s", got, logged.String())
+	}
+
+	// At 0, 1, 11, 29, 30 and 31 s: the second warning is due at 30 s, warnEvery after the first.
+	for step, advance := range []time.Duration{0, time.Second, 10 * time.Second, 18 * time.Second, time.Second, time.Second} {
+		now = now.Add(advance)
+		db.script = []scriptedObservation{{err: refused}}
+		if _, err := horizon.Safe(context.Background()); !errors.Is(err, refused) {
+			t.Fatalf("Safe at step %d = %v, want the observation's error", step, err)
+		}
+		if got, want := warnings(), []int{1, 1, 1, 1, 2, 2}[step]; got != want {
+			t.Fatalf("failure warnings after step %d = %d, want %d; log:\n%s", step, got, want, logged.String())
+		}
+	}
+	if !strings.Contains(logged.String(), "dial refused") {
+		t.Fatalf("failure warning does not carry the observation's error:\n%s", logged.String())
 	}
 }
 
@@ -555,26 +635,32 @@ func resetEventLog(ctx context.Context, t *testing.T, database *store.Store) {
 	}
 }
 
-// scriptedHorizonDB answers each observation with the next scripted row and the stall
-// diagnosis with holder.
+// scriptedHorizonDB answers each observation with the next scripted row (or its scripted
+// failure) and the stall diagnosis with holder. observed, when set, runs as each observation
+// starts.
 type scriptedHorizonDB struct {
-	script []scriptedObservation
-	holder func(dest ...any) error
+	script   []scriptedObservation
+	holder   func(dest ...any) error
+	observed func()
 }
 
 type scriptedObservation struct {
 	newest int64
 	xmin   uint64
 	xid    uint64
+	err    error
 }
 
 func (db *scriptedHorizonDB) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults {
+	if db.observed != nil {
+		db.observed()
+	}
 	if len(db.script) == 0 {
 		return scriptedResults{err: errors.New("observation script exhausted")}
 	}
 	next := db.script[0]
 	db.script = db.script[1:]
-	return scriptedResults{observation: next}
+	return scriptedResults{observation: next, err: next.err}
 }
 
 func (db *scriptedHorizonDB) QueryRow(context.Context, string, ...any) pgx.Row {

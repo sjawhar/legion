@@ -109,10 +109,11 @@ type hubEventSeed struct {
 // none of which the hub will act on.
 //
 // The wait for that horizon, which an open write anywhere on the instance can hold back, ends with
-// the hub's lifetime. A read that fails is tried again after the listener's redial backoff (a
-// reseed forgets the horizon again, which costs only the observations since). Only the intake
-// calls it, and only while it holds a cursor or at its start, so one runs at a time and its one
-// send never waits on seeds' one slot.
+// the hub's lifetime, or with an error once every observation has failed for a while
+// (Horizon.Await). A read that fails is tried again after the listener's redial backoff (a reseed
+// forgets the horizon again, which costs only the observations since). The seed's send gives up
+// when the lifetime ends, so a seed the intake will never take leaves no goroutine behind for
+// running to wait on.
 func (h *deliveryHub) seedEvents(await func(context.Context) (safe, id int64, at time.Time, err error)) {
 	h.seeded = false
 	h.running.Add(1)
@@ -126,7 +127,10 @@ func (h *deliveryHub) seedEvents(await func(context.Context) (safe, id int64, at
 				p0, err = delivery.OpenP0Keys(ctx, h.server.deps.Store.Pool)
 			}
 			if err == nil {
-				h.seeds <- hubEventSeed{cursor: cursor, at: at, p0: p0}
+				select {
+				case h.seeds <- hubEventSeed{cursor: cursor, at: at, p0: p0}:
+				case <-h.lifetime.Done():
+				}
 				return
 			}
 			if h.lifetime.Err() != nil {

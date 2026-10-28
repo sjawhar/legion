@@ -187,6 +187,13 @@ func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, f
 // back, so it runs outside mu: the caller running it marks starting, and every other caller
 // waits on starting (or its own ctx) rather than on mu or a spin. A read that fails, ctx's end
 // included, leaves the relay unstarted, and the next caller runs the read again.
+//
+// A start whose read ends after the relay's lifetime has is refused, and starts nothing. The
+// caller's subscribe runs on a goroutine the SSE handler detaches (awaitEventSubscription), so the
+// server's shutdown does not wait for it, and the shutdown may already be in wait: running's Add
+// then would race that Wait, and the goroutines it counted would run unwaited for. The check and
+// the Add are under the one hold of mu that wait takes before its Wait, so either the Add comes
+// first or the check sees the lifetime ended.
 func (r *eventStreamRelay) start(ctx context.Context) error {
 	for {
 		r.mu.Lock()
@@ -216,6 +223,10 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 			r.mu.Unlock()
 			return fmt.Errorf("read the live event stream's cursor: %w", err)
 		}
+		if err := r.lifetime.Err(); err != nil {
+			r.mu.Unlock()
+			return fmt.Errorf("start the live event stream: the server is shutting down: %w", err)
+		}
 		r.cursor, r.cursorAt, r.started = cursor, cursorAt, true
 		r.running.Add(2)
 		r.mu.Unlock()
@@ -243,7 +254,8 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 // awaitEventCursor waits for a horizon proven safe by an observation taken during the call
 // (Horizon.Await), which is at or above every id committed before the call, and answers it with
 // the last event at or below it and that event's created_at: 0 and the zero time when there is
-// none. It returns early only when ctx ends.
+// none. It returns early when ctx ends, and with the observation's error once every observation
+// has failed for a while (Horizon.Await), so no caller waits on a failing database without one.
 func (s *server) awaitEventCursor(ctx context.Context) (safe, id int64, at time.Time, err error) {
 	if safe, err = s.horizon().Await(ctx); err != nil {
 		return 0, 0, time.Time{}, err
@@ -278,8 +290,14 @@ func lastEventThrough(ctx context.Context, q queryer, through int64) (int64, tim
 }
 
 // wait returns once the relay's goroutines have, after its lifetime ended. A relay no
-// subscription ever started has none to wait for.
-func (r *eventStreamRelay) wait() { r.running.Wait() }
+// subscription ever started has none to wait for. It takes mu once before its Wait, so a start
+// still finishing has either counted its goroutines by then or will see the lifetime ended and
+// start none (start).
+func (r *eventStreamRelay) wait() {
+	r.mu.Lock()
+	r.mu.Unlock() //nolint:staticcheck // an empty critical section orders this Wait after start's Add
+	r.running.Wait()
+}
 
 // onNotify wakes a read for one event commit, on the listener's goroutine. The relay's connection
 // listens on dispatch_events alone: the delivery hub's other two channels say nothing about the

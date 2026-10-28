@@ -49,7 +49,9 @@
 // operator's open psql session, a prepared transaction), holds H back until it ends, so H trails
 // the longest write transaction open on the instance. That delays live readers only; it blocks no
 // writer. A pending observation older than five seconds logs a warning naming the oldest such
-// transaction, so a stall can be found.
+// transaction, so a stall can be found. An observation that fails logs its error, and an Await
+// whose every observation has failed for ten seconds returns that error to its caller rather
+// than wait on.
 //
 // Each observation consumes one transaction id, which brings anti-wraparound vacuum sooner. A
 // Horizon observes only when a caller asks it to (Safe, Await) and runs no timer of its own, so a
@@ -86,6 +88,14 @@ const (
 	// Await's re-observation backoff: 10 ms doubling to 250 ms.
 	horizonBackoffMin = 10 * time.Millisecond
 	horizonBackoffMax = 250 * time.Millisecond
+	// horizonAwaitFailFor is how long Await keeps re-observing while every observation fails
+	// before it returns the last one's error; one observation that succeeds starts it again. Its
+	// long-lived callers (the delivery hub's event seed, the event relay's start and its reseed)
+	// wait on a lifetime, not a request, so without it an observation that never succeeds (a
+	// horizon pool that cannot dial, say) would leave them waiting for ever with no error to log
+	// or retry on. Ten seconds is forty retries at Await's longest backoff: long enough to ride
+	// out a redial, short enough that the caller's own warning and retry come soon.
+	horizonAwaitFailFor = 10 * time.Second
 	// A pending observation older than horizonStallAfter logs a warning, at most once every
 	// horizonWarnEvery, so a transaction held open for minutes names itself without flooding
 	// the log.
@@ -127,9 +137,10 @@ type HorizonDB interface {
 type Horizon struct {
 	db HorizonDB
 
-	// now, stallAfter, warnEvery and logger are the stall warning's clock, thresholds and sink;
-	// NewHorizon sets the production values and a test replaces them. A nil logger is
-	// slog.Default at the time of the warning.
+	// now, stallAfter, warnEvery and logger are the stall and failure warnings' clock, thresholds
+	// and sink, and now is also the clock Await measures horizonAwaitFailFor by; NewHorizon sets
+	// the production values and a test replaces them. A nil logger is slog.Default at the time of
+	// the warning.
 	now        func() time.Time
 	stallAfter time.Duration
 	warnEvery  time.Duration
@@ -152,8 +163,10 @@ type Horizon struct {
 	// pending holds the observations still waiting for a later one to prove them safe, oldest
 	// first, each with an A above safe.
 	pending []horizonObservation
-	// warnedAt is when the last stall warning was logged.
-	warnedAt time.Time
+	// warnedAt is when the last stall warning was logged, and failWarnedAt when the last failed
+	// observation was.
+	warnedAt     time.Time
+	failWarnedAt time.Time
 }
 
 // horizonObservation is one observation: its number, A, X and when it was recorded.
@@ -209,22 +222,27 @@ func (h *Horizon) Safe(ctx context.Context) (int64, error) {
 }
 
 // Await returns H once an observation taken during this call is proven safe, so H is at or
-// above every id committed before the call; it re-observes with the 10 ms -> 250 ms backoff and
-// returns early only with ctx's error.
+// above every id committed before the call; it re-observes with the 10 ms -> 250 ms backoff. It
+// returns early with ctx's error, or with an observation's error once every observation has
+// failed for horizonAwaitFailFor.
 //
 // The observation has to start after the call: one already in flight took its snapshot before
 // the call and can miss an id committed just before it, so Await waits that one out rather than
-// share it. An observation error is retried like an unproven observation, and reported with
-// ctx's error if ctx ends first.
+// share it. An observation error is retried like an unproven observation until observations have
+// failed for horizonAwaitFailFor with no success between, measured from the first failure since
+// the last success, and is then returned; if ctx ends first, the last one is reported with ctx's
+// error. A failure the caller's own ctx caused counts for neither.
 func (h *Horizon) Await(ctx context.Context) (int64, error) {
 	h.mu.Lock()
 	after := h.started
 	h.mu.Unlock()
 	wait := horizonBackoffMin
 	var failed error
+	var failingSince time.Time
 	for {
 		err := h.observe(ctx, after)
 		if err == nil {
+			failed = nil
 			h.mu.Lock()
 			proven, safe := h.safeThrough > after, h.safe
 			h.mu.Unlock()
@@ -232,7 +250,14 @@ func (h *Horizon) Await(ctx context.Context) (int64, error) {
 				return safe, nil
 			}
 		} else if ctx.Err() == nil {
+			now := h.now()
+			if failed == nil {
+				failingSince = now
+			}
 			failed = err
+			if failingFor := now.Sub(failingSince); failingFor >= horizonAwaitFailFor {
+				return 0, fmt.Errorf("await event horizon: every observation failed for %s: %w", failingFor, err)
+			}
 		}
 		if ctx.Err() == nil {
 			timer := time.NewTimer(wait)
@@ -303,6 +328,11 @@ func (h *Horizon) observe(ctx context.Context, after uint64) error {
 // horizonDiagnosisTimeout, which would otherwise hold up the relay, the hub or the handler that
 // ran the observation. stalled has already marked the warning logged, so the rate limit holds
 // however long the diagnosis takes.
+//
+// An observation that failed while ctx was still live logs its error, at most once every
+// warnEvery: Await retries it every 250 ms for up to horizonAwaitFailFor, and its long-lived
+// callers retry after that, so without the warning readers would wait with nothing in the log to
+// say why. One that failed because ctx ended is the caller's own doing, and logs nothing.
 func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 	observation, xmin, err := h.take(ctx)
 	h.mu.Lock()
@@ -316,10 +346,21 @@ func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 		h.record(observation, xmin)
 		stalled, safe = h.stalled(observation.at), h.safe
 	}
+	warnFailure := false
+	if err != nil && ctx.Err() == nil {
+		now := h.now()
+		if h.failWarnedAt.IsZero() || now.Sub(h.failWarnedAt) >= h.warnEvery {
+			h.failWarnedAt, warnFailure = now, true
+		}
+	}
 	h.mu.Unlock()
 	close(flight.done)
+	if warnFailure {
+		h.log().Warn("dispatch: event horizon observation failed; live event readers cannot advance until one succeeds",
+			"error", err)
+	}
 	if stalled != nil {
-		go h.warnStall(ctx, *stalled, observation.at.Sub(stalled.at), safe)
+		go h.warnStall(*stalled, observation.at.Sub(stalled.at), safe)
 	}
 }
 
@@ -435,14 +476,17 @@ func (h *Horizon) stalled(now time.Time) *horizonObservation {
 
 // warnStall logs that oldest has waited pendingFor to be proven safe, naming the oldest open
 // transaction that holds a transaction id. It runs on a goroutine of its own (see run), and the
-// diagnosis runs past the caller's cancellation under its own short deadline; a failed one is
-// logged in the warning, never returned.
-func (h *Horizon) warnStall(ctx context.Context, oldest horizonObservation, pendingFor time.Duration, safe int64) {
+// diagnosis runs on a context of its own under a short deadline, never one derived from the
+// caller's: that one carries the caller's store hold mark (store.WithTransactionTracking,
+// store.ForConcurrentRead), with which a Horizon on the shared pool (the fallback when the
+// horizon pool cannot open) would have the diagnosis's QueryRow refused as a nested acquire. A
+// failed diagnosis is logged in the warning, never returned.
+func (h *Horizon) warnStall(oldest horizonObservation, pendingFor time.Duration, safe int64) {
 	attrs := []any{
 		"pending_for", pendingFor, "observed_id", oldest.newest, "safe_horizon", safe,
 		"observer_xid", oldest.xid,
 	}
-	diagnosis, cancel := context.WithTimeout(context.WithoutCancel(ctx), horizonDiagnosisTimeout)
+	diagnosis, cancel := context.WithTimeout(context.Background(), horizonDiagnosisTimeout)
 	defer cancel()
 	var kind, state, application, database, query string
 	var pid int32
@@ -461,9 +505,13 @@ func (h *Horizon) warnStall(ctx context.Context, oldest horizonObservation, pend
 		}
 		attrs = append(attrs, "state", state, "application_name", application, "database", database, "query", query)
 	}
-	logger := h.logger
-	if logger == nil {
-		logger = slog.Default()
+	h.log().Warn("dispatch: event horizon held back by an open transaction; live event readers wait for it", attrs...)
+}
+
+// log is the warnings' sink: logger, or slog.Default at the time of the warning when it is nil.
+func (h *Horizon) log() *slog.Logger {
+	if h.logger == nil {
+		return slog.Default()
 	}
-	logger.Warn("dispatch: event horizon held back by an open transaction; live event readers wait for it", attrs...)
+	return h.logger
 }
