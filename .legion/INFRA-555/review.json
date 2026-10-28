@@ -2,25 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-555",
-  "completed": "2026-10-28T10:12:53Z",
-  "round": 4,
-  "trigger": "Conflict-forced forward merge of main 184897ac (6e3df71e). Unchanged-diff fingerprint at my last review's head 671f4dbf ad9fe91b..., at 4988bbde e034b9f9...: changed, so a new round. With CHANGELOG.md and .changes/** also excluded both hash 5d9d1a6c..., so the PR's own delta is only its 17 CHANGELOG entries moved into changie fragments.",
-  "reviewedCodeHead": "6e3df71e4a49f4135b804cbbe7bd91d54c8f8c03",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T11:53:58Z",
+  "round": 5,
+  "scope": "Narrowed by the INFRA-63 architect at the review-round cap: (1) no Dispatch key in any fragment name, Issue field or entry text, each entry otherwise unchanged; (2) the forward merge of main is faithful.",
+  "reviewedCodeHead": "75c172e235dd0134c1941e76f577de9f0b23028a",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "ci": "At code head 6e3df71e (CI head; compare to PR head 4988bbde shows only .legion/): required lint, typecheck, test, pr-title queued at 10:05Z. Not read as a pass; this round requests changes on other grounds.",
+  "fragments": "17 files under packages/{envoy,contracts,claude-envoy,pi-legion}/.changes/unreleased/ at 75c172e2, all pr2390-<Kind>-<time>.yaml, all custom.Issue: pr2390, no [A-Z][A-Z0-9]+-[0-9]+ match in any; git diff -M 568c22ec 15e7b7f5 shows each body changed only by the trailing (INFRA-555) removed.",
+  "merge": "Fingerprint excluding .legion, docs/solutions, CHANGELOG.md and .changes: 5d9d1a6c at 568c22ec and at 15e7b7f5 (the rename), 810b08b1 at 7347a712: the merge of main aeeee6c0 (#2368) changed the PR's own diff in 7 files. Interdiff read: store/pool.go adds registryPoolSize=1 to ConnectionsPerProcess (lease 11, total 85), infra/gcp/dispatch.go dispatchConnectionsPerPod 83->85, dispatch_kube.go/dispatch_test.go comments applied to main's text (the PR's app PDB block dropped since main moved every budget into deployment()), main_test.go passes the PR's new dispatchHandler args in main's /livez test, both READMEs merged. Both thermonuclear reviews rebuilt every both-sides file with git merge-file and found both sides kept; 64+4+1+11+1+1+3=85; app default still 1 replica Recreate, so the census Rollout lines hold.",
+  "ci": "Required set lint, typecheck, test, pr-title: all success at code head 75c172e2 (read 2026-10-28 11:53Z); compare to PR head shows only .legion/. Non-required Legion Envoy and Contracts run 40673764884 still queued then.",
   "thermonuclear": {
-    "deepReview": "APPROVE at 4988bbde: main's bus stream-id change, redact.URL refusals, ConnectOption callers, migration 0135, leasePoolSize 11 all hold; fragments render and match the old entries",
-    "codeQuality": "APPROVE at 4988bbde: 16 both-side files merge as HEAD has them; fragments match character for character"
+    "deepReview": "APPROVE at 7347a712 (merge faithful; go build/vet, infra TestDispatchConnectionsPerPod and TestDispatchAppWaitsForTheFrontDoor pass)",
+    "codeQuality": "APPROVE at 7347a712 (merge faithful; /livez and maxConnAge tests pass)"
   },
-  "fastFollow": "packages/envoy/AGENTS.md:2265 says the stream is created at start (now on first connection); pi-legion CHANGELOG stray blank line the old entry removed is back.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/*/.changes/unreleased/INFRA-555-*.yaml",
-      "description": "Controller ruling 10:04Z relayed by the INFRA-63 architect (dispatch://INFRA-472, stop new leaks): no Dispatch issue key in a public fragment name, Issue field or entry text. All 17 fragments are named INFRA-555-*, carry custom.Issue: INFRA-555 and end their body with (INFRA-555). Recreate them with changie new --custom Issue=pr2390 (names pr2390-<Kind>-<time>.yaml) and remove the key from every body."
-    }
-  ]
+  "fastFollow": "Census C1 row's infra/gcp line numbers moved with the merge (dispatch_kube.go deploymentStrategy now ~45-54, deployment() ~405-450).",
+  "keyFindings": []
 }
