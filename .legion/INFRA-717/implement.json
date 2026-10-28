@@ -2,9 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T19:25:00Z",
+  "completed": "2026-10-28T20:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2476",
-  "codeHead": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+  "codeHead": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
+  "round": 2,
+  "roundReason": "Tester's failure: scripts/dispatch/README.md said any Postgres 18 works while its throwaway server (pgserver 0.1.4) is PostgreSQL 16.2, which stems English differently ('added' gives 'ad', production's 18.6 gives 'add'). The architect asked for the procedure to start a Postgres 18 server and to show 'add' through the paragraph's commands.",
   "proof": [
     {
       "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
@@ -29,13 +31,21 @@
       "observed": "Word-bounded grep: no output, exit=1. The plan's unbounded regex matches one token, 'SQL-18' inside 'pgvector-on-PostgreSQL-18' in release-engineering.md line 6: that text is on main already, and the line shows as added only because the whole one-line paragraph changed. Files: the 4 changed files plus .legion/INFRA-717/plan.json, none under /.changes/. Title and the code commit's subject: 'ci: stop running the Postgres 16 jobs now that production runs Postgres 18', no key.",
       "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
       "negativeControl": "printf '+# see INFRA-1\\n' | grep -nE '\\b[A-Z][A-Z0-9]+-[0-9]+\\b|dispatch://' prints the line (exit 0), so the bounded grep still catches a key."
+    },
+    {
+      "criterion": "scripts/dispatch/README.md's Lexeme database paragraph starts a throwaway server whose English stemming matches production's PostgreSQL 18.6 (architect: to_tsvector('english','added adding') gives 'add' through the paragraph's commands).",
+      "surface": "The README's own bash block, run as written in this pod, and the connection form meaning-search-check.ts uses for a socket path (Bun SQL with path, username postgres, database postgres).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && awk '/^### Lexeme database/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' scripts/dispatch/README.md > $TMPDIR/lexeme-block.sh && TMPDIR=/legion/scratch/tmp/t717 bash -euo pipefail $TMPDIR/lexeme-block.sh; psql -h /legion/scratch/tmp/t717/pg -U postgres -d postgres -Atc \"select current_setting('server_version_num'), to_tsvector('english','added adding settings'), websearch_to_tsquery('english','added')\"; (cd scripts/dispatch && bun -e '<new SQL({ path, username: \"postgres\", database: \"postgres\" }) selecting server_version_num, tsvector_to_array(to_tsvector(english, added adding)), querytree(websearch_to_tsquery(english, added)), every value bound>' /legion/scratch/tmp/t717/pg/.s.PGSQL.5432); cd /legion/scratch/tmp/t717/pg && server/bin/pg_ctl -D data stop",
+      "observed": "Block exit 0 with no warning (initdb, then 'server started'). psql: 180006|'add':1,2 'set':3|'add'. Bun: {\"v\":\"180006\",\"l\":[\"add\"],\"q\":\"'add'\"}. pg_ctl stop: 'server stopped'. No TCP listener on 5432 (listen_addresses is empty).",
+      "headSha": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
+      "negativeControl": "The README's old command, uvx --python 3.12 --from pgserver==0.1.4, with the same query printed 160002 | 'ad':1,2 'set':3 | 'ad': the query tells the 16.2 server from the 18.6 one."
     }
   ],
   "filesChanged": [
     ".github/workflows/envoy-and-contracts.yaml: deleted jobs dispatch-go-postgres-16 and broker-go-postgres-16 with their comment blocks; three comments (filter list L52, envoy filter gate L402, envoy filter image-pull L429) now name only the remaining jobs.",
     ".github/workflows/pr-and-main.yaml: deleted job daemon-go-postgres-16 with its comment block; file ends at the test job's cache/save step.",
     ".dispatch/architecture/release-engineering.md: cut the clause and sentence about the three Postgres 16 jobs.",
-    "scripts/dispatch/README.md: line 328 now says 'Any Postgres 18 works, as production and CI run 18:' (task 5a from the architect via the planner)."
+    "scripts/dispatch/README.md: line 328 now says 'Any Postgres 18 works, as production and CI run 18:' (task 5a from the architect via the planner). Round 2: the throwaway server is zonky's pinned PostgreSQL 18.6.0 Linux x86-64 binaries from Maven Central, unpacked with Python, initdb'd with user postgres, socket-only in $TMPDIR/pg; the 'printed URL' sentence went with pgserver, and a stop command is given."
   ],
   "trickyParts": [
     "No paths-filter, trigger or pull-test-images entry existed only for the deleted jobs, so every filter entry stays; envoy-go, envoy-infra-go and envoy-smoke still use pull-test-images.",
@@ -44,7 +54,8 @@
   "deviations": [
     "The edits were made directly, not by a deep-worker subagent: the change is five deletions and four one-line text edits, each checked above.",
     "AC3's key grep uses word boundaries (\\b...\\b): the plan's unbounded regex matches 'SQL-18' in 'PostgreSQL-18', which is not a key and is on main already.",
-    "scripts/dispatch/README.md line 328 is now 110 characters wide; the rest of the paragraph is unchanged, as task 5a says."
+    "scripts/dispatch/README.md line 328 is now 110 characters wide; the rest of that sentence is unchanged, as task 5a says.",
+    "Round 2 uses zonky's PostgreSQL 18.6.0 binaries, not packages/envoy/scripts/dev-postgres.sh as the architect suggested first: dev-postgres.sh needs Docker, which a worker pod lacks (no docker binary here), and gives a TCP container rather than the socket-only server under $TMPDIR/pg that the README's example invocation (line 266) names. The architect allowed 'another pinned Postgres 18 runner'. 18.6.0 is the version production runs; the binaries carry no pgvector, which the lexeme check does not use."
   ],
   "openQuestions": []
 }
