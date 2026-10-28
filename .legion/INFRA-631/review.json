@@ -2,40 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T13:06:16Z",
-  "round": 4,
-  "headReviewed": "the handoff commit this file is pushed in (code head 6cbc88e3, merge of main c27469629a9b)",
+  "completed": "2026-10-28T13:50:40Z",
+  "round": 5,
+  "headReviewed": "the handoff commit this file is pushed in (code head 1a3678ac, on the merge of main 5fbd8391)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 1,
-  "roundThreeFindings": "fixed: the blockquote, footnote and escaped-close reproductions (and the tab and sentence-cut variants) refuse with exit 2, file unchanged; main is merged (c2746962) and restructure.ts --strict on its two files is byte-identical to the head guides; the refusal line names the re-laid-out text",
+  "minor": 0,
+  "roundFourFindings": "fixed: nested <pre> and <code>, an open tag inside emphasis, a link or a footnote, an unclosed <pre> across paragraphs and list items, and CRLF and tab after the tag name all leave the file unchanged with exit 0, stable on a second --write; the pi-envoy citation says list",
   "verified": [
-    "restructure.ts --strict on main c27469629a9b's two files: exit 0, byte-identical to the head guides",
-    "checker exit 0 on both guides; bun test of the two test files: 39 pass, 0 fail",
-    "every earlier reproduction (rounds 1-3) refuses or stays unchanged, and a second --write changes nothing",
-    "neither guide holds a <pre>, <textarea>, <script>, <style>, <code>, <tt>, <kbd> or <samp> tag",
-    "required checks (lint, typecheck, test, pr-title) at CI head 6cbc88e3 all queued at 13:06Z; compare 6cbc88e3...c960f9ee is .legion/ only; PR MERGEABLE"
+    "restructure.ts --strict on main 5fbd8391's two files: exit 0, byte-identical to the head guides",
+    "checker exit 0 on both guides; bun test of the two test files: 47 pass, 0 fail",
+    "every reproduction from rounds 1-4 leaves the file unchanged or refuses, and a second --write changes nothing",
+    "required checks (lint, typecheck, test, pr-title) at CI head 1a3678ac all queued at 13:50Z; compare 1a3678ac...fdcff9c8 is .legion/ only; PR MERGEABLE"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:876",
-      "description": "The guard's verbatim state lives in one child list, counts no nesting, and ends with each block, so --write still exits 0 after changing text inside <pre>/<code>: 'Use <pre>a <pre>b</pre> c. Then more text\\nd</pre> here.' (nested, plain paragraph), 'Use <code>a <code>b</code> c\\nd</code> here.', '> Quote *x <pre>y*\\nline one\\nline two</pre>' (open tag inside emphasis), 'Use <pre>x\\n\\nNext b. Then c\\nd.' (an unclosed <pre> holds the next paragraph). Fix that ends the class: in the guard, keep a block's text exact when its subtree holds any verbatim open tag, and keep later blocks exact while a verbatim element opened earlier is unclosed (open and close counted by name, in document order). Refusal is the intended outcome; no guide holds such a tag."
+      "file": "scripts/semantic-line-breaks.ts:272",
+      "description": "verbatimCount counts any '</pre>' substring of a raw-HTML span as a close, including one inside an HTML comment or a quoted attribute value, in both markVerbatim and exactBlocks. '<pre>\\n<!-- </pre> -->\\n\\nThis sentence starts on one line\\nand ends on the next.' and 'Intro <pre> then <span title=\"</pre>\">x</span>\\n\\n…' are joined with exit 0; GitHub's POST /markdown renders the joined text inside the still-open <pre>, before with its line break and after without. Fix: count a close only from a token that is exactly a close tag (a whole raw-HTML span or inline html node '</name>'); in HTML block values, skip comments, processing instructions, declarations, CDATA and quoted attribute values before counting closes. Opens may stay loose."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:95",
-      "description": "VERBATIM_OPEN's lookahead lacks \\r, so in a CRLF file '<pre\\r\\nclass=\"x\">a. Then b\\r\\nc</pre>' is not read as <pre>: --write exits 0 and cuts inside it. Add \\r to the lookahead."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-envoy/AGENTS.md:207",
-      "description": "Cites 'the \"Listener API\" table of packages/envoy/AGENTS.md'; that section is a list now. Reword it as the PR reworded the in-file table references."
+      "file": "scripts/semantic-line-breaks.ts:955",
+      "description": "Two load-bearing paths have no test (code quality mutated each; 46 of 46 still passed): the nesting count across blocks (:282; 'Use <pre>a <pre>b</pre>\\n\\nNext x. Then y.\\n\\nz</pre>' must stay unchanged) and exactBlocks, the only refusal for an open tag the block scanner cannot see ('<span>\\n`<pre>`\\n</span>\\n\\nNext x. Then y.' must refuse at line 5). Add both, with the two reproductions above."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at c960f9ee (2 High: nesting, unclosed <pre>; 1 Medium: CRLF; 1 Minor: stale citation and brief). Consumers checked at head: check-body-embed-limit.sh exit 0 and its test 49 pass; check-private-names.sh exit 0 and its test 261 pass; headings identical to main c2746962",
-    "codeQuality": "Verdict: CHANGES at c960f9ee (state per child list: the emphasis case; the close-tag branch is untested)"
+    "deepReview": "Verdict: CHANGES at fdcff9c8 (1 High: close counted inside a comment or attribute; 1 Minor: stale brief). Segmentation alone leaves no gap: a tag markVerbatim misses is still counted by exactBlocks",
+    "codeQuality": "Verdict: CHANGES at fdcff9c8 (nesting count and exactBlocks untested; one cleanup: always-true branch and optional chains in verbatimCount and markVerbatim)"
   }
 }
