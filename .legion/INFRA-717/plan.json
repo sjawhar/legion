@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-717",
+  "completed": "2026-10-28T18:55:00Z",
+  "summary": "Delete the three CI jobs kept on PostgreSQL 16 (dispatch-go-postgres-16 and broker-go-postgres-16 in .github/workflows/envoy-and-contracts.yaml, daemon-go-postgres-16 in .github/workflows/pr-and-main.yaml) with their comment blocks and the 0.8.7-pg16 digest they alone pin, rewrite the three comments that name them, and cut the clause and sentence about them from .dispatch/architecture/release-engineering.md. No filter, trigger or image-pull entry exists only for them, so every entry stays; no package changes, so no changelog fragment.",
+  "readAt": "main a409c128",
+  "tasks": [
+    "envoy-and-contracts.yaml: delete L1171-1219 (comment block, job dispatch-go-postgres-16, trailing blank line).",
+    "envoy-and-contracts.yaml: delete L1464-1507 (comment block, job broker-go-postgres-16, trailing blank line).",
+    "envoy-and-contracts.yaml comments: L52 -> '# The image pull envoy-go, envoy-infra-go and envoy-smoke run first.'; L402-403 -> '# The gate of envoy-go; every other Go job has its own.'; L430 -> '# The image pull envoy-go runs before its tests.' No path or filter entry changes (envoy-go, envoy-infra-go, envoy-smoke still use .github/actions/pull-test-images; needs.changes.outputs.envoy then gates envoy-go alone).",
+    "pr-and-main.yaml: delete L468-558 (blank line, comment block, job daemon-go-postgres-16); the file ends with the test job's actions/cache/save step and one trailing newline.",
+    ".dispatch/architecture/release-engineering.md L6: cut from '; the exceptions are three jobs that run on Postgres 16' through 'All three are removed once production runs Postgres 18.'; end '...and `envoy-go` prints the server's version and pgvector's before its tests.' with a period; front matter unchanged.",
+    "No changelog fragment (AGENTS.md: a fragment per package changed; none is).",
+    "One commit, key-free conventional subject, e.g. 'ci: stop running the Postgres 16 jobs now that production runs Postgres 18'. No issue key, dispatch:// link, deployment-repository or company name in commit messages, PR title, PR body, workflow comments or handoffs: the required lint runs check-private-names.sh over every tracked file (.legion/ handoffs included) and check-pr-text.sh over the PR's text.",
+    "Open the PR ready for review (a draft's required checks report skipped). Title = commit subject. Body from the pr-body.md template; Why states production's Cloud SQL instance has run PostgreSQL 18.6 since 28 October, with no deployment-repository name, run URL or dispatch:// link.",
+    "No ce-simplify-code pass: no runtime code (workflow YAML and one doc clause, all deletions); Thermo line says so."
+  ],
+  "acceptance": [
+    {
+      "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
+      "surface": "The workflow files GitHub Actions reads, and the job graph of the PR's runs on GitHub.",
+      "checks": [
+        "cd -- \"$LEGION_WORKSPACE\" && grep -rnE '7b822b0a|until production runs Postgres 18|postgres-16' .github/workflows; echo \"exit=$?\"  -> only exit=1",
+        "cd -- \"$LEGION_WORKSPACE\" && export GOPATH=$TMPDIR/gopath GOMODCACHE=$TMPDIR/gomod GOCACHE=$TMPDIR/gocache && SC=$(uvx --from shellcheck-py@0.10.0.1 which shellcheck) && go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck \"$SC\" .github/workflows/envoy-and-contracts.yaml .github/workflows/pr-and-main.yaml; echo \"exit=$?\"  -> only exit=0 (baseline on main: exit 0, no output)",
+        "Same actionlint over the whole directory at the head and at main: identical 9 pre-existing syntax-check findings (cache-mode, concurrency.queue) in changelog-fold, claude-envoy-rebuild, release-envoy-infra, release-envoy-listener, release; none in the two edited files.",
+        "Negative control: a $TMPDIR copy of the head's envoy-and-contracts.yaml with needs: [changes, dispatch-go-postgres-16] on envoy-go -> actionlint exits 1 naming a needed job that does not exist. Never edit the workspace copy for this.",
+        "gh run view <run id> -R sjawhar/legion --json jobs --jq '.jobs[].name' for the Tests and Legion Envoy and Contracts runs at the code head, read after the changes job has completed: no name ends '(until production runs Postgres 18)'. A run listing only 'changes' proves nothing."
+      ]
+    },
+    {
+      "criterion": "The required checks (lint, typecheck, test, pr-title) pass on the pull request, and envoy-go still reports 180006|0.8.7.",
+      "surface": "The PR's checks and envoy-go's log on GitHub at the code head.",
+      "checks": [
+        "gh pr checks <n> -R sjawhar/legion --required: lint, typecheck, test, pr-title each pass (never skipping) at the code head of a ready-for-review PR.",
+        "gh run view <envoy run id> -R sjawhar/legion --log --job <envoy-go job id> | grep -E '\\s1[68]0[0-9]{3}\\|'  -> a line ending 180006|0.8.7, job conclusion success. envoy-go runs because envoy-and-contracts.yaml is in the envoy filter.",
+        "Negative control: the same grep over the Postgres 16 job's log on main before this change (run 40701563936, job 122882888478) prints 160015|0.8.7 (observed by the planner), so the read tells the majors apart.",
+        "Owner: envoy-go is not required and takes about 27 min behind a backed-up runner pool. The reviewer does not approve while envoy-go at the code head is queued, in progress or red. The tester records the read when finished at its turn, else records it as not yet read; it never waits."
+      ]
+    },
+    {
+      "criterion": "No added line or path names the deployment's Dispatch keys or dispatch:// links; a fragment, if needed, uses changie new --custom Issue=pr<number>; new commit subjects carry no key.",
+      "surface": "The PR's diff and commits on GitHub.",
+      "checks": [
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --git --from main --to legion/INFRA-717@origin .github .dispatch | grep -E '^\\+' | grep -vE '^\\+\\+\\+ ' | grep -nE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://'; echo \"exit=$?\"  -> only exit=1",
+        "gh pr view <n> -R sjawhar/legion --json files --jq '.files[].path' | grep -vE '^\\.legion/'  -> exactly the three files, none under /.changes/",
+        "gh pr view <n> -R sjawhar/legion --json title,commits --jq '.title, .commits[].messageHeadline'  -> no [A-Z]+-[0-9]+ key",
+        "Negative control: printf '+# see dispatch://X-1\\n' | grep -nE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://' prints the line."
+      ]
+    }
+  ],
+  "proofRoles": {
+    "implement": "AC1 static grep, pinned actionlint on the two files, whole-directory parity with main, and the needs negative control at its head; AC3 checks on the opened PR. Pushes, opens the PR ready for review, reads the PR's runs once if changes has finished, never waits.",
+    "test": "Re-runs AC1's local checks at the head; reads AC1's job lists, AC2's required checks and envoy-go line, and AC3 on GitHub; its own negative controls as listed.",
+    "review": "Approves only once envoy-go at the code head finished success and printed 180006|0.8.7; checks the diff is deletions plus the three comment rewrites and the doc's period (legion-worker cleanup-deletion reference)."
+  },
+  "productionCheck": "Production for a CI change is main's CI: on main's push runs at the merge commit, the Tests and Legion Envoy and Contracts job lists carry no '(until production runs Postgres 18)' job, and envoy-go prints 180006|0.8.7. Recorded on the PR's Production line.",
+  "retroNote": "Any docs/solutions learning is named <slug>-pr<number>.md with related_issues holding sjawhar/legion#<number> only, as the pr2364 learnings do; no issue key in a path or line that reaches main.",
+  "decisions": [
+    "actionlint is clean = the pinned v1.7.12 + shellcheck 0.10.0 run exits 0 on the two edited files and the whole-directory finding set equals main's. CI runs no actionlint and main carries 9 findings in files the spec leaves untouched.",
+    "The image pin = the digest's three uses in .github/workflows (the acceptance names workflows). packages/envoy/scripts/dev-postgres.test.sh:29-30 keeps old_pin (it tests the move off that image); docs/plans/2026-10-14-dispatch-gcp-plan.md:676 is history.",
+    "Assumption: the daemon-owned branch name, the transient .legion/INFRA-717/ handoffs, and the PR body's Dispatch line and Why key are outside the spec's 'added line or path' and 'commit subjects'; retro removes .legion/INFRA-717/ before READY and the squash subject is the PR title."
+  ],
+  "discoveredScope": [
+    "Sent to the architect, not in this diff (spec: nothing else changes): scripts/dispatch/README.md:328 says 'Any Postgres 16 works, as production runs 16', now false; packages/envoy/deploy/scripts/autodeploy.sh:13 says the production database is Aurora PostgreSQL 16 and pins postgres:16.11-alpine pg_dump, a different deployment's database, unverified; packages/envoy/internal/dispatch/outbox/THROUGHPUT.md:10 'pgvector pg16' is a dated measurement record."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase steps, push and skip-checks rules, PR body template and proof shape (references/pr-body.md), and references/cleanup-deletion.md for a deletion-only diff.",
+      "asd-ste100: the PR body and any Envoy message to teammates are written in ASD-STE100, as the deployment instructions require."
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md's proof rules (read CI on GitHub, never wait on a queued lane, verify the implementer's proof, negative controls)."
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for approving the head by SHA and references/cleanup-deletion.md for checking the diff is a complete, deletion-only removal; approve only after envoy-go's 180006|0.8.7 at the code head."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "No role is obliged to wait for envoy-go (not required, ~27 min, backed-up pool), and an absence proof from a run needs its jobs created.", "answer": "The reviewer does not approve until envoy-go at the code head finished success with 180006|0.8.7; the tester records it if finished. Absence is proven by the static grep plus job lists read after changes completes; a run listing only changes proves nothing."},
+      {"finding": "'actionlint is clean' fails over the whole directory on main already, and CI does not run actionlint.", "answer": "Defined as pinned actionlint v1.7.12 with shellcheck 0.10.0 on the two edited files exiting 0, plus whole-directory parity with main's 9 findings; negative control with a dangling needs."},
+      {"finding": "Issue keys can leak via retro learning file names, changelog fragment names, handoffs, the PR body Dispatch line and branch name.", "answer": "Retro note: learning named -pr<number>.md; no fragment needed; commit subjects and PR title key-free; branch, transient handoffs and PR body Dispatch line recorded as an assumption outside the diff."},
+      {"finding": "Citing the production evidence in the PR body can turn the required lint red (deployment repository name).", "answer": "Why states the fact without the deployment repository's name, run URL or dispatch:// link."},
+      {"finding": "A draft PR passes required checks vacuously (skipped).", "answer": "Required checks must be completed/success, not skipped, at the code head of a ready-for-review PR; the PR is opened ready for review."},
+      {"finding": "The release-engineering.md text to cut is a clause plus a sentence.", "answer": "Task 5 cuts from '; the exceptions are' through 'All three are removed once production runs Postgres 18.' and ends the kept sentence with a period; front matter unchanged."},
+      {"finding": "No changelog fragment is needed.", "answer": "Task 6: none; AC3 checks no /.changes/ path in the PR's files."},
+      {"finding": "Stale text outside the spec scope (scripts/dispatch/README.md:328, autodeploy.sh:13, THROUGHPUT.md:10); 'image pin' could mean every copy of the digest.", "answer": "Stale text sent to the architect as a scope decision, not in this diff; image pin scoped to workflows, dev-postgres.test.sh fixture and docs/plans history stay."},
+      {"finding": "Live-state claims unverifiable read-only (production on 18.6, ruleset, actionlint baseline, envoy-go output, durations).", "answer": "Planner ran the ruleset read, actionlint baseline, envoy-go and pg16 log reads and duration reads (recorded in the plan); production's 18.6 is the approved spec's claim, and this pane's gh cannot read the deployment repository's runs (403)."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
