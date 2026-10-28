@@ -2,41 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T09:21:26Z",
-  "round": 4,
-  "headReviewed": "79c191d13e4f67fe1acb9016463e96d27f6c5c1e",
+  "completed": "2026-10-28T10:12:18Z",
+  "round": 5,
+  "headReviewed": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
-  "scope": "Narrow, per the INFRA-588 architect: the round-3 findings, the conflict merge cae91dd8, then end the round with REQUEST_CHANGES naming the architect's post-INFRA-629 list plus any correctness defect.",
-  "ci": "Code head 79c191d1 (only .legion/ above it, compare handoffsOnly true): required lint, typecheck, test and pr-title completed success at 09:21Z; the non-required claude-envoy job was still queued.",
-  "roundThreeFindings": "Both fixed. verify-build builds twice with --out into a scratch directory, refuses a tar inside the repository, reports a second-build difference as non-reproducible, and writes no file of the checkout; build.ts drops --in-place (the only remaining reference is the test that it exits 2); only the rebuild's build job and the claude-envoy job's disposable checkout extract the checked tar. docs/deployment.md points LEGION_CLAUDE_PLUGIN_DIR at an --out build. Proof recorded: implementer's and tester's git/jj status clean after verify-build, test, check-dist and --out on trees with plugin-source edits; tester's operator checkout pulls fast-forward. Both thermonuclear agents reproduced it.",
-  "merge": "cae91dd8 resolved correctly: merge-tree of 2fe74f7a and b295a3fb conflicts only in packages/claude-envoy/CHANGELOG.md, and the resolution differs only by the markers; per-file patch-ids of the PR diff match across the merge except that CHANGELOG hunk's position; head's dist/ and legion/ equal main's.",
+  "important": 1,
+  "minor": 3,
+  "ci": "Code head 4360b7a2 (only .legion/ above it, compare handoffsOnly true): typecheck success, lint in progress, test and pr-title queued at 10:11Z. Not waited for: this round requests changes.",
+  "roundFourItems": "All seven done. Merge f428381d matches merge-tree 30ebe359 in its five conflicted files with both sides kept; one land_on_main naming push-fold and push-built; pushed=true gone with no reader anywhere; both callers check the base sha first; workflow comments point to verify-build.sh; check-private-names.sh header corrected; verify-build applies a shipped skill's .gitignore and stops on a failed listing; one extract-built for every tar extraction. Thread PRRT_kwDORFy7ds6xDe55 answered and accepted.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 79c191d1 (Minors: stale PR body, 'only the rebuild extracts' wording, dead git init with a false comment, nested .gitignore in a shipped skill not checked)",
-    "codeQuality": "Verdict: CHANGES at 79c191d1 (extract duplicated in three places; dead git init; find failure masked by the check-ignore pipeline status; nested .gitignore not applied)"
+    "deepReview": "Verdict: APPROVE at 4360b7a2 (Minors: stale PR body phrases, fixed by the reviewer; no ::error:: line on a failed listing; no refusal case for changelog-fold.yaml's or a release's per-workflow allow-list)",
+    "codeQuality": "Verdict: CHANGES at 4360b7a2 (no correctness defect; the extract-built and verify-build caller lists restated in five files)"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/claude-envoy/scripts/verify-build.sh",
-      "description": "Lines 83-85: git -C repo_root check-ignore reads only the checkout's ignore files, but build.ts copies whole skill directories into legion/, a skill's own .gitignore included, and push-built's git add -A applies it, so the files it matches are silently left out of main (reproduced by deep review: skills/legion-worker/.gitignore naming notes.md passes verify-build). The in-place check of round 3 saw it. No skill ships one today. Fix: check against a git repository laid out like the build (which gives line 75's git init a job) or refuse a built .gitignore."
+      "file": "packages/claude-envoy/.changes/unreleased/INFRA-630-built-plugin-rebuilt-on-main.yaml",
+      "description": "New Dispatch keys in public files, against the controller's 10:04Z ruling (dispatch://INFRA-576/comment/fa82b5f7-4448-46ad-835b-91d1d939d110, under dispatch://INFRA-472 'stop new leaks only'): the fragment's name and the '(INFRA-630)' ending its body, and the ten docs/solutions 'status: superseded … by INFRA-630' lines this PR adds. Rename the fragment pr-2423-built-plugin-rebuilt-on-main.yaml, drop the key from its body, and name the pull request (sjawhar/legion#2423) in place of the key in the ten status lines."
     },
     {
-      "severity": "important",
+      "severity": "minor",
       "file": "packages/claude-envoy/scripts/verify-build.sh",
-      "description": "Lines 83-97: with pipefail the pipeline status is check-ignore's 1 when find fails and check-ignore matches nothing, and also 1 when find fails partway while check-ignore matches a path, so the '1)' branch passes with an error hidden. List the files first so a find failure stops the script."
+      "description": "Line 98: a failed git ls-files stops the script with only git's fatal line; give it an ::error::verify-build.sh line like every other refusal."
     },
     {
-      "severity": "important",
-      "file": "PR #2423",
-      "description": "The architect's list after #2419 (INFRA-629) merged as 184897ac: merge main; one land_on_main definition whose header names push-fold and push-built; drop land_on_main's unread pushed=true and its assertions and its copy of push-built's base check; cut the workflow comments that restate verify-build.sh's steps; correct check-private-names.sh:23-25; correct the PR body's Change bullet (no in-place build) and the 'only the rebuild extracts' wording (README, packages/claude-envoy/AGENTS.md, claude-envoy-rebuild.yaml:83), since the claude-envoy job extracts too; fix verify-build.sh:21-23's comment (check-private-names.sh reads with find and grep when given paths)."
+      "severity": "minor",
+      "file": ".github/scripts/check-release-credentials.test.sh",
+      "description": "The per-workflow allow-list is refused only for the rebuild; add cases refusing changelog-fold.yaml's key step running push-built or push-main, and a release's running push-fold."
     },
     {
       "severity": "minor",
       "file": ".github/workflows/claude-envoy-rebuild.yaml",
-      "description": "Fast-follow: the rm -rf + tar -xf extraction is in claude-envoy-rebuild.yaml:85-88, envoy-and-contracts.yaml:1031-1034 and release-push.sh push-built; one release-push.sh extract-built subcommand would keep the build job's changed output computed the way push-built extracts."
+      "description": "The lists of jobs that run extract-built and verify-build are restated in verify-build.sh:14-17, claude-envoy-rebuild.yaml:81-84, envoy-and-contracts.yaml:1029-1031 and check-private-names.sh:23-26, and verify-build.sh explains steps 2-3 twice (24-28 and 75-80, 86-92); keep each list once (release-push.sh, verify-build.sh's header)."
     }
   ]
 }
