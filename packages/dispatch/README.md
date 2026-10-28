@@ -173,7 +173,8 @@ for an issue, a document, a file, a picture, a block, a removed pinned block, an
 message, a session and a component, read by its own reference, as an edge's other end and on the
 `Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. It
 also covers the blocks of comments and messages: a mention in a comment starts at the comment's
-block holding it (a node of kind `block`, id `comment/<uuid>#b<n>`, whose `parent` is the comment);
+block holding it, a node of kind `block`, id `comment/<uuid>#b<n>`, whose `parent` is the comment
+(A10);
 a comment or message reply that names a block (`--reply-to <comment>#b-b2`,
 `--in-reply-to <message>#b-b2`) is a `replies_to` edge to that block, and `dispatch read` quotes it
 (A7); the facts of a comment's and a message's block (A11); a block's id kept through a person's

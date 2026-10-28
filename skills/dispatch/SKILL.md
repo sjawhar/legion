@@ -72,12 +72,15 @@ dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
+dispatch://KEY/comment/<id>#b-<block>[@vN]
 dispatch://KEY/message/<id>
+dispatch://KEY/message/<id>#b-<block>
 dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
+dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
+A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix. `#b-<block>` names one block of a comment or message; `@vN` on a comment block pins a revision. To answer one block, pass its reference to `dispatch comment --reply-to` or `dispatch message --in-reply-to`.
 
 ## Setup and the HTTP API
 
