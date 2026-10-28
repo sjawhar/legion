@@ -1,16 +1,18 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- `AskReach`, the reach every ask read carries, shared by `AskThread` and `AskRead`: `claimant`
-  (the session holding the claim on the ask's issue), `route` (the issue's route, `session:<id>` or
-  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and,
-  since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
-  `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
-  a reader counts each session once and tells a route nobody holds from one Dispatch could not
-  judge; each is null when absent and on a project document's ask.
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
+
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
   `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
@@ -214,12 +216,6 @@
 
 ### Changed
 
-- `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
-  holds the claim a person's answers, comments and messages on the issue reach it directly, a new
-  comment that mentions it arrives once, as the mention, when the mention reached it, and still
-  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
-  twice, and the second copy is the same comment), and that an agent's events and every other
-  change on the issue still need a subscription.
 - `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
   `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
   question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
@@ -227,6 +223,7 @@
   in those terms, saying what happens to whom under each option, never "How should we proceed?"
   or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
   naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

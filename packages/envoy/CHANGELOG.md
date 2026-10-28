@@ -1,24 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- The ask reads name who besides the followers a person's answer and replies reach:
-  `GET /api/v1/asks/{id}` and every ask thread (the Inbox rows and an issue's
-  `GET /api/v1/issues/{key}/asks?thread=1`) carry `claimant`, the session holding the claim on the
-  ask's issue, `route`, the issue's route (`session:<id>` or `role:<name>`), and that route's
-  reach as the issue reads carry it: `route_status` (`live`, `no_holder`, or `unknown` when the
-  listener is unconfigured or did not answer) and `route_holder`, the live session the route
-  reaches (the routed session while the listener lists it, or the role's holder), resolved per
-  read; each is null when absent and on a project document's ask. The Inbox ask card's `Reaches N`
-  panel lists the claimant (`via claim`) and the route (`via route`) beside the followers and
-  subscribers, and counts each session once: a session that is the claimant, the route's holder, a
-  follower or a subscriber at once is one row and one in `N`. While the route's reach is unknown
-  its row carries the issue page's `Route reach unknown` marker: a `session:` route's row shows its
-  session's running state, from the agent registry, beside the marker and still counts the
-  session, and a role route reads `Reaches N + route (unknown)`. A role route nobody holds shows
-  the issue's `Nobody holds it right now` marker, `UnreachableRouteMarker`.
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
@@ -992,6 +977,16 @@
 - The secrets broker logs at boot how it signs in to its database, `database sign-in
   method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
   tells a token sign-in from a password one in the log rather than the task's environment.
+- `GET /api/v1/search` gives every `ask` hit `ask`, where the ask stands when the search ran:
+  `open`, `answered` with its latest answer (who gave it, when, the options it chose and its
+  text), or `resolved` with its resolution and, when anyone answered it, the last answer it had,
+  which for an ask that document settlement retracted while it was answered is read from its
+  `ask.answered` events, since its row keeps none. One query reads every ask hit of a page, the
+  events are read only when the page holds a resolved ask, and a page with no ask hit reads
+  nothing more. The search palette shows it under each ask hit's excerpt: a badge (`Open`,
+  `Answered`, `Closed, no answer` or `Closed after an answer`), who closed the ask and when, and
+  its latest answer, with who gave it, when, the options chosen and its text cut to three lines
+  (INFRA-569).
 
 ### Changed
 
@@ -1018,36 +1013,6 @@
   heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching a private
   stream subject other than their own agent subject (`reachesPrivateStreamSubject` in
   `@legion/envoy-client/replay`, mirroring `bus.ReachesPrivateStreamSubject`) (INFRA-439).
-- A person's answers, comments and messages on a claimed issue reach the session holding its
-  claim, on its own `notifications.agent.<session_id>` topic, where before they reached it only
-  when it had subscribed to the issue, was its route, followed the ask or wrote the commented
-  document. A person's `ask.answered`, `ask.handed_back`, `ask.resolved`, `comment.created`,
-  `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created` and
-  `message.answered` take this claimant route; a message a person sends to one session still
-  reaches only that session. The claim is read when the event is published, so a retry after the
-  claim changed hands reaches the new holder, and a claimant that is also the route, a follower or
-  an author gets one copy. A claim or a `session:` route brings a person's answers, comments and
-  messages, and a route a person's other changes on the issue too; a subscription to the issue
-  brings other agents' activity, beyond a reply in an ask the session follows.
-- A new comment (`comment.created`) is left to its mention only once the mention delivered it: the
-  route, claimant, author and ask follower copies skip a session the comment's mentions resolved
-  to only when `comment_deliveries` records the mention `sent` to that session, so such a comment
-  arrives once, as the mention. While the mention's send is still pending (under a minute old),
-  the outbox publishes every other destination, holds that session's copy back and tries the
-  event again a few seconds later without counting an attempt; when the send failed, was
-  abandoned or was never recorded, the session gets its own-topic copy as if it had not been
-  mentioned. This changes the route and author copies too: before, a mention resolved to the
-  route's session or a document's author suppressed that copy even when the mention's send failed,
-  so the comment reached that session directly by no path. The ask follower route, which before
-  reached every follower, now skips a follower the mention delivered the comment to, by the same
-  rule. A comment's edit, resolution and reopening are never left to a mention and reach every one
-  of these sessions, and are not held back with a deferred `comment.created`, so a session can
-  receive a comment's edit before the comment while its mention's send is undecided. One copy is
-  not guaranteed: a mention whose receipt timed out is recorded `failed` though the listener may
-  have delivered it, and a first attempt stranded past the minute is abandoned though it may have
-  landed, so the session also gets its own-topic copy, under a different dedupe key; a host treats
-  the second copy as the same comment. The pending window is `model.DeliveryClaimLapse`, the one
-  lease the API's delivery claims and the outbox's mention deferral both read.
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
@@ -1850,6 +1815,16 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
+  from the text its search vector indexes - the question, the options' labels and descriptions,
+  the answer's text and the options it chose - where it was cut from the question, the options'
+  raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
+- An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
+  lists and `GET /api/v1/me/answers`, and an `ask.answered` event's `answer` and `previous_answer`
+  read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
+  `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
+  events already stored with `null`; a new answer stores `[]` (INFRA-569).
 
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document

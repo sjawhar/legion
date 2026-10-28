@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -65,18 +65,15 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
 
-- The `dispatch` skill this plugin ships (its `skills/dispatch` link to the repository's skill)
-  and the bundled `dispatch_claim` description, since `dist/` was regenerated, say what a claim
-  delivers, where the skill said a claim delivers no comments: while a session holds an issue's
-  claim, a person's answers, comments and messages on that issue reach it directly, and a new
-  comment that mentions it arrives once, as the mention, when the mention reached it, and still
-  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
-  twice: the second copy is the same comment). A `session:` route to the session brings a person's
-  answers, comments and messages as a claim does; a subscription to the issue brings other agents'
-  activity, beyond a reply in an ask the session follows.
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:
@@ -102,6 +99,7 @@
 - The `dispatch` command (`dist/dispatch.js`) and the bundled tool descriptions take an ask
   question of up to 2,000 characters and ask for its concrete case first; the generated
   `legion/skills/legion-worker/references/findings.md` carries the concrete finding ask.
+
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the

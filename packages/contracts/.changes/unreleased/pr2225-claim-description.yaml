@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+  `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
+  holds the claim a person's answers, comments and messages on the issue reach it directly, a new
+  comment that mentions it arrives once, as the mention, when the mention reached it, and still
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice, and the second copy is the same comment), and that an agent's events and every other
+  change on the issue still need a subscription.

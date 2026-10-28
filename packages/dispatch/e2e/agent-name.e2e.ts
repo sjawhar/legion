@@ -186,7 +186,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment show the agent's current name, whether it runs, and a live link", async ({
+test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment show the agent's current name, whether it runs, and a live link @phone", async ({
   browser,
 }, testInfo) => {
   const seeded = await seed();
@@ -257,7 +257,7 @@ test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment sh
   }
 });
 
-test("the live link opens that agent's conversation, running or not", async ({
+test("the live link opens that agent's conversation, running or not @phone", async ({
   browser,
 }, testInfo) => {
   const seeded = await seed();
@@ -287,7 +287,7 @@ test("the live link opens that agent's conversation, running or not", async ({
   }
 });
 
-test("on a phone the ask card's asker still opens its copy handles, and the live link beside it opens the conversation", async ({
+test("on a phone the ask card's asker still opens its copy handles, and the live link beside it opens the conversation @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the kept action is checked at phone width");
@@ -335,7 +335,7 @@ test("on a phone the ask card's asker still opens its copy handles, and the live
 // The ask card's provenance line holds the turn, the asker's copy-handles button with the live
 // link beside it, and the time. On a phone the live link's 44 px touch box and "Waiting on you"
 // leave the asker's name a few letters ("Le…") unless the asker gets a line of its own.
-test("on a phone the ask card's asker reads its whole name beside Waiting on you and the live link", async ({
+test("on a phone the ask card's asker reads its whole name beside Waiting on you and the live link @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the narrow provenance line is a phone layout");
@@ -363,7 +363,7 @@ test("on a phone the ask card's asker reads its whole name beside Waiting on you
   }
 });
 
-test("the page reads the agent list once, asks nothing per agent, and shows a rename and a stop without a reload", async ({
+test("the page reads the agent list once, asks nothing per agent, and shows a rename and a stop without a reload @phone", async ({
   browser,
 }, testInfo) => {
   // The open page learns of a rename and then of a stop only from the shell's 15 s registry
@@ -416,7 +416,7 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
   }
 });
 
-test("a claimed List row and Board card open their issue by keyboard, and the claim's agent link opens the agent", async ({
+test("a claimed List row and Board card open their issue by keyboard, and the claim's agent link opens the agent @phone", async ({
   browser,
 }, testInfo) => {
   const seeded = await seed();

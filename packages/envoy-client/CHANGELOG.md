@@ -1,19 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Changed
 
-- `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
-  messages on <KEY> now reach you directly.`, after the status advice and before the note that the
-  session is not subscribed to the issue, which still names the subscription every other event on
-  it needs.
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
 - `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
   their `--help` asks for the concrete case first and the choice in its terms
   (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
   `--image`, the appended `Ref:` line and picture lines count toward the limit.
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -187,6 +184,15 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
 
 - `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
   envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse

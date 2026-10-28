@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
 
 - AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
   review, a file missing when the gate ran) warn by default: the write posts with its warning and
@@ -329,12 +335,6 @@
 
 ### Changed
 
-- The `dispatch` skill this plugin ships says what a claim delivers, where it said a claim delivers
-  no comments: a person's answers, comments and messages on the claimed issue reach the session,
-  and a new comment that mentions it arrives as the mention alone once that mention was delivered,
-  or twice when the mention's receipt timed out. A `session:` route to the session brings a
-  person's answers, comments and messages as a claim does; a subscription to the issue brings
-  other agents' activity, beyond a reply in an ask the session follows.
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
   passing (a test, review, check or proof) also says, in that sentence, what the pass does not
@@ -351,6 +351,7 @@
   case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
   choice in those terms, never "Which option?". The ask block template shows that shape. To stay
   under the 2,000-word guard, lines another of the three skills already says are cut.
+
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
   own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
   the session's own tree touches is fixed in that tree's pull request, any other goes to the
