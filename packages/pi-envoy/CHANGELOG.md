@@ -217,6 +217,18 @@
 
 ### Fixed
 
+- AskGate's rules no longer push a reviewer to shorten an ask below what its concrete case needs.
+  They say a rewritten `dispatch ask` or `dispatch edit-ask` question is at most 2,000 characters
+  (`ASK_QUESTION_MAX`), cut to fit and never below it to save room. Content failure 12 exempts the
+  concrete case, what each option does and to whom, and the recommendation, and content failure
+  13 now names padding (a preamble, a restatement, a process account, a closing offer), never
+  length alone. A question about a credential, grant or permission only the person can give is a
+  question for them, and a claim about what the person said may be restated as the agent's own
+  dated reading of a named source when no link reaches their words. A full-length rewrite now
+  reaches the agent whole: the revise reason handed to it is capped at 8 KiB, from 2 KiB, which
+  clipped the end of a rewrite (its options and recommendation), and the review's output budget is
+  4,096 tokens, from 1,200, which a rewrite of a 1,450-character question already used 1,106 of,
+  thinking included; an answer cut off there holds no verdict and the write posts unreviewed.
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
   numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
