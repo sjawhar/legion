@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, type QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { openStreamResponse } from "../../__tests__/sse-test-harness";
 import { api, isRetryableQueryError } from "../../api/client";
+import { DispatchQueryClient, queryRetryDelay } from "../../api/query-client";
 import { refreshQueries } from "../../api/query-refresh";
 import { useEventStream } from "../../api/sse";
 import type { CredentialPendingResponse } from "../../api/types";
@@ -13,9 +14,9 @@ import { Inbox } from "./Inbox";
 
 // A Dispatch with no secrets broker answers the credential-request list with `null`, an answer that
 // holds until the page reloads or the event stream reconnects (the server reads its broker setting
-// at boot). The QueryClient here is main.tsx's own, with no retry delay. Every credential-list call
-// after the first is held open, so a refetch, had one started, would leave the list loading and the
-// empty state off the screen.
+// at boot). The QueryClient here is main.tsx's own. Every credential-list call after the first is
+// held open, so a refetch, had one started, would leave the list loading and the empty state off
+// the screen.
 const never = () => Promise.withResolvers<never>().promise;
 
 let whoAmI: Mock<typeof api.whoAmI>;
@@ -37,12 +38,12 @@ afterEach(() => {
 });
 
 function productionQueryClient(): QueryClient {
-  return new QueryClient({
+  return new DispatchQueryClient({
     defaultOptions: {
       queries: {
         refetchOnWindowFocus: true,
         retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
-        retryDelay: 0,
+        retryDelay: queryRetryDelay,
         staleTime: 30_000,
       },
     },

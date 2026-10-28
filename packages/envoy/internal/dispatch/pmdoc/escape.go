@@ -7,6 +7,7 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
+	"github.com/yuin/goldmark/parser"
 )
 
 // The renderer's escape rules. Paragraph text is written so the parser reads it back as the same
@@ -878,7 +879,7 @@ func altReadsBack(written, alt string, context inlineContext) (reads, stored boo
 	if !isAlt(block.Children, alt) {
 		return false, false
 	}
-	nodes, err := readInline(image, storedMarkdown.run, nil)
+	nodes, err := readInline(image, storedMarkdown.run, parser.NewContext(), nil)
 	return true, err == nil && isAlt(nodes, alt)
 }
 
