@@ -26,7 +26,11 @@ async function markdownFile(text: string) {
 /** Runs the script as a contributor does: `bun scripts/semantic-line-breaks.ts [--write] <files>`. */
 function run(args: string[]) {
   const result = Bun.spawnSync(["bun", SCRIPT, ...args], { cwd: REPO_ROOT });
-  return { exitCode: result.exitCode, stdout: result.stdout.toString() };
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
 }
 
 /** `--write` on `text`; the file's content afterwards and the exit code. */
@@ -521,4 +525,53 @@ test("--write keeps a byte order mark", async () => {
   const result = await written("\uFEFFSome words. More words.\n");
   expect(result.text).toBe("\uFEFFSome words.\nMore words.\n");
   expect(result.exitCode).toBe(0);
+});
+
+/** The warning the script prints for a verbatim element opened by `tag` on 1-based `line`. */
+function verbatimWarning(path: string, line: number, tag: string) {
+  return `${path}:${line}: warning: ${tag} opens a verbatim element; from this block to the end of the file, R1 and R2 are not checked and --write changes nothing\n`;
+}
+
+test("check warns at the verbatim tag's own line in a multi-line paragraph and keeps exit 0", async () => {
+  const path = await markdownFile("A first line\nsecond line\nthird line has <PRE>x</PRE> here.\n");
+  const { exitCode, stdout, stderr } = run([path]);
+  expect(stdout).toBe("");
+  expect(stderr).toBe(verbatimWarning(path, 3, "<pre>"));
+  expect(exitCode).toBe(0);
+});
+
+test("check warns about a verbatim tag after a finding and keeps exit 1", async () => {
+  const path = await markdownFile(
+    "One sentence. Two sentences.\n\nIntro line\nwith <code>x</code>.\n"
+  );
+  const { exitCode, stdout, stderr } = run([path]);
+  expect(stdout).toContain(`${path}:1: R1:`);
+  expect(stderr).toBe(verbatimWarning(path, 4, "<code>"));
+  expect(exitCode).toBe(1);
+});
+
+test("--write warns on a file it changes and on a file it leaves unchanged", async () => {
+  const changed = await markdownFile("One sentence. Two sentences.\n\n<kbd>Ctrl</kbd> opens it.\n");
+  const unchanged = await markdownFile("One sentence.\n\n<kbd>Ctrl</kbd> opens it.\n");
+  const { exitCode, stderr } = run(["--write", changed, unchanged]);
+  expect(stderr).toBe(
+    verbatimWarning(changed, 3, "<kbd>") + verbatimWarning(unchanged, 3, "<kbd>")
+  );
+  expect(exitCode).toBe(0);
+  expect(await readFile(changed, "utf8")).toBe(
+    "One sentence.\nTwo sentences.\n\n<kbd>Ctrl</kbd> opens it.\n"
+  );
+});
+
+test("a <code> in a code span or a fenced block warns nothing", async () => {
+  const span = await markdownFile("Write `<code>` here.\n");
+  const fenced = await markdownFile("```html\n<code>x</code>\n```\n");
+  for (const args of [
+    [span, fenced],
+    ["--write", span, fenced],
+  ]) {
+    const { exitCode, stderr } = run(args);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+  }
 });

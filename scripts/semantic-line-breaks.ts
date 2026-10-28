@@ -198,9 +198,18 @@ interface ListItem {
   contentColumn: number;
 }
 
+interface VerbatimFrom {
+  /** 0-based index of the line holding the tag. */
+  line: number;
+  /** The tag name in angle brackets, lower-cased, e.g. `<pre>`. */
+  tag: string;
+}
+
 interface Blocks {
   lines: LineInfo[];
   items: ListItem[];
+  /** Where markVerbatim found the first verbatim open, if anywhere. */
+  verbatimFrom?: VerbatimFrom;
 }
 
 interface Fence {
@@ -543,8 +552,8 @@ function scanBlocks(source: readonly string[]): Blocks {
     }
     if (!isBlank(line)) for (const item of open) item.last = index;
   }
-  markVerbatim(source, lines, frontMatter + 1);
-  return { lines, items };
+  const verbatimFrom = markVerbatim(source, lines, frontMatter + 1);
+  return verbatimFrom === undefined ? { lines, items } : { lines, items, verbatimFrom };
 }
 
 /**
@@ -553,9 +562,13 @@ function scanBlocks(source: readonly string[]): Blocks {
  * block, and so is a run of lines of one other kind up to the next list item's marker. An HTML
  * block's raw HTML is its whole text; another block's is the inline HTML proseMask reads, so a tag
  * named in a code span, an autolink or escaped text counts for nothing. Fences and indented code
- * hold none.
+ * hold none. Returns the line and tag of the match, or undefined when there is none.
  */
-function markVerbatim(source: readonly string[], lines: LineInfo[], from: number): void {
+function markVerbatim(
+  source: readonly string[],
+  lines: LineInfo[],
+  from: number
+): VerbatimFrom | undefined {
   for (let first = from; first < lines.length; ) {
     const info = lines[first];
     let last = info?.paragraph?.last ?? first;
@@ -567,13 +580,27 @@ function markVerbatim(source: readonly string[], lines: LineInfo[], from: number
       const html: [number, number][] = [];
       if (info?.kind === "html") html.push([0, text.length]);
       else proseMask(text, html);
-      if (html.some(([start, end]) => VERBATIM_OPEN.test(text.slice(start, end)))) {
+      for (const [start, end] of html) {
+        const match = VERBATIM_OPEN.exec(text.slice(start, end));
+        if (match === null) continue;
         for (const line of lines.slice(first)) line.verbatim = true;
-        return;
+        const at = start + match.index;
+        const line = first + (text.slice(0, at).match(/\n/g)?.length ?? 0);
+        return { line, tag: `${match[0].toLowerCase()}>` };
       }
     }
     first = last + 1;
   }
+  return undefined;
+}
+
+/** Says on stderr where a verbatim element turns R1, R2 and `--write` off for the rest of `text`. */
+function warnVerbatim(path: string, text: string): void {
+  const from = scanBlocks(splitLines(text).lines).verbatimFrom;
+  if (from === undefined) return;
+  process.stderr.write(
+    `${path}:${from.line + 1}: warning: ${from.tag} opens a verbatim element; from this block to the end of the file, R1 and R2 are not checked and --write changes nothing\n`
+  );
 }
 
 /** Index of the next run of exactly `length` backticks at or after `from`, or -1. */
@@ -1124,6 +1151,7 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
   for (const path of paths) {
     const text = await readText(path);
     if (text === undefined) return 2;
+    warnVerbatim(path, text);
     for (const finding of check(text)) {
       process.stdout.write(`${path}:${finding.line + 1}: R${finding.rule}: ${finding.message}\n`);
       status = 1;
@@ -1164,6 +1192,7 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
       continue;
     }
     const next = relayout(text);
+    warnVerbatim(path, text);
     if (next === text) continue;
     const difference = foldedDifference(text, next);
     const refusal =
@@ -1183,7 +1212,10 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
 // `bun scripts/semantic-line-breaks.ts [--write] <file.md>...` prints `file:line: R<n>: <excerpt>`
 // for each finding and exits 1 when there is one; with `--write` it re-lays out each file in place
 // and exits 2, writing nothing for that file, when the result would differ in more than whitespace,
-// would render differently, or would change again under a second re-layout.
+// would render differently, or would change again under a second re-layout. In both modes, a file
+// whose verbatim element (`<pre>`, `<code>` and the like, outside code) turns the checks off for
+// the rest of the file gets one `file:line: warning: <tag> opens a verbatim element; ...` line on
+// stderr; it does not change the exit code.
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const write = args[0] === "--write";
