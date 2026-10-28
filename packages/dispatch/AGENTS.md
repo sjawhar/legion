@@ -1201,8 +1201,8 @@ its method and path, and one still retrying after a file's last test fails that 
 preload's `afterEach` (`__tests__/network-guard.ts`). Both ways the page makes a request are
 guarded, because happy-dom's `XMLHttpRequest` — which an upload goes through — has a `Fetch` of
 its own rather than `globalThis.fetch`. After every test the preload also stops every write store
-made since the last (`resetWriteStores` in `features/writes/write-store.ts`: the app's and each
-one a test makes itself) and drops what the page kept (`resetWriteStorage`): a store outlives the
+made since the last, which `watchWriteStores` in `features/writes/write-store.ts` tells it of as
+each is made (the app holds none but its own), and drops what the page kept (`resetWriteStorage`): a store outlives the
 test that made it, and a write it left out would go on retrying, once that test's spies are
 restored, into the tests and files after it, which a bare `bun test`, every file in one process,
 reports as failures of whichever test is running then. Reads still reach the network as before: hundreds of

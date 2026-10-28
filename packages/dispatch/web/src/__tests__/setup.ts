@@ -11,7 +11,7 @@ import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
-import { resetWriteStores } from "../features/writes/write-store";
+import { type Writes, watchWriteStores } from "../features/writes/write-store";
 import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard";
 import { resetRouteAnswers } from "./send-answers";
 
@@ -87,9 +87,14 @@ afterEach(resetReplyDrafts);
 // A write a test leaves out keeps writing what it keeps, and the next test's signed-in app would
 // take it up again (`Writes.resume`): each test's are let go, their trying stopped first, since a
 // store outlives its test and would go on retrying into the tests and files after it
-// (`resetWriteStores`), and so is the issue state the last pin answered, which the next pin would
+// (`watchWriteStores`), and so is the issue state the last pin answered, which the next pin would
 // otherwise write over.
-afterEach(resetWriteStores);
+const madeStores = new Set<Writes>();
+watchWriteStores((store) => madeStores.add(store));
+afterEach(() => {
+  for (const store of madeStores) store.clear();
+  madeStores.clear();
+});
 afterEach(resetWriteStorage);
 afterEach(resetPinState);
 // Whether Dispatch could be reached is the page's to learn afresh: a request one test failed would

@@ -267,9 +267,10 @@ export function signedInLogin(client: QueryClient): string | undefined {
   return client.getQueryData<AuthenticatedUser>(["whoami"])?.login;
 }
 
-/** Every store made since the last `resetWriteStores`, the app's (`writesOf`) and each one a test
- *  makes itself. */
-const made = new Set<Writes>();
+/** Told of each store as it is made: nothing in the app, which holds no store but its own
+ *  (`writesOf`), and the unit tests' preload, which stops every one after each test
+ *  (`watchWriteStores`). */
+let watcher: ((store: Writes) => void) | undefined;
 
 /**
  * Every write the page makes, one per press, beside the app's `QueryClient` (`writesOf`), above
@@ -330,7 +331,7 @@ export class Writes {
     this.#client = client;
     this.#kept = kept;
     this.#files = files;
-    made.add(this);
+    watcher?.(this);
   }
 
   /** Every write held, in press order: one array until a write changes. */
@@ -1056,14 +1057,14 @@ export function writesOf(client: QueryClient): Writes {
   return store;
 }
 
-/** Lets every write of every store go, its trying stopped (`Writes.clear`), for the unit tests'
- *  preload. A store outlives the test that made it, and a write it left out goes on retrying on
- *  its backoff once the test's spies are restored, so against the real client: into the tests
- *  after it, and into the next file's when `bun test` runs every file in one process, where the
- *  network guard fails whichever test is running when the retry reaches the network. */
-export function resetWriteStores(): void {
-  for (const store of made) store.clear();
-  made.clear();
+/** Has `watch` told of every store made from now on (none when `undefined`), for the unit tests'
+ *  preload, which stops each one's trying after every test (`Writes.clear`). A store outlives the
+ *  test that made it, and a write it left out goes on retrying on its backoff once the test's spies
+ *  are restored, so against the real client: into the tests after it, and into the next file's when
+ *  `bun test` runs every file in one process, where the network guard fails whichever test is
+ *  running when the retry reaches the network. */
+export function watchWriteStores(watch: ((store: Writes) => void) | undefined): void {
+  watcher = watch;
 }
 
 export function useWrites(): Writes {
