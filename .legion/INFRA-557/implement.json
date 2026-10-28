@@ -2,54 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-28T17:03:00Z",
-  "round": 4,
+  "completed": "2026-10-28T19:12:00Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "39a730805f22d2b6df1230e589e4a298b263e392",
-  "answersTest": "c447bfff9f39ff6da568e7399e92bcdf3fee8e22",
+  "codeHead": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+  "answersTest": "a4b72ae31d284ac846eb93e553d912851061a7ba",
   "proof": [
     {
-      "criterion": "Tester round-4 failure: the head merges into main and CI can run (PR no longer conflicting)",
-      "surface": "GitHub pull request #2404",
-      "command": "gh api repos/sjawhar/legion/pulls/2404 --jq '{mergeable,mergeable_state}'",
-      "observed": "{\"mergeable\":true,\"mergeable_state\":\"blocked\"} after the forward merge of main 8b4a862b was pushed (blocked = waiting on checks and review, not a conflict). Fingerprint comment: https://github.com/sjawhar/legion/pull/2404#issuecomment-6474938305",
-      "headSha": "39a730805f22d2b6df1230e589e4a298b263e392",
-      "negativeControl": "at c447bfff the same call gave mergeable false, mergeable_state dirty, with conflicts in 5 files (tester)"
+      "criterion": "Tester round-4 failure (architect Q2 as restated 2026-10-28 17:25Z): a SIGKILL with a prompt in flight keeps the session's order and delivers within 15 s; a repeat with the same id is allowed (red row TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s, unchanged from df54bb9a)",
+      "surface": "two real cmd/listener binaries for one machine id against one in-process nats-server 2.10.29; a port session whose first prompt the test holds unanswered when the active pod is SIGKILLed",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=5 -timeout 40m -run '^(TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s|TestTwoPodsPromptWhatAKilledPodOnlyAttempted|TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered|TestTwoPodsSIGKILLHandsOverInOrderWithin15s)$' ./cmd/listener",
+      "observed": "ok 224.543s: all four rows 5 of 5; the in-flight message reached its session first, about 6.2 s after the kill (worker's measured run). Output: https://github.com/sjawhar/legion/pull/2404#issuecomment-6477225696",
+      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+      "negativeControl": "the red row at 39a73080 (tester): 'ses_mp_midprompt took evt-mp-0002 (published 3ms, prompted 6.19s ...) before evt-mp-0001 (published 0s, prompted 35.008s ...), out of the publish order' in 2 of 2; pod-b logged 'listener delivery deferred to another pod's attempt'"
     },
     {
-      "criterion": "Every earlier behaviour holds after the merge: one deliverer, take-overs in order (graceful within 10 s, hard within 15 s), shared state, two builds",
+      "criterion": "All earlier rows still hold",
       "surface": "real cmd/listener binaries per row against one in-process nats-server, relays that cut, freeze or slow links",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
-      "observed": "all 23 rows PASS, ok 558.694s; untagged listener suite (Postgres-backed TestDispatch* skipped) ok 555.790s",
-      "headSha": "39a730805f22d2b6df1230e589e4a298b263e392",
-      "negativeControl": "the tester's red rows failed at the heads they were written against (24a88452, 2e592cc8); the first 20 rows all FAIL on base 819dc283 (https://github.com/sjawhar/legion/pull/2404#issuecomment-6443394041)"
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged go test -count=1 -timeout 20m (four Postgres-backed TestDispatch* skipped) ./cmd/listener/",
+      "observed": "24 rows PASS, ok 510.508s; untagged ok 561.902s; internal/dedupe and internal/integration ok; race on lease/ledger tests ok",
+      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+      "negativeControl": "round-3 red row at 2e592cc8 out of publish order (3 of 3); first 20 rows FAIL on base 819dc283"
     },
     {
-      "criterion": "Graceful and hard take-over on real binaries keep every message once and in order",
-      "surface": "two listener processes built at the head against a real nats-server 2.10.29 process, a port session on a local HTTP server, 40 sends through the standby, the active pod signalled after the 15th",
-      "command": "bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head term4 TERM; bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head kill4 KILL",
-      "observed": "SIGTERM: 0 sends refused, 40 prompted, 40 unique, in send order, the last 3.30 s after the signal. SIGKILL: 40 once, in order, the last 4.90 s after the signal",
-      "headSha": "39a730805f22d2b6df1230e589e4a298b263e392",
-      "negativeControl": "round-3 red row at 2e592cc8: out of publish order 3 of 3"
-    },
-    {
-      "criterion": "Merge interaction: main #2367 panics on a second summary-loop attach to one store, and this branch restarts the loop with each lease term",
-      "surface": "internal/cistore summary loop against an in-process NATS KV store",
-      "command": "cd packages/envoy && go test -count=3 -run TestASummaryLoopStartedAfterThePreviousOneIsDoneTakesOverTheStore -v ./internal/cistore/",
-      "observed": "3 of 3 PASS: StartSummaryLoop's done channel stays open while the cancelled loop's pass publishes, closes after it detaches, and a loop started then attaches and settles a record",
-      "headSha": "39a730805f22d2b6df1230e589e4a298b263e392",
-      "negativeControl": "closing the done channel when the loop goroutine starts instead of when it ends (throwaway edit, reverted): 'the first loop reported itself done while its pass was still publishing'"
+      "criterion": "SIGKILL take-over on real binaries keeps every message once and in order",
+      "surface": "two listener processes built at the head against a real nats-server 2.10.29 process, a port session on a local HTTP server, 40 sends through the standby, the active pod SIGKILLed after the 15th",
+      "command": "for i in 1..9: bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head kill5-$i KILL",
+      "observed": "9 of 9 runs: count 40, unique 40, in send order, the last message 4.87-6.13 s after the signal; no pod logged a deferral",
+      "headSha": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+      "negativeControl": "the tester's smoke.sh SIGKILL run at 39a73080: 'count: 39', m15 missing at the 25 s deadline, pod-b logged the deferral for m15"
     }
   ],
   "filesChanged": [
-    "merge of main 8b4a862b (4ad207c2): .github/workflows/envoy-and-contracts.yaml (listener-multiprocess job kept beside main's new jobs), docs/solutions/architecture-patterns/envoy-ci-summary.md, packages/envoy/cmd/listener/main.go (CI summary loop stays holder-only; each term's loop waits for the previous one's), packages/envoy/infra/README.md, packages/envoy/internal/cistore/cistore.go, internal/cistore/loop.go (StartSummaryLoop returns a done channel), internal/cmdtest/cmdtest.go (tags passed through main's build)",
-    "packages/envoy/internal/cistore/summary_loop_test.go: TestASummaryLoopStartedAfterThePreviousOneIsDoneTakesOverTheStore"
+    "packages/envoy/cmd/listener/lease.go: former_boots in the lease record (boots that held it before the current holder, kept 70 s, at most 16), FormerHolder(boot)",
+    "packages/envoy/internal/dedupe/kv.go: KVConfig.GoneBoot; a young attempt by a gone boot is taken over at once",
+    "packages/envoy/cmd/listener/main.go: the ledger's GoneBoot is the lease's FormerHolder",
+    "packages/envoy/cmd/listener/lease_test.go, internal/dedupe/kv_test.go: former_boots and gone-boot tests",
+    "packages/envoy/cmd/listener/multiprocess_test.go: this branch's own TestTwoPodsPromptWhatAKilledPodOnlyAttempted asserted the old deferral; it now asserts the take-over (once, within the 15 s hard bound, no deferral). The tester's red row is unchanged.",
+    "packages/envoy/cmd/listener/README.md and the pr2404 ledger fragment: the deferral names the two cases"
   ],
   "trickyParts": [
-    "main #2367's attachSummary panics on a second attach; the old loop detaches only after its pass returns, which can outlive the receiver's 5 s wait for holder loops, so a lease lost and regained quickly could have crashed the listener."
+    "A pod that lost the lease but kept running (a partition) is a former holder too; its role- or live-lane attempts are then taken over at once rather than deferred, which follows the architect's rule (only a pod that still holds or renews a lease defers)."
   ],
   "deviations": [
-    "Round 3 deviations stand (linger 1 s when no pod takes the lease; known restart-test load flake on main too)."
+    "Round 3 deviations stand."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
