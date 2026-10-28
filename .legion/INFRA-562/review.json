@@ -2,33 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-28T10:22:24Z",
-  "round": 3,
-  "scope": "Narrowed by the INFRA-63 architect at the review-round cap: (1) the take-over window is settable, so the api tests run near their old times; (2) the two AGENTS.md items; (3) the forward merge of main. Read envoy-go at the new code head before approving.",
-  "reviewedHead": "3eaf2bbd04215f0476dfbfe0ceec9591e4246b63",
-  "codeHead": "14d17e590631156655f22a9e4645528a52a4330e",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T17:06:01Z",
+  "round": 4,
+  "scope": "Narrowed by the INFRA-63 architect: the forward merge is faithful, the changelog fragments carry no Dispatch key, envoy-go is green at the new code head, and a shortened api test still covers its finding. Everything else was approved; a non-correctness finding goes on Fast-follow.",
+  "reviewedHead": "6d92367e4d59a650d13e161c6572de8f4cfc9d73",
+  "codeHead": "f10b3d868f03f4005b696854f83a6b47c58adfea",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 0,
+  "important": 0,
+  "minor": 2,
   "scopeResults": {
-    "takeoverWindow": "Fixed in 14d17e59. Deps.ListenerTakeoverWindow: zero keeps 12 s, and neither routes.BuildAppContext nor cmd/dispatch sets it (grep: only server.go and server_test.go). The api test rig defaults to 750 ms; the tests that prove the window pass listenerTakeoverWindow. Measured in the pod with `go test -json -count=1 -timeout 60m ./internal/dispatch/api/`, merge base 2df3353c (git archive, GOWORK=off) against the head on one Postgres 17. Base 1525.8 s, head 1635.8 s. The tests round 2 named are back at main's times: TestTargetedMessagePrefixesUnavailableListenerErrors 6.59 -> 2.71 s, TestMentionRetrySelectsOneTargetAndReresolvesIt 1.03 -> 1.01 s, TestReplyOnFailedAttemptRecordsTheAnswer 0.84 -> 0.93 s. The PR's 24 new tests add 53.4 s; the rest of the 110 s is load noise in unrelated document tests. This pod ran about 3x slower than CI.",
-    "agentsMd": "Both fixed in 14d17e59: AGENTS.md 1360-1367 states that the guarantee is attempt 1's, and 1374-1381 names both cases that re-resolve on a decided comment.",
-    "forwardMerge": "3ddf76a4 (main at 2df3353c) is correct. main.go's conflict keeps one testHookDuration (main.go:1089). The migrations are renumbered 0135-0138 above main's 0134, with the in-file names and code comments updated (delivery.go, issue_route_status.go, ratelimit.go). leasePoolSize stays 11 for 11 callers: 9 single Exclusive sites plus the delivery intake's two durables. main's component_facts write sits inside the importer's xmin compare-and-set transaction. go vet ./internal/dispatch/... ./cmd/dispatch/ is clean."
+    "forwardMerge": "Faithful. I compared the PR's patch against its merge base at round 3 (2df3353c -> 14d17e59) with its patch now (d47dbf05 -> f10b3d86), file by file. Every difference is one of four things. (a) Main's own changes carried through: main.go's SigningKey move; redeliver's lazy Open/openState, with the PR's Limits field and s.state; listAgents now on the shared stored roster, reading its error and asserting rosters.built; loadAskReaches on routeRosterOrUnknown; the lease allowlist gaining server-processes. (b) Renumbering: migrations 0136-0139 above main's 0135, with every in-file name and code/doc reference updated. (c) leasePoolSize 13 = main's 12 + delivery-resume, and dispatchConnectionsPerPod 87 = 64+4+1+13+1+1+3, the branch's true sum. (d) 78db860e, the test-hook timeout made a test setting (Deps.TestHookTimeout, zero = 10 s; set only by server_test.go). go vet (with and without -tags multiprocess) and gofmt are clean at the head.",
+    "changelogFragments": "CHANGELOG.md is out of the PR's diff. Ten fragments, packages/envoy/.changes/unreleased/pr2387-*.yaml, with no Dispatch key: grep for [A-Z][A-Z0-9]+-[0-9]+ and dispatch:// finds 0 hits. Their migration numbers (0136-0139) match the files.",
+    "envoyGo": "GREEN at f10b3d86 (job 122933045369): internal/dispatch/api ok 512.639 s. envoy-infra-go (TestDispatchConnectionsPerPodIsTheServers) and dispatch-multiprocess are also green.",
+    "shortenedTests": "Each still covers its finding. TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry, now on a 3 s window, still waits for two held tries, runs a resume pass that must leave attempt 1 alone and pending, requires at least four claimed_at reads each strictly later than the one before, and requires one send and one receipt. TestATestHookNamesTheProcessThatNeverAcknowledged, now on a 2 s timeout, still requires the 504 naming the silent process's key, after at least the timeout. In TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce, the late answer at 600 ms still misses the 300 ms receipt window."
   },
-  "ci": "Required set (lint, typecheck, test, pr-title) green at code head 14d17e59; test was green on its rerun, after a daemon-package timeout in TestAnIssueDeployedEventWakesTheCheck (packages/daemon imports no package this PR changes). envoy-go is RED twice at 14d17e59: job 122346244223 and its rerun 122741917532 both end with 'panic: test timed out after 10m0s', FAIL internal/dispatch/api 600.08 s, while running the package's last test, TestALoneRunnerMakesAPassOnEveryTick. Main's api package in envoy-go took 410-572 s, and failed once at 600 s at a17efe77; main's 582cb2a2 'isolate API tests from Postgres contention' is not in this branch. The compare from 14d17e59 to the head touches only .legion/ (2 files).",
-  "mergeState": "GitHub reports the PR CONFLICTING (mergeStateStatus DIRTY) against main@origin, which moved past 2df3353c. Files both sides touch: packages/envoy/{AGENTS.md,CHANGELOG.md}, cmd/dispatch/main.go, packages/envoy-client/src/dispatch-execute.ts. main's #2419 makes changelog entries fragment files.",
-  "threads": "Round-2 threads PRRT_kwDORFy7ds6wwEDH, PRRT_kwDORFy7ds6wwEDW, PRRT_kwDORFy7ds6wwEDh were fixed in 14d17e59 and resolved by the implementer; this round answers each and accepts all three.",
+  "ci": "Required set (lint, typecheck, test, pr-title) green at f10b3d86; the compare from it to the head touches only .legion/ (2 files). 'Dispatch Go suite on production's Postgres 16' failed in 'Initialize containers' on mirror.gcr.io's 'toomanyrequests: Quota exceeded' pulling pgvector (job 122933045581, which GitHub will not rerun). That is an infrastructure failure, and the lane is not required. dispatch, dispatch-memory and envoy-go-race were still running at 17:05Z.",
+  "mergeState": "GitHub reports the PR CONFLICTING again: main moved past d47dbf05 in files the PR touches, among them comment_delivery.go, message_delivery.go, comment_create.go and messages.go. The forward merge after this approval gets the fingerprint check: a confirmation if the diff is unchanged, otherwise a new round.",
+  "threads": "No open thread.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "PR #2387 (merge state)",
-      "description": "GitHub reports the PR CONFLICTING with main. Merge main forward. Under #2419, the PR's CHANGELOG.md entries move into fragment files. The merge also brings main's 582cb2a2, which isolates the API tests from Postgres contention."
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:1360",
+      "description": "Fast-follow, by the architect's ruling: name the second duplicate path that comes after main's #2225. A process dies between claiming a mention and sending it; the mentioned session is also a session route of the comment; it gets the outbox's copy after the one-minute hold and the resume loop's mention. The paragraph's 'once-only guarantee is attempt 1's' does not say this."
     },
     {
-      "severity": "important",
-      "file": "CI envoy-go at 14d17e59",
-      "description": "envoy-go, the only lane that runs internal/dispatch/api, timed out twice at this code head (600 s, at the package's last test). The architect made a green envoy-go at the new code head a condition of approval. After the forward merge, show envoy-go green. If it is still over 600 s, cut the time the PR's new api tests add (about 53 s of 1636 s in the pod), for example the 10 s TEST_HOOK_TIMEOUT wait in TestATestHookNamesTheProcessThatNeverAcknowledged."
+      "severity": "minor",
+      "file": "packages/envoy/infra/go.work.sum",
+      "description": "Fast-follow: the forward merge f10b3d86 rewrote infra/go.work.sum, dropping about 30 checksum lines main carries. This is a file the PR has no reason to touch. envoy-infra-go is green, so nothing breaks; restore main's copy at the next merge."
     }
   ]
 }
