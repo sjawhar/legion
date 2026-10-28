@@ -70,10 +70,11 @@ interface Renderer {
   current: { id: number; source: string; timer: number } | undefined;
 }
 
-/** How long the worker may draw one source before it is refused and the worker terminated. In
- *  Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of 100 nodes with 2
- *  edges each in about 1.2 s; at 200 such nodes it takes about 3 s (5 s in WebKit and Firefox),
- *  and at 400 about 10 s. */
+/** How long the worker may draw one source before it is refused and the worker terminated. On a
+ *  2-CPU issue pod, in Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of
+ *  100 nodes with 2 edges each in about 1.2 s; at 200 such nodes it takes about 3 s (5 s in WebKit
+ *  and Firefox), and at 400 about 10 s. A GitHub-hosted runner is faster: it draws the browser
+ *  row's 800-node flowchart inside 5 s in Chromium and near the limit in WebKit and Firefox. */
 const RENDER_TIME_LIMIT_MS = 5000;
 /** How many drawn sources the cache keeps; the oldest insertion goes first. */
 const CACHE_LIMIT = 32;

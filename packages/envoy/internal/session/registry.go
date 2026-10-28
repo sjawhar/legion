@@ -66,6 +66,11 @@ type SessionEntry struct {
 	// as before.
 	AcceptedHost string `json:"accepted_host,omitempty"`
 
+	// Plugin is the npm package the session registered through and PluginVersion that plugin's
+	// build; both empty for a session whose plugin predates the fields.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
+
 	// unknown holds the JSON of every key a stored registration carries that SessionEntry does not
 	// name: a field a newer build writes. encodeSessionEntry writes it back beside the known fields,
 	// so a heartbeat through this build keeps it while pods of two builds take turns writing one
