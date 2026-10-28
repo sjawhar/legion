@@ -434,6 +434,18 @@ reconnects, re-syncs and shows the current text. A reader sees a brief reconnect
 text they can act on. Cross-process live co-editing of one document — two rooms with text
 streaming between them — is a follow-up issue, out of scope here.
 
+**A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`,
+`cmd/dispatch/conn_age.go`): the server stamps each connection's accept time and answers the first
+request it reads at that age or later with `Connection: close`, and a request carrying an `Upgrade`
+header, a websocket handshake, keeps its connection. kube-proxy and the front door spread load per
+connection, not per request, so while callers reuse their keep-alive connections a process that
+has just rolled in gets little traffic; a closed connection makes the client open a new one, which
+kube-proxy spreads across every ready process. Shutdown needs none of this: once
+`Server.Shutdown` begins, Go's server already writes every response with `Connection: close` and
+closes the connection after it. One race remains: a client can write a request onto an idle pooled
+connection at the instant the server closes it. Clients retry an idempotent request on a new
+connection, but a proxied `POST` can come back as a `502`.
+
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each
@@ -1336,13 +1348,13 @@ Every route the server answers writes one: every `/api/v1` route, the document a
 websockets, `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an `unmatched` path gets
 (a known path called with a method its route does not serve is one too). The dashboard's own
 pages and assets write none, so a browser's page loads do not bury the callers. `/healthz`, which
-a load balancer calls every few seconds, writes none either. Three answers are given before any
-route runs and write none: the `403` a cookie request from another origin gets, the `421` a
-request for another host gets on a server with local sign-in, and the `307` redirect Go's router
-gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash
-(`/api/github/rest`). Match the line as `msg="dispatch: request"`: the previous-shared-token
-warning's message starts with the same words. The line is one synchronous write to stderr per
-request, so a log pipe that blocks stalls requests.
+a load balancer calls every few seconds, and `/livez`, which a liveness probe calls, write none
+either. Three answers are given before any route runs and write none: the `403` a cookie request
+from another origin gets, the `421` a request for another host gets on a server with local
+sign-in, and the `307` redirect Go's router gives an unclean path (`/api/v1//issues`) or a prefix
+route called without its trailing slash (`/api/github/rest`). Match the line as
+`msg="dispatch: request"`: the previous-shared-token warning's message starts with the same words.
+The line is one synchronous write to stderr per request, so a log pipe that blocks stalls requests.
 
 ## Routes
 
@@ -1375,6 +1387,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in issuer: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
+| `/livez` | GET | none | Answer `204` with no body, reading nothing: it says only that the process answers. A liveness or startup probe asks it rather than `/healthz`, so a slow or unreachable Postgres, NATS or file store neither restarts the process nor adds load on every probe period. |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
