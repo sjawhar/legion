@@ -182,7 +182,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.edited", Actor: alice, Payload: map[string]any{
-					"id": "00000000-0000-0000-0000-000000000006", "anchor": anchorOn(doc), "suppressed_authors": nil,
+					"id": "00000000-0000-0000-0000-000000000006", "anchor": anchorOn(doc),
 				}}, ""
 			},
 			wantAgents: []string{"notifications.agent.session-writer"},
@@ -193,7 +193,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000007", "anchor": anchorOn(doc),
-					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"),
 				}}, ""
 			},
 			deliveries: map[string]string{"session-writer": "sent"},
@@ -205,14 +205,14 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000015", "anchor": anchorOn(doc),
-					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"),
 				}}, ""
 			},
 			deliveries: map[string]string{"session-writer": "failed"},
 			wantAgents: []string{"notifications.agent.session-writer", "notifications.agent.session-editor"},
 		},
 		{
-			name: "a reply on a project document reaches its thread's author, not the document's",
+			name: "a reply on a project document reaches its thread's author and the document's writer",
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, nil, "plan", writer, []model.Actor{writer})
 				root := seedDocumentComment(t, database, doc, model.Actor{Kind: "session", ID: "session-root"})
@@ -220,7 +220,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 					"id": "00000000-0000-0000-0000-000000000008", "reply_to": root,
 				}}, "plan"
 			},
-			wantAgents: []string{"notifications.agent.session-root"},
+			wantAgents: []string{"notifications.agent.session-root", "notifications.agent.session-writer"},
 		},
 		{
 			name: "a reply to an ask on a project document reaches the ask's followers, not the document's writer",

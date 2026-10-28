@@ -82,6 +82,19 @@ func (s *statementTracer) matching(fragments ...string) []tracedStatement {
 	return found
 }
 
+// matchingAny returns the statements recorded so far whose SQL holds any of fragments, each once.
+func (s *statementTracer) matchingAny(fragments ...string) []tracedStatement {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []tracedStatement
+	for _, statement := range s.statements {
+		if slices.ContainsFunc(fragments, func(fragment string) bool { return strings.Contains(statement.sql, fragment) }) {
+			found = append(found, statement)
+		}
+	}
+	return found
+}
+
 // tracedStore opens a store on database's database whose every statement tracer records.
 func tracedStore(t *testing.T, database *store.Store, tracer *statementTracer) *store.Store {
 	t.Helper()
@@ -457,21 +470,27 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 	})
 }
 
-// A batch of 100 events of every kind whose destinations need a lookup - replies to comments that
-// mention their thread's author, ask answers, replies to messages, comments on documents and a
-// person's settled edits of documents, on an issue a session holds the claim of - reads their
-// followers, authors and mention deliveries in at most five statements, one per kind, and publishes
-// every one of them. The fifth kind is the mention deliveries a new comment whose mentions resolved
-// to a session reads (loadMentionDeliveries): which of its mentions reached their session, so the
-// session's own copy is left to the mention. The claimant costs no statement: the batch's own read
-// carries the issue's claim (readBatch). A document's writers are one kind, whether a comment on it
-// or an edit of it asks for them, so the edits add no statement.
-func TestTheBatchResolvesFollowersAuthorsAndMentionDeliveriesInAtMostFiveStatements(t *testing.T) {
+// A batch of events of every kind whose destinations need a lookup - replies to comments that
+// mention their thread's author, resolutions of those threads, ask answers, replies to messages,
+// comments on documents and a person's settled edits of documents, on an issue a session holds the
+// claim of, and comments on an issue nobody routes or claims, whose primary document a session
+// wrote - reads their followers, authors, comment recipients and mention deliveries in at most
+// seven statements, one per kind, and publishes every one of them. The kinds are the ask
+// followers, the thread root authors a resolution reads, the message authors, the document
+// authors, the mention deliveries a new comment whose mentions resolved to a session reads
+// (loadMentionDeliveries), and #2366's two: the sessions of the threads the replies are in
+// (loadCommentRecipients) and the sessions of the unclaimed issues' primary documents
+// (loadPrimaryDocumentAuthors). The claimant costs no statement: the batch's own read carries the
+// issue's claim (readBatch). A document's writers are one kind, whether a comment on it or an edit
+// of it asks for them, so the edits add no statement.
+func TestTheBatchResolvesFollowersAuthorsRecipientsAndMentionDeliveriesInAtMostSevenStatements(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	claimIssue(t, database, "T-1", model.Actor{Kind: "session", ID: "claimant"})
-	const each = batchSize / 5
+	seedSecondIssue(t, database, "T-2")
+	seedSpec(t, database, "T-2", model.Actor{Kind: "session", ID: "primary-author"})
+	const each = batchSize / 7
 	var seeded []model.Event
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	for index := range each {
@@ -492,8 +511,11 @@ func TestTheBatchResolvesFollowersAuthorsAndMentionDeliveriesInAtMostFiveStateme
 					ID: reply, IssueKey: new("T-1"), Body: "@" + writer.ID + " reviewed", ReplyTo: &root,
 					Mentions: mentionOf(writer.ID),
 				},
-				SuppressedAuthors: []string{writer.ID},
 			},
+		}))
+		seeded = append(seeded, appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "comment.resolved", Actor: alice,
+			Payload: map[string]any{"id": root},
 		}))
 		askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: fmt.Sprintf("asker-%d", index)}, "Ship it?")
 		seedFollower(t, database, askID, fmt.Sprintf("follower-%d", index))
@@ -516,6 +538,10 @@ func TestTheBatchResolvesFollowersAuthorsAndMentionDeliveriesInAtMostFiveStateme
 			IssueKey: new("T-1"), Type: "artifact.human_edited", Actor: alice,
 			Payload: map[string]any{"artifact_id": edited, "name": "spec.md", "from_version": 1, "to_version": 2, "editors": []any{alice.ID}},
 		}))
+		seeded = append(seeded, appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-2"), Type: "comment.created", Actor: alice,
+			Payload: map[string]any{"id": uuid.NewString(), "body": "On the second issue"},
+		}))
 	}
 
 	tracer := &statementTracer{}
@@ -536,27 +562,23 @@ func TestTheBatchResolvesFollowersAuthorsAndMentionDeliveriesInAtMostFiveStateme
 			claimant++
 		}
 	}
-	// Each comment reply whose mention failed reaches its root's author, each ask answer its two
-	// followers, each message reply its parent's sender, each document comment the document's
-	// author, and each person's edit the edited document's author; and every reply, answer,
-	// message and comment - a person's - reaches the claimant, which an edit, no claimant event,
-	// does not.
-	if want := each * 4; claimant != want {
+	// Each comment reply whose mention failed reaches its thread's author, each resolution its
+	// thread root's author, each ask answer its two followers, each message reply its parent's
+	// sender, each document comment the document's author, each person's edit the edited
+	// document's author, and each comment on the unclaimed issue its spec's author; and every
+	// reply, resolution, answer, message and comment on the claimed issue - a person's - reaches
+	// the claimant, which an edit, no claimant event, does not.
+	if want := each * 5; claimant != want {
 		t.Fatalf("the batch reached the claimant %d times, want %d", claimant, want)
 	}
-	if want := each/2 + each*5 + each*4; agents != want {
+	if want := each/2 + each*7 + each*5; agents != want {
 		t.Fatalf("the batch reached %d sessions' own subjects, want %d", agents, want)
 	}
-	var lookups []string
-	for _, fragment := range []string{"ask_followers", "from comments", "from messages", "artifact_versions", "from comment_deliveries"} {
-		for _, statement := range tracer.matching(fragment) {
-			lookups = append(lookups, statement.sql)
-		}
+	lookups := tracer.matchingAny("ask_followers", "from comments", "from messages", "artifact_versions", "from comment_deliveries", "is_primary")
+	if len(lookups) > 7 {
+		t.Fatalf("the batch of %d events ran %d follower, author, recipient and mention delivery lookups, want at most 7", len(seeded), len(lookups))
 	}
-	if len(lookups) > 5 {
-		t.Fatalf("the batch of %d events ran %d follower, author and mention delivery lookups, want at most 5", len(seeded), len(lookups))
-	}
-	t.Logf("the batch of %d events ran %d follower, author and mention delivery lookups", len(seeded), len(lookups))
+	t.Logf("the batch of %d events ran %d follower, author, recipient and mention delivery lookups", len(seeded), len(lookups))
 }
 
 // An event is written once, when its batch records it: reading the batch writes nothing, so however

@@ -14,15 +14,17 @@ import (
 )
 
 // lookup answers the reads an event's destinations depend on: an ask's followers in the order they
-// joined, a comment's author and its thread root's author, a message's author, the sessions a
-// document credits, and what a new comment's mentions delivered. A comment or message that does
-// not exist answers no author, found false.
+// joined, a comment's thread root's author, a message's author, the sessions a document credits,
+// the sessions a person's reply under a comment reaches (loadCommentRecipients), the sessions an
+// issue's primary document credits (loadPrimaryDocumentAuthors), and what a new comment's mentions
+// delivered. A comment or message that does not exist answers no author, found false.
 type lookup interface {
 	followers(askID string) ([]string, error)
-	commentAuthor(commentID string) (model.Actor, bool, error)
 	rootCommentAuthor(commentID string) (model.Actor, bool, error)
 	messageAuthor(messageID string) (model.Actor, bool, error)
 	documentAuthors(artifactID string) ([]string, error)
+	commentRecipients(commentID string) ([]string, error)
+	primaryDocumentAuthors(issueKey string) ([]string, error)
 	mentionDeliveries(commentID string) (mentionDeliveries, error)
 }
 
@@ -45,24 +47,20 @@ type mentionDeliveries struct {
 // ask for the same ids whatever the answers are, so a second pass over resolved lookups asks for
 // exactly these.
 type wanted struct {
-	asks, comments, messages, documents, mentions map[string]struct{}
+	asks, comments, messages, documents, threads, issues, mentions map[string]struct{}
 }
 
 func newWanted() *wanted {
 	return &wanted{
 		asks: map[string]struct{}{}, comments: map[string]struct{}{},
-		messages: map[string]struct{}{}, documents: map[string]struct{}{}, mentions: map[string]struct{}{},
+		messages: map[string]struct{}{}, documents: map[string]struct{}{},
+		threads: map[string]struct{}{}, issues: map[string]struct{}{}, mentions: map[string]struct{}{},
 	}
 }
 
 func (w *wanted) followers(askID string) ([]string, error) {
 	w.asks[askID] = struct{}{}
 	return nil, nil
-}
-
-func (w *wanted) commentAuthor(commentID string) (model.Actor, bool, error) {
-	w.comments[commentID] = struct{}{}
-	return model.Actor{}, false, nil
 }
 
 func (w *wanted) rootCommentAuthor(commentID string) (model.Actor, bool, error) {
@@ -80,28 +78,36 @@ func (w *wanted) documentAuthors(artifactID string) ([]string, error) {
 	return nil, nil
 }
 
+func (w *wanted) commentRecipients(commentID string) ([]string, error) {
+	w.threads[commentID] = struct{}{}
+	return nil, nil
+}
+
+func (w *wanted) primaryDocumentAuthors(issueKey string) ([]string, error) {
+	w.issues[issueKey] = struct{}{}
+	return nil, nil
+}
+
 func (w *wanted) mentionDeliveries(commentID string) (mentionDeliveries, error) {
 	w.mentions[commentID] = struct{}{}
 	return mentionDeliveries{}, nil
 }
 
 // lookups is what a batch read for the ids its events asked for (loadLookups). failed holds each
-// id that no read can answer - an id that is no uuid, which the column it is read from refuses, or
-// an author whose JSON does not decode - keyed by its kind and id, with the error the event's
-// destinations then report.
+// id that no read can answer - an id that is no uuid, which the column it is read from refuses, an
+// author whose JSON does not decode, or an id of a comment recipient query that failed - keyed by
+// its kind and id, with the error the event's destinations then report.
 type lookups struct {
 	asks      map[string][]string
-	comments  map[string]commentAuthors
+	roots     map[string]json.RawMessage
 	messages  map[string]json.RawMessage
 	documents map[string][]string
+	// threads is keyed by the canonical form of the comment's uuid, as loadCommentRecipients
+	// reads it.
+	threads   map[string][]string
+	primaries map[string][]string
 	mentions  map[string]mentionDeliveries
 	failed    map[string]error
-}
-
-// commentAuthors is a comment's own author and, when its reply_to walk found one, its thread root's.
-type commentAuthors struct {
-	author json.RawMessage
-	root   json.RawMessage
 }
 
 func (l *lookups) followers(askID string) ([]string, error) {
@@ -111,26 +117,15 @@ func (l *lookups) followers(askID string) ([]string, error) {
 	return l.asks[askID], nil
 }
 
-func (l *lookups) commentAuthor(commentID string) (model.Actor, bool, error) {
-	if err := l.failed["comment:"+commentID]; err != nil {
-		return model.Actor{}, false, err
-	}
-	authors, ok := l.comments[commentID]
-	if !ok {
-		return model.Actor{}, false, nil
-	}
-	return decodeAuthor(authors.author, "comment", commentID)
-}
-
 func (l *lookups) rootCommentAuthor(commentID string) (model.Actor, bool, error) {
 	if err := l.failed["comment:"+commentID]; err != nil {
 		return model.Actor{}, false, err
 	}
-	authors, ok := l.comments[commentID]
-	if !ok || authors.root == nil {
+	root, ok := l.roots[commentID]
+	if !ok {
 		return model.Actor{}, false, nil
 	}
-	return decodeAuthor(authors.root, "comment", commentID)
+	return decodeAuthor(root, "comment", commentID)
 }
 
 func (l *lookups) messageAuthor(messageID string) (model.Actor, bool, error) {
@@ -149,6 +144,25 @@ func (l *lookups) documentAuthors(artifactID string) ([]string, error) {
 		return nil, err
 	}
 	return l.documents[artifactID], nil
+}
+
+// commentRecipients answers a comment id that is no uuid with no session: no comment has it.
+func (l *lookups) commentRecipients(commentID string) ([]string, error) {
+	if err := l.failed["thread:"+commentID]; err != nil {
+		return nil, err
+	}
+	parsed, err := uuid.Parse(commentID)
+	if err != nil {
+		return nil, nil
+	}
+	return l.threads[parsed.String()], nil
+}
+
+func (l *lookups) primaryDocumentAuthors(issueKey string) ([]string, error) {
+	if err := l.failed["issue:"+issueKey]; err != nil {
+		return nil, err
+	}
+	return l.primaries[issueKey], nil
 }
 
 func (l *lookups) mentionDeliveries(commentID string) (mentionDeliveries, error) {
@@ -172,26 +186,34 @@ type queryer interface {
 }
 
 // loadLookups reads what want asks for, one statement per kind that asks anything, so a batch costs
-// at most five reads however many events it holds: ask followers, comment authors, message
-// authors, document authors, and mention deliveries. Each read is the per-id read the outbox made
-// before, over a set of ids: the same rows, in the same order for each id. An id that is no uuid
-// is never sent to Postgres, which would refuse the whole statement over it; it is recorded failed,
-// as the per-id read failed on it before.
+// at most seven reads however many events it holds: ask followers, thread root authors, message
+// authors, document authors, mention deliveries, comment recipients (loadCommentRecipients) and
+// primary document authors (loadPrimaryDocumentAuthors). Each read is the per-id read the outbox
+// made before, over a set of ids: the same rows, in the same order for each id. An id that is no
+// uuid is never sent to Postgres, which would refuse the whole statement over it; it is recorded
+// failed, as the per-id read failed on it before, except a comment recipient's, which has no
+// entry.
+//
+// A read of the first five kinds that fails fails the batch, which is then left unrecorded and read
+// again. A comment recipient read that fails fails only the events that asked it (failRecipients):
+// each event's destinations end at the step that needed it, after its owner topic, route and
+// claimant (eventDestinations), and the batch's other events are untouched.
 func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error) {
 	found := &lookups{
-		asks: map[string][]string{}, comments: map[string]commentAuthors{},
+		asks: map[string][]string{}, roots: map[string]json.RawMessage{},
 		messages: map[string]json.RawMessage{}, documents: map[string][]string{},
+		threads: map[string][]string{}, primaries: map[string][]string{},
 		mentions: map[string]mentionDeliveries{}, failed: map[string]error{},
 	}
 	asks := validIDs(want.asks, "ask", "load followers of ask %q", found.failed)
-	comments := validIDs(want.comments, "comment", "load comment author %q", found.failed)
+	comments := validIDs(want.comments, "comment", "load root comment author %q", found.failed)
 	messages := validIDs(want.messages, "message", "load message author %q", found.failed)
 	documents := validIDs(want.documents, "document", "load document %q session authors", found.failed)
 	mentions := validIDs(want.mentions, "mention", "load mention deliveries of comment %q", found.failed)
 	if err := loadFollowers(ctx, db, asks, found); err != nil {
 		return nil, err
 	}
-	if err := loadCommentAuthors(ctx, db, comments, found); err != nil {
+	if err := loadRootCommentAuthors(ctx, db, comments, found); err != nil {
 		return nil, err
 	}
 	if err := loadMessageAuthors(ctx, db, messages, found); err != nil {
@@ -202,6 +224,18 @@ func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error
 	}
 	if err := loadMentionDeliveries(ctx, db, mentions, found); err != nil {
 		return nil, err
+	}
+	threads, err := loadCommentRecipients(ctx, db, canonicalIDs(want.threads))
+	if err != nil {
+		failRecipients(want.threads, "thread", err, found.failed)
+	} else {
+		found.threads = threads
+	}
+	primaries, err := loadPrimaryDocumentAuthors(ctx, db, slices.Sorted(maps.Keys(want.issues)))
+	if err != nil {
+		failRecipients(want.issues, "issue", err, found.failed)
+	} else {
+		found.primaries = primaries
 	}
 	return found, nil
 }
@@ -218,6 +252,26 @@ func validIDs(set map[string]struct{}, kind, format string, failed map[string]er
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// canonicalIDs returns the canonical form of every id of set that is a uuid, sorted and each once:
+// loadCommentRecipients keys its rows by that form. An id that is no uuid is left out.
+func canonicalIDs(set map[string]struct{}) []string {
+	canonical := map[string]struct{}{}
+	for id := range set {
+		if parsed, err := uuid.Parse(id); err == nil {
+			canonical[parsed.String()] = struct{}{}
+		}
+	}
+	return slices.Sorted(maps.Keys(canonical))
+}
+
+// failRecipients records err, a comment recipient read that failed, against every id of set under
+// kind: every event that asked the read carries the failure, and no other event does.
+func failRecipients(set map[string]struct{}, kind string, err error, failed map[string]error) {
+	for id := range set {
+		failed[kind+":"+id] = err
+	}
 }
 
 // loadFollowers reads the followers of every ask in ids, each ask's in the order they joined (the
@@ -245,12 +299,11 @@ func loadFollowers(ctx context.Context, db queryer, ids []string, found *lookups
 	return nil
 }
 
-// loadCommentAuthors reads, for every comment in ids, its own author and its thread root's: the
-// walk up its reply_to chain to the comment humans reply under. comments.reply_to has no
-// acyclicity constraint, so the walk unions on the visited row and stops at
-// maxCommentThreadDepth: a cycle then finds no reply_to-is-null row and reports no root rather
-// than spinning.
-func loadCommentAuthors(ctx context.Context, db queryer, ids []string, found *lookups) error {
+// loadRootCommentAuthors reads, for every comment in ids, its thread root's author: the walk up its
+// reply_to chain to the comment humans reply under. comments.reply_to has no acyclicity
+// constraint, so the walk unions on the visited row and stops at maxCommentThreadDepth: a cycle
+// then finds no reply_to-is-null row and reports no root rather than spinning.
+func loadRootCommentAuthors(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -263,30 +316,24 @@ func loadCommentAuthors(ctx context.Context, db queryer, ids []string, found *lo
 			from comments c join chain h on c.id = h.reply_to
 			where h.depth < $2
 		)
-		select start::text, depth = 0, reply_to is null, author
+		select start::text, author
 		from chain
-		where depth = 0 or reply_to is null
+		where reply_to is null
 		order by start, depth
 	`, ids, maxCommentThreadDepth)
 	if err != nil {
-		return fmt.Errorf("load the batch's comment authors: %w", err)
+		return fmt.Errorf("load the batch's root comment authors: %w", err)
 	}
 	var start string
-	var own, root bool
 	var author []byte
-	_, err = pgx.ForEachRow(rows, []any{&start, &own, &root, &author}, func() error {
-		authors := found.comments[start]
-		if own {
-			authors.author = json.RawMessage(slices.Clone(author))
+	_, err = pgx.ForEachRow(rows, []any{&start, &author}, func() error {
+		if _, ok := found.roots[start]; !ok {
+			found.roots[start] = json.RawMessage(slices.Clone(author))
 		}
-		if root && authors.root == nil {
-			authors.root = json.RawMessage(slices.Clone(author))
-		}
-		found.comments[start] = authors
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("load the batch's comment authors: %w", err)
+		return fmt.Errorf("load the batch's root comment authors: %w", err)
 	}
 	return nil
 }
@@ -312,48 +359,33 @@ func loadMessageAuthors(ctx context.Context, db queryer, ids []string, found *lo
 	return nil
 }
 
+// documentSessionAuthorsQuery is loadDocumentSessionAuthors' one statement. $1 is the artifact ids.
+const documentSessionAuthorsQuery = `
+	with documents as (
+		select id as key, id as artifact_id
+		from unnest($1::text[]::uuid[]) as id
+	),
+	credited as (` + documentCreditsSQL + `)
+	select key::text, author->>'id'
+	from credited
+	where ` + sessionCreditSQL + `
+	group by key, author->>'id'
+	order by key, min(rank)
+`
+
 // loadDocumentSessionAuthors lists, for every artifact in ids that is a document, the sessions it
-// credits: the one that created it (artifacts.created_by) and every one a version lists
-// (artifact_versions.authors), each once and in the order the document first credits it, its
-// creator first. A person has no Envoy topic, so people are left out, and so is a session credit
-// naming no id, which has none either. A version's authors are a JSON array, or JSON null where a
-// writer encoded a nil list, which every Go reader of the column decodes as no authors; the query
-// reads null the same way rather than failing the event's every publish on jsonb_array_elements'
-// refusal of a scalar.
+// credits (documentCreditsSQL): the one that created it and every one a version lists, each once
+// and in the order the document first credits it, its creator first. People, and session credits
+// with no id, are left out (sessionCreditSQL).
 func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := db.Query(ctx, `
-		with credited as (
-			select a.id as document, a.created_by as author, 0 as number, 0::bigint as position
-			from artifacts a
-			where a.id = any($1::text[]::uuid[]) and a.kind = 'doc'
-			union all
-			select v.artifact_id, credit.author, v.number, credit.position
-			from artifact_versions v
-			join artifacts a on a.id = v.artifact_id and a.kind = 'doc'
-			cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb))
-				with ordinality as credit(author, position)
-			where v.artifact_id = any($1::text[]::uuid[])
-		)
-		select document::text, author->>'id'
-		from credited
-		where author->>'kind' = 'session' and coalesce(author->>'id', '') <> ''
-		group by document, author->>'id'
-		order by document, min(array[number, position])
-	`, ids)
+	documents, err := loadKeyedSessions(ctx, db, "load the batch's document session authors", documentSessionAuthorsQuery, ids)
 	if err != nil {
-		return fmt.Errorf("load the batch's document session authors: %w", err)
+		return err
 	}
-	var document, author string
-	_, err = pgx.ForEachRow(rows, []any{&document, &author}, func() error {
-		found.documents[document] = append(found.documents[document], author)
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("load the batch's document session authors: %w", err)
-	}
+	found.documents = documents
 	return nil
 }
 

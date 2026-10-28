@@ -1052,7 +1052,7 @@ func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.
 	}
 }
 
-func TestLoadCommentAuthorsTerminatesOnACycle(t *testing.T) {
+func TestLoadRootCommentAuthorsTerminatesOnACycle(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -1076,13 +1076,13 @@ func TestLoadCommentAuthorsTerminatesOnACycle(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("loadCommentAuthors did not terminate on a cyclic reply_to chain")
+		t.Fatal("loadRootCommentAuthors did not terminate on a cyclic reply_to chain")
 	}
 	if err != nil {
-		t.Fatalf("load the comment's authors: %v", err)
+		t.Fatalf("load the comment's root author: %v", err)
 	}
 	if ok {
-		t.Fatal("loadCommentAuthors reported a root for a cyclic reply_to chain, want none")
+		t.Fatal("loadRootCommentAuthors reported a root for a cyclic reply_to chain, want none")
 	}
 }
 
@@ -1110,9 +1110,9 @@ func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	// A malformed cycle must not stop the event from reaching its own issue topic or
-	// resolving the direct parent's author (a plain, non-recursive lookup); only the
-	// unresolvable thread-root walk is skipped.
+	// A malformed cycle must not stop the event from reaching its own issue topic or the
+	// author of the comment it replies to, which the bounded walk up visited; only the
+	// thread root, which the walk cannot find, is missing.
 	waitFor(t, 5*time.Second, "cyclic reply_to publication", func() bool {
 		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
 	})

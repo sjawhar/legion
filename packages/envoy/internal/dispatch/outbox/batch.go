@@ -276,13 +276,15 @@ type batchEvent struct {
 	item contracts.Envelope
 	// delivered is the set of the event's published_destinations (publishedDestinationSet).
 	// destinationsOf are every destination the event has; resolveErr is why the list is
-	// incomplete, when it is; mentionPending is a session's copy left out of the list for a
-	// mention still being sent, which blocks the event (eventDestinations, settleEvent). A
-	// copy so left out is no destination of the event, so it holds none of the owner's later
-	// events back.
+	// incomplete, when it is, and resolveLost that the error is the batch's context ending (a
+	// comment recipient query the process's stop cancelled), which releases the event rather than
+	// backing it off; mentionPending is a session's copy left out of the list for a mention still
+	// being sent, which blocks the event (eventDestinations, settleEvent). A copy so left out is no
+	// destination of the event, so it holds none of the owner's later events back.
 	delivered      map[string]struct{}
 	destinationsOf []destination
 	resolveErr     error
+	resolveLost    bool
 	mentionPending bool
 	sends          []*chainSend
 	// held are the not-due events of the owner that held a destination of this one back.

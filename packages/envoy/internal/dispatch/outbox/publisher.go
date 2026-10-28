@@ -34,9 +34,9 @@ const (
 	// and a project's events are published under it.
 	dispatchTopicPrefix = "notifications.dispatch."
 	documentTopicPrefix = dispatchTopicPrefix + "document."
-	// maxCommentThreadDepth bounds the reply_to walk in loadCommentAuthors so a malformed cycle
-	// (comments.reply_to has no acyclicity constraint) cannot spin the recursive query and stall
-	// the outbox scan.
+	// maxCommentThreadDepth bounds the reply_to walks in loadRootCommentAuthors and
+	// loadCommentRecipients so a malformed cycle (comments.reply_to has no acyclicity constraint)
+	// cannot spin the recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
 	// mentionPendingDelay is how long an event waits when a session route held its copy back for
 	// a mention whose send is still undecided (destinations.leftToMention): long enough for the
@@ -139,10 +139,10 @@ func failedAnswer(err error) <-chan error {
 	return answer
 }
 
-// scanBatch reads a batch (readBatch), resolves its events' destinations with the batch's
-// followers, authors and mention deliveries read in at most five statements (loadLookups) and its
-// role routes' holders read once per role (resolveRoleHolders), and sends it through one window
-// (Publisher.WindowUntil) as
+// scanBatch reads a batch (readBatch) and publishes it (publishBatch): it resolves its events'
+// destinations with the batch's followers, authors, comment recipients and mention deliveries read
+// in at most seven statements (loadLookups) and its role routes' holders read once per role
+// (resolveRoleHolders), and sends it through one window (Publisher.WindowUntil) as
 // chains: the sends of one owner's events to one destination key go one at a time, in id order,
 // each once the one before it reached its destination, while the chains of different owners and
 // destination keys proceed side by side (planChains, sendChains). That is the order a receiver
@@ -178,6 +178,14 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 	if err != nil {
 		return batchResult{}, err
 	}
+	return publishBatch(ctx, deps, hold, holder, pending, stopped)
+}
+
+// publishBatch is scanBatch's work after the read: it resolves pending's destinations, sends them,
+// settles each event and records what the batch came to, under hold and as holder. stopped is
+// readBatch's, a row that failed to scan and ended the read: the batch then defers no event past
+// an owner's window (deferPastWindow) and is reported blocked.
+func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, pending []pendingEvent, stopped bool) (batchResult, error) {
 	result := batchResult{}
 	events := make([]*batchEvent, len(pending))
 	for index := range pending {
@@ -342,17 +350,18 @@ type outcome struct {
 }
 
 // settleEvent returns what event, sent by its batch, came to. An event that could not be read is
-// backed off. One with a send that met a lost connection or the process stopping is released;
-// releaseUnacknowledged releases one whose sends NATS did not acknowledge too. One with a send that
-// met the hold's deadline settles as released as well, but its batch is left unrecorded, not
-// released (scanBatch): that outcome is never written. One whose destinations could not all be
-// resolved, or a send of which NATS answered with a failure, is backed off. Otherwise one with a
-// destination held back, or a session's copy held back for a mention still being sent
-// (batchEvent.mentionPending), is blocked: on its blockers (holdBack), and for mentionPendingDelay
-// at most when its copy waits on a mention; and one with neither is published. A held-back copy so
-// blocks the event only when no send of it failed or was lost: a denied or failed send backs the
-// event off with its attempt counted, and a lost one releases it, as they would without the
-// mention.
+// backed off. One with a send that met a lost connection or the process stopping is released, and
+// so is one whose destinations could not all be resolved because the process is stopping
+// (batchEvent.resolveLost); releaseUnacknowledged releases one whose sends NATS did not acknowledge
+// too. One with a send that met the hold's deadline settles as released as well, but its batch is
+// left unrecorded, not released (scanBatch): that outcome is never written. One whose destinations
+// could not all be resolved otherwise, or a send of which NATS answered with a failure, is backed
+// off. Otherwise one with a destination held back, or a session's copy held back for a mention
+// still being sent (batchEvent.mentionPending), is blocked: on its blockers (holdBack), and for
+// mentionPendingDelay at most when its copy waits on a mention; and one with neither is published.
+// A held-back copy so blocks the event only when no send of it failed or was lost: a denied or
+// failed send backs the event off with its attempt counted, and a lost one releases it, as they
+// would without the mention.
 func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	result := outcome{id: event.event.ID}
 	if event.failure != nil {
@@ -362,7 +371,7 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	if event.resolveErr != nil {
 		failures = append(failures, event.resolveErr)
 	}
-	release := false
+	release := event.resolveLost
 	blockers := slices.Clone(event.held)
 	for _, send := range event.sends {
 		switch send.state {
@@ -596,9 +605,11 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 }
 
 // resolveDestinations gives every event of a batch that has an owner and can be read its envelope
-// and destinations (eventDestinations), reading the followers, authors and mention deliveries all
-// of them need at once (loadLookups). An event whose envelope cannot be built has no destination,
-// and the error backs it off.
+// and destinations (eventDestinations), reading the followers, authors, comment recipients and
+// mention deliveries all of them need at once (loadLookups). An event whose envelope cannot be
+// built has no destination, and the error backs it off. A lookup that failed because ctx ended -
+// a comment recipient query the process's stop cancelled (loadLookups) - marks its event
+// resolveLost, which releases it as a send the stop cut off does (settleEvent).
 func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) error {
 	want := newWanted()
 	for _, event := range events {
@@ -627,6 +638,7 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 			continue
 		}
 		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(event.event, event.item.Topic, event.routing, found)
+		event.resolveLost = event.resolveErr != nil && ctx.Err() != nil && errors.Is(event.resolveErr, ctx.Err())
 	}
 	return nil
 }
@@ -682,13 +694,14 @@ func (d *destinations) leftToMention(sessionID string) bool {
 
 // eventDestinations lists event's destinations in the order they are sent and recorded: its
 // owner's topic (ownerTopic), then - for an event that notifies and is not a targeted message - its
-// owner's route, its claimant route and its author routes, then its follower routes and the
-// previous claimant's notice. mentionPending reports a session's copy held back for a mention
-// still being sent (destinations.leftToMention). The mention deliveries of a new comment whose
-// mentions resolved to a session are read before anything else, so a lookup of them that fails
-// leaves the event with no destination. Any other lookup that fails, or a route that does not
-// parse, ends the list there: the destinations before it are returned with the error, which backs
-// the event off once they are sent.
+// owner's route, its claimant route, its primary document's sessions and its author routes, then
+// its follower routes and the previous claimant's notice. mentionPending reports a session's copy
+// held back for a mention still being sent (destinations.leftToMention). The mention deliveries of
+// a new comment whose mentions resolved to a session are read before anything else, so a lookup of
+// them that fails leaves the event with no destination. Any other lookup that fails, or a route
+// that does not parse, ends the list there: the destinations before it are returned with the
+// error, which backs the event off once they are sent. So a comment recipient query that failed
+// (loadLookups) still lets the owner topic, the route and the claimant go first.
 func eventDestinations(event model.Event, ownerTopic string, routing routing, look lookup) (list []destination, mentionPending bool, err error) {
 	d := &destinations{seen: map[string]struct{}{}}
 	if event.Type == "comment.created" && len(payloadMentionedSessions(event.Payload)) > 0 {
@@ -706,6 +719,9 @@ func eventDestinations(event model.Event, ownerTopic string, routing routing, lo
 			}
 		}
 		addClaimantRoute(event, routing.claimant, d)
+		if err := addPrimaryDocumentAuthors(event, routing, look, d); err != nil {
+			return d.list, d.mentionPending, err
+		}
 		if err := addAuthorRoutes(event, look, d); err != nil {
 			return d.list, d.mentionPending, err
 		}
@@ -859,104 +875,124 @@ func addFollowerRoutes(event model.Event, look lookup, d *destinations) error {
 	return nil
 }
 
+// addPrimaryDocumentAuthors delivers a person's comment, or its edit, on an issue with no route and
+// no session claimant (takesPrimaryAuthors) to every session the issue's primary document credits,
+// each on its own topic: a session that writes an issue's spec without a claim still hears the
+// comments on it. The comment's own thread does not matter: a comment in an ask's thread, or a
+// reply, reaches those sessions too. The batch reads them for all such events in one query
+// (loadLookups, loadPrimaryDocumentAuthors); when that query failed, its error ends the event's
+// destinations here. The actor is skipped, and so is a session the comment's mentions resolved to
+// (payloadMentionedSessions) once its mention delivered the comment (recipientFilter).
+func addPrimaryDocumentAuthors(event model.Event, routing routing, look lookup, d *destinations) error {
+	if !takesPrimaryAuthors(event, routing) {
+		return nil
+	}
+	authors, err := look.primaryDocumentAuthors(*event.IssueKey)
+	if err != nil {
+		return err
+	}
+	filter := newRecipientFilter(event, d)
+	var targets []string
+	for _, sessionID := range authors {
+		if filter.keep(sessionID) {
+			targets = append(targets, sessionID)
+		}
+	}
+	d.addSessions(targets, "publish primary document author route to")
+	return nil
+}
+
 // addAuthorRoutes delivers a human comment-thread action, or a person's settled edit of a
 // document, directly to the involved sessions' own topics, regardless of the issue's route (which
 // may point at an entirely different reviewer) and regardless of whether the event's owner is an
-// issue or a project document (which has no route at all). Without this, the agent that started
-// the thread or is the thread's own root author never learns about the human's reply, resolution,
-// reopening, or edit, and the agent that wrote a document never learns of a new comment on it or
-// of a person's edit to it. A reply reaches its thread's root author and its direct parent's
-// author; a new comment on a document (no reply_to and no ask_id), and its edit, reach every
-// session that document credits (loadDocumentSessionAuthors); a comment on an issue's
-// conversation names no document and reaches no author; and artifact.human_edited, which the
-// notice sweep appends once a person's quiet window on a document ends (docs.sendEditNotice),
-// reaches every session the document its payload's artifact_id names credits. Ask threads are not
-// walked here: their asker and repliers are the ask's followers (addFollowerRoutes). The event's
-// own actor is skipped, and so is a session the comment's mentions resolved to
-// (suppressed_authors) once its mention delivered the comment (destinations.leftToMention); an
-// author whose mention failed is added instead.
+// issue or a project document (which has no route at all). Without this, the sessions in a thread
+// never learn of the human's reply, resolution, reopening, or edit, and the agent that wrote a
+// document never learns of a new comment on it or of a person's edit to it.
+//
+// A reply (reply_to set), and its edit, reach every session that wrote a comment in the thread,
+// its root and each reply, then every session the thread's document credits, which the batch reads
+// for all its replies in one query (loadLookups, loadCommentRecipients); when that query failed,
+// its error ends the event's destinations here. A new comment on a document (no reply_to and no
+// ask_id), and its edit, reach every session that document credits (loadDocumentSessionAuthors); a
+// new comment on an issue's conversation names no document and reaches no author. A resolution or
+// a reopening reaches the thread root's author only, so the reopening a reply makes tells no new
+// session twice. artifact.human_edited, which the notice sweep appends once a person's quiet window
+// on a document ends (docs.sendEditNotice), reaches every session the document its payload's
+// artifact_id names credits. Ask threads are not walked here: their asker and repliers are the
+// ask's followers (addFollowerRoutes). The event's own actor is skipped, and so is a session the
+// comment's mentions resolved to (payloadMentionedSessions) once its mention delivered the comment
+// (recipientFilter); an author whose mention failed is added instead.
 func addAuthorRoutes(event model.Event, look lookup, d *destinations) error {
-	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
-	seen := map[string]bool{}
+	filter := newRecipientFilter(event, d)
 	var targets []string
-	consider := func(author model.Actor, found bool) {
-		if !found || author.Kind != "session" || seen[author.ID] {
-			return
+	consider := func(sessionID string) {
+		if filter.keep(sessionID) {
+			targets = append(targets, sessionID)
 		}
-		if event.Actor.SameAs(author) {
-			return
-		}
-		seen[author.ID] = true
-		if _, suppressed := suppressedAuthors[author.ID]; suppressed && d.leftToMention(author.ID) {
-			return
-		}
-		targets = append(targets, author.ID)
 	}
 	considerLoaded := func(author model.Actor, found bool, err error) error {
 		if err != nil {
 			return err
 		}
-		consider(author, found)
+		if found && author.Kind == "session" {
+			consider(author.ID)
+		}
+		return nil
+	}
+	considerSessions := func(sessionIDs []string, err error) error {
+		if err != nil {
+			return err
+		}
+		for _, sessionID := range sessionIDs {
+			consider(sessionID)
+		}
 		return nil
 	}
 
-	var inReplyTo, commentID, messageInReplyTo string
 	switch event.Type {
-	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
-		inReplyTo = payloadString(event.Payload, "reply_to")
-		commentID = payloadString(event.Payload, "id")
+	case "comment.created", "comment.edited":
+		switch replyTo := payloadString(event.Payload, "reply_to"); {
+		case payloadString(event.Payload, "ask_id") != "":
+			// An ask's thread reaches the ask's followers (addFollowerRoutes).
+		case replyTo != "":
+			if err := considerSessions(look.commentRecipients(replyTo)); err != nil {
+				return err
+			}
+		default:
+			if document := commentedDocument(event); document != "" {
+				if err := considerSessions(look.documentAuthors(document)); err != nil {
+					return err
+				}
+			}
+		}
+	case "comment.resolved", "comment.reopened":
+		// New threads persist a reply's reply_to as the thread root. Walking from the comment
+		// still finds the root for legacy nested rows.
+		if commentID := payloadString(event.Payload, "id"); commentID != "" {
+			if err := considerLoaded(look.rootCommentAuthor(commentID)); err != nil {
+				return err
+			}
+		}
 	case "message.created", "message.answered":
-		messageInReplyTo = payloadString(event.Payload, "in_reply_to")
+		if inReplyTo := payloadString(event.Payload, "in_reply_to"); inReplyTo != "" {
+			if err := considerLoaded(look.messageAuthor(inReplyTo)); err != nil {
+				return err
+			}
+		}
 	case "subscription.removed", "ask.follower_added", "ask.follower_removed":
 		// The target is the unsubscribed, added, or removed session itself, carried directly
 		// in the payload — there is no thread or ask to walk to find it.
 		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
-			consider(model.Actor{Kind: "session", ID: sessionID}, true)
+			consider(sessionID)
 		}
 	case "artifact.human_edited":
-		// The edited document is named in the payload (editedDocument); its writers are read
-		// below.
-	default:
-		return nil
-	}
-
-	if inReplyTo != "" {
-		// New comment threads persist ReplyTo as their root ID. Walking still keeps
-		// routing correct for legacy nested rows and finds the root author.
-		if err := considerLoaded(look.rootCommentAuthor(inReplyTo)); err != nil {
-			return err
-		}
-		if err := considerLoaded(look.commentAuthor(inReplyTo)); err != nil {
-			return err
-		}
-	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
-		if err := considerLoaded(look.rootCommentAuthor(commentID)); err != nil {
-			return err
-		}
-	} else if document := editedDocument(event); document != "" {
-		authors, err := look.documentAuthors(document)
-		if err != nil {
-			return err
-		}
-		for _, author := range authors {
-			consider(model.Actor{Kind: "session", ID: author}, true)
-		}
-	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
-		document := commentedDocument(event)
-		if document != "" {
-			authors, err := look.documentAuthors(document)
-			if err != nil {
+		if document := payloadString(event.Payload, "artifact_id"); document != "" {
+			if err := considerSessions(look.documentAuthors(document)); err != nil {
 				return err
 			}
-			for _, author := range authors {
-				consider(model.Actor{Kind: "session", ID: author}, true)
-			}
 		}
-	}
-	if messageInReplyTo != "" {
-		if err := considerLoaded(look.messageAuthor(messageInReplyTo)); err != nil {
-			return err
-		}
+	default:
+		return nil
 	}
 
 	d.addSessions(targets, "publish author route to")
@@ -975,15 +1011,6 @@ func commentedDocument(event model.Event) string {
 		document = *event.ArtifactID
 	}
 	return document
-}
-
-// editedDocument names the document a person's artifact.human_edited is about, its payload's
-// artifact_id, or "" for every other event.
-func editedDocument(event model.Event) string {
-	if event.Type != "artifact.human_edited" {
-		return ""
-	}
-	return payloadString(event.Payload, "artifact_id")
 }
 
 func publishedDestinationSet(subjects []string) map[string]struct{} {
@@ -1120,27 +1147,6 @@ func suppressesCurrentRoute(payload any, current *string, d *destinations) bool 
 		return false
 	}
 	return d.leftToMention(sessionID)
-}
-
-func payloadStringSet(payload any, key string) map[string]struct{} {
-	values, ok := payload.(map[string]any)
-	if !ok {
-		return nil
-	}
-	result := map[string]struct{}{}
-	switch entries := values[key].(type) {
-	case []string:
-		for _, entry := range entries {
-			result[entry] = struct{}{}
-		}
-	case []any:
-		for _, entry := range entries {
-			if value, ok := entry.(string); ok {
-				result[value] = struct{}{}
-			}
-		}
-	}
-	return result
 }
 
 // payloadMentionedSessions reads the sessions a comment payload's mentions resolved to (each
