@@ -188,10 +188,12 @@ session's inbox reached through a registered topic, and every failed-delivery la
 
 ## The NATS grant a Legion daemon needs
 
-Legion's daemon reads Dispatch and GitHub events from the stream through two durable consumers
-per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>`) and
-`legion-go-<project>-github` (filtering each of the project's repositories). It sends its own
-notices to roles and to the controller through the listener's HTTP API, not over NATS.
+Legion's daemon reads Dispatch and GitHub events from the stream through three durable consumers
+per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>` and the
+project's repository-mapping subject), `legion-go-<project>-dispatch-server` (filtering
+Dispatch's own start, `notifications.dispatch.server.started`) and `legion-go-<project>-github`
+(filtering each of the project's repositories). It sends its own notices to roles and to the
+controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:
 
@@ -201,16 +203,20 @@ When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `tru
 | Publish | Subscribe |
 | --- | --- |
 | `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS` | `notifications.envoy.exceptions.notifications.role.>` |
-| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>` | `_INBOX.>` |
+| `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` | `_INBOX.>` |
+| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>` | |
 | `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>` | |
 | `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` | |
 | `$JS.ACK.ENVOY_NOTIFICATIONS.>` | |
 
 The last row is the subject a consumer acknowledges a message on. Replies to the API requests come
-back on `_INBOX.>`.
+back on `_INBOX.>`. The stored-message get (`STREAM.MSG.GET`) is how `legion state` reads each
+consumer's oldest waiting message, whose time is the consumer's lag; it only reads, one message at
+a time. A daemon whose user lacks it still runs, and its state names the refusal as each waiting
+consumer's `unavailable`.
 
 The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
-not just the daemon's two: a holder of the daemon's seed can read, recreate with another filter,
+not just the daemon's three: a holder of the daemon's seed can read, recreate with another filter,
 and drain any consumer of the stream, every host's listener consumer and another project's daemon
 consumers included. It can also create a push consumer whose delivery subject is any subject at
 all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,

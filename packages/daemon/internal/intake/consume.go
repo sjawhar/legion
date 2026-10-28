@@ -38,6 +38,9 @@ type ConsumerSpec struct {
 	AckWait  time.Duration
 	NakDelay time.Duration
 	Logger   *slog.Logger
+	// Now is the clock Consumers reads when it records a consumer opened or a message handled,
+	// and when Lag measures a stall and the oldest waiting message's age; nil is time.Now.
+	Now func() time.Time
 	// ReviewPermission answers whether review's author has write access or higher to its
 	// repository, which is what lets a review decide a review round
 	// (PullRequestReview.AuthorCanWrite). The workflow decides inside a transaction and performs no
@@ -87,6 +90,8 @@ func (r *RetryLater) Unwrap() error { return r.Err }
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
 // set GitHub intake hears and decodes, which SetRepositories replaces under mu. pool is the
 // Postgres every fact is applied on and every consumer's position is kept in (consumer_positions).
+// progress is, per durable consumer, what JetStream does not keep: when this daemon opened it and
+// when it last handled a message (Lag).
 type Consumers struct {
 	spec     ConsumerSpec
 	pool     *pgxpool.Pool
@@ -99,6 +104,8 @@ type Consumers struct {
 	// githubIntakeSubject), silently, with the message counted pending and never delivered.
 	server jetstream.Consumer
 	github jetstream.Consumer
+
+	progress struct{ dispatch, server, github *consumerProgress }
 
 	mu    sync.Mutex
 	repos []ghrepo.Repository
@@ -151,7 +158,12 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}, nil
+	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}
+	opened := spec.Now()
+	consumers.progress.dispatch = &consumerProgress{name: dispatchConsumerName(spec.Project), opened: opened}
+	consumers.progress.server = &consumerProgress{name: dispatchServerConsumerName(spec.Project), opened: opened}
+	consumers.progress.github = &consumerProgress{name: githubConsumerName(spec.Project), opened: opened}
+	return consumers, nil
 }
 
 func githubConsumerConfig(spec ConsumerSpec, repositories []ghrepo.Repository) jetstream.ConsumerConfig {
@@ -281,10 +293,145 @@ func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
 	}
 }
 
+const (
+	// consumerLagBound bounds one Lag read: the state route waits on it, so a NATS server that does
+	// not answer costs a state read two seconds and an unavailable line, not the request's life.
+	consumerLagBound = 2 * time.Second
+	// consumerStallAfter is how long a consumer with messages waiting may go without handling one
+	// before Lag calls it stalled: a healthy consumer handles a message in well under a second, and
+	// a stalled one holds every event behind the message it is stuck on.
+	consumerStallAfter = 60 * time.Second
+)
+
+// ConsumerLag is one durable consumer's lag as Lag reads it.
+//
+// Waiting is the messages the consumer has not handled, JetStream's NumPending (not yet delivered)
+// plus NumAckPending (delivered and not yet acknowledged); it counts the messages the daemon will
+// acknowledge without a transaction at decode too. OldestAt is the stream time of the oldest of
+// them, the first message after the consumer's ack floor on one of its filter subjects, and
+// OldestAge how long before the read it was stored; both are zero when nothing waits, and when that
+// message could not be read. LastHandledAt is when this daemon last handled a message of the
+// consumer — acknowledged it, or terminated it as poison, with JetStream taking either — and is zero
+// before the first; a nak is not handled. Stalled is true when messages wait and none was handled
+// for consumerStallAfter, counted from the consumer's open while none has been.
+//
+// Unavailable names what NATS did not answer or refused: `read the consumer's info: <error>` when
+// CONSUMER.INFO failed, and then Waiting is 0 and Stalled false, since neither is known; `read the
+// oldest waiting message: <error>` when only the stored-message read (STREAM.MSG.GET) failed, and
+// then Waiting and Stalled stand and OldestAt is zero. Empty when every read answered.
+type ConsumerLag struct {
+	Name          string
+	Waiting       uint64
+	OldestAt      time.Time
+	OldestAge     time.Duration
+	LastHandledAt time.Time
+	Stalled       bool
+	Unavailable   string
+}
+
+// consumerProgress is what Lag needs of one durable consumer that JetStream does not keep: when
+// this daemon opened it (OpenConsumers) and when it last handled a message of it (Run). Run's
+// consumer loop writes handled while a state read reads it, so it is kept under mu.
+type consumerProgress struct {
+	name   string
+	opened time.Time
+
+	mu      sync.Mutex
+	handled time.Time
+}
+
+func (p *consumerProgress) handle(at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.handled = at
+}
+
+func (p *consumerProgress) lastHandled() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.handled
+}
+
+// Lag is the lag of the Dispatch, Dispatch-server and GitHub durable consumers, in that order
+// (ConsumerLag), read fresh from JetStream within consumerLagBound: per consumer one CONSUMER.INFO
+// and, while messages wait, one STREAM.MSG.GET per filter subject for the first message at or after
+// the sequence above its ack floor on that subject, the smallest sequence's time being the oldest.
+// Each consumer's info is read through a handle of its own, as DispatchPosition reads, so nothing
+// races Run's. A read that fails or runs out of the bound is that consumer's Unavailable; Lag
+// itself never fails, so the state that shows it is still served.
+func (c *Consumers) Lag(ctx context.Context) []ConsumerLag {
+	read, cancel := context.WithTimeout(ctx, consumerLagBound)
+	defer cancel()
+	progress := []*consumerProgress{c.progress.dispatch, c.progress.server, c.progress.github}
+	lags := make([]ConsumerLag, len(progress))
+	for i, consumer := range progress {
+		lags[i] = c.lagOf(read, consumer)
+	}
+	return lags
+}
+
+func (c *Consumers) lagOf(ctx context.Context, progress *consumerProgress) ConsumerLag {
+	handled := progress.lastHandled()
+	lag := ConsumerLag{Name: progress.name, LastHandledAt: handled}
+	consumer, err := c.stream.Consumer(ctx, progress.name)
+	if err != nil {
+		lag.Unavailable = "read the consumer's info: " + err.Error()
+		return lag
+	}
+	info := consumer.CachedInfo()
+	lag.Waiting = info.NumPending + uint64(info.NumAckPending)
+	if lag.Waiting == 0 {
+		return lag
+	}
+	now := c.spec.Now()
+	since := handled
+	if since.IsZero() {
+		since = progress.opened
+	}
+	lag.Stalled = now.Sub(since) >= consumerStallAfter
+	oldest, err := c.oldestWaiting(ctx, info)
+	if err != nil {
+		lag.Unavailable = "read the oldest waiting message: " + err.Error()
+		return lag
+	}
+	if !oldest.IsZero() {
+		lag.OldestAt, lag.OldestAge = oldest, now.Sub(oldest)
+	}
+	return lag
+}
+
+// oldestWaiting is the stream time of the first message after info's ack floor on any of its
+// consumer's filter subjects, or zero when the stream holds none (the stream's MaxAge removed it
+// since the info was read).
+func (c *Consumers) oldestWaiting(ctx context.Context, info *jetstream.ConsumerInfo) (time.Time, error) {
+	filters := slices.Clone(info.Config.FilterSubjects)
+	if info.Config.FilterSubject != "" {
+		filters = append(filters, info.Config.FilterSubject)
+	}
+	var oldest *jetstream.RawStreamMsg
+	for _, filter := range filters {
+		message, err := c.stream.GetMsg(ctx, info.AckFloor.Stream+1, jetstream.WithGetMsgSubject(filter))
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			continue
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		if oldest == nil || message.Sequence < oldest.Sequence {
+			oldest = message
+		}
+	}
+	if oldest == nil {
+		return time.Time{}, nil
+	}
+	return oldest.Time, nil
+}
+
 // Run consumes the three durable consumers until ctx ends, and returns the error of the one that
 // stops first. Every decoded fact enters ApplyFact on the consumers' pool; a committed transaction
 // is acknowledged, a rolled-back transaction is nacked with a delay, poison is terminated, and a
-// committed refusal is logged then acknowledged. The Dispatch consumer's own position, and
+// committed refusal is logged then acknowledged. Each message acknowledged or terminated is
+// recorded as its consumer's last handled (Lag). The Dispatch consumer's own position, and
 // admission's hold on it, are the daemon's boot-owned concern (workflowRuntime.pollHoldRelease),
 // not intake's: this loop knows nothing about either.
 func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
@@ -293,12 +440,14 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 	c.mu.Unlock()
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, dispatch, c.spec, c.repositories, c.pool, handlers)
+		return consumeConsumer(consumeContext, dispatch, c.progress.dispatch, c.spec, c.repositories, c.pool, handlers)
 	})
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, c.server, c.spec, c.repositories, c.pool, handlers)
+		return consumeConsumer(consumeContext, c.server, c.progress.server, c.spec, c.repositories, c.pool, handlers)
 	})
-	group.Go(func() error { return consumeConsumer(consumeContext, github, c.spec, c.repositories, c.pool, handlers) })
+	group.Go(func() error {
+		return consumeConsumer(consumeContext, github, c.progress.github, c.spec, c.repositories, c.pool, handlers)
+	})
 	return group.Wait()
 }
 
@@ -309,12 +458,15 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 // library's default batch of 500, a consumer working a backlog has JetStream redeliver the
 // messages it is holding, and each redelivery is prepared again (a Dispatch read) and takes the
 // fact lock again before it is found already processed. One message in flight costs one pull
-// request per message and leaves the window to the message's own work.
-func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, repositories func() []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) error {
+// request per message and leaves the window to the message's own work. Each message handled is
+// recorded in progress at spec.Now.
+func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, progress *consumerProgress, spec ConsumerSpec, repositories func() []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) error {
 	lag := &lagWatch{consumer: consumer.CachedInfo().Name, logger: spec.Logger, now: time.Now}
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
 		lag.observe(message)
-		consumeMessage(ctx, message, spec, repositories(), pool, handlers)
+		if consumeMessage(ctx, message, spec, repositories(), pool, handlers) {
+			progress.handle(spec.Now())
+		}
 	}, jetstream.PullMaxMessages(1))
 	if err != nil {
 		return err
@@ -374,56 +526,57 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 		"subject", message.Subject(), "stream_seq", metadata.Sequence.Stream, "published_at", metadata.Timestamp.UTC().Format(time.RFC3339))
 }
 
-func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) {
+// consumeMessage applies one message and reports whether it was handled: acknowledged, or
+// terminated as poison, with JetStream taking the acknowledgement or the termination, the two ways
+// a message leaves its consumer's waiting count. A nak is not handled: the message waits again.
+func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) bool {
 	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
 			logMessage(spec.Logger, slog.LevelError, "term poison JetStream message", message, "error", termErr)
+			return false
 		}
-		return
+		return true
 	}
 	for _, field := range decoded.Unread {
 		logMessage(spec.Logger, slog.LevelWarn, "unreadable field taken as absent", message, "event_id", decoded.EventID, "field", field)
 	}
 	if decoded.Fact == nil {
-		ackMessage(spec.Logger, message)
-		return
+		return ackMessage(spec.Logger, message)
 	}
 	if _, ok := decoded.Fact.(RepoMappingChanged); ok {
 		if err := readMapping(ctx, spec); err != nil {
 			nakResolve(spec, message, decoded.EventID, "read the project's repository mapping again", "nak the mapping read", err)
-			return
+			return false
 		}
-		ackMessage(spec.Logger, message)
-		return
+		return ackMessage(spec.Logger, message)
 	}
 	recorded, err := recordedPullRequest(ctx, spec, pool, decoded.Fact)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "read whether the pull request is recorded", "nak the pull request read", err)
-		return
+		return false
 	}
 	if !recorded {
 		logMessage(spec.Logger, slog.LevelDebug, "a GitHub event of a pull request the daemon does not record is acknowledged without a transaction", message,
 			"event_id", decoded.EventID)
-		ackMessage(spec.Logger, message)
-		return
+		return ackMessage(spec.Logger, message)
 	}
 	prepared, err := prepareRepository(ctx, spec, decoded.Fact)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "prepare the issue's repository", "nak the repository preparation", err)
-		return
+		return false
 	}
 	decoded.Fact = prepared
 	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
-		return
+		return false
 	}
 	fact, err := resolveReviewPermission(ctx, spec, withBody)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "read the reviewer's repository permission", "nak the reviewer's permission read", err)
-		return
+		return false
 	}
 	decoded.Fact = fact
 
@@ -433,7 +586,7 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		if nakErr := message.NakWithDelay(spec.NakDelay); nakErr != nil {
 			logMessage(spec.Logger, slog.LevelError, "nak intake processing failure", message, "event_id", decoded.EventID, "error", nakErr)
 		}
-		return
+		return false
 	}
 	if result.Refusal != nil {
 		logMessage(spec.Logger, slog.LevelWarn, "committed refusal", message,
@@ -443,7 +596,7 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 			"error", result.Refusal.Message,
 		)
 	}
-	ackMessage(spec.Logger, message)
+	return ackMessage(spec.Logger, message)
 }
 
 // recordedPullRequest says whether the daemon records the pull request a review or a checks
@@ -571,10 +724,14 @@ func nakResolve(spec ConsumerSpec, message jetstream.Msg, eventID, what, nakWhat
 	}
 }
 
-func ackMessage(logger *slog.Logger, message jetstream.Msg) {
+// ackMessage acknowledges message and reports whether the client sent the acknowledgement, logging
+// the failure when it did not.
+func ackMessage(logger *slog.Logger, message jetstream.Msg) bool {
 	if err := message.Ack(); err != nil {
 		logMessage(logger, slog.LevelError, "ack intake message", message, "error", err)
+		return false
 	}
+	return true
 }
 
 func logMessage(logger *slog.Logger, level slog.Level, message string, delivery jetstream.Msg, attributes ...any) {
@@ -606,6 +763,9 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	}
 	if spec.Logger == nil {
 		spec.Logger = slog.Default()
+	}
+	if spec.Now == nil {
+		spec.Now = time.Now
 	}
 	return spec, nil
 }

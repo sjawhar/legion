@@ -45905,6 +45905,15 @@ var legionRepositories = strictObject({
   refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
 });
+var legionConsumerLag = strictObject({
+  name: nonEmptyString,
+  waiting: number2().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: number2().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: boolean2(),
+  unavailable: nonEmptyString.optional()
+});
 var LegionStateResponse = strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -45916,7 +45925,8 @@ var LegionStateResponse = strictObject({
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: array(legionCapabilityState),
   repositories: legionRepositories,
-  settings: legionSettings
+  settings: legionSettings,
+  consumers: array(legionConsumerLag)
 });
 var LegionRegisterResponse = strictObject({
   claimToken: nonEmptyString,
@@ -48745,7 +48755,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 40
+  daemonApiVersion: 41
 };
 
 // src/channel-forwarder.ts

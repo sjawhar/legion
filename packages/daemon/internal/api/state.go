@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -67,6 +68,45 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
+	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
+	// NATS at the request after the state's transaction commits, so no NATS read holds the
+	// snapshot open. Never null: a daemon with no workflow has none (contract 41).
+	Consumers []ConsumerLagView `json:"consumers"`
+}
+
+// ConsumerLagView is one durable consumer's lag as the state shows it (intake.ConsumerLag): its
+// name; how many messages wait for it (Waiting); the stream time of the oldest and its age in whole
+// seconds at the read, both null when nothing waits or when that message could not be read; when
+// the daemon last handled one of its messages, null before the first; whether it is stalled,
+// messages waiting and none handled for 60 seconds; and Unavailable, what NATS did not answer or
+// refused, absent when every read answered.
+type ConsumerLagView struct {
+	Name             string     `json:"name"`
+	Waiting          uint64     `json:"waiting"`
+	OldestAt         *time.Time `json:"oldestAt"`
+	OldestAgeSeconds *int64     `json:"oldestAgeSeconds"`
+	LastHandledAt    *time.Time `json:"lastHandledAt"`
+	Stalled          bool       `json:"stalled"`
+	Unavailable      string     `json:"unavailable,omitempty"`
+}
+
+// ConsumerLagViewsOf is lags as the state shows them, consumer for consumer; no lags is an empty
+// list.
+func ConsumerLagViewsOf(lags []intake.ConsumerLag) []ConsumerLagView {
+	views := make([]ConsumerLagView, len(lags))
+	for i, lag := range lags {
+		view := ConsumerLagView{Name: lag.Name, Waiting: lag.Waiting, Stalled: lag.Stalled, Unavailable: lag.Unavailable}
+		if !lag.OldestAt.IsZero() {
+			oldestAt, age := lag.OldestAt, int64(lag.OldestAge/time.Second)
+			view.OldestAt, view.OldestAgeSeconds = &oldestAt, &age
+		}
+		if !lag.LastHandledAt.IsZero() {
+			handledAt := lag.LastHandledAt
+			view.LastHandledAt = &handledAt
+		}
+		views[i] = view
+	}
+	return views
 }
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
@@ -193,8 +233,8 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims` and `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the
-// plugin's strict reader refuses.
+// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
+// `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -212,6 +252,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
+	}
+	if out.Consumers == nil {
+		out.Consumers = []ConsumerLagView{}
 	}
 	return json.Marshal(out)
 }

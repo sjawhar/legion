@@ -1,5 +1,5 @@
 -- 0062_live_issue_reads.up.sql — indexes for the reads a fact makes, so its cost does not grow with
--- the records of finished issues, which are never deleted (INFRA-493).
+-- the records of finished issues, which are never deleted.
 --
 -- issues_live serves record.Store.LiveIssues: the project's records not in phase done, and the done
 -- ones set back to todo (a root a person re-admits, a parked child), which is every record admission

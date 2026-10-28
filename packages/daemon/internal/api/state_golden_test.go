@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -396,6 +397,17 @@ func populatedState(t *testing.T) State {
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
 	}
 }
 

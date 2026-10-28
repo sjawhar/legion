@@ -372,4 +372,19 @@ package api
 // and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is INFRA-208,
 // on main before this change, so this change takes the number above it, as the collision note
 // says.)
-const DaemonAPIVersion = 40
+//
+// 41: api.State gains `consumers`, the lag of the daemon's three durable consumers
+// (api.ConsumerLagView), read from NATS after the state's transaction commits: each consumer's
+// `name`, `waiting` (JetStream's NumPending plus NumAckPending), `oldestAt` and
+// `oldestAgeSeconds` (the stream time of the first message after its ack floor on one of its
+// filter subjects, and that message's age in whole seconds; both null when nothing waits or the
+// message could not be read), `lastHandledAt` (when the daemon last acknowledged one of its
+// messages or terminated one as poison, null before the first; a nak is not handled), `stalled`
+// (messages waiting and none handled for 60 seconds, counted from the consumer's open before the
+// first) and `unavailable` (what NATS did not answer within the read's 2-second bound or refused,
+// absent when every read answered: a failed CONSUMER.INFO leaves `waiting` 0 and `stalled` false,
+// a failed STREAM.MSG.GET only the oldest null). Never null, so a 40 plugin's strict reader
+// refuses the state, and the boot gate and `legion probe-image` refuse the mixed pair. (40 is
+// declared by the released pi-legion without `consumers`, so this change takes the number above
+// it, as the collision note says.)
+const DaemonAPIVersion = 41

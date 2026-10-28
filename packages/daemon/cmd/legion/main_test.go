@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
@@ -1595,6 +1597,54 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			}
 			if !strings.Contains(out.String(), tc.want) {
 				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told, one line per durable consumer, how many
+// messages wait for it and how old the oldest is; when it is stalled, how long it has handled none
+// and since when — its last handled message, or the daemon's start before the first; and what NATS
+// did not answer, alone on the line when the consumer's info could not be read. With no consumers
+// the one line says so.
+func TestPlainStateGivesEachDurableConsumersLag(t *testing.T) {
+	startedAt := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 10, 28, 9, 20, 30, 0, time.UTC)
+	for _, tc := range []struct {
+		name, consumers string
+		want            []string
+	}{
+		{name: "none", consumers: `[]`, want: []string{"durable consumers: none"}},
+		{
+			name: "caught up, waiting, stalled since the last, stalled since the start",
+			consumers: `[{"name":"legion-go-LEGION-dispatch","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":"2026-10-28T09:20:01Z","stalled":false},` +
+				`{"name":"legion-go-LEGION-dispatch-server","waiting":2,"oldestAt":"2026-10-28T09:20:25Z","oldestAgeSeconds":5,"lastHandledAt":"2026-10-28T09:20:01Z","stalled":false},` +
+				`{"name":"legion-go-LEGION-github","waiting":412,"oldestAt":"2026-10-28T09:08:00Z","oldestAgeSeconds":750,"lastHandledAt":"2026-10-28T09:10:00Z","stalled":true},` +
+				`{"name":"legion-go-LEGION-other","waiting":3,"oldestAt":"2026-10-28T09:01:00Z","oldestAgeSeconds":1170,"lastHandledAt":null,"stalled":true}]`,
+			want: []string{
+				"consumer legion-go-LEGION-dispatch: 0 waiting",
+				"consumer legion-go-LEGION-dispatch-server: 2 waiting, oldest 5s",
+				"consumer legion-go-LEGION-github: 412 waiting, oldest 12m30s; STALLED: none handled for 10m30s, the last at 2026-10-28T09:10:00Z",
+				"consumer legion-go-LEGION-other: 3 waiting, oldest 19m30s; STALLED: none handled for 20m30s, none since the daemon started at 2026-10-28T09:00:00Z",
+			},
+		},
+		{
+			name: "NATS did not answer",
+			consumers: `[{"name":"legion-go-LEGION-dispatch","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the consumer's info: context deadline exceeded"},` +
+				`{"name":"legion-go-LEGION-github","waiting":7,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":"2026-10-28T09:19:00Z","stalled":true,"unavailable":"read the oldest waiting message: nats: permissions violation"}]`,
+			want: []string{
+				"consumer legion-go-LEGION-dispatch: unavailable: read the consumer's info: context deadline exceeded",
+				"consumer legion-go-LEGION-github: 7 waiting, oldest unknown; STALLED: none handled for 1m30s, the last at 2026-10-28T09:19:00Z; unavailable: read the oldest waiting message: nats: permissions violation",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var consumers []api.ConsumerLagView
+			if err := json.Unmarshal([]byte(tc.consumers), &consumers); err != nil {
+				t.Fatalf("decode consumers: %v", err)
+			}
+			if got := consumerLines(consumers, startedAt, now); !slices.Equal(got, tc.want) {
+				t.Fatalf("consumerLines =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
 			}
 		})
 	}

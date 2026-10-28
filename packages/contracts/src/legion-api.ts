@@ -437,6 +437,24 @@ const legionRepositories = z.strictObject({
   caches: z.array(legionCacheView),
 });
 
+/** `api.ConsumerLagView` — one durable consumer's lag, read from NATS after the state's
+ * transaction commits (contract 41): its `name`; `waiting`, the messages it has not handled
+ * (JetStream's pending plus acknowledgement-pending); `oldestAt`, the stream time of the oldest of
+ * them, and `oldestAgeSeconds` its age at the read, both null when nothing waits or that message
+ * could not be read; `lastHandledAt`, when the daemon last acknowledged one of its messages or
+ * terminated one as poison, null before the first; `stalled`, messages waiting and none handled for
+ * 60 seconds; and `unavailable`, what NATS did not answer or refused, absent when every read
+ * answered. */
+const legionConsumerLag = z.strictObject({
+  name: nonEmptyString,
+  waiting: z.number().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: z.number().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: z.boolean(),
+  unavailable: nonEmptyString.optional(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
@@ -447,7 +465,8 @@ const legionRepositories = z.strictObject({
  * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
  * serves it (contract 31); `settings` is the daemon's resolved legion.yaml with no credential,
  * credential source or credential file path, required, and loose like `payload` above so a
- * legion.yaml key added later changes no strictly parsed shape (contract 35). */
+ * legion.yaml key added later changes no strictly parsed shape (contract 35); `consumers` is the lag
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 41). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -460,6 +479,7 @@ export const LegionStateResponse = z.strictObject({
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
   settings: legionSettings,
+  consumers: z.array(legionConsumerLag),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

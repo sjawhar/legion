@@ -557,5 +557,32 @@
       "tester": "omp"
     },
     "role_config_files": {}
-  }
+  },
+  "consumers": [
+    {
+      "name": "legion-go-LEGION-dispatch",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": "2026-09-22T09:17:50Z",
+      "stalled": false
+    },
+    {
+      "name": "legion-go-LEGION-dispatch-server",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": null,
+      "stalled": false,
+      "unavailable": "read the consumer's info: context deadline exceeded"
+    },
+    {
+      "name": "legion-go-LEGION-github",
+      "waiting": 412,
+      "oldestAt": "2026-09-22T09:05:34Z",
+      "oldestAgeSeconds": 754,
+      "lastHandledAt": "2026-09-22T09:16:41Z",
+      "stalled": true
+    }
+  ]
 }

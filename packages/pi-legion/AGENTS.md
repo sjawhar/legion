@@ -90,7 +90,10 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 40's `awaiting_person`
+number is the one `DaemonAPIVersion` declares, last bumped by contract 41's strict `consumers` on
+`GET /legion/v1/state` (the lag of the daemon's three durable consumers, each with what
+waits, the oldest waiting message, the last handled, whether it is stalled and what NATS did not
+answer; a 40 plugin rejects it), after contract 40's `awaiting_person`
 phase and strict `waitingOn` issue view on `GET /legion/v1/state` (a root that gave its admission
 slot up while its architect waits on a person, and what it waits on; a 39 plugin rejects both),
 after contract 39's one-container issue pod (INFRA-208: a sandbox locator of an issue pod's role
