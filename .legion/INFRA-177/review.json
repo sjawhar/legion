@@ -2,22 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-177",
-  "completed": "2026-10-27T18:11:18Z",
-  "round": 4,
-  "headReviewed": "78ff7c3e90d15effe51cfce506c540559273c8ca (code head 1783e41b9415; 4a8cecc8 and 78ff7c3e add only .legion/INFRA-177/)",
-  "fingerprint": "changed by forward merge 545816c7 with main 2df3353c (comment of 2026-10-27T16:43Z), so a full round",
+  "completed": "2026-10-28T12:54:08Z",
+  "round": 5,
+  "headReviewed": "da591f55b466bbdf3f12dd24b8f8595fc1d14e9b (code head f508510f50df; dc353901 and da591f55 add only .legion/INFRA-177/)",
+  "fingerprint": "changed by forward merges b72bb4a3 (main 460facf5) and f508510f (main 8dfaf3a7), per the comment of 2026-10-28, so a full round",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 4,
-  "code": "No finding stands in the code. Merge 545816c7 keeps main's #2365 chain rule (HeadCountedFrom, HeadArrivedFrom, migration 0060, keptPushes, boundedPushes) with sparesAttempt = Before != \"\" && ByReviewApp; nothing of the removed handoff-only, forced or carry code came back; each deleted #2365 test pinned removed behaviour or is kept as a review-App case. Migrations 0061_handoff_records and 0135_handoffs follow main's 0060 and 0134; recordsSchema 61 is tied by test; contract 41 (main 40). 791ec4e4 fixes the rig build; git diff 791ec4e4 1783e41b is empty.",
-  "ci": "Read 18:09Z at CI head 1783e41b (compare to 78ff7c3e: handoffsOnly true, 2 files): lint, typecheck and pr-title success; test FAILURE in run 40542910070 (job 122325752693): TestADeployRunDuringAnOpenLookIsKeptForTheNextLook, check_wake_test.go:681 'timed out waiting for the look's start row resuming the implementer'. The test file and check_wake.go are untouched by this PR; sibling check_wake tests failed the same way at the same hour on INFRA-576, INFRA-511, INFRA-569 and INFRA-562 (dispatch://INFRA-623, P1).",
-  "thermonuclear": "deep-review: Verdict APPROVE at 78ff7c3e (3 Minor). code-quality: Verdict APPROVE at 78ff7c3e.",
+  "minor": 2,
+  "code": "Both merges are sound: main's #2379 head runs, #2385 never-move-back fence and shared compare, and #2440 push bound are kept for review-App pushes; nothing of the handoff-only, forced or approval-carry code came back; every deleted main test pinned removed behaviour; READY's removed-.legion/ allowance holds through githubrest.ChangedFile.Status (ready_scope_test.go). Migration 0062_handoff_records follows main's 0061; recordsSchema 62 is pinned by test; Dispatch 0135; contract 41 (main 40). Every CHANGELOG.md equals main's; the pr2354-* fragments match their packages' diffs except envoy-client's.",
+  "ci": "Read 12:36Z at CI head f508510f (compare to da591f55: handoffsOnly true, 2 files): lint, typecheck, test and pr-title queued. The round-4 red (check_wake flake) passed on re-run (run 40542910070 attempt 2, per the implementer).",
+  "thermonuclear": "deep-review: Verdict APPROVE at da591f55 (3 Minor). code-quality: Verdict CHANGES at da591f55, all three findings cleanup or release notes, none correctness.",
   "keyFindings": [
-    {"severity": "important", "file": "CI (required check test)", "description": "Required check test is red at code head 1783e41b: TestADeployRunDuringAnOpenLookIsKeptForTheNextLook timed out (run 40542910070). It is the dispatch://INFRA-623 check_wake flake, not this PR's code, but no approval is given on a red head: re-run the failed job once (gh run rerun 40542910070 --failed) and complete once it settles green."},
-    {"severity": "minor", "file": "PR body", "description": "Change line 'daemon migration 0060 and Dispatch migration 0130' must read 0061 and 0135; the E2E (implementer) line should name 1783e41b, where implement.json's proofs ran. Sent to the implementer as body-only edits."},
-    {"severity": "minor", "file": "packages/pi-legion/scripts/skill-scenarios/daemon-pane.go", "description": "Line 9 still cites phase.HandoffFile; daemon-pane.ts:3-4 says the rig does not restate the daemon, which daemon-pane.go now does for the word table."},
-    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "On the first push after the upgrade, a pull request with more than 16 stored handoff-only pushes behind its head drops the extra with one WARN each (boundedPushes); no decision changes. Note it in the cutover runbook or accept."},
-    {"severity": "minor", "file": "packages/daemon/internal/workflow/pullrequest.go", "description": "The re-check clauses at :189 (FixAttempts decreased, PlannedRed changed for a push of another head) fire only after a force push back to an earlier head and have no test on that path."}
+    {"severity": "important", "file": "packages/envoy-client/.changes/unreleased/", "description": "envoy-client changed (handoff-write/handoff-read in dispatch-execute.ts and dispatch-http.ts; the dispatch command acting as ENVOY_SESSION_ID ?? CLAUDE_CODE_SESSION_ID in dispatch-cli.ts; README) but has no pr2354 changie fragment, though it has a .changie.yaml and AGENTS.md's fragment rule asks one per changed package. Add an Added and a Changed fragment with `changie new --custom Issue=pr2354` (no Dispatch key), as the INFRA-138 architect asked."},
+    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "headPush (:166-182) has no caller after the merge took main's run-based advance and dropped HeadPushKnown. Fast-follow."},
+    {"severity": "minor", "file": "packages/daemon/internal/api/ready.go", "description": "unreviewedChange (:233-243) re-implements githubrest.ChangedPaths, which ready.go:177 already uses; filter removed .legion/ files, then use ChangedPaths. Fast-follow."}
   ]
 }
