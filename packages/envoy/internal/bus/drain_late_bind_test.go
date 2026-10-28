@@ -114,7 +114,7 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 			}
 			client.subscriptionsMu.Unlock()
 			client.stop()
-			_ = client.endBind(slot, sub, nil)
+			_ = client.endBind(slot, sub, nil, true)
 			drained := make(chan error, 1)
 			go func() { drained <- client.Drain(5 * time.Second) }()
 			// Well within this, a drain that takes no subscription has begun draining the connection.
@@ -163,7 +163,7 @@ func TestCloseDoesNotInstallABindThatFinishesAfterStop(t *testing.T) {
 	}
 
 	client.Close()
-	if err := client.endBind(slot, sub, nil); !errors.Is(err, errStopped) {
+	if err := client.endBind(slot, sub, nil, true); !errors.Is(err, errStopped) {
 		t.Fatalf("end bind after Close: %v, want %v", err, errStopped)
 	}
 	client.subscriptionsMu.Lock()

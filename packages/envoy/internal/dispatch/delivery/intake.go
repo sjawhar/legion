@@ -673,14 +673,20 @@ type intakeMessage struct {
 // bind does, or at deliverSubject, for a caller that has just created the durable with it. The
 // subscription's callback only routes each message (receive); its handler runs on the goroutine of
 // the message's key (keyedRunner) and acknowledges it there (deliver). StopDelivering stops the
-// subscription this made last, so a caller subscribing again stops the one before first.
+// subscription this made last, so a caller subscribing again stops the one before first. A
+// subscribe that fails gives up its handling and the registration the client kept of it
+// (bus.Client.ReleaseFailed): a reconnect would bind that registration otherwise, and its
+// callback, its handling given up, would hand back every message until the intake's next subscribe
+// replaced it.
 func (in *Intake) subscribe(deliverSubject string) (*natsgo.Subscription, error) {
 	handling, abandon := context.WithCancel(context.Background())
 	delivery := &intakeDelivery{nats: in.nats, handling: handling, abandon: abandon}
 	delivery.keys = newKeyedRunner(func(message intakeMessage) { in.deliver(handling, message) })
-	sub, err := subscribeDurable(in.nats, deliveryConsumerConfig(), deliverSubject, delivery.receive)
+	wanted := deliveryConsumerConfig()
+	sub, err := subscribeDurable(in.nats, wanted, deliverSubject, delivery.receive)
 	if err != nil {
 		abandon()
+		in.nats.ReleaseFailed(wanted.FilterSubject)
 		return nil, err
 	}
 	delivery.sub = sub

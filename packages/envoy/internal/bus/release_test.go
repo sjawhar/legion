@@ -1,6 +1,7 @@
 package bus_test
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,5 +206,172 @@ func TestReleaseOfAReplacedSubscriptionKeepsTheReplacement(t *testing.T) {
 	waitFor(t, 10*time.Second, "the replacement to be handed the message", func() bool { return second.Load() == 1 })
 	if got := first.Load(); got != 0 {
 		t.Fatalf("the replaced subscription's handler was handed %d message(s)", got)
+	}
+}
+
+// subscribeAbsent subscribes client's JetStream subscription to the durable name before it exists,
+// with a handler that counts what it is handed, and requires the bind to fail: the client keeps
+// the registration, which a reconnect binds once the durable exists.
+func subscribeAbsent(t *testing.T, client *bus.Client, name string, count *atomic.Int32) {
+	t.Helper()
+	sub, err := client.Subscribe("", func(msg *natsgo.Msg) {
+		count.Add(1)
+		_ = msg.Ack()
+	}, natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
+	if err == nil {
+		t.Fatalf("bound the durable %s before it existed (%v); the test proves nothing", name, sub)
+	}
+}
+
+// A subscription whose bind failed, and whose caller gave up its registration, stays unbound
+// across a reconnect, in place or onto a connection the client dials to replace a closed one, even
+// once the durable it named exists: without the release the client binds the failed registration,
+// and the handler its caller gave up takes the durable's deliveries. A later Subscribe on the same
+// client binds the durable and is handed what was published meanwhile.
+func TestAFailedSubscriptionReleasedIsNotBoundByAReconnect(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reconnect func(*bus.Client) error
+	}{
+		{name: "in place", reconnect: func(client *bus.Client) error { return client.Conn.ForceReconnect() }},
+		{name: "replaced connection", reconnect: func(client *bus.Client) error {
+			client.Conn.Close()
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, uri := startNATS(t)
+			client, err := bus.ConnectOwningStream([]string{uri})
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			defer client.Close()
+			hooked := make(chan struct{}, 8)
+			client.AddReconnectHook(func(*natsgo.Conn) error {
+				hooked <- struct{}{}
+				return nil
+			})
+
+			var failed atomic.Int32
+			subscribeAbsent(t, client, "failed", &failed)
+			client.ReleaseFailed("")
+			consumer := releaseDurable(t, client, "failed")
+
+			if err := tc.reconnect(client); err != nil {
+				t.Fatalf("reconnect: %v", err)
+			}
+			awaitHook(t, hooked)
+			publishReleaseProbe(t, client, "notifications.github.test.failed")
+			// nats-server applies a new subscriber's interest on the consumer's own goroutine, so a
+			// bind would show as push-bound, and be handed the message, within moments.
+			time.Sleep(time.Second)
+			if client.SubOK() {
+				t.Fatal("SubOK reports a subscription bound after its failed registration was released")
+			}
+			info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+			if err != nil {
+				t.Fatalf("read the durable: %v", err)
+			}
+			if info.PushBound {
+				t.Fatal("the reconnect bound the released failed registration to the durable")
+			}
+			if got := failed.Load(); got != 0 {
+				t.Fatalf("the failed subscription's handler was handed %d message(s) after the reconnect", got)
+			}
+
+			var fresh atomic.Int32
+			bindCounting(t, client, consumer, &fresh)
+			waitFor(t, 10*time.Second, "the fresh subscription to be handed the message", func() bool { return fresh.Load() == 1 })
+			if !client.SubOK() {
+				t.Fatal("SubOK reports the fresh subscription unbound")
+			}
+			if got := failed.Load(); got != 0 {
+				t.Fatalf("the failed subscription's handler was handed %d message(s)", got)
+			}
+		})
+	}
+}
+
+// A reconnect that lands after a subscription's bind failed and before its caller gave up the
+// registration binds it; ReleaseFailed then gives up the registration and unsubscribes that bound
+// handle, so the durable is left free and the handler is handed nothing.
+func TestReleaseFailedUnsubscribesWhatARestoreBound(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	hooked := make(chan struct{}, 8)
+	client.AddReconnectHook(func(*natsgo.Conn) error {
+		hooked <- struct{}{}
+		return nil
+	})
+
+	var failed atomic.Int32
+	subscribeAbsent(t, client, "failed", &failed)
+	consumer := releaseDurable(t, client, "failed")
+	if err := client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("reconnect in place: %v", err)
+	}
+	awaitHook(t, hooked)
+	if !client.SubOK() {
+		t.Fatal("the reconnect did not bind the failed registration; the test proves nothing")
+	}
+
+	client.ReleaseFailed("")
+	if client.SubOK() {
+		t.Fatal("SubOK reports a subscription bound after its failed registration was released")
+	}
+	waitFor(t, 10*time.Second, "the durable to lose its subscriber", func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		return err == nil && !info.PushBound
+	})
+	publishReleaseProbe(t, client, "notifications.github.test.failed")
+	time.Sleep(time.Second)
+	if got := failed.Load(); got != 0 {
+		t.Fatalf("the failed subscription's handler was handed %d message(s)", got)
+	}
+
+	var fresh atomic.Int32
+	bindCounting(t, client, consumer, &fresh)
+	waitFor(t, 10*time.Second, "the fresh subscription to be handed the message", func() bool { return fresh.Load() == 1 })
+}
+
+// ReleaseFailed gives up only a registration whose Subscribe failed: not the one a later Subscribe
+// on the subject made and bound, nor the one a Subscribe on another subject was refused beside
+// (ErrSubscriptionHeld). The kept subscription is bound again by a recovery onto a replacement
+// connection.
+func TestReleaseFailedKeepsASubscriptionThatBound(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	var failed, bound atomic.Int32
+	subscribeAbsent(t, client, "later", &failed)
+	consumer := releaseDurable(t, client, "later")
+	bindCounting(t, client, consumer, &bound)
+	client.ReleaseFailed("")
+	if !client.SubOK() {
+		t.Fatal("ReleaseFailed gave up a later Subscribe's bound subscription")
+	}
+	const other = "notifications.github.test.other"
+	if _, err := client.Subscribe(other, func(*natsgo.Msg) {}); !errors.Is(err, bus.ErrSubscriptionHeld) {
+		t.Fatalf("subscribe on another subject: %v, want %v", err, bus.ErrSubscriptionHeld)
+	}
+	client.ReleaseFailed(other)
+	if !client.SubOK() {
+		t.Fatal("ReleaseFailed of a refused subject gave up the held subscription")
+	}
+
+	client.Conn.Close()
+	waitFor(t, 30*time.Second, "the recovery to bind the kept subscription again", client.SubOK)
+	publishReleaseProbe(t, client, "notifications.github.test.later")
+	waitFor(t, 10*time.Second, "the kept subscription to be handed the message", func() bool { return bound.Load() == 1 })
+	if got := failed.Load(); got != 0 {
+		t.Fatalf("the failed subscription's handler was handed %d message(s)", got)
 	}
 }

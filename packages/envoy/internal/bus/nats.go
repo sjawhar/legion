@@ -173,12 +173,12 @@ type recoverableSubscription struct {
 	handler   nats.MsgHandler
 	opts      []nats.SubOpt
 	active    *nats.Subscription
-	// subscribed is the handle the registration's first successful bind installed: the one
-	// Subscribe returned, when its own bind succeeded. Release names the registration by it; a
-	// later restore's bind replaces active and leaves it. When Subscribe's own bind failed (before
-	// a background client's first connection, say), the restore that first binds the registration
-	// installs its own handle here, one no caller holds: such a registration is given up by the
-	// caller's next Subscribe, which replaces it, never by a Release.
+	// subscribed is the handle Subscribe returned: the one its own bind installed, when that bind
+	// succeeded. Release names the registration by it; a later restore's bind replaces active and
+	// leaves it. When Subscribe's own bind failed (the server refused it, or a background client
+	// has not connected yet) it stays nil, and the restore that binds the registration installs
+	// only active, a handle no caller holds: the caller gives such a registration up with
+	// ReleaseFailed, or its next Subscribe replaces it, never a Release.
 	subscribed *nats.Subscription
 	// binding is set while a bind of this registration is in flight, and closed when it ends. A
 	// registration has one bind at a time: a restore leaves one that has a bind in flight, and a
@@ -433,7 +433,8 @@ func (c *Client) Connected() bool {
 // an earlier one returned, a call on another subject is refused with ErrSubscriptionHeld, and a
 // caller that is done with it gives it up with Release. On a client that connects in the
 // background and has not connected yet, the bind fails (nothing reaches the server before then)
-// and the registration stays, so the first connection binds it.
+// and the registration stays, so the first connection binds it; a caller that gives up on a
+// subscription whose bind failed gives up the registration with ReleaseFailed.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -513,7 +514,7 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 		_ = replaced.Unsubscribe()
 	}
 	sub, err := bind(next, conn, js)
-	if err := c.endBind(subscription, sub, err); err != nil {
+	if err := c.endBind(subscription, sub, err, true); err != nil {
 		return nil, err
 	}
 	return sub, nil
@@ -542,6 +543,29 @@ func (c *Client) Release(sub *nats.Subscription) {
 	*subscription = recoverableSubscription{transport: jetStreamSubscription}
 	c.subscriptionsMu.Unlock()
 	if rebound != nil && rebound != sub {
+		_ = rebound.Unsubscribe()
+	}
+}
+
+// ReleaseFailed gives up the JetStream registration a Subscribe on subject left behind when its own
+// bind failed, so that no reconnect or recovery binds it. A caller that gives up on a subscription
+// it could not bind calls it: the client binds the registration on its next connection otherwise,
+// and hands the handler deliveries its caller no longer takes. A bind of the registration in flight
+// is waited for first, as Release does, and a handle a restore bound for it meanwhile is
+// unsubscribed. It gives up nothing else: not a registration whose Subscribe's own bind succeeded
+// (a later Subscribe's), nor one on another subject, which refused the call (ErrSubscriptionHeld).
+func (c *Client) ReleaseFailed(subject string) {
+	c.subscriptionsMu.Lock()
+	subscription := &c.subscriptions[jetStreamSubscription]
+	c.awaitBindLocked(subscription)
+	if subscription.handler == nil || subscription.subject != subject || subscription.subscribed != nil {
+		c.subscriptionsMu.Unlock()
+		return
+	}
+	rebound := subscription.active
+	*subscription = recoverableSubscription{transport: jetStreamSubscription}
+	c.subscriptionsMu.Unlock()
+	if rebound != nil {
 		_ = rebound.Unsubscribe()
 	}
 }
@@ -581,15 +605,16 @@ func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStre
 
 // endBind ends the bind in flight of the registration subscription holds. A bind that ends during
 // Drain's collection installs for the next pass; after that collection it drains itself. A Close
-// never installs a bind that finishes after it stopped the client.
-func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscription, err error) error {
+// never installs a bind that finishes after it stopped the client. returned is set for the bind of
+// a Subscribe, whose handle it returns: only that one is installed as the registration's subscribed.
+func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscription, err error, returned bool) error {
 	c.subscriptionsMu.Lock()
 	close(subscription.binding)
 	subscription.binding = nil
 	mode := c.stopMode
 	if err == nil && (mode == clientRunning || mode == clientDraining) {
 		subscription.active = sub
-		if subscription.subscribed == nil {
+		if returned {
 			subscription.subscribed = sub
 		}
 	}

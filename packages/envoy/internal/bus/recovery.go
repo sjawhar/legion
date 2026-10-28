@@ -383,7 +383,7 @@ func (c *Client) restoreSubscriptions() (pending bool, err error) {
 	for index, subscription := range restoring {
 		slog.Info("envoy nats resubscribing", slog.String("name", c.name), slog.String("subject", registrations[index].subject))
 		sub, err := bind(registrations[index], conn, js)
-		if err := c.endBind(subscription, sub, err); err != nil {
+		if err := c.endBind(subscription, sub, err, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
