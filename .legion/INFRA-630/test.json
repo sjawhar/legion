@@ -2,51 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T10:28:00Z",
-  "round": 6,
-  "headTested": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
-  "note": "No merge this round; c3a63d7e changes verify-build.sh's failed-listing branch, the credential check's test, comments, the changelog fragment's name and body, and ten docs/solutions status lines. release-push.sh, build.ts, the workflows' steps and every build input are unchanged since 4360b7a2, so criterion 1 and push-built's crafted-tar and race checks are carried from round 5; everything the round touches ran again at c3a63d7e on Bun 1.4.4.",
+  "completed": "2026-10-28T11:34:00Z",
+  "round": 7,
+  "headTested": "f519ad0b1a3eea52a627a13ef9013b70db82c920",
+  "note": "f519ad0b changes only comments in .github/scripts/release-push.sh and .github/workflows/claude-envoy-rebuild.yaml (0 changed lines outside '#' comments) and prose in packages/claude-envoy/README.md and AGENTS.md, the reviewer's round-6 fast-follow. No merge: GitHub's base moved to 0a921021 by main's own commits, and the branch was not rebased. The behaviour verified at c3a63d7e in round 6 is unchanged; this round confirms the two changed executable files still run as before.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran $TMPDIR/infra630/pushbuilt-proof.sh from the workspace at 410b2179 (code head c3a63d7e): verify-build left the build clone clean; push-built exit 0, one github-actions[bot] commit over base af119fd1 touching only dist/, no gh call; check-dist at it passes. Main moved: exit 0, origin unchanged at 121bfdaa, stub gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'."
+    "how": "Round 6 re-ran $TMPDIR/infra630/pushbuilt-proof.sh at 410b2179 (code c3a63d7e) and it held; f519ad0b changes no executable line of release-push.sh or the rebuild workflow, so the proof stands, and the two files were exercised again below."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-5 minor: a failed git ls-files in verify-build is a named ::error:: refusal, with no tar written and the checkout untouched; the rest of verify-build unchanged in behaviour",
-      "surface": "bun run verify-build <tar> from packages/claude-envoy in a scratch clone of c3a63d7e",
-      "command": "verify-build with a git stub first on PATH that fails `ls-files`; bash $TMPDIR/infra630-t4/vb-neg.sh (16 pull-request-like cases)",
-      "observed": "the stub: 'stub: ls-files fails' then '::error::verify-build.sh: git ls-files could not list the ignored files of the build, so the build is not checked', exit 1, no tar, checkout unchanged; the clean head, a skills edit, a contracts edit and a non-matching skill .gitignore: exit 0; checkout changes 0 after every case",
-      "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
-      "negativeControl": "each exit 1: a skill .gitignore naming notes.md and a nested references/.gitignore '*.txt' ('… is a generated file git ignores'); force-added *.log and logs/; an executable skill script; a symlink; a name with a space; a renamed bundle source; a syntax error; a Tailscale MagicDNS host in a bundled string and in a skill; a packages/claude-envoy/.gitignore matching built files"
+      "criterion": "The round-6 fast-follow is text only and leaves the rebuild path working at the new head",
+      "surface": "the workspace at 6832fdfb (code f519ad0b): release-push.sh, the credential check over the rebuild workflow, bun run verify-build",
+      "command": "jj diff -r f519ad0b -- release-push.sh claude-envoy-rebuild.yaml | non-comment changed lines; bash -n .github/scripts/release-push.sh; bash .github/scripts/check-release-credentials.sh; cd packages/claude-envoy && bun run verify-build $TMPDIR/infra630-t4/vb-r7.tar; jj status; release-push.sh check-built on that tar",
+      "observed": "0 non-comment lines changed; syntax ok; '10 credentialed job(s) and 10 build job(s) across 5 workflows …', exit 0; 'verify-build.sh: … holds a build main's rebuild accepts'; 'The working copy has no changes.'; check-built exit 0",
+      "headSha": "f519ad0b1a3eea52a627a13ef9013b70db82c920",
+      "negativeControl": "the same tar with dist/dispatch.js made executable: '::error::release-push.sh check-built: member dist/dispatch.js … has the mode -rwxr-xr-x', exit 1"
     },
     {
-      "criterion": "Round-5 minor: each workflow's deploy-key step may run only its own push command, the fold's included",
-      "surface": ".github/scripts/check-release-credentials.sh over copies of .github with one run line changed, PyYAML from $TMPDIR/pyyaml-venv",
-      "command": "bash .github/scripts/check-release-credentials.sh; python $TMPDIR/infra630-t4/mut6.py",
-      "observed": "'10 credentialed job(s) and 10 build job(s) across 5 workflows keep credentials out of jobs that run dependency code', exit 0",
+      "criterion": "Carried from rounds 5-6 (no executable change since c3a63d7e): criteria 1-4 before the merge, verify-build's 16-case matrix, extract-built, push-built's refusals and race, the per-workflow push commands, the fragment fold",
+      "surface": "as recorded in rounds 5 and 6",
+      "command": "rounds 5 (4360b7a2) and 6 (c3a63d7e) of this handoff's history",
+      "observed": "all passed; CI at c3a63d7e: Tests (lint, typecheck, test) success run 40671221103, Rebuild Claude Envoy plugin success run 40671221248 (build success, push skipped), Docs, Worker Image and Fold Changelog Fragments success",
       "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
-      "negativeControl": "each exit 1 naming the step and the workflow's allowed command: changelog-fold.yaml's 'Fold and push' running push-built or push-main ('… a step whose run calls release-push.sh push-fold, which changelog-fold.yaml allows'); release.yaml's 'Tag release' running push-fold ('… push-tag or release-push.sh push-main, which release.yaml allows'); the rebuild's 'Land the build on main' running push-fold ('… push-built, which claude-envoy-rebuild.yaml allows')"
-    },
-    {
-      "criterion": "Round-5 important: no new Dispatch key in a public file; the changelog entry still folds",
-      "surface": "the pull request's diff on GitHub; changie v1.26.0 (the version .github/actions/install-changie installs) on packages/claude-envoy",
-      "command": "gh pr diff 2423 | awk over added lines outside .legion/ for INFRA-588/629/630/633; git grep '^status: superseded' -- docs/solutions; cd packages/claude-envoy && changie batch 0.0.0-tester --dry-run",
-      "observed": "no added line outside .legion/ names INFRA-588, 629, 630 or 633; 10 superseded status lines name sjawhar/legion#2423 and 0 name INFRA-630; the fragment is pr-2423-built-plugin-rebuilt-on-main.yaml and changie folds it under '### Changed' with no key in its text, writing nothing",
-      "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
-      "negativeControl": "a fragment with kind: Nonsense beside it: changie refuses, 'kind not found but configuration expects one: 'Nonsense'' (removed after)"
-    },
-    {
-      "criterion": "Carried from round 5 (inputs unchanged in 4360b7a2..c3a63d7e): criterion 1 merge-tree pairs; extract-built and the rebuild/claude-envoy job emulations; push-built's crafted tars and the fetch/push race on the merged land_on_main",
-      "surface": "git merge-tree; release-push.sh against a local bare origin",
-      "command": "bash $TMPDIR/infra630-t4/crit1.sh; bash $TMPDIR/infra630-t4/pb5.sh; bash $TMPDIR/infra630-t4/rebuild-job.sh (round 5, at 4360b7a2)",
-      "observed": "source-only pairs exit 0 both orders; the race pushes nothing and starts a fresh run; extract-built and the job emulations as recorded in round 5; gh pr diff at 410b2179 lists nothing under dist/ or legion/",
-      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-      "negativeControl": "the contracts pair with rebuilt files committed: exit 1 both orders; eight crafted tars refused with origin unchanged"
+      "negativeControl": "round 6: a failing git ls-files, a skill .gitignore naming a shipped file, a step running another workflow's push command, each refused"
     }
   ],
-  "ci": "Read on GitHub for c3a63d7e (code head; 410b2179 is handoff-only) at 10:25Z: lint, typecheck, test (run 40671221103), changes, three build jobs (one the rebuild workflow's own pull_request run), fold_build and two pr-title runs queued; one pr-title cancelled by a newer event. Not waited for.",
+  "ci": "Read on GitHub at 11:31Z. f519ad0b (code head; 6832fdfb is handoff-only): no check run reported yet. c3a63d7e, the previous code head, which differs only in comments and prose: Tests success (lint, typecheck, test), Rebuild Claude Envoy plugin success (push skipped), Docs, Worker Image, Fold Changelog Fragments and PR Title success; Legion Envoy and Contracts cancelled by the newer push. Not waited for.",
   "observations": [
     "build.ts --out on a dangling symlink still fails with a raw EEXIST from mkdir and writes nothing (unchanged since round 1)."
   ]
