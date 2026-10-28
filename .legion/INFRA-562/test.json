@@ -2,30 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-28T17:49:22Z",
-  "round": 8,
-  "testedHead": "fd34f26db1b01028bc519a06d2e08061b62882d7",
-  "codeHead": "f43f33d1ce23",
+  "completed": "2026-10-28T19:02:28Z",
+  "round": 9,
+  "testedHead": "1b8e04a89167747a517c1f36a49acf9c11c84f08",
+  "codeHead": "c63149d0ac9a",
   "fingerprint": {
-    "previousVerifiedHead": "cc977ce5876d8f91ef54ee2a710f27eaa3a028c6",
-    "previous": "84c6cb970dcc60097f38a29ff3fb598dc457af6f1ab7152bc8b507e6ec658006",
-    "current": "1102103bc6a454f541a5cef74ac2243fac1ddb6a90fcdc881ee62579dde22504",
-    "verdict": "changed (the conflict-return merge f43f33d1 resolved ask_snooze.go and comment_create.go against main's e82b013b), so a full test round is owed at the head that merges"
+    "previousVerifiedHead": "fd34f26db1b01028bc519a06d2e08061b62882d7",
+    "previous": "1102103bc6a454f541a5cef74ac2243fac1ddb6a90fcdc881ee62579dde22504",
+    "current": "59d17ba89a018d1d6bc5bb3e7d353ecf4a4e2ae80c8e780a1648dbe9f99b0f54",
+    "verdict": "changed (merge 7ac06a53 with main's #2366, and c63149d0's tests): full test round run"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the issue's key two-process rows and the comment take-over tests at fd34f26d (code f43f33d1): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestADeliveryAKilledProcess|TestASendWhoseRequest|TestASendDuringAListenerTakeOver|TestBothProcessesJudge|TestClaimAndAnswerTimes' ./cmd/dispatch` -> all PASS, ok 157.114s, 0 SKIP (the never-known session waits the real window, 24.76 s); `go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce|TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce|TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow|Snooze' ./internal/dispatch/api/` -> ok 19.962s. Not re-run here: the whole two-process suite (the implementer's 120/0/0) and the api package, owed at the merging head."
+    "how": "Re-ran the implementer's three new tests at 1b8e04a8: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheClaimantOnce|TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce|TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce' ./internal/dispatch/api/` -> 3 PASS. Showed they catch the defect: a throwaway mutation dropping sessionRoutes from resolveCommentDeliveries' wait (comment_create.go:297, restored after, nothing committed) -> all three FAIL 'session s1 received the comment 2 times, want once: 1 mention steer(s) and 1 claimant / follower / primary document author fan-out(s)'. Then the full round: `go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 917.210s, 120 PASS, 0 FAIL, 0 '--- SKIP'; `go test -count=1 ./internal/dispatch/outbox/` -> ok 140.263s; `go test -count=1 -run 'Comment|Mention|TakeOver|Takeover|Listener|Claimant|Follower|Resume|Retry|Snooze|Route' ./internal/dispatch/api/` -> ok 140.133s; `cd infra && go test -count=1 -run TestDispatchConnectionsPerPodIsTheServers ./gcp/...` -> ok. Not re-run: the whole api package. Logs: $TMPDIR/mp-1b8e04a8.log, outbox-1b8e04a8.log, apisub-1b8e04a8.log."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The head merges with main, so the merged tree is what CI and the merge judge",
-      "evidence": "`gh pr view 2387 --json mergeable` -> CONFLICTING at 17:49Z; every check at f43f33d1 queued. main@origin moved past the merge's base 53f39ba0 to 20ba65a6 'fix(dispatch): a person's comment reaches the issue's claimant and every agent in its thread, doc-read shows open threads' text, and October's undelivered comments are counted (#2366)'. Files both sides changed: packages/envoy-client/src/dispatch-execute.ts, packages/envoy/AGENTS.md, internal/dispatch/api/comment_create.go, internal/dispatch/model/model.go. A trial merge (`jj new fd34f26db1b0 main@origin`, abandoned, nothing pushed) reports one 2-sided conflict, model/model.go (CommentEventPayload: #2366 drops SuppressedAuthors and has the outbox's session routes read the comment's own mentions from comment_deliveries; this branch adds mentions_decide_routes beside it). comment_create.go merges cleanly as text but not as behaviour: #2366 adds the claimant and the thread's agents as session routes that the outbox dedupes against comment_deliveries, while this branch decides whether a comment waits out a take-over before its commit (resolveCommentDeliveries' wait: issue route, thread reply, anchor or document) and whether a resumed attempt keeps its resolution from that set. The merge needs that predicate to cover #2366's new routes (a claimed issue with no route, a comment in a thread with agents), else a mention resolved only after the commit by the take-over retry can reach a session the claimant or thread route already reached: the round-1 double delivery (TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce) through a route that test does not set. Pin it at the merge with the same test shape on a claimed, unrouted issue and on a reply in an agent's thread."
-    }
+  "failed": 0,
+  "failures": [],
+  "breakAttempts": [
+    "Checked the merged wait predicate against every session route main's outbox publishes for a comment.created (outbox/publisher.go publishDestinations:660-687): the issue route (route.route), the session claimant (publishClaimantRoute; readCommentRoutes' claimed_by session), the primary document's session authors on an issue with no route and no session claimant (publishPrimaryDocumentAuthors; readCommentRoutes' primary doc created_by or version authors), the reply thread's sessions (publishAuthorRoutes reply_to; input.ReplyTo), a new comment's document authors (commentedDocument; input.Anchor / owner.ArtifactID), the ask's followers (publishFollowerRoutes; ask_followers), and the previous claimant (publishPreviousClaimant: issue.claimed / issue.released only, not a comment). Every route is covered.",
+    "Residual, not a failure: readCommentRoutes reads the claimant and followers before the transaction opens and the outbox reads them at publish time, so a claim or ask follow made between the comment's pre-commit read and its publish, while the listener is mid take-over, can still give that session two copies; the window is the comment request itself."
   ],
-  "ci": "Read on GitHub at 17:49Z at code head f43f33d1: build, changes, typecheck, lint, test, pr-title, the daemon Postgres 16 suite queued. Not waited for.",
+  "ci": "Read on GitHub at 19:02Z at code head c63149d0: changes, build, lint, test, typecheck, pr-title and the daemon Postgres 16 suite queued. Not waited for. GitHub: MERGEABLE, review APPROVED.",
   "observations": [
-    "The review's two fast-follows (AGENTS.md naming the #2225 crash duplicate path; infra/go.work.sum restored to main's) are the reviewer's, recorded in review.json round 4.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY."
+  ],
+  "proof": [
+    {
+      "criterion": "Items 1, 2 and 8: a cancelled or killed sender's attempt reaches its recipient; a send during a listener take-over reaches its session",
+      "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch",
+      "observed": "ok 917.210s, 120 PASS, 0 FAIL, 0 SKIP; TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 29.18s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 20.85s, TestASendDuringAListenerTakeOverReachesItsSession 65.94s",
+      "headSha": "1b8e04a89167747a517c1f36a49acf9c11c84f08",
+      "negativeControl": "sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window (28.10 s)"
+    },
+    {
+      "criterion": "Merge with #2366: a mention during a take-over reaches a session the outbox also reaches as claimant, ask follower or primary-document author once",
+      "surface": "POST /api/v1/issues/{key}/comments through the real handler on Postgres 17, with the outbox's fan-out of comment.created counted",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheClaimantOnce|TestAnAskReplyDuringAListenerTakeOverReachesTheFollowerOnce|TestACommentDuringAListenerTakeOverReachesThePrimaryDocumentAuthorOnce' ./internal/dispatch/api/",
+      "observed": "3 PASS: s1 hears each comment once",
+      "headSha": "1b8e04a89167747a517c1f36a49acf9c11c84f08",
+      "negativeControl": "sessionRoutes dropped from the pre-commit wait (throwaway mutation) -> all three FAIL 'session s1 received the comment 2 times, want once'"
+    }
   ]
 }
