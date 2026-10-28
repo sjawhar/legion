@@ -64,6 +64,7 @@ import {
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
+import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import type { AskBlockHost } from "./typed-block-drawing";
@@ -440,7 +441,7 @@ export function ProofDocument({
         setActiveMarks: (markIds) => handle.setActiveMarks(markIds),
       });
       const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
-      const fragment = connection.doc.getXmlFragment("prosemirror");
+      const fragment = connection.doc.getXmlFragment(FRAGMENT_NAME);
       let searchFrame = 0;
       const refreshSearchHighlights = () => {
         cancelAnimationFrame(searchFrame);
@@ -812,6 +813,7 @@ export function ProofDocument({
               onAnswered={blockAnswered}
               owner={owner.kind === "document" ? owner : undefined}
               readOnly={blocksReadOnly}
+              rowResolution={isClosed}
             />
           );
         })}

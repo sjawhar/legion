@@ -85,11 +85,12 @@ type Consumers struct {
 	spec     ConsumerSpec
 	stream   jetstream.Stream
 	dispatch jetstream.Consumer
-	// server is the durable on Dispatch's own start (serverStartedSubject), a durable of its own
-	// rather than a second filter subject on the Dispatch consumer: the NATS server in use
-	// withholds some of one durable's messages when its FilterSubjects set mixes a wildcard
-	// subject with another (measured in packages/envoy/internal/dispatch/delivery/intake.go,
-	// githubIntakeSubject), silently, with the message counted pending and never delivered.
+	// server is the durable on Dispatch's announcement that every server process serves a build
+	// (server.started, serverStartedSubject), a durable of its own rather than a second filter
+	// subject on the Dispatch consumer: the NATS server in use withholds some of one durable's
+	// messages when its FilterSubjects set mixes a wildcard subject with another (measured in
+	// packages/envoy/internal/dispatch/delivery/intake.go, githubIntakeSubject), silently, with the
+	// message counted pending and never delivered.
 	server jetstream.Consumer
 	github jetstream.Consumer
 

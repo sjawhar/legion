@@ -1,4 +1,4 @@
--- 0135_block_pointer_links.up.sql
+-- 0136_block_pointer_links.up.sql
 --
 -- A typed block's `block[]` attribute is a link of the attribute's kind from the block to each
 -- block it names, and the attribute can limit the types it points at. The link is listed only

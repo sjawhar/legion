@@ -250,7 +250,11 @@ test("Change answer opens its card under the answer row, not a newer reply on th
     answers: [shipAnswer],
     ask,
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const { view } = renderPage();
@@ -291,8 +295,28 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
   const getAsk = spyOn(api, "getAsk").mockImplementation(
     async (): Promise<AskRead> =>
       changed
-        ? { answers: [shipAnswer, holdAnswer], ask: after, edits: [], followers: [], replies: [] }
-        : { answers: [shipAnswer], ask: before, edits: [], followers: [], replies: [] }
+        ? {
+            answers: [shipAnswer, holdAnswer],
+            ask: after,
+            claimant: null,
+            edits: [],
+            followers: [],
+            replies: [],
+            route: null,
+            route_status: null,
+            route_holder: null,
+          }
+        : {
+            answers: [shipAnswer],
+            ask: before,
+            claimant: null,
+            edits: [],
+            followers: [],
+            replies: [],
+            route: null,
+            route_status: null,
+            route_holder: null,
+          }
   );
   const sent: AnswerAskInput[] = [];
   const answerAsk = spyOn(api, "answerAsk").mockImplementation(async (_id, input) => {
