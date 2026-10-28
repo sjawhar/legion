@@ -1333,10 +1333,12 @@ bound, to a later pass once they have waited a lease - in a rolling update
 process killed with sends in flight leaves their attempts `pending` under a claim that the first
 pass after it lapses resumes, within a minute and 30 s of its taking. Such a resend repeats the
 attempt's idempotency key, so a send the killed process had already handed over is dropped as a
-repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says by whom, and where that fails). Each pass costs one
-read of the pending `comment_deliveries` rows per process every 30 s; `comment_deliveries` has
-no index on `state`, so that read scans the table, a cost taken in place of a migration that adds
-one. Order holds within one process only: an attempt resumed after a crash or a handoff can reach
+repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says by whom, and where that fails). Each pass reads the
+partial index `comment_deliveries_pending` (migration 0135, `created_at` where
+`state = 'pending'`): with nothing stranded it is one statement per process every 30 s that reads
+no row, and otherwise it reads its window's rows and each one's `comment.created` event. No event can drive the pass instead: a killed process sends no
+signal, and a stopping one refuses its sends after its lifetime ends, so no live process hears of
+the attempts either leaves. Order holds within one process only: an attempt resumed after a crash or a handoff can reach
 its recipient after comments accepted later.
 A targeted
 message is the same shape on `message_deliveries`, resolved before the claim rather than after it:

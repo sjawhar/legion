@@ -340,8 +340,10 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 // Each is sent as its comment's author, the actor its comment.created event names, read once per
 // comment; an attempt whose event cannot be read is logged and left for its author's retry.
 //
-// comment_deliveries has no index on state, so the read scans the table: one scan per process
-// every strandedPassInterval, a cost taken in place of a migration that adds the index.
+// The read of the attempts goes through comment_deliveries_pending (migration 0135: created_at
+// where state = 'pending'), so a pass with nothing stranded is that one statement and reads no
+// row; otherwise it reads the rows of its window and each comment's comment.created event. It runs on a timer because no event announces a stranded attempt: a killed
+// process sends no signal, and a stopping one refuses its sends after its Lifetime ends.
 func (s *server) strandedCommentMentions(ctx context.Context, limit int, held []mentionKey) ([]mentionSend, error) {
 	ctx = store.WithTransactionTracking(ctx)
 	heldComments := make([]string, len(held))
