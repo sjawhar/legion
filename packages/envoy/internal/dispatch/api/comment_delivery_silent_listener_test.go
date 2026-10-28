@@ -248,3 +248,108 @@ func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *test
 			copies, routeCopy, state.sent())
 	}
 }
+
+// A process killed after it claimed a mention attempt, before its send reached the listener,
+// leaves the attempt pending with a claim that lapses a lease later; the session holds no copy.
+// If the listener is silent from then on, the stranded pass's resend fails too, and the route copy
+// is the only way the session can still hear the comment: it must get exactly one copy, as it does
+// when the listener is silent and no process was killed.
+func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails(t *testing.T) {
+	listener, state := newMentionListener(t)
+	stopping, stop := context.WithCancel(t.Context())
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{
+		envoyURL: listener.URL, envoyTimeout: time.Second, lifetime: stopping,
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "A claimed send that never landed", "before")
+	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"route": "session:s1",
+	}, "alice"); patched.Code != http.StatusOK {
+		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	stop()
+	claimed := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Claimed when the process was killed.", "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	if _, err := database.Pool.Exec(context.Background(), `
+		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' - interval '1 second'
+		where comment_id = $1
+	`, claimed.ID); err != nil {
+		t.Fatalf("lapse the killed process's claim: %v", err)
+	}
+	ageAttempts(t, database, claimed.ID)
+	// From now on the listener answers nothing.
+	_ = state.holdLookups("/v1/registry/s1")
+
+	// The outbox runs from here on; it gets the comment before the next process's first pass.
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		outbox.Run(ctx, outbox.Deps{Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: deps.Docs})
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var published bool
+		if err := database.Pool.QueryRow(context.Background(), `
+			select published_at is not null from events where type = 'comment.created' and payload->>'id' = $1
+		`, claimed.ID).Scan(&published); err != nil {
+			t.Fatalf("read comment.created: %v", err)
+		}
+		if published {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	passes := make(chan struct{}, 1)
+	lifetime, end := context.WithCancel(t.Context())
+	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
+	next.start()
+	awaitPasses(t, passes, 3)
+	waitForCommentDeliveries(t, database, claimed.ID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
+		for _, attempt := range attempts {
+			if attempt.State == "pending" {
+				return false
+			}
+		}
+		return true
+	})
+	end()
+	next.wait()
+
+	copies := 0
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		var unpublished int
+		if err := database.Pool.QueryRow(context.Background(),
+			`select count(*) from events where issue_key = $1 and published_at is null`, issue.Key).Scan(&unpublished); err != nil {
+			t.Fatalf("count unpublished events: %v", err)
+		}
+		if unpublished == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the outbox left %d events of %s unpublished", unpublished, issue.Key)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events
+		where issue_key = $1 and (payload->>'id' = $2 or payload->>'comment_id' = $2) and $3 = any(published_destinations)
+	`, issue.Key, claimed.ID, contracts.AgentSubject("s1")).Scan(&copies); err != nil {
+		t.Fatalf("count s1's copies: %v", err)
+	}
+	for _, send := range state.sent() {
+		if send.session == "s1" {
+			copies++
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("s1 received %d copies of the comment (mention sends: %#v), want exactly 1: its resend failed, so only the route copy can reach it",
+			copies, state.sent())
+	}
+}
