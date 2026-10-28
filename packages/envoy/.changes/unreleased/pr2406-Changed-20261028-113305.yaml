@@ -6,8 +6,11 @@ body: |-
     write its `comment.delivery` event then. Each listener lookup the comment makes is bounded at
     250 ms, so a listener that does not answer delays the comment by one 250 ms timeout per 8
     mentions. Every process resends attempts left pending a minute or more by a process that stopped
-    or was killed, at start and every 30 s. A client that read a mention's delivery state from the
-    create response reads it from the comment, or from its `comment.delivery` event, afterwards.
+    or was killed, at start and every 30 s. A session the comment's route or an author route reaches
+    and that a mention names hears the comment once, from the mention; when that mention's send
+    fails, the route or author copy skipped for it is published to it then. A client that read a
+    mention's delivery state from the create response reads it from the comment, or from its
+    `comment.delivery` event, afterwards.
 time: 2026-10-28T11:33:05.902497869Z
 custom:
     Issue: pr2406
