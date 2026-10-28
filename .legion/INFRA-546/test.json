@@ -2,44 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-546",
-  "completed": "2026-10-27T18:23:12Z",
-  "round": 5,
-  "headSha": "eb0cb4eb9b214d7940d236a5ba62c618798c747b",
-  "codeHeadSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
+  "completed": "2026-10-28T09:58:25Z",
+  "round": 6,
+  "headSha": "11a2dcb5055108bcaa89afe7d913af76dd28a7cb",
+  "codeHeadSha": "11a2dcb5055108bcaa89afe7d913af76dd28a7cb",
+  "fingerprint": {
+    "oldHead": "7f536f31512aac649d3b262e8deda3046648c9a7",
+    "oldBase": "d48d71fd3078 (#2228's last tip; legion/INFRA-439 is deleted)",
+    "newHead": "11a2dcb5055108bcaa89afe7d913af76dd28a7cb",
+    "newBase": "fork_point(main@origin | head) = b295a3fbcb42",
+    "withSkillFileset": "ef4039896fe996b6 -> 985dfa6ddf12ac73: changed (only packages/envoy/infra/go.work.sum differs: 25 checksum lines at the old head, none at the new)",
+    "withoutGoWorkSum": "985dfa6ddf12ac73 at both heads",
+    "decision": "full test round: the fingerprint changed and the merged tree carries main's newer code"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at eb0cb4eb: P1-P5 and every standalone refusal reproduced. Checked its Go-test proof of the republish (TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom) independently on the real surface: real listener and Dispatch on a nats-server v2.10.29 cluster, no step-down."
+    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 11a2dcb5: P1-P5 and every standalone refusal reproduced."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "A GitHub delivery a full clustered nats-server 2.10 stream refused is stored once the stream has room, with no step-down; while still full the redelivery is an error (round 3 finding 1)",
-      "surface": "Real envoy-listener (ENVOY_NATS_REPLICAS=3, ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on three nats-server v2.10.29 processes and on three v2.15.1 processes; signed GitHub push deliveries with curl",
-      "command": "bash /legion/scratch/tmp/t546/tX.sh /legion/scratch/tmp/t546/bin <nats-server v2.10.29 | v2.15.1> (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6450209439)",
-      "observed": "v2.10.29: d1 to the full stream -> 503; redelivery while full -> 503 'acknowledged a duplicate of a message it does not hold, and its publish without its id failed: ... is full'; operator raised max_bytes to 200000, redelivery -> 200 and stored (15 -> 16) with no step-down; fresh d2 twice -> 200, stored once. v2.15.1: 503 while full, 200 and stored after the raise, d2 stored once.",
-      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
-      "negativeControl": "Round 4's head (e572c5be) on the same v2.10.29 steps answered 503 after the raise until 'nats stream cluster step-down' (https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)"
-    },
-    {
-      "criterion": "Dispatch's outbox (async window) stores an event a full clustered 2.10 stream refused once the stream has room, with no step-down, and once only",
-      "surface": "Real envoy-dispatch (Postgres 17, agent bearer) on three nats-server v2.10.29 processes with a full ENVOY_NOTIFICATIONS (limit 20000); project and issue created over POST /api/v1/projects and /api/v1/issues",
-      "command": "bash /legion/scratch/tmp/t546/tZ.sh /legion/scratch/tmp/t546/bin (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6450209439)",
-      "observed": "While full, the outbox logged 'publish event ... acknowledged a duplicate of a message it does not hold, and its publish without its id failed' for event_id 1 and 2 every 5 s; 12 s after the operator raised the limit, 15 -> 17 msgs with notifications.dispatch.project.ZT.project.created and notifications.dispatch.issue.ZT-1.issue.created stored once each; still 17 after 20 s more.",
-      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
-      "negativeControl": "Round 4's head needed a step-down before the outbox's events were stored; the 47228d56 build stored neither event (round 4 log, https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)"
-    },
-    {
-      "criterion": "Earlier rounds' behaviour holds at this head: mixed-settings race ends correct; listener and Dispatch starts keep copies, limit, DiscardNew and id; an operator's raise of the limit stands; a full stream refuses and keeps what it holds; settings refused at load after the forward merge",
-      "surface": "Real envoy-listener and envoy-dispatch on three nats-server v2.15.1 processes and one standalone v2.15.1 server",
-      "command": "bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40; bash /legion/scratch/tmp/p546b/proof.sh <workspace>; bash /legion/scratch/tmp/t546/tH.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6450209439)",
-      "observed": "race.sh: 8/8 PASS (replicas 3, max_bytes 2000000, discard new, an id, buckets 3 3 3), 8 keeper restores. proof.sh P1-P5 reproduced (50 GiB raise stood 40 s). tH: Dispatch refuses ENVOY_NATS_REPLICAS 0/6/x/3.0 and ENVOY_STREAM_MAX_BYTES 0/-5/1GB/2^66; the listener accepts ' 3 ', +3, 03 and refuses 1e1, 1e9, 2^66.",
-      "headSha": "eb0cb4eb9b214d7940d236a5ba62c618798c747b",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 -> exit 1 'insufficient storage resources available'"
+      "criterion": "A full ENVOY_NOTIFICATIONS refuses new messages with an error the sender can retry, and its send and publish routes answer as the census row and the docs say (census row 'ENVOY_NOTIFICATIONS discard policy'; packages/envoy/AGENTS.md:1342; CHANGELOG.md:1012,1038; deploy/README.md:172) - on the tree merged with main",
+      "evidence": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000) on a standalone nats-server v2.15.1, filled through /v1/messages/publish: publish and send both answer 503 {\"error\":\"envoy: the message bus did not answer: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded\"}, with request records outcome=bus_unavailable (bash /legion/scratch/tmp/t546/tS.sh; https://github.com/sjawhar/legion/pull/2362#issuecomment-6465967683). main's writeBusUnavailable (cmd/listener/api.go:234-264) answers every non-refused, non-denied bus error with busUnansweredPrefix and records it as bus_unavailable. Its own comment carves out ErrPublishDenied because 'the bus answered this publish' and the prefix would send an operator looking for an outage; bus.ErrStreamFull, which this PR adds, is the same case. This PR's census row, AGENTS.md:1342, CHANGELOG.md:1012/:1038 and deploy/README.md:172 say 500. Red test 3ceb0bead0af: `cd packages/envoy && go test ./cmd/listener/ -run TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer -count=1` fails on both routes ('the refusal reads \"envoy: the message bus did not answer: stream ENVOY_NOTIFICATIONS is full: ...\": it says the bus did not answer, but the bus answered that the stream is full'). The test requires 503, a Retry-After, a body naming the full stream without that prefix, and an outcome other than bus_unavailable; the wording is the implementer's."
     }
   ],
   "observations": [
-    "The republish's measured cost on nats-server v2.10.29 (the trade-off the PR body's consumer list names): after a delivery was refused once, each later redelivery of that delivery stored another copy while the stream leader stayed the same (d1: 4 copies, seq 16-19, each with a new event_id and the same source_event_id d1 / dedupe_key github.d1); after a step-down further redeliveries were deduplicated again. With room, 30 deliveries each sent 4 times at once stored 35 msgs (5 doubled) on v2.10.29, and 30 (one each) on v2.15.1, where 14-17 of the 120 requests answered 503 'nats: duplicate message id is in process'. The sessions drop such a repeat by dedupe_key; the Legion daemon (event_id only) does not. The hub runs v2.15.1.",
-    "CI at 7f536f31, read 2026-10-27T18:22Z: lint, typecheck, test, build and changes queued. Read as queued, not waited for; the envoy-go-race fix (round 3 finding 2) is CI's to show at this head."
+    "Held on the merged tree: v2.10.29 cluster - a GitHub redelivery after an operator raise is stored with no step-down (503 -> 200, 15 -> 16), Dispatch's outbox stores project.created and issue.created once each with no step-down; v2.15.1 cluster - the same; the rendered grant raises the stream and three buckets to 3 (grant without STREAM.UPDATE.KV_* refused naming KV_envoy_interests); settings refused at load in both programs; race.sh 4 40: 8/8 PASS with 8 keeper restores.",
+    "One race.sh run lost a round because its R3 listener could not bind 127.0.0.1:16301 (held by another process at that moment); the harness moved to 36301-36303 and the recorded run is clean.",
+    "CI at d5e72a6a, read 2026-10-28T09:50Z: build success, test in progress, lint, typecheck, changes and pr-title queued. Not waited for."
   ]
 }
