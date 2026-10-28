@@ -109,7 +109,10 @@ func commentBlockNodes(ctx context.Context, q Queryer, ids []string, includeRemo
 // its message, which has no versions. Its Text is re-read from the message body: a message never
 // changes, so the body split as the index split it (itemblocks.Split) holds the block at its
 // position, which its identity hash confirms; were the parser to read the body otherwise since,
-// the block is the first of equal hash, else its stored excerpt stands in.
+// the block is the first of equal hash, else its stored excerpt stands in. A direct message has
+// no address, so its blocks resolve to no node: no reference names one, and an edge at one is
+// omitted as at any node that does not exist; GET /api/v1/messages/{id}/blocks reads them under
+// the conversation's read rule.
 func loadMessageBlockNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
 		select b.node_id, b.block_id, b.excerpt, b.position, b.text_sha256,
@@ -117,7 +120,7 @@ func loadMessageBlockNodes(ctx context.Context, q Queryer, kind string, _ bool, 
 		from message_blocks b
 		join messages m on m.id = b.message_id
 		left join issues i on i.key = m.issue_key
-		where b.node_id = any($1) and b.position is not null`, ids)
+		where b.node_id = any($1) and b.position is not null and m.issue_key is not null`, ids)
 	if err != nil {
 		return fmt.Errorf("load message block nodes: %w", err)
 	}
