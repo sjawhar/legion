@@ -2,35 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T16:15:00Z",
-  "round": 10,
-  "headReviewed": "the handoff commit this file is pushed in (code head 4e67dd97, on the merge of main 690c0136)",
+  "completed": "2026-10-28T16:36:45Z",
+  "round": 11,
+  "headReviewed": "the handoff commit this file is pushed in (code head 0c77df5c, merge of main 8b4a862b)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 3,
   "minor": 0,
-  "roundNineFindings": "fixed: a CRLF file and an invalid UTF-8 file each refuse with exit 2 and the bytes kept; the refusal tests bite (mutations in a scratch copy: the UTF-8 refusal's continue removed fails 1, the whitespace refusal's continue removed fails 4, CRLF allowed again fails 1, a lenient decoder fails 1)",
+  "roundTenFindings": "fixed: a BOM then '<source src=x> …' and a list is left unchanged; BOM files with a paragraph, an ATX heading or front matter are re-laid out with the BOM kept, stable on a second run; main 8b4a862b merged and restructure.ts --strict on its files is byte-identical to the head guides",
   "verified": [
-    "checker exit 0 on both guides; bun test of the two test files: 87 pass, 0 fail",
-    "restructure.ts --strict on main 690c0136's files byte-identical to the head guides; on main 8b4a862b's files exit 0",
-    "GitHub reports the pull request CONFLICTING with main 8b4a862b: git merge-tree conflicts in packages/envoy/AGENTS.md",
-    "required checks at CI head 4e67dd97 queued at 16:05Z; every completed 'Tests' run of this branch's pull_request runs (18) is cancelled, none succeeded: each push cancels the run before a runner takes it"
+    "checker exit 0 on both guides; bun test of the two test files: 88 pass, 0 fail",
+    "GitHub reports the pull request CONFLICTING with main e82b013b (#2324, merged 16:28Z), which changed AGENTS.md (+6/-6) and README.md (+41/-1); git merge-tree conflicts in both; restructure.ts --strict on e82b013b's files exits 0",
+    "required checks at CI head 0c77df5c queued at 16:30Z"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/AGENTS.md",
-      "description": "The head conflicts with main 8b4a862b. Merge main and regenerate the guides with restructure.ts --strict on main's files (exit 0 there today)."
+      "file": "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md",
+      "description": "The head conflicts with main e82b013b in both guides. Merge main and regenerate the guides with restructure.ts --strict on main's files."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:1115",
-      "description": "With ignoreBOM true a leading U+FEFF stays in the text, so every line-start rule misreads line 1 while micromark and GitHub drop the BOM. '\\xef\\xbb\\xbf<source src=x> Some words.\\n- one. two\\n- three' is written with exit 0, and GitHub's POST /markdown shows the two '-' lines as raw text in the <source> HTML block before and as a <ul> after. Fix: take a leading BOM off before any check or re-layout and put it back only in writeFile, in check mode too; add this input as a test."
+      "file": "scripts/semantic-line-breaks.ts:1150",
+      "description": "The decoder drops one BOM; micromark drops another, GitHub does not. '\\xef\\xbb\\xbf\\xef\\xbb\\xbf| a | b |\\n|---|---|\\n| 1 | 2 |\\n2. item' is written with exit 0 (a blank line before '2. item'); GitHub renders one paragraph before and a paragraph plus <ol start=\"2\"> after. Round 10 refused it. Fix by construction: add U+FEFF to ODD_WHITESPACE, so --write refuses any file whose decoded text still holds one; add the input as a test."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/semantic-line-breaks.ts:1123",
+      "description": "No test needs bytes 2 and 3 of hasByteOrderMark: weakening it to bytes[0] === 0xef passes all tests, and would add a BOM to any file starting with a character in U+F000-U+FFFF. Add a test such as '！Some words. More words.' whose output must not start with U+FEFF."
     }
   ],
-  "fastFollow": "The usage comment at semantic-line-breaks.ts:1183-1186 omits the UTF-8 and whitespace refusals; plus the cleanups named in rounds 3, 5 and 7.",
+  "fastFollow": "Two doc comments in a row above LENIENT_UTF8 (semantic-line-breaks.ts:1113-1117); the usage comment's refusal list; the cleanups named in rounds 3, 5 and 7.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at bef3650e (1 High: the BOM shifts line 1 past every anchored rule). Other BOM first lines refuse or render the same",
-    "codeQuality": "Verdict: APPROVE at bef3650e"
+    "deepReview": "Verdict: CHANGES at e53bf974 (1 High: two BOMs). Line numbers, a file of only a BOM, a BOM before invalid UTF-8 and the restructure.ts path checked and fine",
+    "codeQuality": "Verdict: APPROVE at e53bf974 (the byte check is untested; doubled doc comment)"
   }
 }
