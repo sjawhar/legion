@@ -749,6 +749,32 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 	return env
 }
 
+// settingsOverlays is Oh My Pi's list of settings overlays, which the operator's pod env may set
+// and a role's own overlays extend (roleOperatorEnv).
+const settingsOverlays = "PI_CONFIG_FILES"
+
+// roleOperatorEnv is operatorEnv as role's agent is told it: with role's own overlays
+// (Options.RoleConfigFiles) after the operator's in PI_CONFIG_FILES, so each of them outranks the
+// operator's, or as PI_CONFIG_FILES in name order when the operator's pod env names none. A role
+// with none is told operatorEnv unchanged.
+func (r *Runtime) roleOperatorEnv(role claim.Role) []corev1.EnvVar {
+	env := r.operatorEnv()
+	own := strings.Join(r.roleConfigFiles[role], ":")
+	if own == "" {
+		return env
+	}
+	at, found := slices.BinarySearchFunc(env, settingsOverlays, func(v corev1.EnvVar, name string) int { return strings.Compare(v.Name, name) })
+	switch {
+	case !found:
+		return slices.Insert(env, at, corev1.EnvVar{Name: settingsOverlays, Value: own})
+	case env[at].Value == "":
+		env[at].Value = own
+	default:
+		env[at].Value += ":" + own
+	}
+	return env
+}
+
 // The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
 // workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role is
 // told none of the three home-directory ones: its cache and data homes are the issue's
@@ -980,7 +1006,8 @@ func (r *Runtime) LaunchBound() time.Duration {
 // its agents (podKind.agentEnv: a tree agent its tree, issue, workspace and the gh files its
 // credential is read from, the controller LEGION_CONTROLLER=1), then the rest of the variables
 // every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
-// (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
+// (runtime.kubernetes.pod, with the role's own overlays after the operator's in PI_CONFIG_FILES,
+// roleOperatorEnv), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
 // mount, then OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the URL file of the
 // session database every session is a row in (Options.SessionStore, sessionDSNFile), which a pod
@@ -1057,7 +1084,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})
-	env = append(env, r.operatorEnv()...)
+	env = append(env, r.roleOperatorEnv(spec.Role)...)
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}

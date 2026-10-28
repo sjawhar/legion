@@ -560,6 +560,7 @@
     },
     "worker_backends": {
       "tester": "omp"
-    }
+    },
+    "role_config_files": {}
   }
 }

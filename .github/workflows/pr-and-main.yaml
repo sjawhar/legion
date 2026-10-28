@@ -99,9 +99,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-pr-text.sh
 
-      # No Go cache here: gofmt needs none, and this job, which ends first, would save a nearly
-      # empty one under the key the typecheck and test jobs share (the daemon's go.sum), where the
-      # first save is the one every later run restores.
+      # No Go cache here: gofmt needs none.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
@@ -130,15 +128,43 @@ jobs:
       - name: Check the whole tree with Biome
         run: bunx biome check .
 
-      # The notices step below builds go-licenses and loads every release binary's modules. It
-      # keeps them under a key of its own, apart from the one setup-go above leaves unsaved.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # A pull request that changes none of what the notices step reads (the three Go modules,
+      # go.work, the notices script, the target lists, and this workflow, which holds the step)
+      # neither restores the notices cache, about 2.2 GB, nor runs the step. A push to main and a
+      # merge-queue run always run it: the filter runs only on pull_request, so its output is empty
+      # there.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: notices_inputs
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            go_notices:
+              - 'packages/daemon/**'
+              - 'packages/envoy/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'scripts/go-third-party-notices.sh'
+              - '.github/go-release-targets.json'
+              - '.github/agent-secrets-client-targets.json'
+              - '.github/envoy-infra-targets.json'
+              - '.github/workflows/pr-and-main.yaml'
+
+      # The notices step below builds go-licenses and loads every release binary's modules, kept
+      # under a key of their own. Every run that runs the step restores them by the exact key, and
+      # only a run off main falls back to main's newest entry by prefix: a run on main restores by
+      # the exact key only, so the entry it saves holds no modules an older go.sum needed. Only a
+      # run on main saves them, after the step, because an entry a pull request writes is readable
+      # by no other pull request.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: notices_cache
+        if: github.event_name != 'pull_request' || steps.notices_inputs.outputs.go_notices == 'true'
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
             ~/.cache/legion
           key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'packages/envoy/infra/go.sum', 'scripts/go-third-party-notices.sh') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-notices-{0}-', runner.os) || '' }}
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion_build job and
@@ -151,6 +177,7 @@ jobs:
       # compiled here, with their release builds' CGO_ENABLED and -buildvcs: a compile error on one
       # platform only fails the pull request rather than the release after the merge.
       - name: Check every Go release archive's third-party notices can be written and the cross-built commands compile
+        if: github.event_name != 'pull_request' || steps.notices_inputs.outputs.go_notices == 'true'
         run: |
           notices="$RUNNER_TEMP/notices"
           mkdir -p "$notices"
@@ -185,6 +212,15 @@ jobs:
           done
           wc -l "$notices"/*
 
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.notices_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/legion
+          key: ${{ steps.notices_cache.outputs.cache-primary-key }}
+
 
   typecheck:
     if: ${{ !github.event.pull_request.draft }}
@@ -196,15 +232,39 @@ jobs:
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: packages/daemon/go.sum
+          cache: false
+
+      # The Go module and build caches are restored on every run and saved at the end of the job
+      # only by a run on main: an entry a pull request writes is readable by no other pull request,
+      # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
+      # it is off. Only a run off main falls back, when go.sum changed, to main's newest entry for
+      # this Go by prefix; a run on main restores by the exact key only, so the entry it saves holds
+      # no modules an older go.sum needed.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
 
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
       # sandbox/live*_test.go), which run on the devbox against a real cluster.
       - name: Vet the Go daemon, its e2e-tagged live proofs included
         run: go vet -tags e2e ./...
         working-directory: packages/daemon
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
 
   test:
@@ -308,9 +368,20 @@ jobs:
         run: bunx tsc --noEmit -p scripts/github-apps
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: packages/daemon/go.sum
+          cache: false
+
+      # Restored on every run, saved at the end of the job only on main (the typecheck job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
 
       # After setup-go: held-port.test.ts builds the real envoy-listener and hands it a held socket.
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict, the held-port helper)
@@ -373,3 +444,11 @@ jobs:
 
       - name: Stage 1 live proof
         run: bash scripts/e2e/stage1-skeleton.sh
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
