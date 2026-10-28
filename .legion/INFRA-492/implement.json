@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-492",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
+  "completed": "2026-10-28T13:54:57Z",
+  "round": "conflict return (READY_HEAD_CONFLICTS at 80f3e6a4, then again at a59e4b03): main 0a921021 (#2225) and c2746962 (#2233 among them) merged forward",
+  "proof": [
+    {
+      "criterion": "Spec acceptance 1 and 2 still hold on the merged head: budget 0 reads over 20 unrelated writes, sidebar first reads sent once, freshness within 2 s",
+      "surface": "Dispatch in Chromium and iPhone (Playwright) against the branch's Go server, fake Envoy, loopback Postgres 17 + pgvector, production bundle",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=<loopback> bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refetch-budget.e2e.ts e2e/refresh-freshness.e2e.ts e2e/recipients-claim.e2e.ts e2e/live.e2e.ts e2e/inbox.e2e.ts",
+      "observed": "At 85597891: 80 passed, 2 skipped, 1 failed (#2225's route-row test, red on main too); REFETCH-BUDGET 'GETs under /api/ in the window: 0; reads of an issue no write touched: 0'; REFETCH-SIDEBAR 'inbox 1, pinned 1, projects 1'",
+      "headSha": "85597891a4eb391e0a617a976f072921ee9b686f",
+      "negativeControl": "Base 16e4bb0f758e with the unchanged refetch-budget.e2e.ts fails: Received 1120 against <= 5 (recorded in the PR's E2E line)"
+    },
+    {
+      "criterion": "A route change in a status write reaches the mounted ask card without a reload, and the close that follows withdraws it (#2225 with #2233)",
+      "surface": "Dispatch in Chromium (Playwright), same stack",
+      "command": "DATABASE_URL=<loopback> bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/recipients-claim.e2e.ts -g 'route change in a status write' --repeat-each=3; then --project=chromium --project=iphone e2e/recipients-claim.e2e.ts e2e/close-withdraws-asks.e2e.ts",
+      "observed": "3 passed of 3; then 10 passed. The old test fails at main 08572e01 on a git archive (2 of 2, 'Routed next (e2e)' not found, the card reads 'Withdrawn')",
+      "headSha": "4682d7bf176c89de7ff2efd25d832414e12f9bb9",
+      "negativeControl": "With changes.has('route') taken out of askThreadsIssue, the test fails: Expected substring 'Routed next (e2e)' at line 350"
+    },
+    {
+      "criterion": "A close's withdrawal and a reopen's restore name their thread's logins, and the server suite holds",
+      "surface": "Go api suite on a real Postgres 17 (DISPATCH_TEST_DATABASE_URL)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -count=1 -timeout 55m",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 1204.944s; TestIssueEventsSayWhatTheWriteChanged asserts ask.resolved and ask.opened name alice and issue.closed names []",
+      "headSha": "85597891a4eb391e0a617a976f072921ee9b686f",
+      "negativeControl": "Before the payload change the same test failed: issue.closed ThreadLogins [] where the old expectation was [alice]. The withdrawal's ask.resolved had no thread_logins (NewAskEventPayload)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/issue_ask_lifecycle.go (withdraw/restore events carry thread_logins)",
+    "packages/envoy/internal/dispatch/api/thread_logins.go (comment)",
+    "packages/envoy/internal/dispatch/api/events_test.go (close/reopen expectations)",
+    "packages/dispatch/web/src/api/event-refresh.ts, web/src/api/sse.ts, web/src/__tests__/sse.test.ts (#2225's rule and Inbox marker ported)",
+    "packages/dispatch/AGENTS.md (#2225's refresh clause)",
+    "packages/dispatch/e2e/recipients-claim.e2e.ts (two #2225 tests adapted)",
+    "merge resolutions: api/routes_table.go, refs/blocks.go, cmd/dispatch/README.md, packages/envoy/AGENTS.md"
+  ],
+  "trickyParts": [
+    "#2225's route-row test is red on main itself after #2233; fixed here because this PR owns the ask-thread refresh rules and edits that file."
+  ],
+  "deviations": [
+    "Two of main's tests changed: #2225's in-flight claim test holds the response, not the request, because this branch never cancels. Its route-row test moves the route in a status write, because a close now withdraws the card."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Main carries a red browser test (recipients-claim route-row) until this PR merges; reported to the controller."
+  ]
+}
