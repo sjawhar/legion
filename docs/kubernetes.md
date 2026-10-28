@@ -1569,8 +1569,8 @@ this order:
    opens the database or the cluster, and refuses this release's shape key by key, so a daemon
    re-pinned on the file as this release left it never starts:
    - the top-level keys this release added, each `unknown key <key>` (`classify` in
-     `internal/config/config.go` at `legion-v10.0.0`): `capabilities`, `production_check_hours`
-     and `worker_backends`;
+     `internal/config/config.go` at `legion-v10.0.0`): `capabilities`, `production_check_hours`,
+     `worker_backends` and `role_config_files`;
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
      be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag)
      and every key this release added there, `deploys`, `merge` and `slack_channels`, each
@@ -3598,14 +3598,16 @@ compared: a change there reaches the pods created after it.
 
 The supervisor relaunches each reported claim at once, through the launch path a death uses: a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
-replaces follows from what moved. A pod whose launcher dials a stale stream, or which lacks the
-broker enrollment its roles are started against now, cannot run them as a pod created now would,
+replaces follows from what moved. A pod whose launcher dials a stale stream, which lacks the
+broker enrollment its roles are started against now, or which lacks the operator mount holding a
+file `role_config_files` names for any of its roles, cannot run them as a pod created now would,
 and every role of it is reported at once, from the boot that re-adopts them: the first of them
 relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
 that turn, resume into the new pod, whose launcher dials the current stream for every role and mounts the
 current enrollment. None of them is charged, and none is found gone when the pod is replaced under
 it. The controller's pod, whose one launcher dials a stale stream, or which lacks the broker
-enrollment under `runtime.kubernetes.agent_secrets`, is replaced the same way at its relaunch. A
+enrollment under `runtime.kubernetes.agent_secrets`, or the mount of one of its own
+`role_config_files`, is replaced the same way at its relaunch. A
 role whose environment alone moved, the broker's URL, `LEGION_SLACK_CHANNELS` for the controller
 and the other addresses its agent is told among them, starts its next generation in the same pod,
 handed the current values, and the pod and its other roles are left as they are. The stale
@@ -4693,8 +4695,8 @@ clone or workspace.
 Every end of an issue pod is therefore the end of that pod's disk, and the ends are these:
 
 - **a launch replaces the pod**, because it cannot run the launching role as a pod created now
-  would: another image, a moved worker stream, a secrets-broker enrollment or session-database key
-  the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape
+  would: another image, a moved worker stream, a secrets-broker enrollment, session-database key
+  or `role_config_files` mount the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape
   before this release ([Pinning a release that drops what a running pod still
   uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses),
   [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk));
@@ -5445,6 +5447,79 @@ issue's pod (every role of it alike) and the image probe's.
   process of the pod's own user that removes the CLI's AskGate record or a marker, acts as another
   session id or state directory, or otherwise goes around the CLI (pi-envoy's README, "What
   AskGate is not").
+- **`role_config_files`** gives one role Oh My Pi overlays no other role gets: a top-level
+  `legion.yaml` key mapping a role (an issue role, or `controller` under `controller: daemon`) to
+  absolute paths of overlays in the operator's mounts. A deployment that wants a model fallback
+  chain only for the roles whose output a machine checks keeps `retry.modelFallback` off in the
+  operator's `overlay.yml` and puts the chain in an overlay of its own, in a ConfigMap of its own
+  (`apply.sh` writes only `legion-operator-route`'s two keys):
+
+  ```yaml
+  # fallback.yml: kubectl -n legion create configmap legion-operator-roles --from-file=fallback.yml
+  retry:
+    modelFallback: true
+    fallbackChains:
+      default: [anthropic/claude-opus-5:xhigh]
+  ```
+
+  mounted into every pod and named for those roles:
+
+  ```yaml
+  runtime:
+    kubernetes:
+      pod:
+        volumes:
+          - {name: operator-roles, config_map: {name: legion-operator-roles}}
+        volume_mounts:
+          - {volume: operator-roles, mount_path: /etc/legion-operator-roles}
+  role_config_files:
+    implementer: [/etc/legion-operator-roles/fallback.yml]
+    tester: [/etc/legion-operator-roles/fallback.yml]
+    merger: [/etc/legion-operator-roles/fallback.yml]
+  ```
+
+  (beside the block's other volumes and mounts). Both runtimes name a role's own files right after
+  the operator's overlays, so each outranks them, and keep the turn-scoping overlay where they always
+  have: in a pod the shim names it first (so the operator's overlays, and now a role's own, outrank
+  it), in a pane the runtime names it last. Such a role's `PI_CONFIG_FILES` in a pod is therefore
+  the turn-scoping overlay, then the `pod.env` value, then its own files in order; the overlays
+  reach the role with its start command, so its pod is the one it would be without the key, and a
+  role the key leaves out is told exactly what it was told before. The loader refuses, at
+  `legion start --check-config` too, an
+  unknown role, an empty list, a relative path, a path named twice or one `pod.env`'s
+  `PI_CONFIG_FILES` already names, a role `worker_backends` puts on `claude`, and a file under no
+  `volume_mounts` mount (or, under a whole ConfigMap or Secret volume that lists `items`, a file no
+  item writes), since a pod sees only the image and the operator's mounts. Whether the ConfigMap
+  holds the key is the cluster's: the image probe is passed `--role-config-files <role>=<files>`
+  for each named role and, in its pod, which mounts what every pod mounts, reads each file of that
+  role's `PI_CONFIG_FILES` (an empty entry skipped, as Oh My Pi skips it), then runs
+  `omp config get retry.modelFallback --json` on each of the role's own files alone and on the whole
+  list. A file it cannot read, or Oh My Pi exiting non-zero on one, refuses the boot (`the probe pod
+  … refused role <role>'s Oh My Pi overlays: <file> cannot be read: …`, or `Oh My Pi refuses
+  <file>: error: …` with Oh My Pi's own error line), naming the role and the file, never that
+  role's start; a run that never reached an exit of its own (a timeout) is logged, not refused,
+  since every file was already read. An image whose `legion` predates the key stops at the unknown
+  flag and is refused as one to rebuild from this daemon's commit. The probe reads the ConfigMap as
+  it is at boot, and a pod reads it when it starts; a file mounted by `sub_path` is never refreshed
+  in a running pod, so a changed file reaches a role once its pod is replaced.
+  **Rolling it out:** a pod created before the operator added the overlay's volume and mount (or
+  moved or dropped a mount around it, or changed that volume's ConfigMap, Secret or `items`) cannot
+  run a role whose `PI_CONFIG_FILES` names the file, so the whole pod is replaced, as for a change
+  of the secrets broker's enrollment. At the restart, every role of an affected pod that is running
+  is reported `StaleAddress` at the boot's re-adoption, whether or not `role_config_files` names
+  it, its detail `role_config_files.<role> <file> (unset), now volume <name> from ConfigMap <name>
+  items [...]`; the supervisor relaunches each at once, uncharged, so each running turn is lost and
+  each role resumes its session in the new pod, and the issue pod is replaced with its disk, which
+  takes the unpushed work of every role in it ([The disk dies with its
+  pod](#the-disk-dies-with-its-pod)). A pod with no role running at the restart is replaced at the
+  first launch into it, which ends no turn, since none is running. So add the mount and the key
+  when no role of an affected issue is mid-turn and every role has pushed.
+  **Who can read the files:** only loading is per role. Every role of a pod mounts every operator
+  volume, so each role can read every role's overlay file; never put a secret in one (a credential
+  travels in `provider_keys` or a mounted Secret the operator means every role to hold).
+  The capability report's `model-fallback` row reads the operator's overlays alone: a deployment
+  that turns fallback on only for some roles, as here, reports the row open, and records that with
+  `capabilities.decided.model-fallback: "<reason>"`.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
