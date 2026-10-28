@@ -753,19 +753,27 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
+// recordedMarkRefs is every mark an ask or comment row anchored on artifactID records. Each
+// predicate compares the expression of the table's index, asks_anchor_artifact or
+// comments_anchor_artifact (migration 0032), so the read is an index scan, and keeps the text
+// comparison so it returns exactly the rows that comparison alone would. Only the ask-block insert
+// sets block_artifact_id, and it writes no anchor, so an anchored ask's coalesce is its anchor's
+// artifact_id. The uuid casts cannot fail: both indexes evaluate the same casts on every row, so
+// a row whose artifact_id does not cast could not have been written.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
 	for _, target := range []struct {
-		table string
+		table   string
+		indexed string
 	}{
-		{table: "asks"},
-		{table: "comments"},
+		{table: "asks", indexed: `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)`},
+		{table: "comments", indexed: `(anchor->>'artifact_id')::uuid`},
 	} {
 		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
 			select anchor, %s
 			from %s
-			where anchor is not null and anchor->>'artifact_id' = $1
-		`, commentMarkType(target.table), target.table), artifactID)
+			where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
+		`, commentMarkType(target.table), target.table, target.indexed), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
 		}
