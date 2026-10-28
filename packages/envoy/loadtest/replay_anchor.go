@@ -1,0 +1,447 @@
+package main
+
+// Two of the replay seed's decisions, pure like replay_seed_plan.go: where an anchor lands when its
+// logged quote cannot hold it (chooseAnchor, also what the replay source calls for the window's
+// anchors), and the size every synthetic history version must have so that each version changes
+// as many bytes as the production version it stands for (planHistory).
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// The branches chooseAnchor takes, by name, as replay-fetch counts them, the seed records them
+// (loadtest.replay_anchors) and replay-check-seed reports them.
+const (
+	ruleLoggedQuote  = "logged_quote"
+	ruleInBlock      = "in_logged_block"
+	ruleNearest      = "nearest_surviving_block"
+	ruleNoBlockMap   = "no_block_map"
+	ruleUnanchorable = "unanchorable"
+)
+
+// anchorChoice is where an anchor lands: the branch, the block chosen (its id; empty without a
+// block map), its span [Start, End) in the document's text at At, and the quotes to try in order.
+type anchorChoice struct {
+	Branch     string
+	BlockID    string
+	Start, End int
+	Candidates []string
+	// Occurrence, when set, is the zero-based occurrence of the single candidate (the logged
+	// quote, repeated in the text) that lies inside the span: the anchor input's occurrence.
+	// QuoteAt is that occurrence's byte offset in the text.
+	Occurrence *int
+	QuoteAt    int
+}
+
+// find is the top-level index of a block id and the text it stands for: the block's own, or a
+// table row's (the table's) or cell's.
+func (bm *replayBlockMap) find(id string) (int, string, bool) {
+	if bm == nil || id == "" {
+		return -1, "", false
+	}
+	for i, b := range bm.Blocks {
+		if b.ID == id {
+			return i, b.Text, true
+		}
+		for _, in := range b.Inner {
+			if in.ID == id {
+				if in.Text == "" {
+					return i, b.Text, true
+				}
+				return i, in.Text, true
+			}
+		}
+	}
+	return -1, "", false
+}
+
+// spanCandidates are the fallback sentences inside text[start:end) that occur once in the whole
+// text.
+func spanCandidates(text string, start, end int) []string {
+	var out []string
+	for _, c := range fallbackCandidates(text[start:end]) {
+		if strings.Count(text, c) == 1 {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// locate is the span of block text in the document's text when it occurs there exactly once.
+func locate(text, block string) (int, int, bool) {
+	if strings.TrimSpace(block) == "" || strings.Count(text, block) != 1 {
+		return 0, 0, false
+	}
+	i := strings.Index(text, block)
+	return i, i + len(block), true
+}
+
+// chooseAnchor decides where an anchored comment or ask lands in text, its document's markdown
+// at At, given the logged anchor (its block id, quote and orphaned flag) and the document's
+// current blocks bm. The rule, in order:
+//
+//  1. logged_quote: the logged block's current text occurs once in text, the logged quote is not
+//     orphaned, occurs once in text and lies inside that block's span: the logged quote.
+//  2. in_logged_block: the logged block's current text occurs once in text: a sentence inside
+//     that span that is unique in the whole text (fallbackCandidates), drawn by fallbackOrder.
+//  3. nearest_surviving_block: otherwise (the block's text is not in text, holds no usable
+//     sentence, or its id is not among the current blocks): the nearest block in current order
+//     (ties: the earlier) whose text occurs once in text and holds a usable unique sentence,
+//     measured from the logged block; when its id is absent, from the block whose text holds the
+//     logged quote, else from the block at the logged quote's relative position in text (the
+//     document's middle when the quote is not in text either).
+//
+// Without a block map the whole text is the span (no_block_map); with no usable sentence anywhere
+// the anchor is unanchorable. skipLogged drops branch 1, for a logged quote Dispatch refused.
+func chooseAnchor(text string, bm *replayBlockMap, blockID, quote string, orphaned, skipLogged bool, rngSeed uint64, docID, itemID string) anchorChoice {
+	pick := func(branch, id string, start, end int, cands []string) anchorChoice {
+		return anchorChoice{Branch: branch, BlockID: id, Start: start, End: end, Candidates: fallbackOrder(rngSeed, docID, itemID, cands)}
+	}
+	if bm == nil || len(bm.Blocks) == 0 {
+		if !skipLogged && !orphaned && quote != "" && strings.Count(text, quote) == 1 {
+			return anchorChoice{Branch: ruleNoBlockMap, Start: 0, End: len(text), Candidates: []string{quote}}
+		}
+		if c := spanCandidates(text, 0, len(text)); len(c) > 0 {
+			return pick(ruleNoBlockMap, "", 0, len(text), c)
+		}
+		return anchorChoice{Branch: ruleUnanchorable}
+	}
+	top, btext, found := bm.find(blockID)
+	start, end, located := 0, 0, false
+	if found {
+		start, end, located = locate(text, btext)
+	}
+	// Rule 1: a logged quote that is not orphaned and occurs once in the text is no substitute, so
+	// it is used whether or not its logged block survives. Its span is its block's when the quote
+	// lies inside it, else the quote itself.
+	if !skipLogged && !orphaned && quote != "" && strings.Count(text, quote) == 1 {
+		q := strings.Index(text, quote)
+		if located && q >= start && q+len(quote) <= end {
+			return anchorChoice{Branch: ruleLoggedQuote, BlockID: blockID, Start: start, End: end, Candidates: []string{quote}}
+		}
+		return anchorChoice{Branch: ruleLoggedQuote, Start: q, End: q + len(quote), Candidates: []string{quote}}
+	}
+	// A logged quote repeated in the text but once inside its located block: that occurrence,
+	// counted under in_logged_block.
+	if located && !skipLogged && !orphaned && quote != "" {
+		k, at, inside := 0, -1, 0
+		for i, off := 0, 0; ; i++ {
+			j := strings.Index(text[off:], quote)
+			if j < 0 {
+				break
+			}
+			if p := off + j; p >= start && p+len(quote) <= end {
+				k, at = i, p
+				inside++
+			}
+			off += j + 1
+		}
+		if inside == 1 {
+			return anchorChoice{Branch: ruleInBlock, BlockID: blockID, Start: start, End: end, Candidates: []string{quote}, Occurrence: &k, QuoteAt: at}
+		}
+	}
+	if located {
+		if c := spanCandidates(text, start, end); len(c) > 0 {
+			return pick(ruleInBlock, blockID, start, end, c)
+		}
+	}
+	ref := top
+	if !found {
+		ref = -1
+		if quote != "" {
+			for i, b := range bm.Blocks {
+				if strings.Contains(b.Text, quote) {
+					ref = i
+					break
+				}
+			}
+		}
+		if ref < 0 {
+			rel := 0.5
+			if i := strings.Index(text, quote); quote != "" && i >= 0 && len(text) > 0 {
+				rel = float64(i) / float64(len(text))
+			}
+			ref = min(len(bm.Blocks)-1, int(rel*float64(len(bm.Blocks))))
+		}
+	}
+	for d := 0; d < len(bm.Blocks); d++ {
+		for _, i := range []int{ref - d, ref + d} {
+			if i < 0 || i >= len(bm.Blocks) || (d == 0 && i != ref) || (found && i == top && located) {
+				continue
+			}
+			if s, e, ok := locate(text, bm.Blocks[i].Text); ok {
+				if c := spanCandidates(text, s, e); len(c) > 0 {
+					return pick(ruleNearest, bm.Blocks[i].ID, s, e, c)
+				}
+			}
+			if d == 0 {
+				break
+			}
+		}
+	}
+	return anchorChoice{Branch: ruleUnanchorable}
+}
+
+// substituteAnchor is chooseAnchor for the replay source's window anchors: given a document's
+// text, the logged block id and quote, the quote to anchor on and the branch that chose it.
+func substituteAnchor(text string, bm *replayBlockMap, blockID, quote string, rngSeed uint64, docID, itemID string) (string, string, error) {
+	c := chooseAnchor(text, bm, blockID, quote, false, false, rngSeed, docID, itemID)
+	if len(c.Candidates) == 0 {
+		return "", c.Branch, fmt.Errorf("anchor %s on document %s has no usable quote", itemID, docID)
+	}
+	return c.Candidates[0], c.Branch, nil
+}
+
+// --- history sizes -------------------------------------------------------------------------------
+
+// historyPlan is how a document's synthetic history reproduces production's version sizes. Every
+// version below Restore is the base (the text at At with the run [RunStart, RunEnd) removed and the
+// answers not yet given stripped) plus a padding paragraph of synthetic words at the end, sized so
+// the version has Sizes[n-1] bytes. Version Restore removes the padding and inserts the run back
+// (before the heading at RunEnd, or at the end), giving the text at At less the answers still to
+// come; the versions after it are those answers. AnswerAt maps a version to the answered typed ask
+// blocks (indexes into the issue's asks) whose answer it carries.
+type historyPlan struct {
+	Final            int
+	Sizes            []int
+	Restore          int
+	RunStart, RunEnd int
+	AnswerAt         map[int][]int
+	// Flipped counts versions whose size change is production's with the sign flipped, because
+	// the base cannot be made small enough; Missing the versions production lists no size for
+	// (taken as unchanged); Fixed the answer versions, whose change Dispatch decides.
+	Flipped, Missing int
+	// Unreachable counts versions no sign can reach: raised to the smallest size the base and a
+	// padding paragraph take, so their change differs from production's.
+	Unreachable int
+}
+
+// padMin is the shortest padding paragraph a version carries.
+const padMin = 8
+
+// padLen is the length of padded version n's padding paragraph: version n-1's (prevPad bytes)
+// changed by the planned size change, so version n changes size by exactly the plan's change
+// whatever size Dispatch stored version n-1 at: version 1's base canonicalised to other bytes than
+// sent, or an answer version whose change differs from production's. A padding paragraph is plain
+// words, which Dispatch stores as sent. The stored padding, not the seeder's memory, is prevPad,
+// so a resumed seed continues alike.
+func (p historyPlan) padLen(n, prevPad int) int { return prevPad + p.Sizes[n-1] - p.Sizes[n-2] }
+
+// padOverhead is what a padding paragraph adds to a document beyond its own bytes: the blank line
+// before it and its line feed; one byte when the base is empty (no blank line).
+func padOverhead(baseLen int) int {
+	if baseLen == 0 {
+		return 1
+	}
+	return 2
+}
+
+// atxHeading matches an ATX heading line.
+var atxHeading = regexp.MustCompile(`^#{1,6} `)
+
+// sectionStarts are the offsets in text where a removable run may start or end: 0 and each ATX
+// heading line that follows a blank line outside code fences and directive blocks.
+func sectionStarts(text string) []int {
+	starts := []int{0}
+	fence, directive, pos, prevBlank := false, 0, 0, true
+	for _, line := range strings.Split(text, "\n") {
+		s := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(s, "```") || strings.HasPrefix(s, "~~~"):
+			fence = !fence
+		case !fence && strings.HasPrefix(s, ":::"):
+			if s == ":::" {
+				directive = max(0, directive-1)
+			} else {
+				directive++
+			}
+		case !fence && directive == 0 && pos > 0 && prevBlank && atxHeading.MatchString(line):
+			starts = append(starts, pos)
+		}
+		prevBlank = s == ""
+		pos += len(line) + 1
+	}
+	return starts
+}
+
+// chooseRun picks the run of whole sections to remove: the shortest one of at least need bytes
+// holding no typed ask block, else (none is long enough) the longest one holding none. Both ends
+// are section starts (the end may be the text's end). It returns 0, 0 when need <= 0 or no run
+// qualifies.
+func chooseRun(text string, need int) (int, int) {
+	if need <= 0 {
+		return 0, 0
+	}
+	starts := append(sectionStarts(text), len(text))
+	bestS, bestE, longS, longE := 0, 0, 0, 0
+	for i := 0; i < len(starts)-1; i++ {
+		for j := i + 1; j < len(starts); j++ {
+			if strings.Contains(text[starts[i]:starts[j]], ":::ask") {
+				break
+			}
+			n := starts[j] - starts[i]
+			if n >= need && (bestE == 0 || n < bestE-bestS) {
+				bestS, bestE = starts[i], starts[j]
+			}
+			if n > longE-longS {
+				longS, longE = starts[i], starts[j]
+			}
+		}
+	}
+	if bestE > 0 {
+		return bestS, bestE
+	}
+	return longS, longE
+}
+
+// baseText is the text with the run removed. A run reaching the end leaves the blank line before
+// it, which canonical markdown drops.
+func baseText(text string, runStart, runEnd int) string {
+	if runEnd <= runStart {
+		return text
+	}
+	base := text[:runStart] + text[runEnd:]
+	if runEnd == len(text) {
+		base = strings.TrimRight(base, "\n")
+		if base != "" {
+			base += "\n"
+		}
+	}
+	return base
+}
+
+// planHistory plans a document's history from production's version sizes (sizes[n-1] for version
+// n, -1 when unlisted), its text at At (whose size Dispatch keeps, so local size n is sizes[n-1] -
+// sizes[final-1] + len(text)), and the version each answered typed ask block's answer lands at
+// (answerVersions[i] for ask index answerAsks[i]; one under 2 or past final takes the last free
+// version).
+func planHistory(text string, sizes []int, final int, answerAsks, answerVersions []int) (historyPlan, error) {
+	p := historyPlan{Final: final, AnswerAt: map[int][]int{}}
+	real := make([]int, final)
+	for n := range final {
+		switch {
+		case n < len(sizes) && sizes[n] >= 0:
+			real[n] = sizes[n]
+		case n > 0:
+			real[n] = real[n-1]
+			p.Missing++
+		default:
+			p.Missing++
+		}
+	}
+	free := final
+	for i, ask := range answerAsks {
+		v := answerVersions[i]
+		if v < 2 || v > final {
+			for free > 1 && len(p.AnswerAt[free]) > 0 {
+				free--
+			}
+			v = free
+		}
+		p.AnswerAt[v] = append(p.AnswerAt[v], ask)
+	}
+	p.Restore = final
+	for p.Restore > 1 && len(p.AnswerAt[p.Restore]) > 0 {
+		p.Restore--
+	}
+	for v := range p.AnswerAt {
+		if v <= 1 {
+			return p, fmt.Errorf("an answer cannot land at version %d", v)
+		}
+	}
+	local := func(n int) int { return real[n-1] - real[final-1] + len(text) }
+	p.Sizes = make([]int, final)
+	for n := p.Restore; n <= final; n++ {
+		p.Sizes[n-1] = local(n)
+	}
+	if p.Restore == 1 {
+		if len(p.AnswerAt) > 0 {
+			return p, fmt.Errorf("every version is an answer: no version is left to create the document")
+		}
+		return p, nil
+	}
+	// The run: long enough that the smallest padded version still holds padMin bytes of padding
+	// over the base. The floor is taken over the unstripped base, the largest any version's base
+	// gets as answers land.
+	smallest := len(text)
+	for n := 1; n < p.Restore; n++ {
+		smallest = min(smallest, local(n))
+	}
+	p.RunStart, p.RunEnd = chooseRun(text, len(text)+padOverhead(len(text))+padMin-smallest)
+	base := baseText(text, p.RunStart, p.RunEnd)
+	floor := len(base) + padOverhead(len(base)) + padMin
+	// Walk back from Restore: each padded version is the next one less production's change; one
+	// that would fall under the floor takes the change with its sign flipped, and one under it
+	// still is raised to the floor (Unreachable).
+	for n := p.Restore - 1; n >= 1; n-- {
+		d := real[n] - real[n-1]
+		size := p.Sizes[n] - d
+		if len(p.AnswerAt[n+1]) == 0 && size < floor && d != 0 {
+			size = p.Sizes[n] + d
+			p.Flipped++
+		}
+		if size < floor {
+			size = floor
+			p.Unreachable++
+		}
+		p.Sizes[n-1] = size
+	}
+	return p, nil
+}
+
+var (
+	askDirective = regexp.MustCompile(`^:::ask\{#([^ }]+)([^}]*)\}`)
+	answerAttr   = regexp.MustCompile(` (answered_by|answered_at|selected|answer)="[^"]*"`)
+	stateAttr    = regexp.MustCompile(` state="[^"]*"`)
+)
+
+// stripAnswers is text with the typed ask blocks named in ids written as Dispatch stores an
+// unanswered block: no answered_by, answered_at, selected or answer, and state "open".
+func stripAnswers(text string, ids map[string]bool) string {
+	if len(ids) == 0 {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		m := askDirective.FindStringSubmatch(line)
+		if m == nil || !ids[m[1]] {
+			continue
+		}
+		attrs := answerAttr.ReplaceAllString(m[2], "")
+		attrs = stateAttr.ReplaceAllString(attrs, ` state="open"`)
+		lines[i] = ":::ask{#" + m[1] + attrs + "}" + line[len(m[0]):]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// padText is n bytes of synthetic lowercase words, starting with a token no document holds, and
+// different for each salt.
+func padText(n int, salt int) string {
+	var b strings.Builder
+	b.WriteString(padToken)
+	for i := 0; b.Len() < n; i++ {
+		b.WriteByte(' ')
+		b.WriteString(words[(salt*7+i*13)%len(words)])
+	}
+	s := b.String()[:n]
+	if strings.HasSuffix(s, " ") {
+		s = s[:n-1] + "x"
+	}
+	return s
+}
+
+// nextPad is padding of n bytes that differs from prev, so a version whose size does not change
+// still changes its bytes.
+func nextPad(prev string, n, salt int) string {
+	s := padText(n, salt)
+	if s == prev {
+		if s[len(s)-1] == 'y' {
+			s = s[:n-1] + "z"
+		} else {
+			s = s[:n-1] + "y"
+		}
+	}
+	return s
+}

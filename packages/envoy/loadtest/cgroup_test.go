@@ -86,7 +86,7 @@ func mergeLines(t *testing.T, lines []string) (cgroupFile, string) {
 }
 
 // near is true when a holds a value within 1e-9 of want.
-func near(a *float64, want float64) bool { return a != nil && math.Abs(*a-want) < 1e-9 }
+func nearPtr(a *float64, want float64) bool { return a != nil && math.Abs(*a-want) < 1e-9 }
 
 // The default series: from 2 minutes before the window, 3 s off its grid, to 7 s after it.
 func defaultSeries(role string, cores float64) cgSeries {
@@ -103,13 +103,13 @@ func TestCgroupMergeInterpolatesTheWindowsEnds(t *testing.T) {
 	if !ok {
 		t.Fatalf("no dispatch role: %+v", cf)
 	}
-	if !near(d.CoresMean, 2) || !near(d.CPUS, 1200) || !near(d.CoresPeak5s, 2) {
+	if !nearPtr(d.CoresMean, 2) || !nearPtr(d.CPUS, 1200) || !nearPtr(d.CoresPeak5s, 2) {
 		t.Fatalf("cores_mean %v, cpu_s %v, cores_peak_5s %v; want 2, 1200, 2", deref(d.CoresMean), deref(d.CPUS), deref(d.CoresPeak5s))
 	}
-	if !near(d.ThrottledS, 0) || !near(d.LimitCores, 16) || d.CPUMax != "1600000 100000" {
+	if !nearPtr(d.ThrottledS, 0) || !nearPtr(d.LimitCores, 16) || d.CPUMax != "1600000 100000" {
 		t.Errorf("throttled_s %v, limit_cores %v (cpu_max %q); want 0 and 16", deref(d.ThrottledS), deref(d.LimitCores), d.CPUMax)
 	}
-	if d.WorkingSetBytesMax == nil || *d.WorkingSetBytesMax != 2<<30 || !near(d.WorkingSetBytesMean, 2<<30) {
+	if d.WorkingSetBytesMax == nil || *d.WorkingSetBytesMax != 2<<30 || !nearPtr(d.WorkingSetBytesMean, 2<<30) {
 		t.Errorf("working set mean %v, max %v; want 2 GiB", deref(d.WorkingSetBytesMean), d.WorkingSetBytesMax)
 	}
 	// Samples at 12:00:02, :07, ..., 12:09:57 in the window: 120, never more than 5 s apart.
@@ -142,7 +142,7 @@ func TestCgroupMergeNeverTakesANegativeOrInflatedDeltaAcrossARestart(t *testing.
 			t.Errorf("%s: cores_mean %v, peak %v; want between 0 and 2", c.name, deref(d.CoresMean), deref(d.CoresPeak5s))
 		}
 		// Only the 5 s across the restart is lost: 595 of 600 s at 2 cores.
-		if !near(d.CoresMean, 2*595.0/600) || d.Restarts != 1 || len(d.Pods) != c.wantPods {
+		if !nearPtr(d.CoresMean, 2*595.0/600) || d.Restarts != 1 || len(d.Pods) != c.wantPods {
 			t.Errorf("%s: cores_mean %v, restarts %d, pods %q; want %.4f, 1 and %d pods", c.name, deref(d.CoresMean), d.Restarts, d.Pods, 2*595.0/600, c.wantPods)
 		}
 	}
@@ -207,7 +207,7 @@ func TestCgroupMergeDoesNotCountAFailedReadAsZero(t *testing.T) {
 	if d.FailedReads != 3 || d.Samples != 117 || d.Restarts != 0 {
 		t.Fatalf("failed reads %d, samples %d, restarts %d; want 3, 117, 0", d.FailedReads, d.Samples, d.Restarts)
 	}
-	if !near(d.CoresMean, 2) || !near(d.CoresPeak5s, 2) || d.WorkingSetBytesMax == nil || !near(d.WorkingSetBytesMean, 2<<30) {
+	if !nearPtr(d.CoresMean, 2) || !nearPtr(d.CoresPeak5s, 2) || d.WorkingSetBytesMax == nil || !nearPtr(d.WorkingSetBytesMean, 2<<30) {
 		t.Errorf("cores_mean %v, peak %v, working set mean %v: a failed read entered them", deref(d.CoresMean), deref(d.CoresPeak5s), deref(d.WorkingSetBytesMean))
 	}
 	if cf.Failed {
@@ -238,7 +238,7 @@ func TestCgroupMergeLeavesAnUnbracketedRoleNull(t *testing.T) {
 	if r.CoresMean != nil || r.CPUS != nil || r.ThrottledS != nil || r.LimitCores != nil {
 		t.Fatalf("runner: cores_mean %v, cpu_s %v, throttled_s %v, limit %v; want all null", deref(r.CoresMean), deref(r.CPUS), deref(r.ThrottledS), deref(r.LimitCores))
 	}
-	if !near(r.CoresPeak5s, 1) || r.Samples == 0 || cf.Failed {
+	if !nearPtr(r.CoresPeak5s, 1) || r.Samples == 0 || cf.Failed {
 		t.Errorf("runner: peak %v, samples %d, failed %v; want 1 core, samples, not failed", deref(r.CoresPeak5s), r.Samples, cf.Failed)
 	}
 }
@@ -263,7 +263,7 @@ func TestCgroupMergeReadsOnlyWhatTheStepNeedsAndRefusesUnreadableInput(t *testin
 		t.Fatalf("cgroup-merge: %v", err)
 	}
 	cf, _ := readCgroupFile(dir)
-	if d := cf.Roles["dispatch"]; !near(d.CoresMean, 2) {
+	if d := cf.Roles["dispatch"]; !nearPtr(d.CoresMean, 2) {
 		t.Errorf("cores_mean %v, want 2: samples outside the step entered it", deref(d.CoresMean))
 	}
 

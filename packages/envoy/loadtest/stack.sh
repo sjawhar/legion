@@ -6,6 +6,9 @@
 #   stack.sh setup          build envoy-dispatch, envoy-listener and loadgen into $LOADTEST_ROOT/bin,
 #                           install nats-server (the version packages/envoy/go.mod pins) and Postgres,
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
+#                           Writes bin/envoy-dispatch.json, the build's record (below). With
+#                           LOADTEST_DISPATCH_COMMIT=<rev> envoy-dispatch alone is built from that
+#                           commit instead (a rev that names no commit is refused before any build).
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
 #   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
@@ -14,26 +17,72 @@
 #   stack.sh reset [LOG]    what run-step.sh does before each step: stop Dispatch and the listener,
 #                           recreate database dispatch from dispatch_seed, restart NATS on a fresh store
 #                           and the listener, start Dispatch (its log to LOG) and wait for /healthz.
+#   stack.sh reset --replay [LOG]
+#                           the same from this build's prepared replay template (replay-prepare;
+#                           refused without one), and before Dispatch starts, `loadgen replay-checksum
+#                           -db dispatch` into $LOADTEST_ROOT/replay/last-reset.json.
 #   stack.sh stop [NAME...] stop dispatch, listener, nats, proxy and postgres (or the named ones).
 #   stack.sh status         each process: pid, alive, port.
 #   stack.sh build-info     print this checkout's commit and whether its tree has uncommitted changes
 #                           ("<commit> <true|false>"; run-step.sh records them in meta.json).
 #   stack.sh loadgen ARGS   run $LOADTEST_ROOT/bin/loadgen under the stack's environment, from the
 #                           root (run-step.sh and run-series.sh call loadgen this way).
+#   stack.sh replay-seed-patch-check BUNDLE_DIR
+#                           build Dispatch at the replay seed's commit with replay-seed-len16.patch
+#                           into bin/dispatch-seed and run the patch's tests there (TestLen16Seed),
+#                           with every *.md under BUNDLE_DIR as the corpus; exits with their status.
+#   stack.sh replay-seed --bundle DIR [--keys-file FILE] [--stock] [--resume] [--out DIR] [-- ARGS]
+#                           the LINUX replay's seed: build Dispatch at 35efd326 (production's commit on
+#                           2026-10-26, migration 0114) with replay-seed-len16.patch (--stock: without)
+#                           into bin/dispatch-seed[-stock]; on database dispatch_replay_build (dropped
+#                           and recreated, or kept with --resume) start it while Postgres, the proxy,
+#                           NATS and the listener run, run `loadgen replay-seed -bundle DIR -db
+#                           dispatch_replay_build [-keys-file FILE] ARGS`, wait for Dispatch to owe no
+#                           work and go idle, stop it, vacuum, pg_dump the database (the smallest of
+#                           gzip:9 and the zstd levels this pg_dump accepts), split it into 24 MiB
+#                           parts linux-replay-seed-0114.dump.partNN under DIR of --out (default
+#                           $LOADTEST_ROOT/replay-seed) and write seed.meta.json there.
+#   stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] > MANIFEST
+#                           a replay manifest (schema 1, replay-2026-10-26.json) from replay-pack's
+#                           JSON, the bundle's bundle.meta.json and replay-seed's seed.meta.json
+#                           (without --seed-dir, "seed": null). No lock, no stack.
+#   stack.sh replay-get [--manifest FILE] [--from-dir DIR]
+#                           the manifest's parts (default replay-2026-10-26.json) under
+#                           $LOADTEST_ROOT/replay/parts, each kept when its sha256 matches, else
+#                           copied from DIR or downloaded from DISPATCH_URL with DISPATCH_TOKEN_FILE's
+#                           token, and refused on a sha256 mismatch; the bundle unpacked into
+#                           replay/bundle and verified file by file; the seed dump restored once into
+#                           the template dispatch_replay_seed (replay/seed-restored.json). Needs
+#                           Postgres running when the manifest names a seed.
+#   stack.sh replay-prepare this build's replay template dispatch_replay_<key> (key: the first 16 hex
+#                           of bin/envoy-dispatch.json's dispatch_binary_sha256): from
+#                           dispatch_replay_seed, migrated by this build's Dispatch, its block-index
+#                           backfill done, quiet, vacuumed (replay/prepared/<key>.json). Reused once
+#                           made; the 3 most recently used are kept.
+#
+# A Dispatch built from another commit (build_dispatch_at) is built in a `git archive` export of that
+# commit's packages/envoy under $LOADTEST_ROOT/dispatch-src/<commit>[-<patch sha256, 12 hex>], with
+# GOWORK=off GOTOOLCHAIN=local; a tree without cmd/dispatch/pprof.go gets zz_loadtest_pprof.go.txt as
+# cmd/dispatch/zz_loadtest_pprof.go, which serves pprof on LOADTEST_DISPATCH_PPROF_PORT. Every
+# Dispatch binary has a <binary>.json beside it: dispatch_commit, dispatch_tree, build_dirty, patch,
+# patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration.
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); ports LOADTEST_PG_PORT (15432), LOADTEST_PROXY_PORT (15433),
 # LOADTEST_NATS_PORT (14222), LOADTEST_NATS_MONITOR_PORT (18222), LOADTEST_LISTENER_PORT (19120),
 # LOADTEST_DISPATCH_PORT (18777), LOADTEST_PPROF_PORT (16061), read by setup into stack.json;
-# LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy.
+# LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
+# LOADTEST_DISPATCH_COMMIT (setup, above); LOADTEST_GOMAXPROCS, Dispatch's GOMAXPROCS (default: nproc).
 #
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
 # DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_*, HOME and XDG_* never reach it, and every process is
-# stopped by the pid in its pidfile ($LOADTEST_ROOT/run/<name>.pid), never by name.
+# stopped by the pid in its pidfile ($LOADTEST_ROOT/run/<name>.pid), never by name. replay-get alone
+# reads DISPATCH_URL and DISPATCH_TOKEN_FILE, in this shell, for its downloads.
 #
-# setup, start, seed, reset and stop take the root's run lock (common.sh) for their run, and are
-# refused while another run holds it; run-step.sh's and run-series.sh's own calls pass. status,
-# build-info and loadgen take no lock.
+# setup, start, seed, reset, stop, replay-seed-patch-check, replay-seed, replay-get and
+# replay-prepare take the root's run lock (common.sh) for their run, and are refused while another
+# run holds it; run-step.sh's and run-series.sh's own calls pass. status, build-info, loadgen and
+# replay-manifest take no lock.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -51,6 +100,24 @@ STACK=$ROOT/stack.json
 SEED_META=$ROOT/seed.meta.json
 STACK_HOME=$ROOT/home
 PGSERVER_VERSION=0.1.4
+# The LINUX replay's seed: Dispatch at production's commit on 2026-10-26 (newest migration 0114,
+# no cmd/dispatch/pprof.go), with the allocation-free len16 patch unless --stock, on its own database.
+REPLAY_COMMIT=35efd326b66aea9ee2476396dabab7f7685fdbf3
+REPLAY_MIGRATION=114
+REPLAY_PATCH=$here/replay-seed-len16.patch
+REPLAY_DB=dispatch_replay_build
+# The replay's inputs (replay-get) and templates (replay-prepare, reset --replay): the manifest
+# that names the bundle's and the seed dump's parts, the Dispatch issue they are file artifacts of,
+# the restored seed's template database and how many prepared templates are kept.
+REPLAY_MANIFEST=$here/replay-2026-10-26.json
+REPLAY_ISSUE=INFRA-639
+REPLAY_DIR=$ROOT/replay
+REPLAY_SEED_DB=dispatch_replay_seed
+REPLAY_KEEP=3
+BUNDLE_META=bundle.meta.json
+PPROF_OVERLAY=$here/zz_loadtest_pprof.go.txt
+# The binaries a dispatch process may run: the stack's own and the replay seed's two builds.
+DISPATCH_BINARIES=("$BIN/envoy-dispatch" "$BIN/dispatch-seed" "$BIN/dispatch-seed-stock")
 # Processes in stop order, and in start order (dispatch is started by seed and reset).
 PROCESSES=(dispatch listener nats proxy postgres)
 START_ORDER=(postgres proxy nats listener dispatch)
@@ -177,19 +244,20 @@ write_stack_json() {
 
 pidfile() { printf '%s/%s.pid\n' "$RUN" "$1"; }
 
-# binary_of NAME: the executable a live process of that name must be running, so a pid the kernel
-# has reused for something else is never signalled.
+# binary_of NAME: the executables a live process of that name may be running, one a line, so a pid
+# the kernel has reused for something else is never signalled. A dispatch process runs the stack's
+# envoy-dispatch or one of the replay seed's builds.
 binary_of() {
   case $1 in
     postgres) printf '%s\n' "$PGBIN/postgres" ;;
     proxy) printf '%s\n' "$BIN/loadgen" ;;
     nats) printf '%s\n' "$BIN/nats-server" ;;
     listener) printf '%s\n' "$BIN/envoy-listener" ;;
-    dispatch) printf '%s\n' "$BIN/envoy-dispatch" ;;
+    dispatch) printf '%s\n' "${DISPATCH_BINARIES[@]}" ;;
   esac
 }
 
-# pid_of NAME: the pid in NAME's pidfile when that process is alive and runs NAME's binary.
+# pid_of NAME: the pid in NAME's pidfile when that process is alive and runs one of NAME's binaries.
 pid_of() {
   local f pid exe
   f=$(pidfile "$1")
@@ -199,7 +267,7 @@ pid_of() {
   [ -d "/proc/$pid" ] || return 1
   # A binary rebuilt while its process runs shows as "<path> (deleted)".
   exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
-  [ "${exe% (deleted)}" = "$(binary_of "$1")" ] || return 1
+  binary_of "$1" | grep -qxF -- "${exe% (deleted)}" || return 1
   printf '%s\n' "$pid"
 }
 
@@ -361,10 +429,21 @@ dispatch_healthy() {
   curl -fsS --max-time 5 "http://127.0.0.1:$(port dispatch)/healthz" | jq -e '.ok and .nats'
 }
 
-# start_dispatch LOG: Dispatch on database dispatch, through the latency proxy unless
-# LOADTEST_PG_DIRECT=1; waits up to 120 s for /healthz to report ok and NATS.
+# gomaxprocs: LOADTEST_GOMAXPROCS (default: nproc), refused unless a positive integer.
+gomaxprocs() {
+  local n=${LOADTEST_GOMAXPROCS:-$(nproc)}
+  [[ $n =~ ^[1-9][0-9]*$ ]] || die "LOADTEST_GOMAXPROCS='$n' is not a positive integer"
+  printf '%s\n' "$n"
+}
+
+# start_dispatch LOG [BINARY [DB [SECONDS]]]: BINARY (default $BIN/envoy-dispatch) on database DB
+# (default dispatch), through the latency proxy unless LOADTEST_PG_DIRECT=1; waits up to SECONDS
+# (default 120) for /healthz to report ok and NATS.
 start_dispatch() {
-  local log=$1
+  local log=$1 binary=${2:-$BIN/envoy-dispatch} db=${3:-dispatch} healthz_seconds=${4:-120}
+  [ -x "$binary" ] || die "no Dispatch binary at $binary; run stack.sh setup first"
+  local procs
+  procs=$(gomaxprocs) || exit 1
   running dispatch && die "Dispatch is already running (pid $(pid_of dispatch)); stack.sh stop dispatch first"
   check_port dispatch dispatch
   check_port dispatch pprof
@@ -376,14 +455,22 @@ start_dispatch() {
   else
     running proxy || die "the latency proxy is not running; stack.sh start (or LOADTEST_PG_DIRECT=1)"
   fi
+  # A build with a pprof.go of its own reads DISPATCH_PPROF_PORT; one without it carries stack.sh's
+  # overlay (build_dispatch_at), which reads LOADTEST_DISPATCH_PPROF_PORT.
+  local pprof_var=DISPATCH_PPROF_PORT
+  if [ -f "$binary.json" ] && [ "$(jq -r .dispatch_pprof_overlay "$binary.json")" = true ]; then
+    pprof_var=LOADTEST_DISPATCH_PPROF_PORT
+  fi
   local webdist=$ROOT/webdist
   mkdir -p -- "$webdist" "$STACK_HOME"
   # scripts/e2e/dispatch-session-settings.sh's Dispatch, on the stack's ports and tokens. No
   # DISPATCH_SIGNING_KEY: Dispatch keeps its key under the stack's HOME (XDG_DATA_HOME), so it is the
-  # same across steps. No AWS_*: no Bedrock calls.
+  # same across steps. No AWS_*: no Bedrock calls. Of the settings below, the only one 35efd326 (the
+  # replay seed's build) lacks is DISPATCH_PPROF_PORT: it has no pprof.go, so the overlay's
+  # LOADTEST_DISPATCH_PPROF_PORT stands in for it.
   # shellcheck disable=SC2034
   local dispatch_env=("${base_env[@]}"
-    "DATABASE_URL=postgres://postgres@127.0.0.1:$pg_port/dispatch?sslmode=disable"
+    "DATABASE_URL=postgres://postgres@127.0.0.1:$pg_port/$db?sslmode=disable"
     "DISPATCH_AGENT_TOKEN=$(jq -r .dispatch_token "$STACK")"
     "DISPATCH_IDENTITY=header:X-Dispatch-User"
     "DISPATCH_IDENTITY_HEADER_TRUSTED=1"
@@ -391,31 +478,118 @@ start_dispatch() {
     "DISPATCH_PORT=$(port dispatch)"
     "DISPATCH_SERVER_URL=http://127.0.0.1:$(port dispatch)"
     "DISPATCH_WEB_DIST=$webdist"
-    "DISPATCH_PPROF_PORT=$(port pprof)"
+    "$pprof_var=$(port pprof)"
+    "GOMAXPROCS=$procs"
     "NATS_URLS=nats://127.0.0.1:$(port nats)"
     "ENVOY_URL=http://127.0.0.1:$(port listener)"
     "ENVOY_TOKEN=$(jq -r .listener_token "$STACK")")
-  spawn dispatch "$log" dispatch_env "$BIN/envoy-dispatch"
+  spawn dispatch "$log" dispatch_env "$binary"
   set_pid dispatch "$(pid_of dispatch)"
   stack_set '.pg_direct = $d' --argjson d "$direct"
-  wait_for "Dispatch /healthz to report ok and NATS" 120 dispatch "$log" dispatch_healthy
-  note "dispatch pid $(pid_of dispatch) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port; log $log"
+  wait_for "Dispatch /healthz to report ok and NATS" "$healthz_seconds" dispatch "$log" dispatch_healthy
+  note "dispatch pid $(pid_of dispatch) ($binary, database $db, GOMAXPROCS $procs) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port; log $log"
+}
+
+# ---- builds ------------------------------------------------------------------------------------------
+
+sha256_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# resolve_commit REV: REV's full commit id in the checkout; refused, naming REV, when it names none.
+resolve_commit() {
+  git -C "$SRC" rev-parse --verify --quiet "$1^{commit}" ||
+    die "'$1' names no commit in $SRC"
+}
+
+# newest_migration ENVOY_DIR: the highest NNNN prefix of a migration file in that tree, an integer.
+newest_migration() {
+  local file
+  file=$(cd -- "$1/internal/dispatch/store/migrations" && printf '%s\n' [0-9]*.sql | sort -n | tail -n1)
+  printf '%s\n' "$((10#${file%%_*}))"
+}
+
+# write_build_json BINARY ENVOY_DIR COMMIT TREE DIRTY PATCH PATCH_SHA256 OVERLAY: BINARY.json, the
+# build's record (an empty TREE, PATCH or PATCH_SHA256 is null).
+write_build_json() {
+  local binary=$1 dir=$2
+  jq -n --arg commit "$3" --arg tree "$4" --argjson dirty "$5" --arg patch "$6" --arg patch_sha "$7" \
+    --argjson overlay "$8" --arg binary_sha "$(sha256_of "$binary")" \
+    --arg go "$(go version "$binary" | awk '{ print $NF }')" --argjson migration "$(newest_migration "$dir")" \
+    'def orNull: if . == "" then null else . end;
+     {dispatch_commit: $commit, dispatch_tree: ($tree | orNull), build_dirty: $dirty,
+      patch: ($patch | orNull), patch_sha256: ($patch_sha | orNull), dispatch_pprof_overlay: $overlay,
+      dispatch_binary_sha256: $binary_sha, go_version: $go, newest_migration: $migration}' >"$binary.json"
+}
+
+# build_dispatch_at REV OUT [PATCH]: build cmd/dispatch of commit REV (PATCH applied) into OUT, and
+# write OUT.json. The tree is a `git archive` export of REV's packages/envoy under
+# $ROOT/dispatch-src/<commit>[-<first 12 hex of PATCH's sha256>], reused once marked .complete; a
+# tree without cmd/dispatch/pprof.go gets the pprof overlay. Sets BUILT_TREE to its packages/envoy.
+build_dispatch_at() {
+  local rev=$1 out=$2 patch=${3:-} sha
+  sha=$(resolve_commit "$rev") || exit 1
+  local key=$sha patch_sha="" patch_name=""
+  if [ -n "$patch" ]; then
+    [ -f "$patch" ] || die "no patch at $patch"
+    patch_sha=$(sha256_of "$patch")
+    patch_name=$(basename -- "$patch")
+    key+=-${patch_sha:0:12}
+  fi
+  local srcroot=$ROOT/dispatch-src
+  local tree=$srcroot/$key
+  if [ ! -f "$tree/.complete" ]; then
+    note "exporting packages/envoy at $sha${patch:+ with $patch_name} into $tree"
+    rm -rf -- "$tree"
+    mkdir -p -- "$tree"
+    git -C "$SRC" archive "$sha" packages/envoy | tar -x -C "$tree"
+    if [ -n "$patch" ]; then
+      # The export is no repository: the ceiling keeps git apply from finding one above it.
+      (cd -- "$tree" && GIT_CEILING_DIRECTORIES=$srcroot git apply -p1 "$patch") ||
+        die "$patch does not apply to $sha"
+    fi
+    : >"$tree/.complete"
+  fi
+  BUILT_TREE=$tree/packages/envoy
+  local overlay=false
+  if [ ! -f "$BUILT_TREE/cmd/dispatch/pprof.go" ]; then
+    cp -f -- "$PPROF_OVERLAY" "$BUILT_TREE/cmd/dispatch/zz_loadtest_pprof.go"
+    overlay=true
+  fi
+  note "building $out from $sha${patch:+ + $patch_name} (pprof overlay: $overlay)"
+  (cd -- "$BUILT_TREE" && GOWORK=off GOTOOLCHAIN=local go build -o "$out" ./cmd/dispatch)
+  write_build_json "$out" "$BUILT_TREE" "$sha" "$(git -C "$SRC" rev-parse "$sha:packages/envoy")" false \
+    "$patch_name" "$patch_sha" "$overlay"
 }
 
 # ---- commands ----------------------------------------------------------------------------------------
 
 cmd_setup() {
+  local commit=""
+  if [ -n "${LOADTEST_DISPATCH_COMMIT:-}" ]; then
+    commit=$(resolve_commit "$LOADTEST_DISPATCH_COMMIT") || exit 1
+  fi
   command -v go >/dev/null || die "go is required"
   command -v uv >/dev/null || die "uv is required (Postgres comes from the pgserver wheel)"
   command -v jq >/dev/null || die "jq is required"
   [ -d "$ENVOY_SRC/cmd/dispatch" ] || die "LOADTEST_SRC=$SRC holds no packages/envoy/cmd/dispatch"
   mkdir -p -- "$BIN" "$RUN" "$LOGS" "$PGDIR/log" "$STACK_HOME" "$ROOT/tmp" "$ROOT/runs"
 
-  note "building envoy-dispatch, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
-  (cd -- "$ENVOY_SRC" &&
-    go build -o "$BIN/envoy-dispatch" ./cmd/dispatch &&
-    go build -o "$BIN/envoy-listener" ./cmd/listener &&
-    go build -o "$BIN/loadgen" ./loadtest)
+  if [ -n "$commit" ]; then
+    build_dispatch_at "$commit" "$BIN/envoy-dispatch"
+    note "building envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+    (cd -- "$ENVOY_SRC" &&
+      go build -o "$BIN/envoy-listener" ./cmd/listener &&
+      go build -o "$BIN/loadgen" ./loadtest)
+  else
+    note "building envoy-dispatch, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+    (cd -- "$ENVOY_SRC" &&
+      go build -o "$BIN/envoy-dispatch" ./cmd/dispatch &&
+      go build -o "$BIN/envoy-listener" ./cmd/listener &&
+      go build -o "$BIN/loadgen" ./loadtest)
+    local dirty tree=""
+    dirty=$(build_dirty)
+    [ "$dirty" = true ] || tree=$(git -C "$SRC" rev-parse HEAD:packages/envoy 2>/dev/null || true)
+    write_build_json "$BIN/envoy-dispatch" "$ENVOY_SRC" "$(build_commit)" "$tree" "$dirty" "" "" false
+  fi
 
   local nats_version
   nats_version=$(awk '$1 == "github.com/nats-io/nats-server/v2" { print $2; exit }' "$ENVOY_SRC/go.mod")
@@ -546,6 +720,10 @@ cmd_seed() {
 }
 
 cmd_reset() {
+  if [ "${1:-}" = --replay ]; then
+    cmd_reset_replay "${@:2}"
+    return
+  fi
   local log=${1:-$LOGS/dispatch.log}
   need_stack
   running postgres || die "Postgres is not running; stack.sh start first"
@@ -554,6 +732,673 @@ cmd_reset() {
   stop_one listener
   sql postgres 'drop database if exists dispatch' >/dev/null
   sql postgres 'create database dispatch template dispatch_seed' >/dev/null
+  stop_one nats
+  start_nats
+  start_listener
+  start_dispatch "$log"
+}
+
+# ---- the LINUX replay's seed -------------------------------------------------------------------------
+
+cmd_replay_seed_patch_check() {
+  [ $# -eq 1 ] || die "usage: stack.sh replay-seed-patch-check BUNDLE_DIR"
+  [ -d "$1" ] || die "no bundle directory at $1"
+  local bundle
+  bundle=$(cd -- "$1" && pwd -P)
+  command -v go >/dev/null || die "go is required"
+  mkdir -p -- "$BIN" "$LOGS"
+  build_dispatch_at "$REPLAY_COMMIT" "$BIN/dispatch-seed" "$REPLAY_PATCH"
+  local log=$LOGS/replay-seed-patch-check.log status=0
+  note "go test ./internal/dispatch/pmdoc -run TestLen16Seed in $BUILT_TREE, corpus $bundle; log $log"
+  (cd -- "$BUILT_TREE" && GOWORK=off GOTOOLCHAIN=local LOADTEST_LEN16_CORPUS=$bundle \
+    go test ./internal/dispatch/pmdoc -run 'TestLen16Seed' -count=1 -v) >"$log" 2>&1 || status=$?
+  grep -E 'len16 corpus:|^(--- |ok |FAIL|PASS)' -- "$log" || true
+  ((status == 0)) || die "the len16 patch's tests failed (exit $status); see $log"
+  note "the len16 patch's tests pass"
+}
+
+# has_table DB TABLE: TABLE exists in DB. Postgres resolves every table a statement names before it
+# runs, so the existence check is a query of its own.
+has_table() { [ "$(sql "$1" "select to_regclass('public.$2') is not null")" = t ]; }
+
+# owe WHAT COUNT: owed_work's tally.
+owe() {
+  OWED=$((OWED + $2))
+  (($2 == 0)) || OWED_WHAT+="${OWED_WHAT:+, }$2 $1"
+}
+
+# owed_work DB: sets OWED to the number of rows of work Dispatch still owes in DB and OWED_WHAT to
+# what they are, each table read only when it exists. At 0114 the settle timer is in memory, but every
+# durable document update writes a doc_settlements_pending row and settlement deletes it.
+owed_work() {
+  local db=$1 n
+  OWED=0
+  OWED_WHAT=""
+  if has_table "$db" events; then
+    owe "unpublished events" "$(sql "$db" 'select count(*) from events where published_at is null')"
+  fi
+  if has_table "$db" comment_deliveries; then
+    owe "pending comment deliveries" "$(sql "$db" "select count(*) from comment_deliveries where state = 'pending'")"
+  fi
+  if has_table "$db" message_deliveries; then
+    owe "pending message deliveries" "$(sql "$db" "select count(*) from message_deliveries where state = 'pending'")"
+  fi
+  if has_table "$db" doc_settlements_pending; then
+    owe "pending document settlements" "$(sql "$db" 'select count(*) from doc_settlements_pending')"
+  fi
+  if has_table "$db" document_block_versions; then
+    n=$(sql "$db" 'select count(*) from document_block_versions where version is null')
+    owe "unversioned document blocks" "$n"
+  fi
+  if has_table "$db" block_grammar_owed; then
+    owe "block-grammar entries owed" "$(sql "$db" 'select count(*) from block_grammar_owed')"
+  fi
+}
+
+# cpu_ticks PID: the process's utime + stime, in clock ticks.
+cpu_ticks() {
+  local stat fields
+  stat=$(cat -- "/proc/$1/stat") || return 1
+  read -ra fields <<<"${stat##*) }"
+  # After "pid (comm) ", utime and stime are the 12th and 13th fields.
+  printf '%s\n' "$((fields[11] + fields[12]))"
+}
+
+# wait_quiet DB LOG: wait until Dispatch owes no work in DB (within 1800 s), then until it uses less
+# than 0.05 cores over 30 s (within 900 s), then read the owed work again. Sets QUIET_SECONDS.
+wait_quiet() {
+  local db=$1 log=$2 started=$SECONDS deadline
+  note "waiting for Dispatch to owe no work in $db"
+  deadline=$((SECONDS + 1800))
+  while :; do
+    owed_work "$db"
+    ((OWED == 0)) && break
+    running dispatch || die "Dispatch exited while it still owed $OWED_WHAT; see $log"
+    ((SECONDS < deadline)) || die "Dispatch still owes $OWED_WHAT after 1800 s; see $log"
+    sleep 2
+  done
+  note "Dispatch owes no work; waiting for it to idle below 0.05 cores over 30 s"
+  local clk pid before after
+  clk=$(getconf CLK_TCK)
+  deadline=$((SECONDS + 900))
+  while :; do
+    pid=$(pid_of dispatch) || die "Dispatch exited before it went idle; see $log"
+    before=$(cpu_ticks "$pid")
+    sleep 30
+    after=$(cpu_ticks "$pid") || die "Dispatch exited before it went idle; see $log"
+    # Below 0.05 cores over 30 s: fewer than 1.5 s of CPU, 2 * ticks < 3 * CLK_TCK.
+    if ((2 * (after - before) < 3 * clk)); then
+      break
+    fi
+    ((SECONDS < deadline)) || die "Dispatch still uses $(((after - before) * 100 / clk / 30))% of a core after 900 s; see $log"
+    note "Dispatch used $(((after - before) * 100 / clk / 30))% of a core over 30 s; waiting"
+  done
+  owed_work "$db"
+  ((OWED == 0)) || die "Dispatch went idle yet owes $OWED_WHAT; see $log"
+  QUIET_SECONDS=$((SECONDS - started))
+  note "Dispatch is quiet after $QUIET_SECONDS s"
+}
+
+# pg_tool NAME: the Postgres client NAME of the stack's own Postgres (pgserver), else the system's.
+pg_tool() {
+  if [ -x "$PGBIN/$1" ]; then
+    printf '%s\n' "$PGBIN/$1"
+  elif [ -x "/usr/bin/$1" ]; then
+    printf '%s\n' "/usr/bin/$1"
+  else
+    die "no $1: neither $PGBIN/$1 nor /usr/bin/$1 exists"
+  fi
+}
+
+cmd_replay_seed() {
+  local usage="usage: stack.sh replay-seed --bundle DIR [--keys-file FILE] [--stock] [--resume] [--out DIR] [-- LOADGEN_ARGS]"
+  local bundle="" keys="" stock=false resume=false out=$ROOT/replay-seed extra=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --bundle | --keys-file | --out)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value; $usage"; fi
+        case $1 in
+          --bundle) bundle=$2 ;;
+          --keys-file) keys=$2 ;;
+          --out) out=$2 ;;
+        esac
+        shift 2
+        ;;
+      --stock) stock=true && shift ;;
+      --resume) resume=true && shift ;;
+      --)
+        extra=("${@:2}")
+        break
+        ;;
+      *) die "unknown argument '$1'; $usage" ;;
+    esac
+  done
+  [ -n "$bundle" ] || die "--bundle is required; $usage"
+  [ -d "$bundle" ] || die "no bundle directory at $bundle"
+  bundle=$(cd -- "$bundle" && pwd -P)
+  if [ -n "$keys" ]; then
+    [ -f "$keys" ] || die "no keys file at $keys"
+    keys=$(cd -- "$(dirname -- "$keys")" && pwd -P)/$(basename -- "$keys")
+  fi
+  mkdir -p -- "$out"
+  out=$(cd -- "$out" && pwd -P)
+  need_stack
+  local p
+  for p in postgres nats listener; do
+    running "$p" || die "$p is not running; stack.sh start first"
+  done
+  running dispatch && die "Dispatch is already running (pid $(pid_of dispatch)); stack.sh stop dispatch first"
+  [ -x "$BIN/loadgen" ] || die "no $BIN/loadgen; run stack.sh setup first"
+  gomaxprocs >/dev/null
+  if [ "$resume" = true ]; then
+    db_exists "$REPLAY_DB" || die "--resume: database $REPLAY_DB does not exist; run without --resume"
+  fi
+
+  local binary=$BIN/dispatch-seed patch=$REPLAY_PATCH
+  if [ "$stock" = true ]; then
+    binary=$BIN/dispatch-seed-stock
+    patch=""
+  fi
+  build_dispatch_at "$REPLAY_COMMIT" "$binary" "$patch"
+
+  if [ "$resume" = true ]; then
+    note "resuming on database $REPLAY_DB"
+  else
+    sql postgres "drop database if exists $REPLAY_DB" >/dev/null
+    sql postgres "create database $REPLAY_DB" >/dev/null
+  fi
+  local dispatch_log=$LOGS/dispatch-replay-seed.log started=$SECONDS
+  trap 'stop_one dispatch' EXIT
+  start_dispatch "$dispatch_log" "$binary" "$REPLAY_DB"
+
+  note "replaying the bundle's state into $REPLAY_DB; log $LOGS/replay-seed.log"
+  local args=(replay-seed -bundle "$bundle" -db "$REPLAY_DB")
+  [ -z "$keys" ] || args+=(-keys-file "$keys")
+  loadgen "${args[@]}" "${extra[@]}" 2>&1 | tee "$LOGS/replay-seed.log" >&2
+  local seed_seconds=$((SECONDS - started))
+
+  wait_quiet "$REPLAY_DB" "$dispatch_log"
+  stop_one dispatch
+  trap - EXIT
+
+  note "vacuum analyze"
+  sql "$REPLAY_DB" 'vacuum analyze' >/dev/null
+  local migration
+  migration=$(sql "$REPLAY_DB" 'select max(version) from schema_migrations')
+  [ "$migration" = "$REPLAY_MIGRATION" ] ||
+    die "database $REPLAY_DB is at migration '$migration', not $REPLAY_MIGRATION; refusing to dump it"
+
+  # The seed's check (loadgen replay-check-seed) with the bundle and keys file it seeded: no dump
+  # unless it passed. Its file goes beside the dump as seed-check.json and into seed.meta.json.
+  local check_file=$ROOT/tmp/seed-check.json check_args=(replay-check-seed -bundle "$bundle" -db "$REPLAY_DB")
+  [ -z "$keys" ] || check_args+=(-keys-file "$keys")
+  rm -f -- "$check_file"
+  note "replay-check-seed; log $LOGS/replay-check-seed.log"
+  loadgen "${check_args[@]}" -out "$check_file" >"$LOGS/replay-check-seed.log" 2>&1 || true
+  [ -f "$check_file" ] || die "replay-check-seed wrote no result; see $LOGS/replay-check-seed.log"
+  [ "$(jq -r .passed "$check_file")" = true ] ||
+    die "replay-check-seed did not pass ($(jq -c '{differences, version_size_mismatches, anchors_outside_logged_block}' "$check_file")); refusing to dump; see $LOGS/replay-check-seed.log"
+  cp -- "$check_file" "$out/seed-check.json"
+  note "replay-check-seed passed: $(jq -c '{documents, anchor_rules, sign_flipped}' "$check_file")"
+
+  # pg_dump's custom format under each compression; pgserver's 16.2 is built without zstd and
+  # refuses those, which is logged and skipped. The smallest is kept.
+  local name dump_log=$LOGS/replay-seed-dump.log candidates=() spec file best="" best_bytes=0 best_spec="" i=0
+  name=linux-replay-seed-$(printf '%04d' "$REPLAY_MIGRATION")
+  local pg_dump compression='[]'
+  pg_dump=$(pg_tool pg_dump)
+  : >"$dump_log"
+  for spec in gzip:9 zstd:19 zstd:level=19,long; do
+    file=$ROOT/tmp/$name.dump.$i
+    i=$((i + 1))
+    note "pg_dump -Fc -Z $spec"
+    if env -i "${base_env[@]}" "$pg_dump" -h 127.0.0.1 -p "$(port postgres)" -U postgres -d "$REPLAY_DB" \
+      -Fc -Z "$spec" -f "$file" >>"$dump_log" 2>&1; then
+      local bytes
+      bytes=$(stat -c %s -- "$file")
+      compression=$(jq -c --arg s "$spec" --argjson b "$bytes" '. + [{compression: $s, bytes: $b}]' <<<"$compression")
+      candidates+=("$file")
+      if [ -z "$best" ] || ((bytes < best_bytes)); then
+        best=$file best_bytes=$bytes best_spec=$spec
+      fi
+    else
+      local why
+      why=$(tail -n 1 -- "$dump_log")
+      note "pg_dump -Z $spec refused, skipped: $why"
+      compression=$(jq -c --arg s "$spec" --arg r "$why" '. + [{compression: $s, refused: $r}]' <<<"$compression")
+      rm -f -- "$file"
+    fi
+  done
+  [ -n "$best" ] || die "pg_dump refused every compression; see $dump_log"
+
+  local dump_sha parts='[]' part
+  dump_sha=$(sha256_of "$best")
+  rm -f -- "$out/$name.dump.part"*
+  split -b 24M -d -a 2 -- "$best" "$out/$name.dump.part"
+  for part in "$out/$name.dump.part"*; do
+    parts=$(jq -c --arg f "$(basename -- "$part")" --argjson b "$(stat -c %s -- "$part")" \
+      --arg s "$(sha256_of "$part")" '. + [{file: $f, bytes: $b, sha256: $s}]' <<<"$parts")
+  done
+  rm -f -- "${candidates[@]}"
+
+  local counts
+  counts=$(sql "$REPLAY_DB" "select json_build_object(
+      'projects', (select count(*) from projects),
+      'issues', (select count(*) from issues),
+      'artifacts', (select count(*) from artifacts),
+      'artifact_versions', (select count(*) from artifact_versions),
+      'comments', (select count(*) from comments),
+      'asks', (select count(*) from asks),
+      'events', (select count(*) from events))")
+  jq -n --argjson migration "$migration" --slurpfile build "$binary.json" \
+    --arg pg "$("$PGBIN/postgres" --version)" --arg at "$(date -u +%FT%TZ)" \
+    --argjson seed_seconds "$seed_seconds" --argjson quiet "$QUIET_SECONDS" \
+    --arg chosen "$best_spec" --argjson candidates "$compression" \
+    --argjson bytes "$best_bytes" --arg sha "$dump_sha" --argjson parts "$parts" --argjson counts "$counts" \
+    --arg keys "$([ -z "$keys" ] || basename -- "$keys")" --slurpfile check "$check_file" \
+    '$build[0] as $b |
+     {migration: $migration, dispatch_commit: $b.dispatch_commit, dispatch_tree: $b.dispatch_tree,
+      dispatch_binary_sha256: $b.dispatch_binary_sha256, patch: $b.patch, patch_sha256: $b.patch_sha256,
+      go_version: $b.go_version, postgres_version: $pg, created_at: $at, seed_seconds: $seed_seconds,
+      quiet_wait_seconds: $quiet, compression: {chosen: $chosen, candidates: $candidates},
+      dump: {bytes: $bytes, sha256: $sha}, parts: $parts, counts: $counts,
+      keys_file: (if $keys == "" then null else $keys end), check: $check[0]}' >"$out/seed.meta.json"
+  note "replay seed done: $(jq '.parts | length' "$out/seed.meta.json") parts of $best_bytes bytes ($best_spec) in $out; $(jq -c .counts "$out/seed.meta.json")"
+}
+
+# ---- the LINUX replay's inputs and templates ---------------------------------------------------------
+
+# now_ns: the time now, UTC, to the nanosecond, so last_used_at orders prepared templates.
+now_ns() { date -u +%FT%T.%NZ; }
+
+# json_set FILE JQ_FILTER [jq args...]: rewrite a JSON file through a filter.
+json_set() {
+  local file=$1 filter=$2
+  shift 2
+  local tmp
+  tmp=$(mktemp "$file.XXXXXX")
+  jq "$@" "$filter" "$file" >"$tmp"
+  mv -f -- "$tmp" "$file"
+}
+
+cmd_replay_manifest() {
+  local usage="usage: stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] > MANIFEST"
+  local pack="" bundle="" seed_dir=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --bundle-pack | --bundle | --seed-dir)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value; $usage"; fi
+        case $1 in
+          --bundle-pack) pack=$2 ;;
+          --bundle) bundle=$2 ;;
+          --seed-dir) seed_dir=$2 ;;
+        esac
+        shift 2
+        ;;
+      *) die "unknown argument '$1'; $usage" ;;
+    esac
+  done
+  { [ -n "$pack" ] && [ -n "$bundle" ]; } || die "--bundle-pack and --bundle are required; $usage"
+  [ -f "$pack" ] || die "no replay-pack output at $pack"
+  [ -f "$bundle/$BUNDLE_META" ] || die "no $BUNDLE_META in $bundle"
+  local seed_args=(--argjson seed '[]')
+  if [ -n "$seed_dir" ]; then
+    [ -f "$seed_dir/seed.meta.json" ] || die "no seed.meta.json in $seed_dir"
+    seed_args=(--slurpfile seed "$seed_dir/seed.meta.json")
+  fi
+  # A part's slug is its file name lower-cased with every character outside [a-z0-9] a '-'; each is
+  # uploaded once, so its version is 1. The seed check's *_list fields are dropped: a passing check
+  # has none, and they would name production issues.
+  # shellcheck disable=SC2016
+  jq -n --arg issue "$REPLAY_ISSUE" --slurpfile pack "$pack" --slurpfile meta "$bundle/$BUNDLE_META" "${seed_args[@]}" '
+    def part: (.file | ascii_downcase | gsub("[^a-z0-9]"; "-")) as $s |
+      {file, slug: $s, ref: "dispatch://\($issue)/artifact/\($s)", version: 1, bytes, sha256};
+    $meta[0] as $m | $pack[0] as $p | $seed[0] as $s |
+    {schema: 1, project: $m.project, window: {from: $m.at, to: $m.until}, issue: $issue,
+     bundle: {tar_zst_sha256: $p.tar_zst_sha256, bytes: $p.bytes, fetched_at: $m.fetched_at,
+              counts: $m.counts, parts: [$p.parts[] | part]},
+     seed: (if $s == null then null else
+       {dump_sha256: $s.dump.sha256, bytes: $s.dump.bytes, compression: $s.compression.chosen,
+        migration: $s.migration, dispatch_commit: $s.dispatch_commit, dispatch_tree: $s.dispatch_tree,
+        patch: $s.patch, patch_sha256: $s.patch_sha256, go_version: $s.go_version,
+        postgres_version: $s.postgres_version, seed_seconds: $s.seed_seconds, keys_file: $s.keys_file,
+        counts: $s.counts, check: ($s.check | with_entries(select(.key | endswith("_list") | not))),
+        parts: [$s.parts[] | part]} end)}'
+}
+
+# replay_download OUT ISSUE SLUG VERSION: one version of a Dispatch file artifact into OUT, with
+# the caller's DISPATCH_URL and the bearer token in DISPATCH_TOKEN_FILE. stack.sh runs in the
+# caller's environment (only the stack processes start under env -i), and the token reaches curl on
+# its standard input, never on a command line or in this script's output.
+replay_download() {
+  [ -n "${DISPATCH_URL:-}" ] || die "DISPATCH_URL is not set: set it and DISPATCH_TOKEN_FILE to download the replay's parts, or pass --from-dir"
+  [ -r "${DISPATCH_TOKEN_FILE:-}" ] || die "DISPATCH_TOKEN_FILE does not name a readable file: set it to download the replay's parts, or pass --from-dir"
+  local token
+  token=$(<"$DISPATCH_TOKEN_FILE")
+  token=${token//[$'\r\n\t ']/}
+  note "downloading dispatch://$2/artifact/$3 version $4"
+  printf 'Authorization: Bearer %s\n' "$token" |
+    curl -q -fsSL --retry 3 --max-time 900 -H @- -o "$1" "${DISPATCH_URL%/}/api/v1/issues/$2/artifacts/$3/versions/$4"
+}
+
+# replay_fetch_part ENTRY ISSUE FROM_DIR: put a manifest part (its JSON) at $REPLAY_DIR/parts/<file>:
+# kept when its sha256 matches, else copied from FROM_DIR or downloaded, and refused, deleted, when
+# its sha256 differs from the manifest's.
+replay_fetch_part() {
+  local entry=$1 issue=$2 from_dir=$3 file slug version want
+  file=$(jq -er .file <<<"$entry")
+  slug=$(jq -er .slug <<<"$entry")
+  version=$(jq -er .version <<<"$entry")
+  want=$(jq -er .sha256 <<<"$entry")
+  [[ $file =~ ^[A-Za-z0-9._-]+$ ]] || die "the manifest's part file '$file' is not a plain file name"
+  local dst=$REPLAY_DIR/parts/$file
+  if [ -f "$dst" ] && [ "$(sha256_of "$dst")" = "$want" ]; then
+    note "part $file: kept (sha256 matches)"
+    return 0
+  fi
+  local tmp=$dst.tmp
+  rm -f -- "$tmp"
+  if [ -n "$from_dir" ]; then
+    [ -f "$from_dir/$file" ] || die "part $file: not in --from-dir $from_dir"
+    cp -- "$from_dir/$file" "$tmp"
+  elif ! replay_download "$tmp" "$issue" "$slug" "$version"; then
+    rm -f -- "$tmp"
+    die "part $file: the download of dispatch://$issue/artifact/$slug version $version failed"
+  fi
+  local got
+  got=$(sha256_of "$tmp")
+  if [ "$got" != "$want" ]; then
+    rm -f -- "$tmp" "$dst"
+    die "part $file: sha256 $got, the manifest says $want; deleted it"
+  fi
+  mv -f -- "$tmp" "$dst"
+  note "part $file: $(stat -c %s -- "$dst") bytes, sha256 matches"
+}
+
+# joined_sha256 FILE...: the sha256 of the files' concatenation.
+joined_sha256() { cat -- "$@" | sha256sum | cut -d' ' -f1; }
+
+# drop_prepared_templates: drop every prepared template (dispatch_replay_<16 hex>) and its record.
+drop_prepared_templates() {
+  local db
+  for db in $(sql postgres "select datname from pg_database where datname ~ '^dispatch_replay_[0-9a-f]{16}\$'"); do
+    sql postgres "drop database if exists $db" >/dev/null
+    note "dropped prepared template $db"
+  done
+  rm -f -- "$REPLAY_DIR"/prepared/*.json
+}
+
+# restore_replay_seed MANIFEST DUMP_PARTS...: restore the joined dump once into $REPLAY_SEED_DB and
+# write seed-restored.json; the same dump sha256 restored before is kept, another one drops the old
+# restore and every prepared template first.
+restore_replay_seed() {
+  local manifest=$1
+  shift
+  local restored=$REPLAY_DIR/seed-restored.json want
+  want=$(jq -er .seed.dump_sha256 "$manifest")
+  if [ -f "$restored" ] && [ "$(jq -r .seed_dump_sha256 "$restored")" = "$want" ] && db_exists "$REPLAY_SEED_DB"; then
+    note "seed dump $want is already restored into $REPLAY_SEED_DB; kept"
+    return 0
+  fi
+  if [ -f "$restored" ] || db_exists "$REPLAY_SEED_DB"; then
+    note "$REPLAY_SEED_DB holds another seed dump or an unfinished restore: dropping it and every prepared template"
+    drop_prepared_templates
+  fi
+  rm -f -- "$restored"
+  sql postgres "drop database if exists $REPLAY_SEED_DB" >/dev/null
+  sql postgres "create database $REPLAY_SEED_DB" >/dev/null
+  local dump=$ROOT/tmp/replay-seed.dump log=$LOGS/replay-restore.log started=$SECONDS
+  mkdir -p -- "$ROOT/tmp"
+  cat -- "$@" >"$dump"
+  note "pg_restore -j 2 of seed dump $want into $REPLAY_SEED_DB; log $log"
+  env -i "${base_env[@]}" "$(pg_tool pg_restore)" --no-owner --no-privileges -j 2 -h 127.0.0.1 \
+    -p "$(port postgres)" -U postgres -d "$REPLAY_SEED_DB" "$dump" >"$log" 2>&1 || {
+    rm -f -- "$dump"
+    tail -n 20 -- "$log" >&2 || true
+    die "pg_restore of the replay seed failed; see $log"
+  }
+  rm -f -- "$dump"
+  local seconds=$((SECONDS - started)) migration
+  migration=$(sql "$REPLAY_SEED_DB" 'select max(version) from schema_migrations')
+  [ "$migration" = "$(jq -r .seed.migration "$manifest")" ] ||
+    die "the restored replay seed is at migration $migration, the manifest says $(jq -r .seed.migration "$manifest")"
+  jq -n --arg sha "$want" --argjson migration "$migration" --argjson seconds "$seconds" \
+    --arg pg "$("$PGBIN/postgres" --version)" --arg at "$(date -u +%FT%TZ)" \
+    --argjson passed "$(jq '.seed.check.passed == true' "$manifest")" \
+    --arg commit "$(jq -r .seed.dispatch_commit "$manifest")" \
+    '{seed_dump_sha256: $sha, migration: $migration, restore_seconds: $seconds, postgres_version: $pg,
+      restored_at: $at, check_passed: $passed, dispatch_commit: $commit}' >"$restored"
+  note "restored the replay seed into $REPLAY_SEED_DB in $seconds s (migration $migration)"
+}
+
+cmd_replay_get() {
+  local usage="usage: stack.sh replay-get [--manifest FILE] [--from-dir DIR]"
+  local manifest=$REPLAY_MANIFEST from_dir=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --manifest | --from-dir)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value; $usage"; fi
+        case $1 in
+          --manifest) manifest=$2 ;;
+          --from-dir) from_dir=$2 ;;
+        esac
+        shift 2
+        ;;
+      *) die "unknown argument '$1'; $usage" ;;
+    esac
+  done
+  [ -f "$manifest" ] || die "no replay manifest at $manifest"
+  [ "$(jq -r .schema "$manifest")" = 1 ] || die "$manifest is not a schema 1 replay manifest"
+  [ -z "$from_dir" ] || [ -d "$from_dir" ] || die "--from-dir $from_dir is not a directory"
+  need_stack
+  [ -x "$BIN/loadgen" ] || die "no $BIN/loadgen; run stack.sh setup first"
+  local has_seed
+  has_seed=$(jq '.seed != null' "$manifest")
+  if [ "$has_seed" = true ]; then
+    running postgres || die "Postgres is not running; stack.sh start first (replay-get restores the seed into it)"
+  fi
+  local issue entry started=$SECONDS
+  issue=$(jq -er .issue "$manifest")
+  mkdir -p -- "$REPLAY_DIR/parts"
+
+  local bundle_parts=()
+  while IFS= read -r entry; do
+    replay_fetch_part "$entry" "$issue" "$from_dir"
+    bundle_parts+=("$REPLAY_DIR/parts/$(jq -r .file <<<"$entry")")
+  done < <(jq -c '.bundle.parts[]' "$manifest")
+  ((${#bundle_parts[@]} > 0)) || die "$manifest lists no bundle parts"
+  local want got
+  want=$(jq -er .bundle.tar_zst_sha256 "$manifest")
+  got=$(joined_sha256 "${bundle_parts[@]}")
+  [ "$got" = "$want" ] || die "the joined bundle parts' sha256 is $got, the manifest's tar_zst_sha256 $want"
+  # bundle.unpacked.json names the joined parts the bundle came from and its bundle.meta.json, so
+  # the same parts over an untouched bundle are not unpacked again.
+  local bundle=$REPLAY_DIR/bundle marker=$REPLAY_DIR/bundle.unpacked.json
+  if [ -f "$marker" ] && [ "$(jq -r .tar_zst_sha256 "$marker")" = "$want" ] && [ -f "$bundle/$BUNDLE_META" ] &&
+    [ "$(jq -r .bundle_meta_sha256 "$marker")" = "$(sha256_of "$bundle/$BUNDLE_META")" ]; then
+    note "bundle at $bundle is already unpacked from these parts; kept"
+  else
+    rm -f -- "$marker"
+    rm -rf -- "$bundle.tmp"
+    note "unpacking the bundle into $bundle"
+    loadgen replay-unpack -out "$bundle.tmp" "${bundle_parts[@]}"
+    rm -rf -- "$bundle"
+    mv -- "$bundle.tmp" "$bundle"
+    jq -n --arg tar "$want" --arg meta "$(sha256_of "$bundle/$BUNDLE_META")" \
+      '{tar_zst_sha256: $tar, bundle_meta_sha256: $meta}' >"$marker"
+  fi
+  local verified
+  verified=$(loadgen replay-verify-bundle -dir "$bundle") || die "the bundle at $bundle does not verify (above)"
+  note "bundle verified: $verified"
+
+  if [ "$has_seed" != true ]; then
+    note "the manifest names no seed (seed is null): nothing restored"
+    note "replay-get done in $((SECONDS - started)) s"
+    return 0
+  fi
+  local seed_parts=()
+  while IFS= read -r entry; do
+    replay_fetch_part "$entry" "$issue" "$from_dir"
+    seed_parts+=("$REPLAY_DIR/parts/$(jq -r .file <<<"$entry")")
+  done < <(jq -c '.seed.parts[]' "$manifest")
+  ((${#seed_parts[@]} > 0)) || die "$manifest lists no seed parts"
+  want=$(jq -er .seed.dump_sha256 "$manifest")
+  got=$(joined_sha256 "${seed_parts[@]}")
+  [ "$got" = "$want" ] || die "the joined seed parts' sha256 is $got, the manifest's dump_sha256 $want"
+  restore_replay_seed "$manifest" "${seed_parts[@]}"
+  note "replay-get done in $((SECONDS - started)) s"
+}
+
+# build_key: the first 16 hex of bin/envoy-dispatch.json's dispatch_binary_sha256, the build's
+# prepared template key. Sets BUILD_COMMIT and BUILD_MIGRATION too.
+build_key() {
+  local build=$BIN/envoy-dispatch.json sha
+  [ -f "$build" ] || die "no $build; run stack.sh setup first"
+  sha=$(jq -er .dispatch_binary_sha256 "$build")
+  BUILD_KEY=${sha:0:16}
+  [[ $BUILD_KEY =~ ^[0-9a-f]{16}$ ]] || die "$build's dispatch_binary_sha256 '$sha' is not a sha256"
+  BUILD_COMMIT=$(jq -r .dispatch_commit "$build")
+  BUILD_MIGRATION=$(jq -er .newest_migration "$build")
+}
+
+# touch_prepared RECORD: refresh a prepared template's last_used_at.
+# shellcheck disable=SC2016
+touch_prepared() { json_set "$1" '.last_used_at = $t' --arg t "$(now_ns)"; }
+
+# prune_prepared: keep the REPLAY_KEEP most recently used prepared templates; drop the rest, each
+# database with its record.
+prune_prepared() {
+  local files=() f i db
+  mapfile -t files < <(for f in "$REPLAY_DIR"/prepared/*.json; do
+    [ -e "$f" ] && printf '%s\t%s\n' "$(jq -r .last_used_at "$f")" "$f"
+  done | sort -r | cut -f2)
+  for ((i = REPLAY_KEEP; i < ${#files[@]}; i++)); do
+    f=${files[i]}
+    db=dispatch_replay_$(basename -- "$f" .json)
+    sql postgres "drop database if exists $db" >/dev/null
+    rm -f -- "$f"
+    note "dropped the least recently used prepared template $db"
+  done
+}
+
+cmd_replay_prepare() {
+  [ $# -eq 0 ] || die "usage: stack.sh replay-prepare"
+  need_stack
+  running postgres || die "Postgres is not running; stack.sh start first"
+  build_key
+  local restored=$REPLAY_DIR/seed-restored.json
+  { [ -f "$restored" ] && db_exists "$REPLAY_SEED_DB"; } ||
+    die "no restored replay seed (database $REPLAY_SEED_DB and $restored); run stack.sh replay-get first"
+  local seed_migration seed_sha
+  seed_migration=$(jq -er .migration "$restored")
+  seed_sha=$(jq -er .seed_dump_sha256 "$restored")
+  ((BUILD_MIGRATION >= seed_migration)) ||
+    die "this build (envoy-dispatch from $BUILD_COMMIT) has newest migration $BUILD_MIGRATION, older than the replay seed's $seed_migration; build a newer Dispatch (LOADTEST_DISPATCH_COMMIT=<rev> stack.sh setup)"
+  [ "$(jq -r .check_passed "$restored")" = true ] ||
+    die "the restored replay seed's check did not pass (the manifest's seed.check.passed is not true); refusing to prepare it"
+  local db=dispatch_replay_$BUILD_KEY rec=$REPLAY_DIR/prepared/$BUILD_KEY.json
+  if [ -f "$rec" ] && db_exists "$db" && [ "$(jq -r .seed_dump_sha256 "$rec")" = "$seed_sha" ]; then
+    touch_prepared "$rec"
+    note "prepared template $db for this build (envoy-dispatch from $BUILD_COMMIT) exists; reused"
+    return 0
+  fi
+  local p
+  for p in nats listener; do [ -x "$(binary_of "$p")" ] || die "no $(binary_of "$p"); run stack.sh setup first"; done
+  local started=$SECONDS log=$LOGS/dispatch-replay-prepare-$BUILD_KEY.log
+  mkdir -p -- "$REPLAY_DIR/prepared"
+  rm -f -- "$rec"
+  stop_one dispatch
+  stop_one listener
+  sql postgres "drop database if exists $db" >/dev/null
+  sql postgres "create database $db template $REPLAY_SEED_DB" >/dev/null
+  stop_one nats
+  start_nats
+  start_listener
+  trap 'stop_one dispatch' EXIT
+  # Dispatch migrates the copy forward before it serves /healthz; the template is not measured, so
+  # Dispatch reaches Postgres directly.
+  note "preparing $db: envoy-dispatch from $BUILD_COMMIT (migration $BUILD_MIGRATION) on the seed (migration $seed_migration); log $log"
+  LOADTEST_PG_DIRECT=1 start_dispatch "$log" "$BIN/envoy-dispatch" "$db" 1800
+  local backfill_started=$SECONDS
+  if has_table "$db" document_block_versions && has_table "$db" block_grammar_owed; then
+    note "waiting for Dispatch's block-index backfill in $db (at most 3600 s)"
+    local deadline=$((SECONDS + 3600)) logged=$SECONDS pending
+    while :; do
+      pending=$(sql "$db" 'select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)')
+      [ "$pending" = 0 ] && break
+      running dispatch || die "Dispatch exited while the block index still owed $pending entries; see $log"
+      ((SECONDS < deadline)) || die "Dispatch still owes $pending block-index entries after 3600 s; see $log"
+      if ((SECONDS - logged >= 30)); then
+        note "block-index backfill: $pending entries owed after $((SECONDS - backfill_started)) s"
+        logged=$SECONDS
+      fi
+      sleep 2
+    done
+  fi
+  local backfill_seconds=$((SECONDS - backfill_started))
+  note "block-index backfill done after $backfill_seconds s"
+  wait_quiet "$db" "$log"
+  stop_one dispatch
+  trap - EXIT
+  note "vacuum analyze $db"
+  sql "$db" 'vacuum analyze' >/dev/null
+  local migration_after at
+  migration_after=$(sql "$db" 'select max(version) from schema_migrations')
+  at=$(now_ns)
+  jq -n --arg key "$BUILD_KEY" --arg commit "$BUILD_COMMIT" \
+    --arg binary_sha "$(jq -r .dispatch_binary_sha256 "$BIN/envoy-dispatch.json")" --arg seed "$seed_sha" \
+    --argjson before "$seed_migration" --argjson after "$migration_after" \
+    --argjson seconds "$((SECONDS - started))" --argjson backfill "$backfill_seconds" \
+    --argjson quiet "$QUIET_SECONDS" --arg at "$at" \
+    '{key: $key, dispatch_commit: $commit, dispatch_binary_sha256: $binary_sha, seed_dump_sha256: $seed,
+      migration_before: $before, migration_after: $after, prepare_seconds: $seconds,
+      backfill_wait_seconds: $backfill, quiet_wait_seconds: $quiet, created_at: $at, last_used_at: $at}' >"$rec"
+  note "prepared template $db in $((SECONDS - started)) s: $(jq -c . "$rec")"
+  prune_prepared
+}
+
+# block_index_owed DB: the block-index entries Dispatch owes in DB (document_block_versions with a
+# null version and block_grammar_owed), 0 when the tables do not exist.
+block_index_owed() {
+  local n=0
+  if has_table "$1" document_block_versions; then
+    n=$((n + $(sql "$1" 'select count(*) from document_block_versions where version is null')))
+  fi
+  if has_table "$1" block_grammar_owed; then
+    n=$((n + $(sql "$1" 'select count(*) from block_grammar_owed')))
+  fi
+  printf '%s\n' "$n"
+}
+
+cmd_reset_replay() {
+  local log=${1:-$LOGS/dispatch.log}
+  need_stack
+  running postgres || die "Postgres is not running; stack.sh start first"
+  build_key
+  local db=dispatch_replay_$BUILD_KEY rec=$REPLAY_DIR/prepared/$BUILD_KEY.json restored=$REPLAY_DIR/seed-restored.json
+  { [ -f "$rec" ] && db_exists "$db"; } ||
+    die "no prepared replay template for this build (envoy-dispatch from $BUILD_COMMIT, key $BUILD_KEY); run stack.sh replay-prepare"
+  local seed_sha
+  seed_sha=$(jq -r .seed_dump_sha256 "$rec")
+  { [ -f "$restored" ] && [ "$(jq -r .seed_dump_sha256 "$restored")" = "$seed_sha" ]; } ||
+    die "prepared template $db was made from seed dump $seed_sha, not the restored one; run stack.sh replay-prepare"
+  local last=$REPLAY_DIR/last-reset.json
+  rm -f -- "$last"
+  stop_one dispatch
+  stop_one listener
+  sql postgres 'drop database if exists dispatch' >/dev/null
+  sql postgres "create database dispatch template $db" >/dev/null
+  local checksum owed migration
+  checksum=$(loadgen replay-checksum -db dispatch) || die "loadgen replay-checksum -db dispatch failed"
+  owed=$(block_index_owed dispatch)
+  migration=$(sql dispatch 'select max(version) from schema_migrations')
+  touch_prepared "$rec"
+  jq -n --arg template "$db" --arg key "$BUILD_KEY" --arg seed "$seed_sha" --argjson checksum "$checksum" \
+    --argjson migration "$migration" --slurpfile prepared "$rec" --argjson empty "$([ "$owed" = 0 ] && echo true || echo false)" \
+    --arg at "$(date -u +%FT%TZ)" \
+    '{template: $template, key: $key, seed_dump_sha256: $seed, checksum: $checksum, migration: $migration,
+      prepared: $prepared[0], backfill_empty: $empty, reset_at: $at}' >"$last"
+  note "database dispatch from $db: checksum $(jq -c .checksum "$last"), block index owes $owed"
   stop_one nats
   start_nats
   start_listener
@@ -593,7 +1438,7 @@ cmd_status() {
 }
 
 case ${1:-} in
-  setup | start | seed | reset | stop) lock_root "$ROOT" ;;
+  setup | start | seed | reset | stop | replay-seed-patch-check | replay-seed | replay-get | replay-prepare) lock_root "$ROOT" ;;
 esac
 case ${1:-} in
   setup) cmd_setup ;;
@@ -601,6 +1446,11 @@ case ${1:-} in
   seed) cmd_seed "${@:2}" ;;
   reset) cmd_reset "${@:2}" ;;
   stop) cmd_stop "${@:2}" ;;
+  replay-seed-patch-check) cmd_replay_seed_patch_check "${@:2}" ;;
+  replay-seed) cmd_replay_seed "${@:2}" ;;
+  replay-manifest) cmd_replay_manifest "${@:2}" ;;
+  replay-get) cmd_replay_get "${@:2}" ;;
+  replay-prepare) cmd_replay_prepare "${@:2}" ;;
   status) cmd_status ;;
   build-info) cmd_build_info ;;
   loadgen) loadgen "${@:2}" ;;

@@ -301,23 +301,23 @@ func TestCodepathsOutageBuckets(t *testing.T) {
 	o := outageTable(buckets, "test", cf, 0, 11.1, 13.8, 13.8, ws, wsSource)
 	// 23:00 is minutes 5-14 without the null minute 7: mean (5+6+8+...+14)/9, max 14.
 	b := o.Buckets[0]
-	if mean := (95.0 - 7) / 9; b.ReplayMinutes != 9 || !near(b.ReplayCoresMean, mean) || !near(b.ReplayCoresMax, 14) || !near(b.ReplayWSGiBMean, mean) || !near(b.ReplayWSGiBMax, 14) {
+	if mean := (95.0 - 7) / 9; b.ReplayMinutes != 9 || !nearPtr(b.ReplayCoresMean, mean) || !nearPtr(b.ReplayCoresMax, 14) || !nearPtr(b.ReplayWSGiBMean, mean) || !nearPtr(b.ReplayWSGiBMax, 14) {
 		t.Errorf("23:00: %+v; want 9 minutes, mean %v, max 14", b, mean)
 	}
 	// 23:30 is minutes 35-44, of which 35-39 exist.
 	b = o.Buckets[3]
-	if b.ReplayMinutes != 5 || !near(b.ReplayCoresMean, 37) || !near(b.ReplayCoresMax, 39) || b.OutageCoresMean != 13.79 {
+	if b.ReplayMinutes != 5 || !nearPtr(b.ReplayCoresMean, 37) || !nearPtr(b.ReplayCoresMax, 39) || b.OutageCoresMean != 13.79 {
 		t.Errorf("23:30: %+v; want 5 minutes, mean 37, max 39 beside 13.79", b)
 	}
-	if !near(o.ReplayCores, 12) || !near(o.ResidualCoresLow, -0.9) || !near(o.ResidualCoresHigh, 1.8) || !near(o.ReplayMemoryGiB, 39) || !near(o.ResidualMemoryGiB, 13.8-39) {
+	if !nearPtr(o.ReplayCores, 12) || !nearPtr(o.ResidualCoresLow, -0.9) || !nearPtr(o.ResidualCoresHigh, 1.8) || !nearPtr(o.ReplayMemoryGiB, 39) || !nearPtr(o.ResidualMemoryGiB, 13.8-39) {
 		t.Errorf("totals: cores %v, residual %v to %v, memory %v, residual %v", deref(o.ReplayCores), deref(o.ResidualCoresLow), deref(o.ResidualCoresHigh), deref(o.ReplayMemoryGiB), deref(o.ResidualMemoryGiB))
 	}
 	// A window starting at 23:00 puts the 23:00 bucket at its minutes 0-9, and 23:30 past its end.
 	o = outageTable(buckets, "test", cf, 5, 11.1, 13.8, 13.8, ws, wsSource)
-	if b := o.Buckets[0]; b.ReplayMinutes != 9 || !near(b.ReplayCoresMean, (45.0-7)/9) {
+	if b := o.Buckets[0]; b.ReplayMinutes != 9 || !nearPtr(b.ReplayCoresMean, (45.0-7)/9) {
 		t.Errorf("23:00 at window offset 5: %+v", b)
 	}
-	if b := o.Buckets[3]; b.ReplayMinutes != 10 || !near(b.ReplayCoresMean, 34.5) {
+	if b := o.Buckets[3]; b.ReplayMinutes != 10 || !nearPtr(b.ReplayCoresMean, 34.5) {
 		t.Errorf("23:30 at window offset 5: %+v, want minutes 30-39", b)
 	}
 	o = outageTable(buckets, "test", cf, 40, 11.1, 13.8, 13.8, ws, wsSource)

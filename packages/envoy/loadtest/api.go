@@ -63,16 +63,21 @@ func (r callResult) arrival() int64 {
 	return r.start
 }
 
-// call sends one request and reads the whole response.
+// call sends one request with a JSON body (none when body is nil) and reads the whole response.
 func (a *api) call(ctx context.Context, method, path string, w who, body any) callResult {
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return callResult{err: err}
-		}
-		payload = b
+	if body == nil {
+		return a.callRaw(ctx, method, path, w, "", nil)
 	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return callResult{err: err}
+	}
+	return a.callRaw(ctx, method, path, w, "application/json", payload)
+}
+
+// callRaw sends one request whose body is payload under contentType (a multipart upload, say);
+// a nil payload sends no body and no Content-Type.
+func (a *api) callRaw(ctx context.Context, method, path string, w who, contentType string, payload []byte) callResult {
 	var getConn, gotConn, wrote atomic.Int64
 	trace := &httptrace.ClientTrace{
 		GetConn: func(string) { getConn.Store(time.Now().UnixNano()) },
@@ -92,8 +97,8 @@ func (a *api) call(ctx context.Context, method, path string, w who, body any) ca
 		return callResult{err: err}
 	}
 	req.Header.Set("Accept", "application/json")
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if payload != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	if w.person != "" {
 		req.Header.Set("X-Dispatch-User", w.person)

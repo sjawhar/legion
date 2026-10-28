@@ -28,6 +28,12 @@ import (
 // timeout. A request the cap refuses is counted as dropped, never sent.
 const maxRequestsInFlight = 25000
 
+// The request sources: the route mix (runRequests) or a replay bundle's logged writes (runReplay).
+const (
+	sourceRequests = "requests"
+	sourceReplay   = "replay"
+)
+
 type runConfig struct {
 	ep           endpoints
 	allowForeign bool
@@ -56,6 +62,9 @@ type runConfig struct {
 	// copyMeta is the -copy-meta file's JSON object, which meta.json records under copy; nil
 	// without the flag.
 	copyMeta json.RawMessage
+	// source is the request source; replay is the replay's plan and roster under -source replay.
+	source string
+	replay *replaySetup
 }
 
 func runLoad(args []string) error {
@@ -81,6 +90,8 @@ func runLoad(args []string) error {
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
 	copyMetaPath := fs.String("copy-meta", "", "JSON object file that describes the copy a foreign run measures, recorded verbatim in meta.json under copy")
+	source := fs.String("source", sourceRequests, "request source: "+sourceRequests+" (the route mix) or "+sourceReplay+" (a replay bundle's logged writes, replay_source.go)")
+	rf := registerReplayFlags(fs)
 	_ = fs.Parse(args)
 
 	// Every input is validated before the first connection.
@@ -100,12 +111,28 @@ func runLoad(args []string) error {
 	if err != nil {
 		return err
 	}
+	replay := *source == sourceReplay
+	if !replay && *source != sourceRequests {
+		return fmt.Errorf("-source must be %s or %s, not %q", sourceRequests, sourceReplay, *source)
+	}
+	var replayOnly []string
+	fs.Visit(func(f *flag.Flag) {
+		if strings.HasPrefix(f.Name, "replay-") {
+			replayOnly = append(replayOnly, "-"+f.Name)
+		}
+	})
 	switch {
 	case *events < 0 || !finite(*events):
 		return fmt.Errorf("-events is required and must be 0 or more")
 	case *requests < 0 || !finite(*requests):
 		return fmt.Errorf("-requests is required and must be 0 or more")
-	case *sessions < 1:
+	case replay && (*events != 0 || *requests != 0):
+		return fmt.Errorf("-source replay sends the replay alone: -events 0 and -requests 0 are required")
+	case replay && *sessions != -1:
+		return fmt.Errorf("-sessions does not apply to -source replay: -replay-roster sets the sessions")
+	case !replay && len(replayOnly) > 0:
+		return fmt.Errorf("%s applies only to -source replay", strings.Join(replayOnly, ", "))
+	case !replay && *sessions < 1:
 		return fmt.Errorf("-sessions is required and must be at least 1")
 	case *human < 0 || *human > 1 || !finite(*human):
 		return fmt.Errorf("-human must be between 0 and 1")
@@ -127,19 +154,36 @@ func runLoad(args []string) error {
 			return err
 		}
 	}
-	if *seedPath == "" {
-		*seedPath = filepath.Join(loadtestRoot(), "seed.json")
-	}
-	sf, err := readSeed(*seedPath)
-	if err != nil {
-		return err
-	}
-	for _, is := range sf.Issues {
-		if mix.Weights[kindReply] > 0 && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
-			return fmt.Errorf("seed %s: issue %s has no root comment ids for replies; reseed with this loadgen", *seedPath, is.Key)
+	var sf seedFile
+	var rs *replaySetup
+	if replay {
+		// The window is the sub-window; the roster is the sessions; seed.json is not read.
+		o, err := rf.options(*rngSeed)
+		if err != nil {
+			return err
 		}
-		if mix.Weights[kindAnchored] > 0 && len(is.Quotes) == 0 {
-			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
+		if rs, err = newReplaySetup(o); err != nil {
+			return err
+		}
+		*duration = o.to - o.from
+		*sessions = len(rs.roster)
+		if *sse < 0 {
+			*sse = 2
+		}
+	} else {
+		if *seedPath == "" {
+			*seedPath = filepath.Join(loadtestRoot(), "seed.json")
+		}
+		if sf, err = readSeed(*seedPath); err != nil {
+			return err
+		}
+		for _, is := range sf.Issues {
+			if mix.Weights[kindReply] > 0 && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
+				return fmt.Errorf("seed %s: issue %s has no root comment ids for replies; reseed with this loadgen", *seedPath, is.Key)
+			}
+			if mix.Weights[kindAnchored] > 0 && len(is.Quotes) == 0 {
+				return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
+			}
 		}
 	}
 	if *sse < 0 {
@@ -157,7 +201,7 @@ func runLoad(args []string) error {
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
-		copyMeta: copyMeta,
+		copyMeta: copyMeta, source: *source, replay: rs,
 	}, sf)
 }
 
@@ -235,6 +279,8 @@ type summaryConfig struct {
 	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
 	// and the run counts only the commit rows that carry it.
 	MarkerNonce string `json:"marker_nonce"`
+	// Source is the request source: requests or replay.
+	Source string `json:"source,omitempty"`
 }
 
 type sessionsSummary struct {
@@ -258,6 +304,8 @@ type summary struct {
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
+	// Replay is the replay's record under -source replay (replay_record.go).
+	Replay *replayRecord `json:"replay,omitempty"`
 }
 
 type metaFile struct {
@@ -292,6 +340,8 @@ type metaFile struct {
 	PGClock *pgClocks `json:"pg_clock,omitempty"`
 	// Copy is the -copy-meta file's JSON object, verbatim; absent without the flag.
 	Copy json.RawMessage `json:"copy,omitempty"`
+	// Replay is the replay's inputs, build and heap-profile times under -source replay.
+	Replay *replayMetaRecord `json:"replay,omitempty"`
 }
 
 func execute(cfg runConfig, sf seedFile) error {
@@ -304,8 +354,8 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.source, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -316,6 +366,12 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	logSamplerStart(lg, cfg.ep)
 	st := newStep(cfg, sf, lg, nonce)
+	if cfg.replay != nil {
+		if err := st.prepareReplay(ctx); err != nil {
+			return err
+		}
+		meta.Replay = &st.replay.meta
+	}
 
 	ns, err := st.subscribeSessions()
 	defer ns.close()
@@ -333,7 +389,13 @@ func execute(cfg runConfig, sf seedFile) error {
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
 	sse := st.startSSE(ctx)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
-	reqs, requestsDone := st.runRequests(ctx, a)
+	var reqs *requestLoad
+	var requestsDone <-chan struct{}
+	if cfg.replay != nil {
+		reqs, requestsDone = st.runReplay(ctx, a)
+	} else {
+		reqs, requestsDone = st.runRequests(ctx, a)
+	}
 	pr := st.startProbes(ctx)
 
 	<-eventsDone
@@ -378,11 +440,16 @@ type step struct {
 	watchers [][]int   // by issue, the sessions that watch it
 	// start is when the generators start; the window runs from winStart to winEnd.
 	start, winStart, winEnd time.Time
+	// replay is the replay's run state under -source replay.
+	replay *replayRun
 }
 
 // newStep lays out the sessions: session i works on issue i (mod the issues in use) and watches
 // four others, so it comments on other sessions' documents. The seed routed issue i to session i.
 func newStep(cfg runConfig, sf seedFile, lg *log.Logger, nonce int64) *step {
+	if cfg.replay != nil {
+		return newReplayStep(cfg, lg, nonce)
+	}
 	st := &step{cfg: cfg, sf: sf, lg: lg, nonce: nonce, active: min(cfg.sessions, len(sf.Issues)),
 		sessions: make([]session, cfg.sessions), watchers: make([][]int, len(sf.Issues))}
 	for i := range st.sessions {
@@ -578,7 +645,8 @@ func (p *probes) wait() {
 func (p *probes) waitSampler() { <-p.smpDone }
 
 // profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
-// dump and the heap profile are taken once it has finished, outside it.
+// dump and the heap profile are taken once it has finished, outside it, and under -source replay
+// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read).
 func (st *step) profile(ctx context.Context) {
 	if !sleepUntil(ctx, st.winStart) {
 		return
@@ -586,6 +654,13 @@ func (st *step) profile(ctx context.Context) {
 	pprof, out := st.cfg.ep.pprof, st.cfg.out
 	secs := int(math.Ceil(st.cfg.duration.Seconds()))
 	fetchTo(pprof+"/debug/pprof/profile?seconds="+strconv.Itoa(secs), filepath.Join(out, "cpu.pprof"), st.cfg.duration+60*time.Second, st.lg)
+	if st.replay != nil {
+		select {
+		case <-st.replay.endRead:
+		case <-ctx.Done():
+			return
+		}
+	}
 	fetchTo(pprof+"/debug/pprof/goroutine?debug=2", filepath.Join(out, "goroutines.txt"), 120*time.Second, st.lg)
 	fetchTo(pprof+"/debug/pprof/heap", filepath.Join(out, "heap.pprof"), 60*time.Second, st.lg)
 	fetchTo(pprof+"/debug/pprof/heap?debug=1", filepath.Join(out, "heap.txt"), 60*time.Second, st.lg)
@@ -618,7 +693,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
 			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
-			MarkerNonce: formatNonce(st.nonce),
+			MarkerNonce: formatNonce(st.nonce), Source: cfg.source,
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
 		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
@@ -649,6 +724,9 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		}
 	}
 	sum.StackExits = pr.smp.stackExits()
+	if st.replay != nil {
+		sum.Replay = st.replay.record(ss, durS)
+	}
 	return sum
 }
 
