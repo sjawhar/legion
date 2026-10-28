@@ -242,13 +242,12 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // Two pushes of the same two heads, and a push of another path not yet delivered, look the same,
 // so this is open for a design that tells them apart.
 //
-// A head run a lost push, or a move made again, opened can stay open with no end. The run bounds
+// A head run that a lost push or a move made again opened can stay open with no end. The run bounds
 // its pushes counting from its anchor head (boundedPushes in ApplyPush), and from there no later
 // push lies on the path forward, since the missing link is the first. When heads follow with no
 // other steps between them, after 16 heads the oldest of their pushes go, those heads replay
-// unchained, and the run stays at maxRunSteps steps for good. In the probe that found it, a
-// settlement at each head closed the run after 17 heads with the judgement unchanged, so the
-// impact found was small.
+// unchained, and the run stays at maxRunSteps steps for good. With a settlement at each head the
+// run closed after 17 heads with the judgement unchanged, so the impact found was small.
 func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival bool) []record.ClassifiedPush {
 	made := map[record.Move]bool{}
 	for _, m := range moves {
