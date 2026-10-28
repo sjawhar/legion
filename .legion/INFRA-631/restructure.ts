@@ -281,8 +281,9 @@ const MIGRATION_NOTE = {
   until: "### Pre-deploy census",
   /**
    * The highest migration the notes describe on main. A constant, not read from the input, so a
-   * port from an older base and main write the same sentence; a log naming a higher number is
-   * reported (--strict fails: raise this; --lenient warns: move that note into its `.up.sql`).
+   * port from an older base and main write the same sentence. Each note the log holds for a
+   * migration above it, or for a migration whose number main gave another name (MAIN_MIGRATIONS),
+   * is reported (--strict fails: raise this; --lenient warns: move each note into its `.up.sql`).
    */
   through: "0134",
   text: (through: string) => [
@@ -291,6 +292,147 @@ const MIGRATION_NOTE = {
   ],
   reason: "20 of 55 residual conflict hunks were two pull requests appending a note here",
 };
+
+/**
+ * The migrations main holds through `MIGRATION_NOTE.through`, by file name. A note naming a migration
+ * of one of these numbers by another name describes a branch migration whose number main took.
+ */
+const MAIN_MIGRATIONS: readonly string[] = [
+  "0001_init",
+  "0002_ask_custom",
+  "0003_events_unpublished_all",
+  "0004_events_backfill_published",
+  "0005_repo_projects",
+  "0006_ask_threads",
+  "0007_ask_resolution",
+  "0008_legacy_documents",
+  "0009_project_artifacts",
+  "0010_search",
+  "0011_comment_threads",
+  "0012_ask_edits",
+  "0013_message_reply_to",
+  "0014_artifact_reviews",
+  "0015_issue_rank",
+  "0016_message_delivery",
+  "0017_agent_tokens",
+  "0018_ask_blocks",
+  "0019_ask_search_options",
+  "0020_outbox_retry",
+  "0021_project_events",
+  "0022_action_asks",
+  "0023_anchor_blocks",
+  "0024_issue_priority",
+  "0025_open_asks_author",
+  "0026_agent_activity",
+  "0027_agent_messages",
+  "0028_comment_turn",
+  "0029_ask_followers",
+  "0030_events_ask_payload_id",
+  "0031_ask_options_array",
+  "0032_refs_provenance",
+  "0033_user_agent_state",
+  "0034_issue_assignee",
+  "0035_drop_action_asks",
+  "0036_architecture_sources",
+  "0037_architecture_projection",
+  "0038_issue_components",
+  "0039_comment_mentions",
+  "0040_comment_query_indexes",
+  "0041_document_update_classes",
+  "0042_user_issue_state_seq",
+  "0043_comment_reply_ask_id",
+  "0044_comment_reply_ask_id_redo",
+  "0045_issue_claim",
+  "0046_delivery_attempt_claims",
+  "0047_delivery_duplicate",
+  "0048_user_ask_snooze",
+  "0049_issue_rank_c_collation",
+  "0050_broadcasts",
+  "0051_user_agent_read",
+  "0052_broadcast_recipient_order",
+  "0053_asks_approval_kind_check",
+  "0054_message_delivery_acceptance",
+  "0055_broadcast_idempotency_keys",
+  "0056_search_text",
+  "0057_issues_search_trigger",
+  "0058_artifact_versions_search_trigger",
+  "0059_comments_search_trigger",
+  "0060_asks_search_trigger",
+  "0061_messages_search_trigger",
+  "0062_search_reindex",
+  "0063_doc_settlements_pending",
+  "0064_asks_approval_requested_version",
+  "0065_comments_created_at_insert_time",
+  "0066_asks_handed_back_reply_fkey",
+  "0067_user_agent_reply_read",
+  "0068_people",
+  "0069_issue_task_progress",
+  "0070_write_suggestions",
+  "0071_agent_artifacts",
+  "0072_embeddings_core",
+  "0073_issues_embeddings_trigger",
+  "0074_artifact_versions_embeddings_trigger",
+  "0075_comments_embeddings_trigger",
+  "0076_asks_embeddings_trigger",
+  "0077_messages_embeddings_trigger",
+  "0078_embeddings_rate_limit",
+  "0079_delivery_settings",
+  "0080_delivery_pull_requests",
+  "0081_delivery_runs",
+  "0082_answers_by_person",
+  "0083_delivery_reconcile_progress",
+  "0084_doc_pending_authors",
+  "0085_delivery_attribution_inputs",
+  "0086_delivery_run_branch_event",
+  "0087_search_vector_bound",
+  "0088_issues_title_lexemes",
+  "0089_issues_title_lexemes_backfill",
+  "0090_delivery_pipeline_jobs",
+  "0091_artifacts_project_documents",
+  "0092_refs_excerpts",
+  "0093_delivery_session_groups",
+  "0094_issue_links",
+  "0095_user_threads",
+  "0096_user_threads_asks_trigger",
+  "0097_user_threads_messages_trigger",
+  "0098_user_threads_seed",
+  "0099_user_threads_catch_up",
+  "0100_delivery_changes",
+  "0101_delivery_pull_requests_changes",
+  "0102_delivery_runs_changes",
+  "0103_delivery_run_jobs_changes",
+  "0104_delivery_session_groups_changes",
+  "0105_delivery_session_group_members_changes",
+  "0106_delivery_settings_changes",
+  "0107_events_notify",
+  "0108_delivery_run_created_at",
+  "0109_delivery_production_job_names",
+  "0110_delivery_run_job_apply_step",
+  "0111_delivery_drop_production_job_name",
+  "0112_people_sub",
+  "0113_repo_projects_default_and_issue_repo",
+  "0114_delivery_deployed_event",
+  "0115_duty_passes",
+  "0116_project_default_assignee",
+  "0117_architecture_sources_per_repo",
+  "0118_embeddings_pending_since",
+  "0119_drop_embeddings_backfill_progress",
+  "0120_artifact_reviews_event_seq",
+  "0121_block_graph",
+  "0122_artifact_versions_block_index_trigger",
+  "0123_comments_block_grammar_trigger",
+  "0124_asks_block_grammar_trigger",
+  "0125_messages_block_grammar_trigger",
+  "0126_block_grammar_seed",
+  "0127_asks_block_id_key",
+  "0128_comments_anchor_block_id_key",
+  "0129_document_edit_notices",
+  "0130_comments_written_version",
+  "0131_asks_written_version",
+  "0132_component_facts",
+  "0133_comments_written_version_backfill",
+  "0134_asks_written_version_backfill",
+];
 
 /** Step 5. The layout instruction, after the first paragraph under each file's title. */
 const HEAD_NOTES: { id: string; guide: Guide; after: string; reason: string }[] = [
@@ -735,15 +877,28 @@ function addMigrationNote(text: string, guide: Guide, problems: Problem[]): stri
     problems.push({ id: note.id, anchor: note.until, message: "missing after the anchor" });
     return text;
   }
-  const numbers = [...text.slice(match.index, end).matchAll(/`(0\d{3})(?!\d)/g)].map(
-    (found) => found[1] ?? ""
-  );
-  const highest = numbers.reduce((top, number) => (number > top ? number : top), "");
-  if (highest > note.through) {
+  const notes = new Map<string, string>();
+  for (const [, number = "", suffix] of text
+    .slice(match.index, end)
+    .matchAll(/`(0\d{3})(_[a-z0-9_]+)?`/g)) {
+    const name = `${number}${suffix ?? ""}`;
+    if (number > note.through) {
+      if (!notes.has(number) || suffix !== undefined) {
+        notes.set(number, `the log notes migration \`${name}\`, above \`${note.through}\``);
+      }
+    } else if (suffix !== undefined && !MAIN_MIGRATIONS.includes(name)) {
+      const taken = MAIN_MIGRATIONS.find((migration) => migration.startsWith(`${number}_`));
+      notes.set(
+        name,
+        `the log notes migration \`${name}\`, but main's migration ${number} is \`${taken}\`, so that migration needs a new number`
+      );
+    }
+  }
+  for (const [key, message] of [...notes].sort(([a], [b]) => a.localeCompare(b))) {
     problems.push({
       id: note.id,
-      anchor: `\`${highest}\``,
-      message: `the log notes a migration above \`${note.through}\`; that note belongs in the header comment of its own .up.sql`,
+      anchor: `\`${key}\``,
+      message: `${message}; move that note into the header comment of its migration's .up.sql`,
       applied: true,
     });
   }
