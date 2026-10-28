@@ -374,3 +374,36 @@ test("a <code> named inside a code span opens no element, so --write re-lays out
   const result = await written("Use `<code>` for code.\n\nLater one. Later two.\n");
   expect(result.text).toBe("Use `<code>` for code.\n\nLater one.\nLater two.\n");
 });
+
+test("a </pre> inside an HTML comment closes no <pre>, so the next paragraph stays as it is", async () => {
+  const text =
+    "<pre>\n<!-- </pre> -->\n\nThis sentence starts on one line\nand ends on the next.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("a </pre> inside an attribute value closes no <pre>, so the next paragraph stays as it is", async () => {
+  const text =
+    'Intro <pre> then <span title="</pre>">x</span>\n\nThis sentence starts on one line\nand ends on the next.\n';
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("an inner </pre> keeps the outer <pre> open into later paragraphs", async () => {
+  const text = "Use <pre>a <pre>b</pre>\n\nNext x. Then y.\n\nz</pre>\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("the guard refuses a re-layout after a <pre> only micromark reads, in an HTML block", async () => {
+  // The block scanner reads the backticks as a code span; micromark reads the tag as raw HTML.
+  const text = "<span>\n`<pre>`\n</span>\n\nNext x. Then y.\n";
+  const path = await markdownFile(text);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  expect(result.stderr.toString()).toContain(`${path}: refusing to write: the block at line 5`);
+  expect(result.exitCode).toBe(2);
+  expect(await readFile(path, "utf8")).toBe(text);
+});

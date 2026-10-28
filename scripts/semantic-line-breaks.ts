@@ -91,11 +91,12 @@ const RULE_LIKE_LINE = /^[-=*_|: \t]+$/;
 /** A list item line whose content is only a task box: the line after it must stay apart. */
 const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
 /**
- * An open tag (group 1) or close tag (group 2) of an element whose line breaks GitHub shows: a
- * raw-text element, or inline code. verbatimCount counts them.
+ * A token that is an open tag (group 1) or a close tag (group 2) of an element whose line breaks
+ * GitHub shows: a raw-text element, or inline code. Anchored to the whole token, so a tag named
+ * inside a comment, an attribute value or another construct is no tag. verbatimCount counts them.
  */
 const VERBATIM_TAG =
-  /<(?:(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\r\n/>])|\/(pre|textarea|script|style|code|tt|kbd|samp)[ \t\r\n]*>)/gi;
+  /^<(?:(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\r\n/>])|\/(pre|textarea|script|style|code|tt|kbd|samp)[ \t\r\n]*>$)/i;
 /** Whitespace inside inline HTML: spaces and tabs, and at most one line ending. */
 const TAG_SPACE = String.raw`[ \t]*(?:\r?\n[ \t]*)?`;
 /** CommonMark's open tag: a tag name, attributes each led by whitespace, an optional `/`, `>`. */
@@ -265,13 +266,20 @@ function unescapedIndex(text: string, char: string, from: number): number {
 }
 
 /**
- * Counts the verbatim elements the text opens and closes into `open`, by lowercase name, nesting
- * included; a name leaves `open` when its count returns to zero, and a close tag of an element not
- * open is ignored. Whether the text holds an open tag.
+ * Counts the verbatim elements the HTML tokens of `text` open and close into `open`, by lowercase
+ * name, nesting included: each token spans one construct htmlEnd reads (a tag, a comment, a
+ * processing instruction, a declaration, CDATA, an autolink), and only a token that is itself an
+ * open or close tag counts. A name leaves `open` when its count returns to zero, and a close tag
+ * of an element not open is ignored. Whether a token opens an element.
  */
-function verbatimCount(text: string, open: Map<string, number>): boolean {
+function verbatimCount(
+  text: string,
+  tokens: readonly [number, number][],
+  open: Map<string, number>
+): boolean {
   let opens = false;
-  for (const [, opened, closed] of text.matchAll(VERBATIM_TAG)) {
+  for (const [start, end] of tokens) {
+    const [, opened, closed] = VERBATIM_TAG.exec(text.slice(start, end)) ?? [];
     if (opened !== undefined) {
       const name = opened.toLowerCase();
       open.set(name, (open.get(name) ?? 0) + 1);
@@ -284,6 +292,21 @@ function verbatimCount(text: string, open: Map<string, number>): boolean {
     }
   }
   return opens;
+}
+
+/**
+ * The constructs htmlEnd reads in raw HTML, as [start, end] pairs: the text of an HTML block,
+ * where a backtick opens no code span.
+ */
+function rawHtmlTokens(text: string): [number, number][] {
+  const tokens: [number, number][] = [];
+  for (let at = text.indexOf("<"); at !== -1; at = text.indexOf("<", at + 1)) {
+    const end = htmlEnd(text, at);
+    if (end === -1) continue;
+    tokens.push([at, end]);
+    at = end - 1;
+  }
+  return tokens;
 }
 
 /** How many cells a table row holds: an outer `|` on either side does not separate two. */
@@ -580,9 +603,7 @@ function markVerbatim(source: readonly string[], lines: LineInfo[], from: number
       const text = source.slice(first, last + 1).join("\n");
       const html: [number, number][] = [];
       proseMask(text, html);
-      for (const [start, end] of html) {
-        if (verbatimCount(text.slice(start, end), open)) opens = true;
-      }
+      opens = verbatimCount(text, html, open);
     }
     if (wasOpen || opens) {
       for (const line of lines.slice(first, last + 1)) line.verbatim = true;
@@ -951,11 +972,13 @@ function renderedForm(node: ParsedNode, inText: boolean, exact: boolean): unknow
  * Which top-level blocks render exactly, whitespace in their text included: each whose subtree
  * holds an HTML node that opens an element VERBATIM_TAG matches, and each later one while such an
  * element is still open, the HTML nodes' open and close tags counted by name in document order.
+ * An HTML node's value is raw HTML, so its tokens are read with rawHtmlTokens.
  */
 function exactBlocks(blocks: readonly ParsedNode[]): boolean[] {
   const open = new Map<string, number>();
   const opens = (node: ParsedNode): boolean => {
-    let found = node.type === "html" && node.value !== undefined && verbatimCount(node.value, open);
+    const value = node.type === "html" ? node.value : undefined;
+    let found = value !== undefined && verbatimCount(value, rawHtmlTokens(value), open);
     for (const child of node.children ?? []) found = opens(child) || found;
     return found;
   };
