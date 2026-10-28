@@ -212,21 +212,22 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	ready := s.awaitEventSubscription(subscribing)
 	var subscription <-chan model.Event
 	var floor int64
-	// replaced is a subscription a cold connection took from a relay whose cursor still names a
-	// position in a log that was reset: its published stands above the log's newest id, which in a
-	// log whose ids only grow it never does. The relay ends every subscription once its reset check
-	// runs (resetCursor), and the connection, which has sent nothing yet, then subscribes again on
-	// the cursor it moved to. Opened at the stale published instead, it would drop the new log's
-	// ids up to it, and then end at the relay's reset, which sends the browser through a reconnect
-	// and the whole refresh a reconnect owes, for a connection the page had only just opened.
+	// replaced is a subscription taken from a relay whose cursor still names a position in a log
+	// that was reset: its published stands above the log's newest id, which in a log whose ids only
+	// grow it never does. The relay ends every subscription once its reset check runs
+	// (resetCursor), and the connection, which has sent no event yet, then subscribes again on the
+	// cursor it moved to. Served from the stale published instead, it would drop the new log's ids
+	// up to it, and then end at the relay's reset, which sends the browser through a reconnect and
+	// the whole refresh a reconnect owes. A connection that opened early keeps its since, which is
+	// an id of the new log (at or below its newest), and is still replayed every event after it.
 	//
-	// The relay's new cursor is no start point for that connection: it is taken under a horizon
+	// The relay's new cursor is no start point for a cold connection: it is taken under a horizon
 	// proven after the reset, so an event of the new log that commits after the request, while
-	// that proof is awaited, can stand at or below it. So the connection starts at replacedFrom,
-	// read when it found the relay on the replaced log: the id before the first one missing from
-	// the new log, whose ids restart at 1, which is every event committed then and none still
-	// open. It is replayed from there to the relay's new cursor, and so may be sent events of the
-	// new log that committed just before its request.
+	// that proof is awaited, can stand at or below it. So a cold connection starts at
+	// replacedFrom, read when it found the relay on the replaced log: the id before the first one
+	// missing from the new log, whose ids restart at 1, which is every event committed then and
+	// none still open. It is replayed from there to the relay's new cursor, and so may be sent
+	// events of the new log that committed just before its request.
 	var replaced <-chan model.Event
 	replacedFrom := int64(-1)
 
@@ -250,8 +251,8 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			// Deferred inside the loop: ready delivers once per subscription, and a cold
-			// connection takes another only after a reset ended the one before (replaced).
+			// Deferred inside the loop: ready delivers once per subscription, and a connection
+			// takes another only after a reset ended the one before (replaced).
 			defer subscribed.cancel()
 			published := subscribed.published
 			// The log's newest id as it stands now, after the subscription began, which costs
@@ -264,26 +265,23 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			relayOnReplacedLog := published > head
-			if opensEarly {
-				// A since above the head is a reset this connection's early open already let the
-				// browser refresh before, and a relay on a replaced log would drop the new log's
-				// ids up to its published, so either way the stream ends rather than go on.
-				if since > head || relayOnReplacedLog {
-					return
-				}
-			} else {
-				if relayOnReplacedLog {
-					if replacedFrom < 0 {
-						if replacedFrom, err = s.eventLogUnbrokenThrough(r.Context()); err != nil {
-							s.writeHandlerError(w, err)
-							return
-						}
+			if opensEarly && since > head {
+				// A reset this connection's early open already let the browser refresh before,
+				// so the stream ends rather than start at published.
+				return
+			}
+			if published > head {
+				if !opensEarly && replacedFrom < 0 {
+					if replacedFrom, err = s.eventLogUnbrokenThrough(r.Context()); err != nil {
+						s.writeHandlerError(w, err)
+						return
 					}
-					replaced = subscribed.events
-					signal(s.eventRelay.wake)
-					continue
 				}
+				replaced = subscribed.events
+				signal(s.eventRelay.wake)
+				continue
+			}
+			if !opensEarly {
 				// A cold client asked for no backlog, and a clamped one's since is of a log this
 				// one replaced: both start at published, the handover this connection holds, or
 				// at replacedFrom when this connection first found the relay on a replaced log.

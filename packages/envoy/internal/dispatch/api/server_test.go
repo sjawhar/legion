@@ -2891,15 +2891,31 @@ func TestSSEStreamOpenedEarlyEndsWhenTheLogIsResetWhileItSubscribes(t *testing.T
 	}
 }
 
-// TestSSEColdConnectionOnARelayStillOnAReplacedLogOpensOnItsNewCursor: a cold connection takes
-// its start point from the relay's published cursor. After the log is reset (e2e/seed.ts
-// truncates it between browser scenarios) the relay keeps the old log's cursor until its reset
-// check has run, which waits for a horizon proven after the reset, so a connection can subscribe
-// in between onto a published id above the new log's newest. Opened there, it would drop the new
-// log's events up to that id, and then the relay's reset would end it, sending the browser through
-// a reconnect and the whole refresh a reconnect owes. So it waits for that reset, subscribes again
-// and opens on the relay's new cursor, and the next event reaches it on the same connection.
-func TestSSEColdConnectionOnARelayStillOnAReplacedLogOpensOnItsNewCursor(t *testing.T) {
+// TestSSEConnectionOnARelayStillOnAReplacedLogWaitsForItsReset: after the log is reset
+// (e2e/seed.ts truncates it between browser scenarios) the relay keeps the old log's cursor until
+// its reset check has run, which waits for a horizon proven after the reset, so a connection can
+// subscribe in between onto a published id above the new log's newest. Served from there, it
+// would drop the new log's events up to that id, and then the relay's reset would end it, sending
+// the browser through a reconnect and the whole refresh a reconnect owes. So it waits for that
+// reset and subscribes again: a cold connection opens then, and one resuming from an id of the new
+// log, which opened at once, is replayed every event after it. Either way the new log's events
+// reach it on the same connection.
+func TestSSEConnectionOnARelayStillOnAReplacedLogWaitsForItsReset(t *testing.T) {
+	for _, connection := range []struct {
+		name  string
+		query string
+	}{
+		{name: "cold", query: ""},
+		{name: "resuming from the new log's start", query: "?since=0"},
+	} {
+		t.Run(connection.name, func(t *testing.T) {
+			replacedLogConnection(t, connection.query)
+		})
+	}
+}
+
+func replacedLogConnection(t *testing.T, query string) {
+	t.Helper()
 	const hold = 2 * time.Second
 	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
 	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
@@ -2932,9 +2948,13 @@ func TestSSEColdConnectionOnARelayStillOnAReplacedLogOpensOnItsNewCursor(t *test
 		t.Fatalf("the new log's head %d is not below the old log's %d: the relay's cursor would not stand above it, so this test proves nothing", head, old)
 	}
 
-	second := sseLines(t, openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}), hold+sseFrameWait).Body)
+	afterReset := eventHead(t, database)
+	second := sseLines(t, openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events"+query, func(*http.Request) {}), hold+sseFrameWait).Body)
 	awaitSSELine(t, second, ": open", sseFrameWait, "the open comment of a connection made while the relay stood on the replaced log")
 	release()
+	if query != "" {
+		awaitSSELine(t, second, fmt.Sprintf("id: %d", afterReset), sseFrameWait, "the new log's event after since, on the resuming connection")
+	}
 	rename("Renamed once the relay has reset")
 	live := fmt.Sprintf("id: %d", eventHead(t, database))
 	awaitSSELine(t, second, live, sseFrameWait, "the event committed after the relay's reset, on the same connection")
