@@ -2,40 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T12:34:50Z",
-  "round": 3,
-  "headReviewed": "the handoff commit this file is pushed in (code head c2a08196, merge parent main 0a921021)",
+  "completed": "2026-10-28T13:06:16Z",
+  "round": 4,
+  "headReviewed": "the handoff commit this file is pushed in (code head 6cbc88e3, merge of main c27469629a9b)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
   "minor": 1,
-  "roundTwoFindings": "fixed: the five reproductions refuse or stay unchanged (k, k2, c, c2 unchanged and stable on a second run; k3 and the '...'-then-'---' front matter refused, exit 2); the frontMatterEnd comment is corrected; the round-1 reproductions still hold",
+  "roundThreeFindings": "fixed: the blockquote, footnote and escaped-close reproductions (and the tab and sentence-cut variants) refuse with exit 2, file unchanged; main is merged (c2746962) and restructure.ts --strict on its two files is byte-identical to the head guides; the refusal line names the re-laid-out text",
   "verified": [
-    "restructure.ts --strict on main 0a921021's two files: exit 0, byte-identical to the head guides",
-    "checker exit 0 on both guides; bun test of the two test files: 36 pass, 0 fail",
-    "GitHub reports the pull request CONFLICTING with main 2d872499, which changed both guides (packages/envoy/AGENTS.md +81 lines, cmd/dispatch/README.md +39 lines since 0a921021)",
-    "required checks (lint, typecheck, test, pr-title) at CI head c2a08196 queued at 12:22Z; compare c2a08196...964d4a82 is .legion/ only"
+    "restructure.ts --strict on main c27469629a9b's two files: exit 0, byte-identical to the head guides",
+    "checker exit 0 on both guides; bun test of the two test files: 39 pass, 0 fail",
+    "every earlier reproduction (rounds 1-3) refuses or stays unchanged, and a second --write changes nothing",
+    "neither guide holds a <pre>, <textarea>, <script>, <style>, <code>, <tt>, <kbd> or <samp> tag",
+    "required checks (lint, typecheck, test, pr-title) at CI head 6cbc88e3 all queued at 13:06Z; compare 6cbc88e3...c960f9ee is .legion/ only; PR MERGEABLE"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:875",
-      "description": "The render guard folds whitespace in every text node, including the text between an inline <pre>/<code>/<kbd>/<samp>/<tt> open tag and its close tag. Where scanBlocks splits a paragraph micromark reads as one (a blockquote's lazy continuation, a footnote definition's text, a tab-indented line) or the close-tag regex ignores an escape (\\</code>), --write joins inside the element and exits 0: '> Quote <pre>\\nline one\\nline two</pre>' becomes 'line one line two</pre>'; '[^1]: Run <pre>…' likewise; '> Run <code>make\\nbuild\\ntest</code> first.' and 'Use <code>a \\\\</code> b\\nc</code> here.' likewise. Fix in the guard: keep text values exact between a VERBATIM_OPEN html sibling and its close tag."
+      "file": "scripts/semantic-line-breaks.ts:876",
+      "description": "The guard's verbatim state lives in one child list, counts no nesting, and ends with each block, so --write still exits 0 after changing text inside <pre>/<code>: 'Use <pre>a <pre>b</pre> c. Then more text\\nd</pre> here.' (nested, plain paragraph), 'Use <code>a <code>b</code> c\\nd</code> here.', '> Quote *x <pre>y*\\nline one\\nline two</pre>' (open tag inside emphasis), 'Use <pre>x\\n\\nNext b. Then c\\nd.' (an unclosed <pre> holds the next paragraph). Fix that ends the class: in the guard, keep a block's text exact when its subtree holds any verbatim open tag, and keep later blocks exact while a verbatim element opened earlier is unclosed (open and close counted by name, in document order). Refusal is the intended outcome; no guide holds such a tag."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md",
-      "description": "The head conflicts with main 2d872499. Merge main and regenerate the two guides with restructure.ts --strict on main's files, as the PR body says."
+      "file": "scripts/semantic-line-breaks.ts:95",
+      "description": "VERBATIM_OPEN's lookahead lacks \\r, so in a CRLF file '<pre\\r\\nclass=\"x\">a. Then b\\r\\nc</pre>' is not read as <pre>: --write exits 0 and cuts inside it. Add \\r to the lookahead."
     },
     {
       "severity": "minor",
-      "file": "scripts/semantic-line-breaks.ts:973",
-      "description": "The second-relayout refusal counts its line in the re-laid-out text, while the render refusal counts in the file: 'Alpha one. Beta two. Gamma three.\\n\\nIntro text\\n[see. Next [a]: b' is refused at 'line 5' of a 4-line file. Name which text the line counts in, or map it to the file."
+      "file": "packages/pi-envoy/AGENTS.md:207",
+      "description": "Cites 'the \"Listener API\" table of packages/envoy/AGENTS.md'; that section is a list now. Reword it as the PR reworded the in-file table references."
     }
   ],
-  "fastFollow": "Cleanup that changes no behaviour (code quality, 964d4a82): the inText/TEXT_PARENTS machinery no longer changes renderedForm's result; HTML_TAG_LINE and OPEN_TAG/closing tag write the same tag grammar twice; three refusal tests copy the run() spawn.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 964d4a82 (1 High: the verbatim-element fold; 2 Minor: refusal line number, stale brief)",
-    "codeQuality": "Verdict: CHANGES at 964d4a82 (three cleanups that change no behaviour)"
+    "deepReview": "Verdict: CHANGES at c960f9ee (2 High: nesting, unclosed <pre>; 1 Medium: CRLF; 1 Minor: stale citation and brief). Consumers checked at head: check-body-embed-limit.sh exit 0 and its test 49 pass; check-private-names.sh exit 0 and its test 261 pass; headings identical to main c2746962",
+    "codeQuality": "Verdict: CHANGES at c960f9ee (state per child list: the emphasis case; the close-tag branch is untested)"
   }
 }
