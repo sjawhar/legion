@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-624",
+  "completed": "2026-10-28T09:53:22Z",
+  "round": 1,
+  "reviewedHead": "6aca0137aa4a1aac5231158bcff96e651623af9c",
+  "codeHead": "acd9df19d914e936d3dc8ddd21847319368fbf29",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 4,
+  "ci": "At acd9df19 (CI head; compare to 6aca0137 handoffsOnly true, 1 file): required lint, typecheck, pr-title success; required test in_progress at 09:31Z. GitHub reports the pull request CONFLICTING / DIRTY against main.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/read-only-directives.ts",
+      "description": "The pull request conflicts with main. #2405 (INFRA-612) makes remarkReadOnlyDirectives drop every `server` attribute; liveTypedBlocksRemarkPlugin calls it, so after a plain merge the live editor's setMarkdown drops them too and VersionView.tsx:92 draws a past version's answered decision (document text carries state=\"answered\", docs/edits_test.go:335) at its defaults. Build the live step from remarkDecideTypedBlocks + typedBlockRefusal, decide explicitly what a paste does with server attributes, and lock the version view of an answered decision with a test. #2419: the CHANGELOG.md entry becomes packages/envoy/.changes/unreleased/INFRA-624-<slug>.yaml."
+    },
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/ask-content.ts",
+      "description": "Only validContent is relaxed; contentMatchAt, canReplace and ReplaceAroundStep's gap check still read the rule, so in an ask [p, list(Option A, After), list(Option B)] Enter twice at the end of Option B throws 'Called contentMatchAt on a node with invalid content', Backspace at the start of Option A and a selection delete from the question into the first list throw 'Content does not fit in gap' (reviewer's run of the deep review's probes in the real proof-editor stack, happy-dom). The keydown throw skips preventDefault, so the browser's native edit runs [INFERENCE]."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/ask_blocks.go",
+      "description": "Settlement keeps a content-invalid ask's row unchanged, but SetAskBlockText (ask_block_text.go:59-128) reads the joined askBlockOf reading: an urgency-only PATCH passes verifyAskBlockRoundTrip and api/asks.go:440-448 writes options [Ship Hold Defer] to the row while the block still breaks the rule (Go probe); a question-only edit is refused with the misleading 'the block carries 1 options, not 3'."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/ask-concurrent-edit.e2e.ts",
+      "description": "The test 'Enter in the question of an ask holding two lists keeps every word' places its caret with placeCaret(alicePage, 'after', 'Which one?') at :168, which finds the malformed banner's quote first; More goes into the second list (tester's probe T9). Scope the caret to the ask's question paragraph and show the test fails when the fix is removed."
+    },
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/ask-content.ts",
+      "description": "SERVER_BLOCK_TYPES is tied to pmdoc isBlockNodeType (node.go:417-424) only by a comment; the test compares it with the editor's own block group. A drift makes the editor build asks Validate refuses, refusing the room for every client. Use child.type.isInGroup('block') and pin the server list in a test that fails when Go's list differs."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/typed-block-commands.ts",
+      "description": "retypeBlock(id, 'ask') on a heading, code block, list or blockquote now builds an off-rule ask (createChecked passes), contradicting ask-content.ts:32-34 and the CHANGELOG; check contentMatch.matchFragment(...)?.validEnd in retype and canRetype."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_blocks.go",
+      "description": "A decided (answered/resolved) ask that breaks the rule goes to invalidBlocks and skips writeDecidedWording; the CHANGELOG and AGENTS.md say it 'stays open'. State what happens to a decided one."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_blocks.go",
+      "description": "readAskBlockStrictly has one caller (askReadability); settlement repeats its content-rule check inline, yet packages/envoy/AGENTS.md:1013 and :2129 cite readAskBlockStrictly as how settlement reads an ask. One named function used by both, cited by the docs."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/doc/VersionView.test.tsx",
+      "description": "UNKNOWN_MARK_REFUSAL (:120-131) pins a 200-character Milkdown message the stub throws for any input, with a comment claiming it is what setMarkdown throws, which nothing checks. Use an opaque message."
+    }
+  ],
+  "fastFollow": "packages/proof-editor/tests/marks-editor.ts:61-71: one key table for press() instead of three chord chains",
+  "thermonuclear": "Both run at 6aca0137 (code acd9df19): deep review CHANGES, code quality CHANGES; findings above.",
+  "security": "untrusted-input: pasted or imported markdown with a refused :::name or a line-start ::name or :name{ stays paragraph text in the live editor (read-only-directives.ts:38-45); Go Render escapes a line-start ':' (pmdoc escape.go:316-321), and the accepted typed-block set is typedBlockRefusal's, as before (read-only-directives.ts:28-30). agent-def: packages/proof-editor/AGENTS.md adds a 19th copied-file edit kind, which covers exactly the lib.ts, lib-headless.ts and lib-remark-directive-plugin.ts edits."
+}
