@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-648",
+  "completed": "2026-10-28T18:03:30Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-drove each proof independently on my own builds of base 3168cd8c and head (workspace at 56503792, code identical to b0d5039f): one replay pair reproduces A1 rule 2 and A6 (changed share 1.97 % -> 1.11 %, ListMarks 2.85 s -> 0.02 s, walk under ListMarks at base, Walk at head); EXPLAIN and an all-artifact row comparison reproduce the recordedMarkRefs claim; the implementer's equivalence harness, extended with anchored and dangling asks and an upper-case anchor, gives identical base and head dumps on the same 24 LINUX specs (A2); the A3 tests pass and fail on a negative control of my own. A5 (benchmem) not re-run: the replay's ListMarks drop and the diff (only two nil-outside-tests hook fields) support it."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1 Merge rule on LINUX's replay; A6 removed CPU gone where it was",
+      "surface": "Local Dispatch server (cmd/dispatch, GOWORK=off go build) base 3168cd8c vs head on Postgres 17.11 + pgvector 0.8.7 (fsync off), NATS JetStream on 4222, the tools' fake listener on 9021, the INFRA-512 replay tools under $TMPDIR/infra512-profile",
+      "command": "RUNS=5 $TMPDIR/tester648/replay-tester.sh (replay648.sh with binaries bin/dispatch-tbase / bin/dispatch-thead): pg_restore run/warmed.dump; BIN=<bin> GOMAXPROCS=2 tools/run-dispatch.sh; tools/drive.sh <side>-5 0.3 1 27 8; go tool pprof -top -nodefraction=0 -edgefraction=0 -focus='docs\\.\\(\\*Service\\)\\.(sweepUnrecordedMarks|readSettlementTree)$' and -peek 'pmdoc\\.ListMarks$'",
+      "observed": "server CPU-s tbase-5 344.15, thead-5 336.68 (293 write events, ~1,775 requests, 0 pending actions each); changed-function share 1.97 % -> 1.11 % (0.86 points, >= g/2 = 0.44); ListMarks 2.85 s (0.89 %) -> 0.02 s; -peek: ListMarks -> pmdoc.walk at base, pmdoc.Walk at head, no walkNode/nodeSize; readSettlementTree alone 1.04 % -> 1.08 % (unchanged); server logs: 0 level=ERROR lines and 0 'list recorded marks for sweep' failures on either side",
+      "headSha": "56503792d3ec3eefb123d48a2d41f3525d9e8178 (code b0d5039f89e75f11fd8e867cdb056521d4338153)",
+      "negativeControl": "Whole-server CPU of one pair (7.5 CPU-s apart) is inside the implementer's six-run spread of 13.05, so it alone separates nothing; the base profile carries the 2.85 s positional walk the head lacks"
+    },
+    {
+      "criterion": "recordedMarkRefs reads through the anchor indexes and returns the same rows (architect's addition b)",
+      "surface": "The replay's dispatch database after the thead-5 run (15,096 comments, 41 asks), psql on 127.0.0.1:55432",
+      "command": "prepare/execute with plan_cache_mode=force_generic_plan, EXPLAIN (ANALYZE) of the base and head predicates for artifact 0a8f575b-5fdd-4b28-9a75-23540706198b; old vs new predicate joined over every artifacts.id::text with EXCEPT",
+      "observed": "base comments: Seq Scan, 15,077 rows removed, 20.57 ms; head: Bitmap Index Scan on comments_anchor_artifact, 0.39 ms, same 19 rows; head asks: Index Scan using asks_anchor_artifact; comment rows old 3,476 = new 3,476, EXCEPT 0; asks with both anchor and block_artifact_id: 0",
+      "headSha": "56503792d3ec3eefb123d48a2d41f3525d9e8178",
+      "negativeControl": "Same query without the indexed predicate (base) takes the Seq Scan; and see the A2 entry's mutation of the asks predicate, which the harness refuses"
+    },
+    {
+      "criterion": "A2 Settled versions and marks identical to today's",
+      "surface": "docs package settlement on real Postgres with the 24 real LINUX specs of $TMPDIR/infra648/equiv/corpus.txt, base tree (git archive 3168cd8c) vs head workspace",
+      "command": "$TMPDIR/tester648/zz_equiv_test.go (the implementer's harness plus: insertAnchoredAsk on a 5th target, an unrecorded dispatchAsk mark on a 6th, a comment anchored with the artifact id in upper case on a 7th; dumps of anchored asks and comments by lower(artifact_id); asserts recorded ask kept and dangling ask swept after the TTL) copied into internal/dispatch/docs of each tree: EQUIV_CORPUS=... EQUIV_OUT=<dump> GOWORK=off go test ./internal/dispatch/docs/ -run TestZZEquiv -count=1; diff base.dump head.dump; harness removed afterwards",
+      "observed": "both ok (150 s); 57,633 lines each, 24 '== end'; diff = 0 lines; 96 anchored-ask rows, 120 dispatchAsk mark lines; the upper-case-anchored comment is swept on every spec on both sides alike (text comparison kept, so behaviour unchanged)",
+      "headSha": "56503792d3ec3eefb123d48a2d41f3525d9e8178",
+      "negativeControl": "head with the asks predicate changed to `block_artifact_id` alone: the harness fails 'path 2: recorded ask mark swept' on LINUX-404 and LINUX-364 (corpus-small.txt); reverted with jj restore"
+    },
+    {
+      "criterion": "A3 INFRA-647's invariant kept with a test that fails if read is changed elsewhere before the version is rendered",
+      "surface": "go test ./internal/dispatch/docs/ on Postgres 17",
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable GOWORK=off go test ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/ -count=1 -run 'TestSettlementReusesTheRenderOnlyOfAnUntouchedRead$|TestSettlementVersionsARepairTheRoomAlreadyHolds$|TestSettlementVersionsTheTreeOfAStampThatMintedNothing$|TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows$|ListMarks|Sweep|Unrecorded' -v",
+      "observed": "all pass, including TestSettleSweepsUnrecordedMarksAfterTTL and TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable",
+      "headSha": "56503792d3ec3eefb123d48a2d41f3525d9e8178",
+      "negativeControl": "my own mutation, different from the implementer's two: right after the afterSettleTreeRead hook, clear the marks of read's first marked text node in place; TestSettlementReusesTheRenderOnlyOfAnUntouchedRead fails at settlement_read_invariant_test.go:67 'reused the rendering of the tree it read, which changed after the read'; reverted with jj restore"
+    }
+  ],
+  "notes": [
+    "ListMarks' only caller is sweepUnrecordedMarks (marks.go:803); every tree it gets passed Validate (read.go:45, blocks.go/splice.go outputs), and Validate refuses children under text and the five leaf types (node.go:181-184), the only nodes walkNode skips.",
+    "recordedMarkRefs' $1::uuid cannot fail on a settled room: every room reaching settlement passed issueOpen's `a.id = $1` against a uuid column (service.go:2654).",
+    "No code writes both anchor and block_artifact_id on an ask (inserts at api/asks.go:211, api/reviews.go:482, docs/ask_blocks.go:718; no update sets either), so the coalesce predicate drops no anchored ask.",
+    "CI at 56503792 was queued when read; the handoff commit carried no skip-checks trailer, so CI runs on it."
+  ]
+}
