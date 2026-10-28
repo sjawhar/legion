@@ -2,54 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T13:13:01Z",
-  "round": 2,
-  "reviewedHead": "d8ade49bdff832122ba53dccf051824807a66700",
-  "codeHead": "524cda673566538829d33bd344dd8d7ada0ad794",
+  "completed": "2026-10-28T16:32:46Z",
+  "round": 3,
+  "reviewedHead": "2c865f383a45928e6e58c03c51a0c7b0cad09189",
+  "codeHead": "2796bcafeb80755a6f5f5c980acd7cc1788e8110",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 5,
-  "ci": "CI head 1a7640cb (newest pull_request run; compare to d8ade49b handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 12:48Z. Not waited on: changes are requested.",
-  "roundOneItems": "Fixed: 1 (aed0278d, b1f6d7bb), 3 (50149821, 524cda67), 4 (741058ff), 5 (f4716bde), 6 (f4716bde), 7 (50149821, b1f6d7bb), 8 (741058ff). Item 2 is fixed for keydown only; still open (thread PRRT_kwDORFy7ds6xENoe, unresolved).",
+  "important": 3,
+  "minor": 1,
+  "scope": "Narrowed by the INFRA-138 architect: round 2's list (review 5683158374) and the DOM read-back fix (keepUnselectedAskBlocks, with the tester's a26d87b0 rows); correctness defects anywhere still fixed here; other points on Fast-follow.",
+  "ci": "CI head f1fd6451 (newest pull_request run; compare to 2c865f38 handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 16:10Z. GitHub reports #2433 CONFLICTING with main (overlapping files: packages/envoy/AGENTS.md, docs/service_test.go, docs/websocket.go, pmdoc/node.go).",
+  "roundTwoItems": "Fixed and accepted: input guards b3a04795 (PRRT_kwDORFy7ds6xENoe, PRRT_kwDORFy7ds6xIl6W), paragraph after the options 33497446 (PRRT_kwDORFy7ds6xIl6c), one content-rule decision 33497446 (PRRT_kwDORFy7ds6xIl6g), docs/solutions notes af271aab (PRRT_kwDORFy7ds6xIl6l), pmdoc test af271aab (PRRT_kwDORFy7ds6xIl6o), editableOnly 9cbf264c (PRRT_kwDORFy7ds6xIl66). Fragment names withdrawn (PRRT_kwDORFy7ds6xIl6w).",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/proof-editor/src/ask-content.ts",
-      "description": "guardBrokenAskKeys covers only handleKeyDown. Typing a letter over a selection from the question into a two-item first list of a two-list ask runs ProseMirror's keypress insertText, which throws 'Content does not fit in gap' before preventDefault; in Chromium against the real server (2 of 2 runs) the browser's own edit removes the other, unselected option list from both pages and the stored document ('Which xion A\\n\\n- Option C'), and the ask is no longer marked malformed. Ctrl+X on the same selection throws the same (page error, nothing deleted). Needs handleTextInput and cut guards and browser rows."
+      "description": "keepUnselectedAskBlocks decides a block is kept when its text is a substring of the ask the edit leaves (:221, :229). In Chromium against the real server, a broken decision with first list [Option B, Option A later] and second list [Option A], execCommand insertText over 'one?'..'Opt' stored 'Which xion B\\n\\n- Option A later' with malformed=null: the unselected list Option A is gone and the decision reads valid (both reviewers reproduced it; control with Option C is refused). Decide by the mapping (any character of the unselected block deleted), with a substring row in happy-dom and Chromium."
     },
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "On an ask holding a paragraph after its list, an options-only repair moves that paragraph into the question, and a question+options edit deletes it ('Stray words after the list' gone; Go probe against Postgres). Settlement keeps the row as it was before the break, so the caller never saw that text; the refusal's 'send options to rebuild the options as one list' leads to the deletion."
+      "description": "For an ask holding paragraphs and then two lists, refuseAskContentEdit lets any options edit through and askBlockChildren replaces every list. The row keeps the options from before the break and the refusal quotes none, so a caller that builds options from the row, as the refusal invites, deletes the other list: Go probe, row [Ship, Hold], block '- Ship\\n- Hold\\n\\n* Defer', options [Ship, Hold, Later] -> nil, Defer deleted. Same class as round 2's paragraph-after-list finding."
+    },
+    {
+      "severity": "important",
+      "file": "(pull request)",
+      "description": "GitHub reports #2433 CONFLICTING with main; forward merge needed (overlapping files packages/envoy/AGENTS.md, docs/service_test.go, docs/websocket.go, pmdoc/node.go)."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The content-rule decision is in four places; the post-write check (:122-128) never fails (quality probe: 30 shape x edit cases), and askBlockBodyChanges and askBlockChildren carry the same AskContentError exemption in two copies."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/dispatch-web/every-milkdown-markdown-parse-path-needs-the-content-rule-check-registered-after-the-mark-plugins-and-locked-by-a-valid-block-INFRA-565.md",
-      "description": "The note at :66-68 (and the INFRA-529 learning at :52-53) says the live step is remarkReadOnlyDirectives; since aed0278d it is remarkDecideTypedBlocks with acceptedTypedBlock, keeping server attributes."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/node_test.go",
-      "description": "TestBlockNodeTypesLoadFromEmbeddedList asserts non-empty and holds paragraph; the init panic and 1,217 other tests already catch both. Delete it."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/pr2433-Fixed-20261028-105348.yaml",
-      "description": "Root AGENTS.md: fragments are <ISSUE KEY>-<slug>.yaml, the branch name only with no Dispatch issue; this PR has INFRA-624. Rename the four and set Issue: INFRA-624."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/editor.ts",
-      "description": "editableOnly is on only when a scope is passed, so placeCaret/selectEditorText/deleteEditorText without a scope can still match the malformed banner's quote (round 1's bug class)."
+      "file": "packages/proof-editor/AGENTS.md",
+      "description": "The copied-file edit kinds (:94-102) name setProps(brokenAskInputGuards) but not lib.ts's .use(keepUnselectedAskBlocks), so an audit finds a line the list does not allow. The ask-content.ts row (:48) omits keepUnselectedAskBlocks and says composition and beforeinput are declined where the code collapses the selection or dispatches ProseMirror's own edit; the Fixed fragment says the same and omits the refused DOM read-back."
     }
   ],
-  "fastFollow": "ask-concurrent-edit.e2e.ts join test through withTwoLists; a seedTwoListShipAsk helper for the four copies in service_test.go",
-  "thermonuclear": "Both run at d8ade49b (code 524cda67): deep review CHANGES, code quality CHANGES; findings above.",
-  "security": "untrusted-input: pasted or imported markdown in the live editor keeps typed only what typedBlockRefusal accepts (read-only-directives.ts:48-50, liveTypedBlocksRemarkPlugin :94-103); server attributes are kept as on main and settlement rewrites them from the row for every readable ask (ask_blocks.go:813-846). Residual, not new in kind: settlement writes only `invalid` on an unreadable ask (ask_blocks.go:266-281), so server attributes a raw Yjs client forges on one stay until repair, as for an ask holding a heading today. authz: no new route; PATCH /api/v1/asks/{id}'s gate unchanged (asks.go:400, 440)."
+  "fastFollow": "ask-content.ts: one helper for 'selection touches a broken ask' (repeated at :58, 89, 149, 165, 172, 191) and for the broken-rule predicate (:41, :206); filterTransaction walks the whole document on every local transaction, limit it to the steps' ranges",
+  "thermonuclear": "Both run at 2c865f38 (code 2796bcaf): deep review CHANGES, code quality CHANGES; findings above.",
+  "security": "authz: no new route; the PATCH /api/v1/asks/{id} gate is unchanged (api/asks.go not in the diff), and the refusal runs inside SetAskBlockText (ask_block_text.go:78). untrusted-input: the new refusal quotes document text with %q, capped at 80 runes (ask_block_text.go:543-550), to a caller already allowed to edit the ask; the filter reads only local transactions and skips y-prosemirror's own (ask-content.ts:256)."
 }
