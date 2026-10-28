@@ -918,3 +918,18 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 	requireRead("an owed message", owedMessage, "message", message.ID, nil, false, "")
 	stillOwed("an owed message", "message_block_state", "message_id", message.ID)
 }
+
+// A direct message has no address, so none of its blocks can be named: the references route
+// never reads one, whatever issue key the reference spells, and so never hands a session its text
+// or the message's, which GET /api/v1/messages/{id}/blocks reads only to a session in the
+// conversation.
+func TestADirectMessagesBlockHasNoAddress(t *testing.T) {
+	handler, _, direct, _, _ := directConversationFrom(t, "alice")
+	for _, key := range []string{"TEST-1", "NONE-9"} {
+		reference := "dispatch://" + key + "/message/" + direct.ID + "#b-b1"
+		response := bearerRequest(t, handler, http.MethodGet, "/api/v1/references?to="+url.QueryEscape(reference), nil)
+		if response.Code < http.StatusBadRequest || strings.Contains(response.Body.String(), "dashboard") {
+			t.Fatalf("?to=%s: status=%d body=%s, want a refusal that carries none of the direct message's text", reference, response.Code, response.Body.String())
+		}
+	}
+}
