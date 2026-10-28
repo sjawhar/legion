@@ -22,7 +22,7 @@ body: |-
       resumed direct message keeps the urgency it was sent with, whether the loop or a person's
       same-mode Retry resumes it (an attempt a Retry opens carries none), and two partial indexes
       the loop reads pending attempts through. The loop takes one more connection in the lease
-      pool, which is now eleven connections (`store.leasePoolSize`).
+      pool (`store.leasePoolSize`).
     - A send that meets an Envoy listener take-over (the new pod refusing connections, answering
       502, 503 or 504, or not yet holding the session) or a receipt timeout tries again under the
       same attempt and idempotency key, backing off from 250 ms to 2 s, for up to 12 s from its

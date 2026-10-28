@@ -21,6 +21,14 @@ func (s *Service) InjectSchemaInvalidForTest(ctx context.Context, artifactID str
 	})
 }
 
+// AfterSettleLockForTest sets the hook every settlement runs once it holds its document's owner
+// row - its issue's row, for an issue's document - and before it reads the room. Tests in package
+// api hold a settlement there to race an issue's close against it. It is set before the service
+// settles anything, since a settlement reads it unlocked.
+func (s *Service) AfterSettleLockForTest(hook func(room string)) {
+	s.afterSettleLock = hook
+}
+
 // AppendRenderOnlySchemaViolationForTest appends to artifactID's stored history a tree the
 // validator reads and the renderer refuses: a checked task whose empty first paragraph precedes a
 // heading has no markdown the browser reads back as a task. Tests here and in package api build
