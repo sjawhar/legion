@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    `envoy-infra:gcp:Dispatch`'s refusals of `appCpu`, `appMemory` and `appPriorityClassName` are now
-    each a `core.InputError` naming the input, with the same text; the memory-per-CPU refusal names
-    whichever of `appCpu` and `appMemory` Autopilot would raise. `gcp:ClusteredNatsHub` runs the same
-    two rules for its own pods.
-time: 2026-10-28T13:09:47.17778955Z
-custom:
-    Issue: pr2371

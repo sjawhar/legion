@@ -123,7 +123,6 @@ type DispatchSettings struct {
 	Replicas           int
 	StrategyType       string
 	RollingUpdate      *DispatchRollingUpdate
-	ServeConfig        string
 	AgentSecretsURL    string
 	AppClientID        string
 	AppID              string
@@ -131,6 +130,8 @@ type DispatchSettings struct {
 	AppKeySecretKey    string
 	AppCPU             string
 	AppMemory          string
+	AppEphemeral       string
+	ProxyEphemeral     string
 	PprofPort          int
 }
 
@@ -140,24 +141,26 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 	if err != nil {
 		return DispatchSettings{}, err
 	}
+	strategy := dispatchStrategyFor(s.replicas)
 	settings := DispatchSettings{
 		DatabaseVersion:    s.databaseVersion,
 		DatabaseTier:       s.databaseTier,
 		DeletionProtection: s.deletionProtection,
 		Namespace:          s.namespace,
 		Replicas:           s.replicas,
-		StrategyType:       s.strategy.strategyType,
-		ServeConfig:        s.serveConfig,
+		StrategyType:       strategy.strategyType,
 		AgentSecretsURL:    s.agentSecretsURL,
 		AppClientID:        s.appClientID,
 		AppID:              s.appID,
 		AppKeySecretName:   s.appKeySecretName,
 		AppKeySecretKey:    s.appKeySecretKey,
-		AppCPU:             s.appCPU,
-		AppMemory:          s.appMemory,
+		AppCPU:             s.appResources.appCPU,
+		AppMemory:          s.appResources.appMemory,
+		AppEphemeral:       s.appResources.appEphemeralStorage,
+		ProxyEphemeral:     s.appResources.proxyEphemeralStorage,
 		PprofPort:          s.pprofPort,
 	}
-	if rolling := s.strategy.rollingUpdate; rolling != nil {
+	if rolling := strategy.rollingUpdate; rolling != nil {
 		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}
 	}
 	return settings, nil

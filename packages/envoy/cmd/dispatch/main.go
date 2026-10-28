@@ -295,6 +295,11 @@ func main() {
 		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
+	// interval below. It appends events and takes no copy lock, so it runs after
+	// restoreDecidedWordings, which takes the copy lock (see below).
+	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
+	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -370,7 +375,8 @@ func main() {
 	//     evictor (it closes the rooms resident in this process that the other process's writes
 	//     left behind the durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
-	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
+	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
+	//     above.
 	leases, err := database.Pool.Leases()
 	if err != nil {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
@@ -434,6 +440,9 @@ func main() {
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
 	// a build indexed without the block grammar.
 	go documentService.RunBlockIndexReconciliation(ctx, leases)
+	// The asks a process older than the withdrawal leaves on an issue it closes or
+	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
+	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
@@ -481,12 +490,7 @@ func main() {
 
 	routesHandler, waitDelivery := routes.New(appCtx)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
-	}
+	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
 	// the process with 1: a supervisor must not read a port clash as a clean stop.
@@ -923,6 +927,28 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 		})
 }
 
+// issueAskRepairBootTimeout bounds the boot's repair of the asks of closed and reopened issues.
+// Each issue commits on its own, so a repair cut short keeps what it repaired, and the interval
+// pass (api.RunIssueAskRepair) repairs what it left.
+const issueAskRepairBootTimeout = 30 * time.Second
+
+// repairIssueAsks is the boot's repair of the asks a close or a reopen by a release older than
+// the withdrawal left (api.RepairIssueAsks), bounded by timeout: open asks on closed issues are
+// withdrawn, and withdrawn asks on open issues are restored. It sweeps only the closed issues'
+// documents marked owing a settlement within the last api.IssueAskRepairInterval, so a boot does
+// not read every closed issue's documents before it serves; the interval pass's first run sweeps
+// them all. Each issue it repairs has its own line; this logs the counts. A repair that fails or
+// runs out of time is logged and the start goes on, since api.RunIssueAskRepair repairs the rest
+// every api.IssueAskRepairInterval.
+func repairIssueAsks(ctx context.Context, deps api.Deps, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: repair the asks of closed and reopened issues", "dispatch: repaired the asks of closed and reopened issues",
+		func(ctx context.Context) ([]any, error) {
+			markedSince := time.Now().Add(-api.IssueAskRepairInterval)
+			repair, err := api.RepairIssueAsks(ctx, deps, &markedSince)
+			return repair.LogArgs(), err
+		})
+}
+
 // bootTask runs task, a repair the boot makes before it serves, bounded by timeout, and logs what
 // it reports: the counts task returns under done at INFO, or, when task fails or runs out of time,
 // those counts and the error under failed at ERROR. Either way the start goes on.
@@ -1012,12 +1038,15 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
-// dispatchHandler mounts the one /healthz the process serves above every dashboard and API
-// route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
-// longer pattern, so "GET /healthz" wins over the router's "/".
+// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
+// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
+// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
+// answers 204 and touches nothing: it says only that the process answers, for a liveness or
+// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
 func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("/", handler)
 	return mux
 }

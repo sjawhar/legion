@@ -94,6 +94,10 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
 				}
 			}
+			// An answer that chose no option stores an empty list, never null.
+			if selected == nil {
+				selected = []string{}
+			}
 			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
 			if options.WriteBlock != nil {
 				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {
@@ -266,7 +270,12 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := strings.TrimSpace(input.Kind)
 	reason := strings.TrimSpace(input.Reason)
-	if (kind != "retracted" && kind != "resolved") || reason == "" {
+	if kind != "retracted" && kind != "resolved" {
+		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest,
+			`resolution kind must be "retracted" or "resolved", not `+strconv.Quote(kind))
+		return
+	}
+	if reason == "" {
 		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest, "resolution requires a kind and reason")
 		return
 	}

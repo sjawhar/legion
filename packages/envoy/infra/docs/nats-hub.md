@@ -232,12 +232,11 @@ which the hub renders from `tailnetDnsName` and `listener.allowedHosts`, and ans
 name an attacker repoints at the hub's tailnet address sends that name as the `Host`, so it is
 refused with the rest. A client that dials the hub by any other address, its bare MagicDNS label
 `<h>` or its tailnet IP among them, is refused the same way unless that address is in
-`listener.allowedHosts`. The guard is in no release yet: its entry stands under `## [Unreleased]`
-in `packages/envoy/CHANGELOG.md`, so an image older than it checks no `Host` at all, and on such
-an image a rebinding page still has the whole API. A browser that asks before a public page
-reaches a private or tailnet address (Chrome's Local Network Access) blocks that; any other
-browser on a device the policy admits to 9020 is a way in, which is one more reason to grant 9020
-narrowly.
+`listener.allowedHosts`. The guard shipped in legion-envoy-v13.11.1, so an image older than that
+release checks no `Host` at all, and on such an image a rebinding page still has the whole API.
+A browser that asks before a public page reaches a private or tailnet address (Chrome's Local
+Network Access) blocks that; any other browser on a device the policy admits to 9020 is a way in,
+which is one more reason to grant 9020 narrowly.
 
 The deployment that builds this hub hands its clients `http://<h>.<tailnetDnsName>:9020`, the
 address the hub renders into `ENVOY_ALLOWED_HOSTS`, so those clients are served as they stand.
