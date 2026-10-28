@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T15:09:39Z",
-  "round": 7,
+  "completed": "2026-10-28T16:32:56Z",
+  "round": 8,
+  "scope": "Merge-resolution review only, as the INFRA-14 architect directed on 2026-10-28 15:12Z (per the controller): the only change since my last approval (145dcc95) is the merge 0d4104f9 of main 690c0136, so I reviewed the conflicted files against both parents and re-approve by SHA; no thermonuclear pass, no full re-review.",
   "decision": "approved",
-  "reviewedHead": "bab3f21c19a61dd562ab5aeadcccae7f6cb55441",
-  "codeHead": "6fc807bf506d20123be5e5ba407343001e905a79",
-  "previousApprovedHead": "779dba57fcd8019c026ef7097e5a1c39ed6e17a8",
-  "fingerprint": "779dba57 9e0d4632c5b38aca59db47f8d78f3b69ede1300904b066c746db4e98ea3245f9 -> bab3f21c b83926c318f76dbd36980d410f7a38667112f2d6b25ab2070c4d0f3574b4ed05: changed (the conflict merge dfd2ff0a of main 139c61b3 rebased this PR's sentence in .dispatch/architecture/envoy-listener.md onto main's rewritten line), so a new round",
+  "reviewedHead": "d5fd27113bddd96457504e7422adcfcf25101697",
+  "codeHead": "21ac1e8132bd527bcf3e1ff4445fa05f1ccd2921",
+  "previousApprovedHead": "145dcc9516ca4a4d5860d5244da9dc2248c2d82c",
   "critical": 0,
   "important": 0,
   "minor": 4,
@@ -34,16 +34,11 @@
       "description": "Cleanup (Fast-follow): name handleAuthError as the other caller of the patched disconnect()."
     }
   ],
-  "verified": [
-    "Per-file interdiff of this issue's change, old 2d872499->5384eb84 vs new 139c61b3->dfd2ff0a: every file identical but .dispatch/architecture/envoy-listener.md, whose line 7 is main's line 7 verbatim followed by the same plugin/plugin_version sentence as before.",
-    "Both thermonuclear agents: main's changes between 2d872499 and 139c61b3 touch none of this PR's code paths (listener main.go help text and comments, an export of transientStatus, an envoy-plugin version bump read at runtime, new Postgres-16 jobs); check-dist fresh on Bun 1.4.4; the PR's Go listener tests and envoy-client transport tests pass."
+  "mergeResolution": [
+    "Conflicted files .github/workflows/envoy-and-contracts.yaml and packages/claude-envoy/AGENTS.md: the merge against its PR parent 145dcc95 is exactly main's own change to those files (fork point -> 690c0136: check-dist replaced by verify-build and extract-built, the rewritten notices and build comments, the built-bundle rows and the never-commit-dist convention); the merge against main 690c0136 is exactly this PR's hunks (the envoy_session_stall output, filter and job with its Go cache steps, the patches/** filter lines, the claude-envoy NATS paragraph and stall-test row).",
+    "packages/claude-envoy/dist and legion are identical to main 690c0136 (0 files differ): this PR's dist changes were dropped as main's new rule requires (packages/claude-envoy/AGENTS.md; claude-envoy-rebuild.yaml builds them on main after the merge). The claude-envoy stall test spawns bin/envoy-channel.ts, which imports src/, so the CI stall job still tests this PR's code; the plugin cache gets it from main's rebuild after the merge, which the production check names."
   ],
-  "thermonuclear": {
-    "head": "bab3f21c",
-    "deepReview": "Verdict: APPROVE at bab3f21c",
-    "codeQuality": "Verdict: APPROVE at bab3f21c"
-  },
-  "ci": "Required checks at code head 6fc807bf (newest pull_request run's head): lint, typecheck, test and pr-title completed success at 15:09Z; compare 6fc807bf...bab3f21c changes only .legion/ (1 file).",
-  "threads": "All four threads carry the reviewer's answer and are resolved; none new; no bot threads.",
-  "proofLines": "E2E (tester) names dfd2ff0a. E2E (implementer) names 5384eb84, whose only descendant change in this branch's code is the merge of main and the one architecture-doc line; the code its suites ran is byte-identical."
+  "ci": "Required checks at code head 21ac1e81 (newest pull_request run's head): lint, typecheck, test and pr-title completed success by 16:32Z; compare 21ac1e81...d5fd2711 changes only .legion/ (1 file).",
+  "threads": "All four threads carry the reviewer's answer and are resolved; none new.",
+  "proofLines": "E2E (tester) names 0d4104f9; E2E (implementer) unchanged from the approved round."
 }
