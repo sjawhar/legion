@@ -5,19 +5,23 @@
 # runner pod inside it, samples every copy container's cgroup, collects, and removes the copy.
 #
 #   cluster.sh up --namespace NS --storage-class SC --dispatch-commit SHA --pg-major 16|18
-#                 --production-repo OWNER/REPO [--listener-image REF]
+#                 --production-repo OWNER/REPO [--listener-image REF] [--stored-order-commit SHA]
 #       Refuses, before it creates anything, a commit with no ghcr.io envoy:<commit> image (naming
 #       the newest first-parent ancestor that has one), a --pg-major other than the production
-#       repository's dispatch/main.go databaseVersion, and an image tag that does not resolve to a
-#       digest. Refuses with exit 2 while the lock ConfigMap dispatch-loadtest-lock exists. Then
-#       takes the lock, installs the copy (Postgres 16 CPU / 60Gi, Dispatch 16 / 32Gi, listener
-#       500m / 512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi), starts the heartbeat and the sampler,
-#       and prints each copy container's requests and limits.
+#       repository's dispatch/main.go databaseVersion, an image tag that does not resolve to a
+#       digest, and a --stored-order-commit that this checkout's git store does not hold or whose
+#       tree has no packages/envoy/cmd/dispatch/storedorder.go. Refuses with exit 2 while the lock
+#       ConfigMap dispatch-loadtest-lock exists. Then takes the lock, installs the copy (Postgres 16
+#       CPU / 60Gi, Dispatch 16 / 32Gi, listener 500m / 512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi),
+#       builds loadgen and (with --stored-order-commit) a static envoy-dispatch of that commit for
+#       the stored-order check (below), starts the heartbeat and the sampler, and prints each copy
+#       container's requests and limits.
 #   cluster.sh seed --namespace NS            loadgen seed and seed-finish, then the template
 #                                             database dispatch_seed.
 #   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only]
 #       Reset, then one loadgen run at FACTOR × (4 events/s, 60 requests/s) with the
-#       series-sessions count (--reads-only: 0 events), then the crash check, cgroup-merge, tables.
+#       series-sessions count (--reads-only: 0 events), then the crash check, the stored-order
+#       check, cgroup-merge, tables.
 #       FACTOR may be fractional (8.5). Postgres's write-out counters (pg_stat_bgwriter, and
 #       pg_stat_checkpointer from Postgres 17) go into pg-stats-before.json and pg-stats-after.json.
 #   cluster.sh series --namespace NS [--duration 10m]   1x 2x 3x 5x 7x 10x, then 10x-reads, then
@@ -49,13 +53,13 @@
 #       residual <run>/replay-residual.md: replay-residual.md's lines, then the seed check's anchors
 #       by placement rule and sign-flipped versions from <run>/replay-manifest.json).
 #   cluster.sh collect --namespace NS [--upload-issue KEY]
-#       Every step in the order the steps ran (meta.json start): the cross-step TABLES.md,
-#       loadgen curves into <run>/curves over every step but the phase replay's, loadgen codepaths
-#       in each step directory (a replay step's beside the outage, as replay runs it); then each
-#       phase's step directories, and the results (curves/, TABLES.md, each step's CODEPATHS.md and
-#       codepaths.json), as zstd tar parts under 24 MiB in <run>/upload/; with --upload-issue, each
-#       part goes to that Dispatch issue. A loadgen failure is reported, the rest still runs, and
-#       collect exits 1.
+#       Every step in the order the steps ran (meta.json start): the cross-step STORED-ORDER.md
+#       and TABLES.md, loadgen curves into <run>/curves over every step but the phase replay's,
+#       loadgen codepaths in each step directory (a replay step's beside the outage, as replay
+#       runs it); then each phase's step directories, and the results (curves/, TABLES.md,
+#       STORED-ORDER.md, each step's CODEPATHS.md and codepaths.json), as zstd tar parts under
+#       24 MiB in <run>/upload/; with --upload-issue, each part goes to that Dispatch issue. A
+#       failure is reported, the rest still runs, and collect exits 1.
 #   cluster.sh status --namespace NS          the lock, the run, its daemons and its pods.
 #   cluster.sh down --namespace NS [--run ID] deletes everything labelled with the run id and the
 #       lock, and waits until nothing of the run is left. A lock of another run is deleted only
@@ -68,19 +72,28 @@
 #       0-39m. A manifest whose seed is null or fails its check skips the replay phases, one
 #       line each.
 #
+# The stored-order check (INFRA-707's oracle): after each step's and each replay's loadgen run,
+# while Dispatch still runs, the runner runs `envoy-dispatch stored-order --since <meta.json
+# window_start>` of --stored-order-commit, with the copy's DATABASE_URL on its standard input (never
+# on a command line), for at most 30 min. Its output goes into <step>/stored-order.txt, its summary
+# line into <step>/stored-order.json, and one line names the counts. A non-zero exit is a
+# correctness finding, not a step failure. collect writes <run>/STORED-ORDER.md. Without
+# --stored-order-commit, each step prints one line saying that the check is skipped.
+#
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
 # 600, holds the digests and the run's random credentials; cgroup.jsonl; steps/; logs/); --run ID
 # names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, sha256sum, uv
-# (collect), dispatch (collect --upload-issue), and DISPATCH_URL and DISPATCH_TOKEN_FILE
-# (replay-prepare's downloads, without --from-dir).
+# (collect), git (up --stored-order-commit), dispatch (collect --upload-issue), and DISPATCH_URL and
+# DISPATCH_TOKEN_FILE (replay-prepare's downloads, without --from-dir).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SELF=$here/cluster.sh
 MANIFESTS=$here/manifests
 ENVOY_DIR=$(cd -- "$here/../.." && pwd)
+REPO_DIR=$(cd -- "$ENVOY_DIR/../.." && pwd)
 # shellcheck source=packages/envoy/loadtest/common.sh
 source "$here/../common.sh"
 export LC_ALL=C TZ=UTC
@@ -108,6 +121,8 @@ REPLAY_TEMPLATE=dispatch_replay
 REPLAY_POD_DUMP=/var/lib/postgresql/copy/replay-seed.dump
 OUTAGE_CORES=11.1,13.8
 OUTAGE_MEMORY_GIB=13.8
+# The stored-order check's bound, in seconds (its timeout's exit status is 124).
+STORED_ORDER_SECONDS=1800
 # What down deletes and then lists: the kinds of `kubectl get all` that the load-test Role may
 # read (it may not list replicationcontrollers, daemonsets, horizontalpodautoscalers or
 # cronjobs, so `get all` itself is refused), and the claims, ConfigMaps and Secrets.
@@ -154,6 +169,7 @@ valid() {
     issue) re='^[A-Z][A-Z0-9]*-[0-9]+$' ;;
     pod) re='^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$' ;;
     uid) re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ;;
+    rfc3339) re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$' ;;
     *) die "valid: no kind $1" ;;
   esac
   [[ $2 =~ $re ]]
@@ -408,6 +424,7 @@ set_run() {
   RUN_DIR=$CLUSTER_ROOT/$RUN
   STATE=$RUN_DIR/state.json
   LOADGEN=$RUN_DIR/loadgen
+  STORED_ORDER_BIN=$RUN_DIR/envoy-dispatch
 }
 
 # state FILTER: one value of state.json.
@@ -908,6 +925,115 @@ runner_wait() {
   printf '%s\n' "$rc"
 }
 
+# ---- the stored-order check -----------------------------------------------------------------------
+
+# stored_order_source COMMIT: refuse a --stored-order-commit that this checkout's git store (which
+# `jj git fetch` fills) does not hold, or whose tree has no cmd/dispatch/storedorder.go, naming it.
+stored_order_source() {
+  command -v git >/dev/null || die "up: --stored-order-commit needs git on PATH"
+  git -C "$REPO_DIR" cat-file -e "$1^{commit}" 2>/dev/null ||
+    die "up: --stored-order-commit $1 is not a commit in this checkout's git store ($REPO_DIR); fetch it (jj git fetch) or name another"
+  git -C "$REPO_DIR" cat-file -e "$1:packages/envoy/cmd/dispatch/storedorder.go" 2>/dev/null ||
+    die "up: --stored-order-commit $1 has no packages/envoy/cmd/dispatch/storedorder.go, so its envoy-dispatch has no stored-order command (INFRA-707); name a commit that has it"
+}
+
+# build_stored_order COMMIT OUT: a static envoy-dispatch of COMMIT's packages/envoy at OUT (an
+# absolute path): `git archive` of this checkout's git store unpacked in a scratch directory beside
+# OUT, built there outside any workspace, then the scratch directory removed.
+build_stored_order() {
+  local commit=$1 out=$2 src rc=0
+  src=$(mktemp -d "${out%/*}/.stored-order-src.XXXXXX") || return 1
+  { git -C "$REPO_DIR" archive "$commit" packages/envoy | tar -C "$src" -xf - &&
+    (cd -- "$src/packages/envoy" && CGO_ENABLED=0 GOWORK=off go build -buildvcs=false -o "$out" ./cmd/dispatch); } || rc=$?
+  rm -rf -- "$src"
+  return "$rc"
+}
+
+# put_stored_order: the run's envoy-dispatch into the runner as /work/envoy-dispatch, executable,
+# unless it is there (put_loadgen's rule).
+put_stored_order() {
+  if runner_has "$STORED_ORDER_BIN" /work/envoy-dispatch -x; then return 0; fi
+  runner_put "$STORED_ORDER_BIN" /work/envoy-dispatch
+  kube exec runner -c runner -- chmod 755 /work/envoy-dispatch || die "chmod of /work/envoy-dispatch in the runner failed"
+}
+
+# The runner's script: DATABASE_URL from its standard input, so the password is on no command line
+# and in no file, then stored-order since $2, bounded at $1 seconds (timeout's exit status 124).
+# shellcheck disable=SC2016 # expanded by the runner's sh
+STORED_ORDER_SCRIPT='IFS= read -r DATABASE_URL; export DATABASE_URL; exec timeout "$1" /work/envoy-dispatch stored-order --since "$2"'
+
+# stored_order_summary TXT COMMIT EXIT SINCE: stored-order.json from the command's output TXT: the
+# commit it was built from, its exit status (null when it did not run), --since (null when none),
+# and the counts of the last summary line (`stored-order: documents=N clean=N mismatched=N
+# refused=N failed=N`), each null when there is no such line or the command timed out (exit 124),
+# never 0.
+stored_order_summary() {
+  jq -Rn --arg commit "$2" --argjson exit "${3:-null}" --arg since "$4" '
+    ([inputs | capture("^stored-order: documents=(?<documents>[0-9]+) clean=(?<clean>[0-9]+) mismatched=(?<mismatched>[0-9]+) refused=(?<refused>[0-9]+) failed=(?<failed>[0-9]+)$")] | last) as $s
+    | {commit: $commit, exit: $exit, since: (if $since == "" then null else $since end)}
+      + (if $s == null or $exit == 124 then {documents: null, clean: null, mismatched: null, refused: null, failed: null}
+        else $s | map_values(tonumber) end)' <"$1"
+}
+
+# stored_order_check NAME DIR: the stored-order check of step NAME (see the header) after its
+# loadgen run, while Dispatch still runs: DIR/stored-order.txt (the command's standard output and
+# error), DIR/stored-order.json (stored_order_summary) and one line naming the counts. A non-zero
+# exit is a finding, never the step's failure. Without the run's envoy-dispatch (up was given no
+# --stored-order-commit), one line says that the check is skipped.
+stored_order_check() {
+  local name=$1 dir=$2 commit since rc=0 txt=$2/stored-order.txt
+  commit=$(state '.stored_order.commit // empty')
+  if [ -z "$commit" ]; then
+    note "step $name: the stored-order check is skipped: up was given no --stored-order-commit"
+    return 0
+  fi
+  since=$(jq -r '.window_start // empty' "$dir/meta.json" 2>/dev/null || true)
+  if valid rfc3339 "$since"; then
+    put_stored_order
+    printf '%s\n' "$(pg_url)" | kube_for $((STORED_ORDER_SECONDS + 60)) exec -i runner -c runner -- \
+      sh -c "$STORED_ORDER_SCRIPT" sh "$STORED_ORDER_SECONDS" "$since" >"$txt" 2>&1 || rc=$?
+    ((rc != 124)) || printf 'stored-order: timed out after %s s (exit 124)\n' "$STORED_ORDER_SECONDS" >>"$txt"
+  else
+    printf 'stored-order: not run: %s/meta.json holds no RFC 3339 window_start\n' "$name" >"$txt"
+    since="" rc=null
+  fi
+  stored_order_summary "$txt" "$commit" "$rc" "$since" >"$dir/stored-order.json"
+  note "$(jq -r --arg name "$name" 'def n: if . == null then "null" else tostring end;
+    "step \($name): stored-order (envoy-dispatch of \(.commit[0:12])) since \(.since | n): "
+    + if .exit == null then "not run: meta.json holds no window_start"
+      else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
+        + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($name)/stored-order.txt" end) end' "$dir/stored-order.json")"
+}
+
+# stored_order_table DIR...: <run>/STORED-ORDER.md: the commit the check's envoy-dispatch was built
+# from, then one row per step directory in the order given (the run's) from its stored-order.json,
+# "not run" for a step without one. A count that no summary line gave is null, never 0.
+stored_order_table() {
+  local commit sha d out=$RUN_DIR/STORED-ORDER.md
+  commit=$(state '.stored_order.commit // empty')
+  sha=$(state '.stored_order.sha256 // empty')
+  {
+    printf '# Stored order\n\n'
+    if [ -n "$commit" ]; then
+      printf "INFRA-707's oracle \`envoy-dispatch stored-order\`, built from commit %s (binary sha256 %s), ran on each step after its window, while Dispatch still ran, with \`--since\` the window start. Exit 1 (a mismatch, a refused document or a failed read) is a correctness finding, not a failed step; \`<step>/stored-order.txt\` holds its lines.\n\n" "$commit" "$sha"
+    else
+      printf "No step ran INFRA-707's oracle \`envoy-dispatch stored-order\`: up was given no \`--stored-order-commit\`.\n\n"
+    fi
+    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    for d in "$@"; do
+      if [ -f "$d/stored-order.json" ]; then
+        jq -r --arg step "${d##*/}" 'def n: if . == null then "null" else tostring end;
+          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) |"' \
+          "$d/stored-order.json" || return 1
+      else
+        printf '| %s | | not run | | | | | |\n' "${d##*/}"
+      fi
+    done
+  } >"$out.tmp" || return 1
+  mv -- "$out.tmp" "$out"
+}
+
 # ---- steps ----------------------------------------------------------------------------------------
 
 # The jq program that turns the run's pods into one line per sampled container: role, pod,
@@ -1059,7 +1185,8 @@ run_step() {
 # most SECONDS), with Postgres's write-out counters before and after it (pg-stats-before.json,
 # pg-stats-after.json), then the after-work of every step: /work/steps/NAME copied back into DIR
 # (and, once copied, removed from the runner with /work/meta/NAME.json), the crash check, the
-# container logs, a non-zero exit recorded, cgroup-merge and tables.
+# container logs, a non-zero exit recorded, the stored-order check while Dispatch still runs (one
+# that dies leaves the step going), cgroup-merge and tables.
 run_in_runner() {
   local name=$1 dir=$2 job=$3 seconds=$4 started rc
   shift 4
@@ -1080,6 +1207,7 @@ run_in_runner() {
   crash_check "$dir/containers-before.tsv" "$dir/containers-after.tsv" "$dir"
   save_pod_logs "$dir" "$started"
   [ "$rc" = 0 ] || record_failure "$dir" loadgen_exit "" "loadgen run ended with exit status $rc (see run.log and loadgen.out)"
+  go_on "step $name: the stored-order check" stored_order_check "$name" "$dir"
   loadgen_local cgroup-merge "$dir" "$RUN_DIR/cgroup.jsonl" || note "step $name: loadgen cgroup-merge failed"
   loadgen_local tables "$dir" || note "step $name: loadgen tables failed"
 }
@@ -1525,12 +1653,13 @@ pack_phase() {
 }
 
 # pack_results [ISSUE]: the phase results (pack_tar), packed and uploaded again on every collect:
-# curves/, TABLES.md, and each step's CODEPATHS.md and codepaths.json, which collect writes after
-# the step's own phase was packed.
+# curves/, TABLES.md, STORED-ORDER.md, and each step's CODEPATHS.md and codepaths.json, which
+# collect writes after the step's own phase was packed.
 pack_results() {
   local paths=() f
   [ ! -d "$RUN_DIR/curves" ] || paths+=(curves)
   [ ! -f "$RUN_DIR/TABLES.md" ] || paths+=(TABLES.md)
+  [ ! -f "$RUN_DIR/STORED-ORDER.md" ] || paths+=(STORED-ORDER.md)
   for f in "$RUN_DIR"/steps/*/CODEPATHS.md "$RUN_DIR"/steps/*/codepaths.json; do
     if [ -f "$f" ]; then paths+=("${f#"$RUN_DIR"/}"); fi
   done
@@ -1539,11 +1668,11 @@ pack_results() {
 }
 
 # collect_run [ISSUE]: the cross-step outputs, with every step in the order the steps ran:
-# TABLES.md over the steps that wrote summary.json, loadgen curves over every step directory but
-# the phase replay's into <run>/curves, and loadgen codepaths in each step directory that holds
-# summary.json (a step that wrote none has no profile; a replay step's as replay_codepaths runs
-# it); then each phase's tar and the results tar. A loadgen failure is reported, the rest still
-# runs, and collect_run returns 1.
+# STORED-ORDER.md over every step directory, TABLES.md over the steps that wrote summary.json,
+# loadgen curves over every step directory but the phase replay's into <run>/curves, and loadgen
+# codepaths in each step directory that holds summary.json (a step that wrote none has no profile;
+# a replay step's as replay_codepaths runs it); then each phase's tar and the results tar. A
+# failure is reported, the rest still runs, and collect_run returns 1.
 collect_run() {
   local issue=${1:-} ran=() names=() curve_dirs=() replays=" " d p rc=0
   [ ! -f "$RUN_DIR/phases/replay" ] || replays+="$(tr '\n' ' ' <"$RUN_DIR/phases/replay")"
@@ -1552,6 +1681,12 @@ collect_run() {
     if [ -f "$d/summary.json" ]; then ran+=("$d") names+=("${d##*/}"); fi
     if [[ $replays != *" ${d##*/} "* ]]; then curve_dirs+=("$d"); fi
   done
+  if stored_order_table "${DIRS[@]}"; then
+    note "wrote $RUN_DIR/STORED-ORDER.md over ${#DIRS[@]} steps, in the order they ran"
+  else
+    note "writing $RUN_DIR/STORED-ORDER.md failed"
+    rc=1
+  fi
   if ((${#ran[@]})); then
     if loadgen_local tables -tops=false -out "$RUN_DIR/TABLES.md" "${ran[@]}"; then
       note "wrote $RUN_DIR/TABLES.md over ${#ran[@]} steps, in the order they ran: ${names[*]}"
@@ -1586,7 +1721,7 @@ collect_run() {
     if [ -f "$p" ]; then pack_phase "${p##*/}" "$issue"; fi
   done
   pack_results "$issue"
-  ((rc == 0)) || note "collect: a loadgen command failed (above); every other output was written"
+  ((rc == 0)) || note "collect: a command failed (above); every other output was written"
   return "$rc"
 }
 
@@ -1615,7 +1750,7 @@ down_run() {
 # ---- subcommands ----------------------------------------------------------------------------------
 
 cmd_up() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image" "" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit" "" "$@"
   positional 0 "no positional arguments"
   trap up_exit EXIT
   up_run
@@ -1634,6 +1769,7 @@ up_exit() {
 # up_run: up from OPT (also all's first phase).
 up_run() {
   local sc=${OPT[storage-class]:-} commit=${OPT[dispatch-commit]:-} major=${OPT[pg-major]:-}
+  local so_commit=${OPT[stored-order-commit]:-}
   PRODUCTION_REPO=${OPT[production-repo]:-}
   local tool
   for tool in kubectl jq curl gh go setsid timeout sha256sum awk tar; do
@@ -1654,6 +1790,10 @@ up_run() {
   valid pod "$HOLDER_POD" || die "up: this pod's name '$HOLDER_POD' is not a pod name"
   valid uid "${POD_UID:-}" || die "up: POD_UID ('${POD_UID:-}') is not a pod uid; the lock names its holder's uid (a Legion pod sets POD_UID)"
   valid issue "${LEGION_ISSUE:-}" || die "up: LEGION_ISSUE ('${LEGION_ISSUE:-}') is not an issue key; the lock names it (a Legion pod sets LEGION_ISSUE)"
+  if [ -n "$so_commit" ]; then
+    valid commit "$so_commit" || die "up: --stored-order-commit '$so_commit' is not a full 40-hex commit sha"
+    stored_order_source "$so_commit"
+  fi
 
   # Production's facts, from the production repository's main.
   local prod_major listener_ref
@@ -1690,13 +1830,19 @@ up_run() {
     --arg sk "$(random_hex 32)" '{namespace: $ns, run: $run, storage_class: $sc, dispatch_commit: $commit,
       pg_major: $major, production_repo: $repo, created: $created, holder_pod: $holder,
       images: ({dispatch: $dispatch, listener: $listener, postgres: $pg, socat: $socat, runner: $runner} + $nats),
-      image_sources: {listener: $listener_ref}, postgres: $tier,
+      image_sources: {listener: $listener_ref}, postgres: $tier, stored_order: null,
       secrets: {pg_password: $pgpw, dispatch_token: $dt, listener_token: $lt, signing_key: $sk}}' >"$STATE")
   chmod 600 "$STATE"
   start_daemon heartbeat
 
   note "building loadgen (static) into $LOADGEN"
   (cd -- "$ENVOY_DIR" && CGO_ENABLED=0 go build -o "$LOADGEN" ./loadtest) || die "go build of loadgen failed"
+  if [ -n "$so_commit" ]; then
+    note "building envoy-dispatch (static) of commit $so_commit into $STORED_ORDER_BIN, for the stored-order check"
+    build_stored_order "$so_commit" "$STORED_ORDER_BIN" || die "go build of envoy-dispatch at commit $so_commit failed"
+    # shellcheck disable=SC2016 # $c and $s are jq's variables
+    state_set '.stored_order = {commit: $c, sha256: $s}' --arg c "$so_commit" --arg s "$(sha256_of "$STORED_ORDER_BIN")"
+  fi
 
   note "installing the copy in $NS"
   apply_manifest secrets.yaml.tmpl
@@ -1711,6 +1857,7 @@ up_run() {
   kube_for 960 wait --for=condition=Ready pod/runner --timeout=900s >/dev/null || die "the runner was not ready within 15 min"
   start_copy
   put_loadgen
+  [ -z "$so_commit" ] || put_stored_order
   save_pg_settings "$RUN_DIR/postgres-settings.txt"
   psql_at postgres 'select version()' >"$RUN_DIR/postgres-version.txt" || die "select version() failed"
   start_daemon sampler
@@ -1917,7 +2064,7 @@ cmd_down() {
 }
 
 cmd_all() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image profile manifest upload-issue" "keep" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit profile manifest upload-issue" "keep" "$@"
   positional 0 "no positional arguments"
   local step_d hour_d replay_to refine collect_rc issue=${OPT[upload-issue]:-} manifest=${OPT[manifest]:-$REPLAY_MANIFEST} why
   case ${OPT[profile]:-} in

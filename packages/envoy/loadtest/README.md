@@ -68,7 +68,7 @@ same step before and after its change, and compares the two rows.
 | `cluster/manifests/` | The copy's templates: `postgres.yaml`, `dispatch.yaml`, `listener.yaml`, `runner.yaml`, `secrets.yaml.tmpl`, and `nats.yaml`, the committed render of chart `nats/nats` 2.15.1 |
 | `cluster/render-nats.sh`, `cluster/nats-values.yaml` | The render of `manifests/nats.yaml` from the chart and its values, with every image pinned by digest |
 | `cluster/replay-residual.md` | What the replay on the copy does not reproduce: `loadgen codepaths -residual-notes` lists it under each replay's residual |
-| `cluster/cluster.test.sh` | The test of `cluster.sh`. It fakes `kubectl`, `gh`, `curl`, `go`, `uv` and `dispatch` and needs no cluster: `cd packages/envoy && bash loadtest/cluster/cluster.test.sh` |
+| `cluster/cluster.test.sh` | The test of `cluster.sh`. It fakes `kubectl`, `gh`, `curl`, `go`, `git`, `uv` and `dispatch` and needs no cluster: `cd packages/envoy && bash loadtest/cluster/cluster.test.sh` |
 
 ## Requirements
 
@@ -1364,7 +1364,7 @@ credential: every token and password is random and made for the run.
   | `deployments.apps`, `statefulsets.apps` | `create`, `get`, `list`, `watch`, `patch`, `delete` | Dispatch, the listener and nats-box; Postgres and NATS. `kubectl rollout status` watches them. |
   | `deployments.apps/scale` | `patch` | `kubectl scale` in each reset |
   | `pods` | `create`, `get`, `list`, `watch`, `delete` | The runner pod; `kubectl wait`; the pod lookups of the sampler and the crash check |
-  | `pods/exec` | `create` | `psql` and `pg_restore` in Postgres (and the replay's dump streamed into it), the `nats` CLI in nats-box, Dispatch's `/healthz` and `cpu.max`, the sampler's cgroup reads, `kubectl cp` and the replay's bundle into the runner, and `loadgen` in the runner |
+  | `pods/exec` | `create` | `psql` and `pg_restore` in Postgres (and the replay's dump streamed into it), the `nats` CLI in nats-box, Dispatch's `/healthz` and `cpu.max`, the sampler's cgroup reads, `kubectl cp` and the replay's bundle into the runner, and `loadgen` and `envoy-dispatch stored-order` in the runner |
   | `pods/log` | `get` | Each step's container logs |
   | `persistentvolumeclaims`, `jobs.batch` | `get`, `list`, `delete` | `down` |
   | `replicasets.apps` | `get`, `list` | `down`'s listing of what is left |
@@ -1384,21 +1384,25 @@ credential: every token and password is random and made for the run.
   4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
   LoadBalancer or a NodePort, and no pod has a priority class.
 - **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `setsid`, `timeout`,
-  `tar`, `sha256sum`, `uv` (collect's zstd compression) and `dispatch` (only for
-  `--upload-issue`). `gh` must read the deployment repository that `--production-repo` names: `up`
-  reads its main's `dispatch/main.go` (`databaseVersion`) and `dispatch/Pulumi.prod.yaml`
-  (`<project>:listenerImage`).
+  `tar`, `sha256sum`, `uv` (collect's zstd compression), `git` (only for `--stored-order-commit`)
+  and `dispatch` (only for `--upload-issue`). `gh` must read the deployment repository that
+  `--production-repo` names: `up` reads its main's `dispatch/main.go` (`databaseVersion`) and
+  `dispatch/Pulumi.prod.yaml` (`<project>:listenerImage`).
 - **For the replay:** `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` (a token that may read
   INFRA-639's artifacts), from which `replay-prepare` downloads INFRA-639's parts, as
   `stack.sh replay-get` does. The copy's pods never reach production: the worker downloads, and
   pushes into the copy.
 - **An image of the commit** (An image for a commit, below).
+- **For the stored-order check:** the `--stored-order-commit` in this checkout's git store
+  (`jj git fetch` fills it), with `packages/envoy/cmd/dispatch/storedorder.go` in its tree (The
+  stored-order check, below).
 
 ### The one command
 
 ```bash
 packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-class premium-rwo \
-  --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> --profile full
+  --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> \
+  --stored-order-commit <sha> --profile full
 ```
 
 `<owner/repo>` is the deployment repository. `all` runs `up`, `seed`, the series (1x, 2x, 3x, 5x,
@@ -1418,6 +1422,7 @@ r4: …`) and goes on. A replay-prepare that fails skips both replays the same w
 | `--pg-major` | `16` or `18`. Required. It must equal production's major (`databaseVersion` in the deployment repository), else `up` refuses and names both. |
 | `--production-repo` | The deployment repository, `owner/repo`. Required. |
 | `--listener-image` | The listener's image. Default: production's `listenerImage` from the deployment repository. |
+| `--stored-order-commit` | The full 40-hex commit whose `envoy-dispatch stored-order` checks each step (The stored-order check, below). Optional: without it, each step prints one line saying that the check is skipped. |
 | `--profile` | `quick` or `full` (Profiles, below). Required. |
 | `--manifest` | The replay's manifest. Default: the committed `replay-2026-10-26.json`. |
 | `--upload-issue` | A Dispatch issue key. Each phase's tar parts go to that issue with `dispatch artifact`. |
@@ -1430,16 +1435,16 @@ key, or from `--run <id>`.
 
 | Subcommand | What it does |
 | --- | --- |
-| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, and an image tag that does not resolve to a digest. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, starts the heartbeat and the sampler, and prints each container's requests and limits. |
+| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, an image tag that does not resolve to a digest, and a `--stored-order-commit` that the git store does not hold or whose tree has no `cmd/dispatch/storedorder.go`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--stored-order-commit`) `envoy-dispatch`, starts the heartbeat and the sampler, and prints each container's requests and limits. |
 | `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
-| `step NAME FACTOR [--duration 10m] [--reads-only]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. |
+| `step NAME FACTOR [--duration 10m] [--reads-only]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. |
 | `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
 | `soak [--duration 60m]` | The step `10x-hour`. |
 | `db-size CPU MEMORY` | Postgres at the Cloud SQL tier of CPU and MEMORY (for example `4 15Gi`), restarted on the same claim. Postgres's `cpu.max` must then read the new limit. |
 | `redeploy --dispatch-commit SHA` | Dispatch on the image of another commit, then a reset. A before-and-after pair runs on one copy. |
 | `replay-prepare [--manifest FILE] [--from-dir DIR]` | The replay's template `dispatch_replay` (The replay on the copy, below). It refuses, before it touches the copy, a manifest whose seed is null or whose seed check failed. |
 | `replay NAME [--from 0] [--to 39m]` | One replay step from `dispatch_replay` (refused without it) over the sub-window FROM to TO after 22:55, then the step's after-work and `loadgen codepaths` beside the outage. |
-| `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `TABLES.md`, `loadgen curves` into `curves/` over every step but the phase `replay`'s, and `loadgen codepaths` in each step directory that holds `summary.json` (a replay step's with the flags `replay` gives it). Then it packs each phase and the phase `results`. A failed `loadgen` command is reported, the rest still runs, and `collect` exits with status 1. |
+| `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `STORED-ORDER.md`, `TABLES.md`, `loadgen curves` into `curves/` over every step but the phase `replay`'s, and `loadgen codepaths` in each step directory that holds `summary.json` (a replay step's with the flags `replay` gives it). Then it packs each phase and the phase `results`. A failed command is reported, the rest still runs, and `collect` exits with status 1. |
 | `status` | The lock, the run, its heartbeat and sampler, and its pods. |
 | `down [--run ID]` | Stops the heartbeat and the sampler, deletes everything labelled with the run id (the claims, the Secrets and the lock too), waits until nothing of the run is left, and prints that listing. It removes the lock of another run only when `--run` names that run. |
 | `all <up's flags> --profile quick\|full [--manifest FILE] [--upload-issue KEY] [--keep]` | The one command (above). |
@@ -1489,13 +1494,13 @@ loadgen run -allow-foreign -source replay -events 0 -requests 0 -replay-inputs /
 ```
 
 The reads, their mix, the upload share and the roster are INFRA-639's defaults. After it: the
-step's after-work (the copy back, the crash check, `cgroup-merge`, `tables`), then
-`loadgen codepaths -heap-start heap-start.pprof -heap-end heap-end.pprof -outage-cores 11.1,13.8
--outage-memory 13.8 -residual-notes <run>/replay-residual.md -window-offset <from>`, where
-`<run>/replay-residual.md` is `cluster/replay-residual.md` followed by two lines from the
-manifest's seed check: the anchors by placement rule, with the share placed on the nearest
-surviving block, and the versions whose size change has its sign flipped (`not recorded` for a
-count the check does not give).
+step's after-work (the copy back, the crash check, the stored-order check, `cgroup-merge`,
+`tables`), then `loadgen codepaths -heap-start heap-start.pprof -heap-end heap-end.pprof
+-outage-cores 11.1,13.8 -outage-memory 13.8 -residual-notes <run>/replay-residual.md
+-window-offset <from>`, where `<run>/replay-residual.md` is `cluster/replay-residual.md` followed
+by two lines from the manifest's seed check: the anchors by placement rule, with the share placed
+on the nearest surviving block, and the versions whose size change has its sign flipped (`not
+recorded` for a count the check does not give).
 
 **`cgroup-merge` fills the replay block** of `summary.json`, whose CPU fields a foreign run leaves
 null (`cpu_source` `none`), from the `dispatch` role's samples: `cpu_source` `cgroup`;
@@ -1515,6 +1520,53 @@ database after `1x-db4`, both over 0 to 5 min under `quick` and 0 to 39 min unde
 F = 1. The replay steps are the phase `replay`. `curves` leaves them out: they are not points of
 the scaling curves.
 
+### The stored-order check
+
+The check is INFRA-707's correctness oracle, `envoy-dispatch stored-order`
+([INFRA-707](dispatch://INFRA-707)). For each document, it folds the stored updates in version
+order and compares the result with every stored class and every version's markdown. It reads
+only, in read-only transactions, and runs no migration. Each step and each replay runs it, so
+every spec that the load wrote is checked after its runs. The copy's Dispatch runs
+`--dispatch-commit`, which can be older than the command (INFRA-598's 9b92ac14 has no
+`stored-order`). So `up --stored-order-commit <sha>` builds the command from another commit:
+`git archive <sha> packages/envoy` from this checkout's git store, then `CGO_ENABLED=0 GOWORK=off
+go build ./cmd/dispatch` in a scratch directory, into `<run>/envoy-dispatch`. `state.json`
+`stored_order` records the commit and the binary's sha256. The runner gets the binary as
+`/work/envoy-dispatch` only when its sha256 differs there, as with `loadgen`. Before it creates
+anything, `up` refuses, and names, a commit that git does not have or whose tree has no
+`packages/envoy/cmd/dispatch/storedorder.go`.
+
+The check runs after the step's window, when `loadgen run` has finished and while Dispatch still
+runs: before the next reset or scale-down, so the document rooms are still resident, as INFRA-707
+asks. In the runner:
+
+```bash
+DATABASE_URL=<the copy's Postgres URL, the one Dispatch uses> \
+  timeout 1800 /work/envoy-dispatch stored-order --since <meta.json window_start>
+```
+
+The URL goes to the runner on the standard input of `kubectl exec`. It is on no command line and
+in no recorded file. `--since` folds the rows and versions from before the window as the base,
+without a check. Each step then writes:
+
+- `stored-order.txt`: the command's standard output and standard error. That is one line for each
+  document, one line for each mismatch, and the summary line `stored-order: documents=N clean=N
+  mismatched=N refused=N failed=N`.
+- `stored-order.json`: `commit`, `exit`, `since`, and `documents`, `clean`, `mismatched`,
+  `refused` and `failed`, from the last summary line. A count is `null`, never 0, when there is no
+  summary line. A run that takes longer than 30 min is stopped: its `exit` is 124 and its counts
+  are `null`. A step whose `meta.json` has no `window_start` does not run the command: its `exit`
+  is `null`.
+
+`cluster.sh` prints one line with the counts. Exit 0 means that every document replays. Exit 1 (a
+mismatch, a refused document, or a read that failed) is a correctness finding, not a failed step:
+the step goes on, and it writes no `step-failed.json` reason. `collect` writes
+`<run>/STORED-ORDER.md`, which has a line naming the commit and one row for each step, in the
+order the steps ran: `since`, the exit and the five counts (`not run` for a step with no
+`stored-order.json`). Without `--stored-order-commit`, each step prints `step <name>: the
+stored-order check is skipped: up was given no --stored-order-commit`, and `STORED-ORDER.md` says
+that no step ran the check.
+
 ### Profiles and timings
 
 | Profile | Step window | Hour | Replays | Refinement | Time |
@@ -1529,8 +1581,9 @@ the worker pod.
 
 | File | What it holds |
 | --- | --- |
-| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, every image by digest, the Postgres tier and its settings, and the run's random credentials. |
+| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, every image by digest, the Postgres tier and its settings, `stored_order` (the `--stored-order-commit` and the sha256 of its `envoy-dispatch`, or `null` without the flag), and the run's random credentials. |
 | `loadgen` | The static `loadgen` of this checkout, which the runner also gets. |
+| `envoy-dispatch` | Only with `--stored-order-commit`: the static `envoy-dispatch` of that commit, which the runner also gets (The stored-order check, above). |
 | `seed.json`, `seed.meta.json` | The seed (The seed, above), and its migration, build commit, start time, `seed_seconds` and counts. |
 | `postgres-settings.txt`, `postgres-version.txt` | Postgres's `SHOW ALL` (after `up` and after `db-size`) and `select version()`. |
 | `cgroup.jsonl` | The sampler's reads: every 5 s, for each copy container (`dispatch`, `pprof`, `postgres`, `nats-0`, `nats-1`, `nats-2`, `listener`, `runner`), one line with `at` (the worker's clock), `role`, `pod`, `container`, `usage_usec`, `throttled_usec`, `cpu_max`, `memory_current` and `inactive_file`. A failed read is a line with `error` and no number. |
@@ -1539,11 +1592,12 @@ the worker pod.
 | `replay/` | `replay-prepare`'s inputs: `parts/` (INFRA-639's parts), `bundle/` and `bundle.unpacked.json`. |
 | `replay-prepared.json` | `replay-prepare`'s record: `template`, `manifest`, `seed_dump_sha256`, `bundle_tar_zst_sha256`, `bundle_meta_sha256`, `dispatch_commit`, `dispatch_image`, `migration_before`, `migration_after`, `schema_version` (`/healthz`'s), `checksum` (`loadgen replay-checksum` of the template), `postgres_version`, `prepared_at`, and `seconds` for `inputs`, `stream`, `restore`, `migrate`, `backfill`, `quiet`, `vacuum`, `checksum` and `total`. |
 | `TABLES.md` | The tables (The tables, above) of every step, in the order the steps ran. |
+| `STORED-ORDER.md` | The stored-order check (above): the commit its `envoy-dispatch` was built from, and one row for each step, in the order the steps ran, with `since`, the exit and the counts. |
 | `curves/CURVES.md`, `curves/curves.csv` | One row per step: the six series (delivery latency, throughput, CPU, memory, database connections, database CPU), pool waiters, commit-order lock waiters, failed rows, the Pass table, and the control's and the 4 vCPU step's comparisons. |
 | `curves/KNEES.md` | Each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
 | `curves/refine.txt` | The refinement's factors, one per line. Empty when no knee needs another step. |
 | `curves/TREND.md` | Only with an hour step: the trend of Dispatch's cores, working set and Go heap in use over minutes 5 to 60. |
-| `upload/` | The tar parts, `cluster-load-test-<date>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The phase `results` holds `curves/`, `TABLES.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
+| `upload/` | The tar parts, `cluster-load-test-<date>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The phase `results` holds `curves/`, `TABLES.md`, `STORED-ORDER.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
 | `logs/` | The heartbeat's and the sampler's logs, `seed.log`, `seed-finish.log`, `replay-restore.log` (`pg_restore`'s output), and the reset record of each `redeploy`. |
 
 A step directory holds the files of `loadgen run` (The step directory, above). `TABLES.md` takes
@@ -1561,6 +1615,7 @@ its cores and working set from `cgroup.json`. It also holds:
 | `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
+| `stored-order.txt`, `stored-order.json` | Only with `--stored-order-commit`: the output of `envoy-dispatch stored-order --since <window_start>` after the step, and `commit`, `exit`, `since` and the counts of its summary line (`null` without one, never 0; The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
 | `dispatch.log`, `listener.log`, `postgres.log`, `nats-0.log`, `nats-1.log`, `nats-2.log` | Each container's log from the step's start. |
 | `CODEPATHS.md`, `codepaths.json` | `loadgen codepaths` (a replay step's from `replay` and again from `collect`, with the replay's flags; every other step's from `collect`): Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle, stacks, other runtime memory and non-Go memory, and the outage's 10-minute buckets beside it. |
 
