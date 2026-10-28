@@ -13,6 +13,7 @@ import atexit
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -341,28 +342,60 @@ def squash(text: str) -> str:
 
 
 def go_lines(text: str) -> list:
-    """The lines of a run: script that start a go command, comments aside."""
-    return [line.strip() for line in text.splitlines()
+    """The logical lines of a run: script that start a go command, comments aside. A line ending in
+    a backslash continues on the next, as the shell reads it, so a package on a continuation line is
+    part of the command."""
+    joined = re.sub(r"\\\n", " ", text)
+    return [line.strip() for line in joined.splitlines()
             if not line.strip().startswith("#") and GO_COMMAND.search(line)]
 
 
-# A package argument on a go line: a relative pattern (`.`, `./x`, `../x`, `./x/...`). This repository's
-# go commands name their packages only that way, and no flag value they pass starts with `.`.
-PACKAGE_ARG = re.compile(r"^\.{1,2}(?:/\S*)?$")
+# The go subcommands GO_COMMAND finds, and the flags of `go build|test|vet|list|run|install|generate`
+# that take their value as the next word (`-o out`); any other flag is a word of its own (`-v`) or
+# carries its value after `=` (`-count=1`). An unknown flag taking a separate value fails closed: its
+# value reads as a package the Run does not name.
+GO_SUBCOMMANDS = {"test", "vet", "build", "run", "list", "install", "generate"}
+VALUE_FLAGS = {
+    "-C", "-o", "-tags", "-timeout", "-run", "-skip", "-count", "-p", "-parallel", "-cpu", "-ldflags",
+    "-gcflags", "-asmflags", "-overlay", "-mod", "-modfile", "-exec", "-bench", "-benchtime",
+    "-coverprofile", "-covermode", "-coverpkg", "-shuffle", "-vet", "-pkgdir", "-toolexec",
+    "-installsuffix", "-buildmode", "-compiler", "-f", "-pgo", "-outputdir", "-blockprofile",
+    "-cpuprofile", "-memprofile", "-mutexprofile", "-trace", "-fuzz", "-fuzztime",
+}
+SHELL_BREAKS = {"|", "||", "&&", ";", "&", ")", "(", "|&"}
 
 
 def line_packages(line: str) -> set:
-    """The packages the go commands on one line name: every relative pattern after a go subcommand,
-    shell punctuation stripped. A Run claims a line only when these are exactly its packages, so a
-    package appended to a claimed command is never left out of the closure the check computes."""
-    found = set()
-    for match in GO_COMMAND.finditer(line):
-        rest = line[match.end():]
-        rest = re.split(r"\||&&|;|\)\s*$", rest)[0]
-        for token in rest.split():
-            token = token.strip("\"')")
-            if PACKAGE_ARG.match(token):
-                found.add(token)
+    """Every positional argument of the go commands on one logical line: each word after a go
+    subcommand, up to the shell's next `|`, `&&`, `;` or `)`, that is neither a flag nor a flag's
+    value. A Run claims a line only when these are exactly its packages, so a package appended to a
+    claimed command, however it is spelled (a relative pattern, an import path, a variable), is never
+    left out of the closure the check computes."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return {f"<unparsed: {line}>"}
+    found, index = set(), 0
+    while index < len(words):
+        if words[index] != "go":
+            index += 1
+            continue
+        index += 1
+        if index + 1 < len(words) and words[index] == "-C":
+            index += 2
+        if index >= len(words) or words[index] not in GO_SUBCOMMANDS:
+            continue
+        index += 1
+        while index < len(words) and words[index] not in SHELL_BREAKS:
+            word = words[index]
+            if word.startswith("-") and len(word) > 1:
+                if "=" not in word and word.split("=")[0] in VALUE_FLAGS:
+                    index += 1
+            else:
+                found.add(word)
+            index += 1
     return found
 
 

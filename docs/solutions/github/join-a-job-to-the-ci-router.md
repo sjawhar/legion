@@ -137,8 +137,9 @@ fails the pull request that adds it.
 - `GATES`: per filter, the job, its go commands and its other steps' reads. Each go command is a
   `Run` pinned to its text: `step_run` for a `run:` step of the job, `script_run` for a script the
   job runs. The check fails when a job's `run:` step starts a go command (`go test`, `vet`,
-  `build`, `run`, `list`, `install`, `generate`) no `Run` claims, or one whose package arguments
-  are not exactly its `Run`'s (a package appended to a claimed command), when a pinned text is gone, and
+  `build`, `run`, `list`, `install`, `generate`) no `Run` claims, or one with a positional argument
+  that is not a flag, a flag's value or one of its `Run`'s packages (a package appended by path,
+  import path or on a backslash-continued line), when a pinned text is gone, and
   when a job or step is gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go
   commands still gets a gate with its reads.
 - `RULES`: per source file, what a test does outside its package: a go command it starts, or a
