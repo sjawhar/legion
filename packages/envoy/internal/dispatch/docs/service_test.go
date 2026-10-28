@@ -843,13 +843,13 @@ func TestSetAskBlockTextRefusesEveryEditOfAnAskRepeatingALabel(t *testing.T) {
 
 // An item the row never held that holds more than its first paragraph (a nested list, a second
 // paragraph) cannot be rebuilt from its label and description without losing the rest, so every
-// edit is refused, quoting the extra content and naming the document edit that moves or deletes it.
+// edit is refused, quoting the list holding it and naming the document edit that deletes it.
 func TestSetAskBlockTextRefusesEveryEditOfAnAskWhoseNewItemHoldsMoreThanItsText(t *testing.T) {
 	ship := model.AskOption{Label: "Ship", Description: "Release it"}
 	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
 	for name, test := range map[string]struct{ list, extra string }{
-		"nested list":      {"- Defer: Wait a week\n  - only if finance agrees\n", `"only if finance agrees"`},
-		"second paragraph": {"- Defer: Wait a week\n\n  Finance must sign off first.\n", `"Finance must sign off first."`},
+		"nested list":      {"- Defer: Wait a week\n  - only if finance agrees\n", `"- Defer: Wait a week\n  - only if finance agrees"`},
+		"second paragraph": {"- Defer: Wait a week\n\n  Finance must sign off first.\n", `"- Defer: Wait a week\n\n  Finance must sign off first."`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
@@ -868,31 +868,49 @@ func TestSetAskBlockTextRefusesEveryEditOfAnAskWhoseNewItemHoldsMoreThanItsText(
 	}
 }
 
-// The refusal above tells the caller to move or delete the extra content with a document edit,
-// then edit the ask. Following it - a document edit deleting the quoted text, then an ask edit
-// sending every option - must reach a valid decision, as the repeated-label refusal's removal does.
-func TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies(t *testing.T) {
+// The refusal above names its repair: delete, with a document edit, the whole list the ask row
+// never held - quoted in full, its nested content included, so the caller sees every word it
+// removes - which leaves one list, then edit the ask sending every option. Each step it names
+// must apply when followed, and the decision must end valid.
+func TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply(t *testing.T) {
 	ship := model.AskOption{Label: "Ship", Description: "Release it"}
 	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
 	defer_ := model.AskOption{Label: "Defer", Description: "Wait a week"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	for name, test := range map[string]struct{ list, extra string }{
-		"nested list":      {"- Defer: Wait a week\n  - only if finance agrees\n", "only if finance agrees"},
-		"second paragraph": {"- Defer: Wait a week\n\n  Finance must sign off first.\n", "Finance must sign off first."},
+	for name, test := range map[string]struct {
+		list  string
+		words []string
+	}{
+		"nested list":      {"- Defer: Wait a week\n  - only if finance agrees\n", []string{"Defer", "Wait a week", "only if finance agrees"}},
+		"second paragraph": {"- Defer: Wait a week\n\n  Finance must sign off first.\n", []string{"Defer", "Wait a week", "Finance must sign off first."}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
 			editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, test.list)))
 			settleCurrentGeneration(t, service, artifactID)
 			every := []model.AskOption{ship, hold, defer_}
-			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &every}); err == nil || !strings.Contains(err.Error(), "dispatch doc-edit") {
+
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &every})
+			if err == nil || !strings.Contains(err.Error(), "dispatch doc-edit") {
 				t.Fatalf("first ask edit: err = %v, want the refusal naming dispatch doc-edit", err)
 			}
-			if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Find: test.extra}}, alice, nil); err != nil {
-				t.Fatalf("document edit deleting %q, as the refusal says: %v", test.extra, err)
+			for _, word := range test.words {
+				if !strings.Contains(err.Error(), word) {
+					t.Fatalf("the refusal does not quote %q of the list it has the caller delete: %v", word, err)
+				}
+			}
+
+			// The list the row never held is the ask's last; dispatch doc-read --blocks gives its id.
+			ask := firstAsk(liveTree(t, service, artifactID))
+			listID, _ := ask.Children[len(ask.Children)-1].Attrs[pmdoc.BlockIDAttr].(string)
+			if listID == "" {
+				t.Fatalf("the second list has no block id")
+			}
+			if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: listID}}, alice, nil); err != nil {
+				t.Fatalf("document edit deleting the list the refusal quotes: %v", err)
 			}
 			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &every}); err != nil {
-				t.Fatalf("ask edit after the document edit: %v", err)
+				t.Fatalf("ask edit sending every option after the document edit: %v", err)
 			}
 			settleCurrentGeneration(t, service, artifactID)
 			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", every)

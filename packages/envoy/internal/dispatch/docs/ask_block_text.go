@@ -530,7 +530,10 @@ func (s *Service) askRowOptions(ctx context.Context, artifactID, blockID string)
 //
 // An ask holding only paragraphs and then two or more lists, where an item the block holds and
 // the row does not (below) holds more than its first paragraph, is refused whatever the edit
-// sends: rebuilding keeps each item's plain text only, so a document edit moves or deletes the rest.
+// sends: rebuilding keeps each item's plain text only. The refusal quotes in full, by block id,
+// the lists a document edit deletes to leave the ask valid (listsToDelete), so the caller can
+// delete them (doc-edit refuses an edit leaving the decision broken, so deleting only the extra
+// content would be refused), edit the ask sending every option, and restore the rest.
 //
 // An ask holding only paragraphs and then two or more lists is refused unless the edit sends
 // options, which rebuilds them as one list and so repairs the ask. Settlement keeps such an ask's
@@ -547,7 +550,7 @@ func refuseAskContentEdit(block askBlock, rowOptions []model.AskOption, edit Ask
 		return &ErrAskBlockUnrepresentable{
 			Field: "block",
 			Reason: broken.Error() + "; the ask-edit route will not move " + after +
-				" into the question nor delete it: move it above the options or delete it with a document edit (dispatch doc-edit), then edit the ask",
+				" into the question nor delete it: move it out of the decision (a document edit places it before or after the decision block) or delete it with a document edit (dispatch doc-edit), then edit the ask",
 		}
 	}
 	items := normalizeAskOptions(block.options)
@@ -563,11 +566,15 @@ func refuseAskContentEdit(block askBlock, rowOptions []model.AskOption, edit Ask
 		}
 	}
 	protected := slices.DeleteFunc(slices.Clone(items), func(item model.AskOption) bool { return slices.Contains(rowOptions, item) })
-	if extra, found := textBeyondItems(block.node, items, protected); found {
+	if lists := listsToDelete(block.node, items, protected); len(lists) > 0 {
+		quoted, ops, err := quotedLists(lists)
+		if err != nil {
+			return err
+		}
 		return &ErrAskBlockUnrepresentable{
 			Field: "block",
-			Reason: broken.Error() + "; an option the decision holds but its ask does not holds " + extra +
-				" below its text, which rebuilding the options as text would delete: move it or delete it with a document edit (dispatch doc-edit), then edit the ask",
+			Reason: broken.Error() + "; an option the decision holds but its ask does not holds more than its text, which rebuilding the options as text would delete: delete " +
+				quoted + ", with a document edit (dispatch doc-edit --ops-json " + ops + "), then edit the ask sending every option; the quoted words below an option can come back in its description",
 		}
 	}
 	if edit.Options == nil {
@@ -603,36 +610,62 @@ func quotedItems(options []model.AskOption) string {
 	return strings.Join(parts, ", ")
 }
 
-// textBeyondItems quotes what the items of ask's lists that read as one of protected hold after
-// their first paragraph - nested lists, further paragraphs - cut short where it runs on, and
-// reports whether any holds such content. items are ask's options in list order, as parseAskBlock
-// reads them.
-func textBeyondItems(ask *pmdoc.Node, items, protected []model.AskOption) (string, bool) {
-	parts := []string{}
-	found := false
+// listsToDelete is the lists of ask a document edit deletes to leave it valid where an item of
+// them that reads as one of protected holds more than its first paragraph - nested lists,
+// further paragraphs: every list holding such an item, and every other list but the first, so
+// at most one is left. None when no such item is held. items are ask's options in list order, as
+// parseAskBlock reads them.
+func listsToDelete(ask *pmdoc.Node, items, protected []model.AskOption) []*pmdoc.Node {
+	lists := []*pmdoc.Node{}
+	holders := []*pmdoc.Node{}
 	index := 0
 	for _, child := range ask.Children {
 		if child.Type != "bullet_list" {
 			continue
 		}
+		lists = append(lists, child)
+		holds := false
 		for _, item := range child.Children {
 			option := items[index]
 			index++
-			if len(item.Children) < 2 || !slices.Contains(protected, option) {
-				continue
-			}
-			found = true
-			for _, rest := range item.Children[1:] {
-				if text := strings.Join(strings.Fields(pmdoc.TextContent(rest)), " "); text != "" {
-					parts = append(parts, text)
-				}
-			}
+			holds = holds || (len(item.Children) > 1 && slices.Contains(protected, option))
+		}
+		if holds {
+			holders = append(holders, child)
 		}
 	}
-	if !found {
-		return "", false
+	if len(holders) == 0 {
+		return nil
 	}
-	return quoteCut(parts, "the empty block below an option's text"), true
+	kept := false
+	return slices.DeleteFunc(lists, func(list *pmdoc.Node) bool {
+		if kept || slices.Contains(holders, list) {
+			return false
+		}
+		kept = true
+		return true
+	})
+}
+
+// quotedLists names lists by block id, each with its whole markdown quoted, nested content and
+// all, so a caller deleting them can restore every word, and the doc-edit ops deleting them.
+func quotedLists(lists []*pmdoc.Node) (quoted, ops string, err error) {
+	parts := make([]string, 0, len(lists))
+	deletes := make([]string, 0, len(lists))
+	for _, list := range lists {
+		markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{list}})
+		if err != nil {
+			return "", "", fmt.Errorf("render a list of a broken ask: %w", err)
+		}
+		id, _ := list.Attrs[pmdoc.BlockIDAttr].(string)
+		parts = append(parts, fmt.Sprintf("the list block %q, which reads %q", id, strings.TrimSpace(markdown)))
+		encoded, err := json.Marshal(model.EditOp{Op: "delete", Block: id})
+		if err != nil {
+			return "", "", fmt.Errorf("encode a delete of a list of a broken ask: %w", err)
+		}
+		deletes = append(deletes, string(encoded))
+	}
+	return strings.Join(parts, " and "), "'[" + strings.Join(deletes, ",") + "]'", nil
 }
 
 // quoteCut quotes parts joined by spaces, cut short where they run on, or names empty when they
