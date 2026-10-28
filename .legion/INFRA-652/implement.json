@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-652",
-  "completed": "2026-10-27T18:19:30Z",
+  "completed": "2026-10-28T09:34:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2429",
   "proof": [
+    {
+      "criterion": "Review finding 1: during a shutdown drain an agents list answers a healthy listener's sessions, not 503 (no new failure path beyond the two the INFRA-512 architect accepted).",
+      "surface": "Dispatch server binary over HTTP: one GET /api/v1/agents in flight when the process receives SIGTERM (http.Server.Shutdown drains it), healthy fake listener answering in 1 s, roster copy expired",
+      "command": "$TMPDIR/infra652/drain.sh <binary> for a binary built at 76dbf910 and one at e66f2b32; go test ./internal/dispatch/api/ -run TestAnAgentsListDuringAShutdownDrain with agents.go at 76dbf910 and at e66f2b32",
+      "observed": "e66f2b32: the read in flight answered 200 with [{\"session_id\":\"ses-live\",...}]; the regression test passes. https://github.com/sjawhar/legion/pull/2429#issuecomment-6465489687",
+      "headSha": "e66f2b32fc3579f7a8e426bbce0059b04425f2b4",
+      "negativeControl": "Binary at 76dbf910: the same read answered 503 {\"code\":\"ENVOY_UNAVAILABLE\",\"error\":\"... terminated signal received\"}; the regression test with 76dbf910's agents.go fails: status 503 ... context canceled."
+    },
+    {
+      "criterion": "Re-check at the review-fix head: byte-identical agents list at 1,000 sessions, one listener call per TTL shared with issue reads, 503 kept.",
+      "surface": "Dispatch server binaries (base 59f6647d, head e66f2b32) over HTTP against a freshly migrated Postgres and a counting fake listener",
+      "command": "$TMPDIR/infra652/proof2.sh (1,000 sessions: 300 last_seen ties, 286 without host; routed issue PRF-1 role:role-0)",
+      "observed": "base and head 200, 1000 rows, 205,408 bytes, cmp identical (sha256 072ab6dc...); 20 agents + 20 issue reads: base 21, head 1 listener calls; stopped listener 503 ENVOY_UNAVAILABLE with the dial error; 200 with 1000 rows 5 s after the listener returned. go test -race focused api suite ok 100.7 s; go vet clean.",
+      "headSha": "e66f2b32fc3579f7a8e426bbce0059b04425f2b4",
+      "negativeControl": "Head with DISPATCH_TEST_HOOKS=1 DISPATCH_TEST_ROSTER_UNCACHED=1: 40 listener calls for the same 40 reads."
+    },
     {
       "criterion": "Merge rule of the shared context on INFRA-589's route mix: every head run below every base run, or (expected gain smaller than the spread) median head S <= median base S - G/2 in share points.",
       "surface": "packages/envoy/loadtest from #2369 (legion/INFRA-589 at a30d1f50ae85, overlaid in plain clones of base 59f6647db9d7 and head 76dbf9108bb3) driving the Dispatch server binary, the real listener with 400 sessions, NATS and Postgres 16.2+pgvector on this 2-vCPU pod",
@@ -63,33 +79,37 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/issue_route_status.go",
-    "packages/envoy/internal/dispatch/api/agents.go",
-    "packages/envoy/internal/dispatch/api/server.go",
-    "packages/envoy/internal/dispatch/api/agents_test.go",
-    "packages/envoy/internal/dispatch/api/issue_route_status_cache_test.go",
-    "packages/envoy/internal/dispatch/api/routes_table.go",
-    "packages/envoy/internal/dispatch/routes/router.go",
+    "packages/dispatch/e2e/run-server.sh",
+    "packages/dispatch/web/src/features/refs/agent-registry.ts",
+    "packages/envoy-client/src/dispatch-http.ts",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/cmd/dispatch/main.go",
     "packages/envoy/cmd/dispatch/settings.go",
     "packages/envoy/cmd/dispatch/settings_test.go",
-    "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/cmd/dispatch/AGENTS.md",
-    "packages/envoy/CHANGELOG.md",
     "packages/envoy/deploy/compose/dispatch.acceptance.compose.yml",
-    "packages/dispatch/e2e/run-server.sh",
-    "packages/dispatch/web/src/features/refs/agent-registry.ts",
-    "packages/envoy-client/src/dispatch-http.ts"
+    "packages/envoy/internal/dispatch/api/agents.go",
+    "packages/envoy/internal/dispatch/api/agents_test.go",
+    "packages/envoy/internal/dispatch/api/issue_route_status.go",
+    "packages/envoy/internal/dispatch/api/issue_route_status_cache_test.go",
+    "packages/envoy/internal/dispatch/api/routes_table.go",
+    "packages/envoy/internal/dispatch/api/server.go",
+    "packages/envoy/internal/dispatch/routes/router.go"
   ],
   "trickyParts": [
     "The roster's sessions slice is shared by every read; listAgents clones before sorting and never writes a session (Roles/Capabilities are shared too). TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt locks that under -race.",
     "readRouteRoster's ctx.Done branch now carries an ErrUnavailable-wrapped error so a cancelled agents read answers 503 rather than a nil-error path.",
-    "The uncached switch is read from Deps (simplify pass), so DISPATCH_TEST_ROSTER_UNCACHED reaches the server through bootConfig -> routes.AppContextOptions -> api.DepsInput -> api.Deps; routes/router.go was the plumbing hop the plan did not list."
+    "The uncached switch is read from Deps (simplify pass), so DISPATCH_TEST_ROSTER_UNCACHED reaches the server through bootConfig -> routes.AppContextOptions -> api.DepsInput -> api.Deps; routes/router.go was the plumbing hop the plan did not list.",
+    "The drain fallback lives in listAgents, not readRouteRoster: the shared fetch keeps its shutdown rule (TestAShutdownEndsAFetchInFlight), issue reads keep reading unknown during a drain as at base, and only an agents list, which base served from the listener on the request context, does so again."
   ],
   "deviations": [
     "routes/router.go changed (not in the plan's file list): main.go hands boot values to routes.AppContextOptions and BuildAppContext builds api.DepsInput there.",
     "Simplify pass applied 2 findings (writeEnvoyError reuse; rosterCache.uncached field dropped in favour of Deps.ListenerRosterUncached); the load-test head series and binary proofs were re-run at the applied head 76dbf910. Skipped: sort-once-per-fetch.",
-    "The local browser run covers the 24 agent/route_status specs in chromium, not all 1,674 tests: the whole suite takes hours on this 2-vCPU pod and WebKit lacks host libraries here; CI's dispatch job runs the whole suite on the head."
+    "The local browser run covers the 24 agent/route_status specs in chromium, not all 1,674 tests: the whole suite takes hours on this 2-vCPU pod and WebKit lacks host libraries here; CI's dispatch job runs the whole suite on the head.",
+    "Round 2 removed TestAnAgentsListAfterTheTTLListsTheListenersNewAnswer and TestAnUncachedListenerRosterAsksTheListenerOnEveryAgentsList (coverage repeated by issue_route_status_cache_test.go and settings_test.go's router subtest), the reviewer's named fast-follow, rather than leaving it.",
+    "The merge-rule load test was not re-run at e66f2b32: the only code change since 76dbf910 is a branch taken once the process lifetime is cancelled, which steady-state load never takes; the scratch volume (and its load-test stack) was also recreated."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round": 2
 }
