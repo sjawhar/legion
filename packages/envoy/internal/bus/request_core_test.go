@@ -146,3 +146,52 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 		t.Fatalf("RequestCoreTo returned after %s; the flush must be bounded by the %s window, not the client's 10s default", elapsed, window)
 	}
 }
+
+// The listener's role lane forwards an envelope to its holder with RequestCoreTo, under
+// contracts.RoleForwardDedupePrefix and the envelope's own dedupe key, to an agent subject the
+// stream captures. A forward of an envelope whose key names its event - Dispatch's, or a webhook's,
+// whose key the prefix hides from contracts.DedupeKeyNamesTheUpstreamEvent - is stored once
+// however often it is sent. Two distinct envelopes that share a key their caller chose are two
+// messages, and the stream stores both.
+func TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent(t *testing.T) {
+	_, url, client := requestClient(t)
+	const topic = "notifications.role.forward-dedupe"
+	chosen := func(name string) contracts.Envelope {
+		return contracts.Envelope{EventID: "evt-" + name, Source: "agent", SourceEventID: "src-" + name, Topic: topic, DedupeKey: "shared-key"}
+	}
+	dispatch := contracts.Envelope{EventID: "dispatch-7", Source: "dispatch", SourceEventID: "7", Topic: topic, DedupeKey: "dispatch-7"}
+	webhook := contracts.Envelope{EventID: "evt-webhook", Source: "github", SourceEventID: "guid-1", Topic: topic, DedupeKey: "github.guid-1"}
+	for _, tc := range []struct {
+		name, holder string
+		sends        []contracts.Envelope
+		want         uint64
+	}{
+		{"two envelopes under one key their caller chose", "ses_forward_chosen", []contracts.Envelope{chosen("first"), chosen("second")}, 2},
+		{"a dispatch envelope sent twice", "ses_forward_dispatch", []contracts.Envelope{dispatch, dispatch}, 1},
+		{"a webhook envelope sent twice", "ses_forward_webhook", []contracts.Envelope{webhook, webhook}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subject := contracts.AgentSubject(tc.holder)
+			responder(t, url, subject)
+			for index, item := range tc.sends {
+				item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
+				item.IssuedAt = contracts.NowMillis()
+				if err := client.RequestCoreTo(subject, item, 2*time.Second); err != nil {
+					t.Fatalf("forward %d returned %v, want nil", index+1, err)
+				}
+			}
+			// The stream takes the messages one connection sends in order, so once it has
+			// acknowledged a later one, every forward before it is stored or dropped.
+			if _, err := client.JS().Publish(subject+"_after", []byte("{}")); err != nil {
+				t.Fatalf("publish the message after the forwards: %v", err)
+			}
+			info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+			if err != nil {
+				t.Fatalf("read the stream: %v", err)
+			}
+			if got := info.State.Subjects[subject]; got != tc.want {
+				t.Fatalf("the stream holds %d copies on %s after %d forwards, want %d", got, subject, len(tc.sends), tc.want)
+			}
+		})
+	}
+}

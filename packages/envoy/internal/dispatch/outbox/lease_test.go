@@ -65,8 +65,8 @@ type countingClient struct {
 	counter *sendCounter
 }
 
-func (c countingClient) Window() bus.Sender {
-	return countingSender{Sender: c.Client.Window(), counter: c.counter}
+func (c countingClient) WindowUntil(deadline func() time.Time) bus.Sender {
+	return countingSender{Sender: c.Client.WindowUntil(deadline), counter: c.counter}
 }
 
 type countingSender struct {
@@ -424,7 +424,7 @@ type fenceAfterFirstSend struct {
 	passed atomic.Bool
 }
 
-func (p *fenceAfterFirstSend) Window() bus.Sender { return p }
+func (p *fenceAfterFirstSend) WindowUntil(func() time.Time) bus.Sender { return p }
 
 func (p *fenceAfterFirstSend) PublishAsync(item contracts.Envelope) <-chan error {
 	p.passed.Store(true)
@@ -474,5 +474,107 @@ func TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore(t *testin
 	end := New(Deps{Store: database, Publisher: &recordingPublisher{}}).scan(context.Background(), publisher)
 	if !end.fenced {
 		t.Fatalf("a scan under a hold past its deadline ended %+v, want fenced before any claim", end)
+	}
+}
+
+// reconnectedQuietly is a publisher whose client reads connected again without its connection
+// change ever being reported, as a reconnect whose event waits in nats.go's callback queue behind
+// a slow callback finds it: ConnectionChanged never closes, and nothing wakes the holder.
+type reconnectedQuietly struct {
+	recordingPublisher
+	connected atomic.Bool
+}
+
+func (p *reconnectedQuietly) Connected() bool { return p.connected.Load() }
+
+func (p *reconnectedQuietly) WindowUntil(func() time.Time) bus.Sender { return p }
+
+// A holder whose client reads connected again when natsLossGrace runs out serves on, though no
+// connection event came: it reads the client's status as the grace ends, keeps the hold and scans,
+// rather than giving the hold up for a loss that is over.
+func TestAHolderConnectedAgainWhenTheGraceEndsKeepsTheHold(t *testing.T) {
+	database := storetest.Open(t)
+	publisher := &reconnectedQuietly{}
+	outbox := New(Deps{Store: database, Publisher: publisher})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hold, _ := outbox.tryHold(ctx)
+	if hold == nil {
+		t.Fatal("the outbox did not take the publisher hold")
+	}
+	t.Cleanup(func() { _ = hold.Release(context.Background()) })
+
+	ended := make(chan holdEnd, 1)
+	go func() { ended <- outbox.serve(ctx, hold) }()
+	time.Sleep(200 * time.Millisecond)
+	if outbox.claims.Load() != 0 {
+		t.Fatal("the holder scanned while its client read disconnected")
+	}
+	publisher.connected.Store(true)
+	select {
+	case end := <-ended:
+		t.Fatalf("the holder stopped serving (%s) though its client read connected when the grace ended", end)
+	case <-time.After(natsLossGrace + time.Second):
+	}
+	if outbox.claims.Load() == 0 {
+		t.Fatal("the holder did not scan once it found its client connected at the grace's end")
+	}
+	cancel()
+	if end := <-ended; end != stopping {
+		t.Fatalf("serve ended %s once ctx ended, want %s", end, stopping)
+	}
+}
+
+// A record that finds the publisher hold another's ends the holder as one that lost the hold, with
+// the hold's loss deadline still ahead. The holder stops that hold's renewal there and then: its
+// Lost is closed and it renews no more, the other's row is left alone, and a take of the hold
+// once it is free again has one renewal running, not two renewing the same row.
+func TestAHolderWhoseRecordFindsTheHoldAnothersStopsItsRenewal(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	tracer := &statementTracer{}
+	outbox := New(Deps{Store: tracedStore(t, database, tracer), Publisher: &recordingPublisher{}})
+	taken := time.Now()
+	hold, _ := outbox.tryHold(ctx)
+	if hold == nil {
+		t.Fatal("the outbox did not take the publisher hold")
+	}
+	other := uuid.New()
+	holdRow(t, database, other)
+	appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: uuid.NewString(), IssueKey: new("T-1"), Body: "recorded under another's hold"},
+	})
+
+	if end := outbox.publish(ctx, hold); end != holdLost {
+		t.Fatalf("publish ended %s, want %s", end, holdLost)
+	}
+	if elapsed := time.Since(taken); elapsed >= publisherHoldOptions.Renew {
+		t.Fatalf("publish took %s, past the first renewal: the test is about a record finding the hold another's before any renewal does", elapsed)
+	}
+	select {
+	case <-hold.Lost():
+	default:
+		t.Fatal("the lost hold's Lost is still open: its renewal runs on")
+	}
+	var holder uuid.UUID
+	if err := database.Pool.QueryRow(ctx, `select holder from duty_holds where name = $1`, publisherHold).Scan(&holder); err != nil || holder != other {
+		t.Fatalf("the hold's row names %s (%v), want the other process's %s left alone", holder, err, other)
+	}
+
+	if _, err := database.Pool.Exec(ctx, `delete from duty_holds where name = $1`, publisherHold); err != nil {
+		t.Fatalf("free the hold: %v", err)
+	}
+	renewals := len(tracer.matching("update duty_holds set expires_at"))
+	again, _ := outbox.tryHold(ctx)
+	if again == nil {
+		t.Fatal("the outbox did not take the free publisher hold again")
+	}
+	t.Cleanup(func() { _ = again.Release(context.Background()) })
+	time.Sleep(publisherHoldOptions.Renew + publisherHoldOptions.Renew/4)
+	if got := len(tracer.matching("update duty_holds set expires_at")) - renewals; got != 1 {
+		t.Fatalf("%s after the hold was taken again, %d renewals were sent, want the new hold's one", publisherHoldOptions.Renew+publisherHoldOptions.Renew/4, got)
 	}
 }

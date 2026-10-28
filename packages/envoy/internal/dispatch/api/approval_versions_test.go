@@ -965,7 +965,7 @@ func (acceptingPublisher) Connected() bool { return true }
 
 func (acceptingPublisher) ConnectionChanged() <-chan struct{} { return nil }
 
-func (p acceptingPublisher) Window() bus.Sender { return p }
+func (p acceptingPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
 
 func (acceptingPublisher) PublishAsync(contracts.Envelope) <-chan error {
 	accepted := make(chan error, 1)

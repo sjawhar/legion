@@ -19,12 +19,13 @@
 -- events_unpublished (0003) and events_unpublished_ready (0020) were read by the per-row claim
 -- alone, and held every pending command for good; nothing reads them now.
 --
--- The index builds read every row of events under SHARE, which holds writes to events while they
--- run (no `concurrently`: the migration runs in one transaction). The release before this one
--- reads neither the new column nor the new indexes, and its claim, which read the two dropped
--- indexes, still runs without them.
-alter table events add column publish_error text;
-
+-- The migration runs in one transaction, so every lock it takes is held until it commits. The
+-- three index builds come first: each reads every row of events under SHARE, which holds writes to
+-- events while it runs (no `concurrently`) and lets reads go on. The column and the two drops come
+-- last, because each takes ACCESS EXCLUSIVE on events, which holds reads too: reads of events wait
+-- only for those last statements, which rewrite no row, and for the commit. The release before
+-- this one reads neither the new column nor the new indexes, and its claim, which read the two
+-- dropped indexes, still runs without them.
 create index events_outbox_fresh on events (id)
   where published_at is null and next_attempt_at is null and (payload ->> 'pending') is distinct from 'true';
 
@@ -33,6 +34,8 @@ create index events_outbox_retry on events (next_attempt_at, id)
 
 create index events_outbox_owner on events (coalesce(issue_key, artifact_id::text, project_key), id)
   where published_at is null and (payload ->> 'pending') is distinct from 'true';
+
+alter table events add column publish_error text;
 
 drop index events_unpublished;
 drop index events_unpublished_ready;

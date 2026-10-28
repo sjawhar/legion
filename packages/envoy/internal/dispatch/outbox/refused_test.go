@@ -37,7 +37,7 @@ func (p *refusingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
-func (p *refusingPublisher) Window() bus.Sender { return p }
+func (p *refusingPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
 
 func (p *refusingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))

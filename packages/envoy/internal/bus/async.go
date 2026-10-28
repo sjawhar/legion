@@ -44,6 +44,13 @@ var ErrNotAcknowledged = errors.New("NATS did not acknowledge the publish")
 // envelope off as a failure of its own.
 var ErrNotCaptured = errors.New("the stream does not capture the topic")
 
+// ErrWindowDeadline is the outcome of a send of a window with a deadline (Client.WindowUntil) that
+// would write at or past it, answered before anything is sent: the deadline had passed when the
+// send began, while its first send waited for a connection, or by the moment it would write. It is
+// neither ErrUnavailable nor ErrRefused: the window's owner may no longer send at all, whatever the
+// connection does.
+var ErrWindowDeadline = errors.New("the window's deadline has passed")
+
 // Sender sends envelopes without waiting for NATS's answers (Client.Window).
 type Sender interface {
 	// PublishAsync sends item to the stream and returns a channel that receives the outcome
@@ -103,13 +110,25 @@ type RequestOptions struct {
 //
 // A Request is a send of the window too, pinned and refused by the same rules, and a Probe pins
 // the window when nothing has yet (window.Request, window.Probe). The window's methods are safe to
-// call from several goroutines at once.
+// call from several goroutines at once. Window is WindowUntil with no deadline.
 func (c *Client) Window() Sender {
 	return &window{client: c}
 }
 
+// WindowUntil returns a window (Window) whose sends never write at or past deadline, read again at
+// each check so a deadline that moves on (a hold's renewal) is the one in force. A send checks it
+// before anything else, its first send waits for a connection no later than it, and every send
+// checks it again once pinned, the last act before the write; a send that finds it passed at any
+// of these answers ErrWindowDeadline, in the channel when the send returns, and sends nothing. A
+// nil deadline is none. A Probe sends no envelope and does not check it.
+func (c *Client) WindowUntil(deadline func() time.Time) Sender {
+	return &window{client: c, deadline: deadline}
+}
+
 type window struct {
 	client *Client
+	// deadline, when not nil, is the moment the window's sends stop writing (WindowUntil).
+	deadline func() time.Time
 
 	// pinning guards conn, js and reconnects while the first send pins them (pin); they never
 	// change after it.
@@ -147,7 +166,7 @@ func (w *window) send(item contracts.Envelope) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := w.pin(publishAcknowledgementTimeout); err != nil {
+	if err := w.pinToSend(); err != nil {
 		return nil, err
 	}
 	return w.sendJetStream(item, data)
@@ -174,6 +193,25 @@ func (w *window) pin(wait time.Duration) error {
 		return fmt.Errorf("bus: %w: the window's connection was lost or reconnected since its first send", ErrUnavailable)
 	}
 	return nil
+}
+
+// pinToSend pins the window for a send (pin), within publishAcknowledgementTimeout and no later
+// than the window's deadline, and answers ErrWindowDeadline when the deadline has passed before
+// the pin, during its wait for a connection, or by its end, which is the last check before the
+// send writes.
+func (w *window) pinToSend() error {
+	if w.deadline == nil {
+		return w.pin(publishAcknowledgementTimeout)
+	}
+	remaining := time.Until(w.deadline())
+	if remaining <= 0 {
+		return fmt.Errorf("bus: %w", ErrWindowDeadline)
+	}
+	err := w.pin(min(publishAcknowledgementTimeout, remaining))
+	if !time.Now().Before(w.deadline()) {
+		return fmt.Errorf("bus: %w", ErrWindowDeadline)
+	}
+	return err
 }
 
 // current reports whether the window's connection is connected and has not reconnected since the
@@ -252,7 +290,7 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	// Taken before the pin reads the connection, so every connection event from here on wakes the
 	// wait for the answer.
 	changed := w.client.ConnectionChanged()
-	if err := w.pin(publishAcknowledgementTimeout); err != nil {
+	if err := w.pinToSend(); err != nil {
 		return nil, err
 	}
 	inbox := nats.NewInbox()

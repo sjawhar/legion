@@ -378,8 +378,11 @@ func main() {
 	}
 
 	// The outbox runs only with NATS, so a process with NATS disabled never publishes
-	// (outboxPublisher stays nil, and /healthz reports outbox_publisher false).
+	// (outboxPublisher stays nil, and /healthz reports outbox_publisher false). outboxStopped is
+	// closed once its Run has returned - its last batch recorded and its hold released - which
+	// shutdown waits for before it closes the pool; it stays nil with no outbox.
 	var outboxPublisher *outbox.Outbox
+	var outboxStopped chan struct{}
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
 		if err != nil {
@@ -399,7 +402,11 @@ func main() {
 			RoleClaims: holders,
 			Sessions:   holders,
 		})
-		go outboxPublisher.Run(ctx)
+		outboxStopped = make(chan struct{})
+		go func() {
+			defer close(outboxStopped)
+			outboxPublisher.Run(ctx)
+		}()
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
 	// embedding queue keeps coverage itself, so a later deploy that gives meaning search a place
@@ -510,7 +517,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery, outboxStopped); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}

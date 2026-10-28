@@ -50,8 +50,9 @@ const (
 	// natsLost: NATS stayed down for natsLossGrace, or a batch's sends failed and the probe of
 	// their connection failed too; the hold is released.
 	natsLost holdEnd = "NATS lost"
-	// holdLost: the hold reported itself lost, or its deadline passed during a batch; the hold is
-	// dropped, since the name may already be another's.
+	// holdLost: the hold reported itself lost, its deadline passed during a batch, or a record
+	// found it another's; its release stops its renewal and deletes the row only while it still
+	// names this process, since the name may already be another's.
 	holdLost holdEnd = "lost"
 )
 
@@ -272,7 +273,7 @@ func (o *Outbox) answering() bool {
 	if !o.probeBeforeHold {
 		return true
 	}
-	if err := o.deps.Publisher.Window().Probe(probeTimeout); err != nil {
+	if err := o.deps.Publisher.WindowUntil(nil).Probe(probeTimeout); err != nil {
 		return false
 	}
 	o.probeBeforeHold = false
@@ -307,22 +308,25 @@ func (o *Outbox) tryHold(ctx context.Context) (*duty.Hold, time.Duration) {
 	return nil, max(remaining, 0)
 }
 
-// publish runs this process as the holder of hold until it stops (serve), then releases the hold,
-// or drops it when it was lost, and returns why it stopped.
+// publish runs this process as the holder of hold until it stops (serve), then releases the hold
+// and returns why it stopped. The release comes on every end, a lost hold's too: serve also ends
+// lost when a record found the hold another's with the loss deadline still ahead, and the release
+// is what stops that hold's renewal before the next take starts another. Its delete and notify are
+// guarded on this holder, so a hold another process has taken is left alone.
 func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 	o.hold.Store(hold)
 	slog.Info("dispatch outbox: took the publisher hold", "instance", o.instance)
 	end := o.serve(ctx, hold)
 	o.hold.Store(nil)
-	if end == holdLost {
-		slog.Info("dispatch outbox: lost the publisher hold", "instance", o.instance)
-		return end
-	}
 	release, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := hold.Release(release); err != nil {
-		// The row then lapses on its own, TTL after the last renewal.
+		// The renewal has stopped, and the row lapses on its own, TTL after the last renewal.
 		slog.Error("dispatch outbox: release the publisher hold", "instance", o.instance, "error", err)
+	}
+	if end == holdLost {
+		slog.Info("dispatch outbox: lost the publisher hold", "instance", o.instance)
+		return end
 	}
 	slog.Info("dispatch outbox: released the publisher hold", "instance", o.instance, "reason", string(end))
 	return end
@@ -330,8 +334,9 @@ func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 
 // serve scans while this process holds hold: once at once, then on each wake, while the NATS
 // client is connected. It returns why it stopped: ctx ended, the hold was lost or its deadline
-// passed mid-batch, or NATS was lost - down for natsLossGrace without a break, or a batch's sends
-// failed for the connection and a probe of that connection failed too.
+// passed mid-batch, or NATS was lost - down for natsLossGrace without a break and still down when
+// the grace ends, or a batch's sends failed for the connection and a probe of that connection
+// failed too.
 func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 	var disconnected, retryTimer *time.Timer
 	var disconnectedFor, retryDue <-chan time.Time
@@ -374,7 +379,15 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 		case <-hold.Lost():
 			return holdLost
 		case <-disconnectedFor:
-			return natsLost
+			// A reconnect's event can wait in nats.go's callback queue behind a slow callback
+			// queued before it, so ConnectionChanged has not closed although the client is
+			// connected again: the client's own status decides, and a connected one serves on and
+			// scans, as the reconnect's wake would have it do.
+			if !o.deps.Publisher.Connected() {
+				return natsLost
+			}
+			disconnected, disconnectedFor = nil, nil
+			due = true
 		case <-o.wake:
 			due = true
 		case <-retryDue:

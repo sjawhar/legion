@@ -72,7 +72,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	list, resolveErr := eventDestinations(event, item.Topic, route, found)
 	single := &batchEvent{item: item, destinationsOf: list}
 	resolveRoleHolders(ctx, deps, []*batchEvent{single})
-	sender := deps.Publisher.Window()
+	sender := deps.Publisher.WindowUntil(nil)
 	var failures []error
 	for _, dest := range single.destinationsOf {
 		if _, ok := delivered[dest.subject]; ok {
@@ -146,7 +146,7 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
-func (p *recordingPublisher) Window() bus.Sender { return p }
+func (p *recordingPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
 
 // PublishAsync answers a topic the stream does not capture as a window does (bus.ErrNotCaptured),
 // so a role route the outbox published to its role topic, rather than forwarding it, fails here.
@@ -193,7 +193,7 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 	return errors.New("publisher unavailable")
 }
 
-func (p *blockingFailPublisher) Window() bus.Sender { return p }
+func (p *blockingFailPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
 
 func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))

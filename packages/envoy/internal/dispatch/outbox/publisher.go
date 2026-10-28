@@ -46,10 +46,11 @@ const (
 
 // Publisher is the NATS client the outbox publishes through (bus.Client).
 type Publisher interface {
-	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
-	// connection or not at all, in no order of its own (bus.Client.Window); sendChains keeps the
-	// order per owner and destination.
-	Window() bus.Sender
+	// WindowUntil starts one batch's sends: each is sent without waiting for NATS's answer, all on
+	// one connection or not at all, in no order of its own, and none written at or past deadline,
+	// which a send past it answers bus.ErrWindowDeadline (bus.Client.WindowUntil); sendChains keeps
+	// the order per owner and destination. A nil deadline is none.
+	WindowUntil(deadline func() time.Time) bus.Sender
 	// Connected reports whether the client has a live connection now. A standby takes the
 	// publisher hold only while it does, and a holder whose client has not for natsLossGrace
 	// releases the hold.
@@ -125,12 +126,15 @@ type fence interface {
 	Deadline() time.Time
 }
 
-// errFenced is a send refused because the publisher hold's deadline had passed.
+// errFenced is a send refused because the publisher hold's deadline had passed: by fencedSender,
+// or by the window itself as bus.ErrWindowDeadline, which sendChains reads as errFenced.
 var errFenced = errors.New("the publisher hold's deadline has passed")
 
 // fencedSender is a batch's window that sends nothing once the publisher hold's deadline has
 // passed: every send checks it first, and one past it answers errFenced at once, so a process that
-// froze past its deadline sends nothing when it resumes.
+// froze past its deadline sends nothing when it resumes. The window is the hold's too
+// (Publisher.WindowUntil), so a send that passed this check and then waited for a connection past
+// the deadline writes nothing either.
 type fencedSender struct {
 	bus.Sender
 	hold fence
@@ -159,7 +163,7 @@ func failedAnswer(err error) <-chan error {
 
 // scanBatch reads a batch (readBatch), resolves its events' destinations with the batch's
 // followers and authors read in at most four statements (loadLookups) and its role routes' holders
-// read once per role (resolveRoleHolders), and sends it through one window (bus.Client.Window) as
+// read once per role (resolveRoleHolders), and sends it through one window (Publisher.WindowUntil) as
 // chains: the sends of one owner's events to one destination key go one at a time, in id order,
 // each once the one before it reached its destination, while the chains of different owners and
 // destination keys proceed side by side (planChains, sendChains). That is the order a receiver
@@ -184,10 +188,11 @@ func failedAnswer(err error) <-chan error {
 // (Outbox), and releases the not-acknowledged events rather than backing them off.
 //
 // The batch runs under hold, the publisher hold: every send checks its deadline first
-// (fencedSender), and once it has passed the batch sends nothing more and is left unrecorded - the
-// record is the last act checked against the deadline - so a process that froze past its deadline
-// neither sends nor writes when it resumes. The record's back-offs, hold-backs and releases are
-// written only while holder still holds the hold on the database's clock (recordBatch).
+// (fencedSender), its window writes nothing past it (Publisher.WindowUntil), and once it has
+// passed the batch sends nothing more and is left unrecorded - the record is the last act checked
+// against the deadline - so a process that froze past its deadline neither sends nor writes when
+// it resumes. The record's back-offs, hold-backs and releases are written only while holder still
+// holds the hold on the database's clock (recordBatch).
 func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (batchResult, error) {
 	pending, stopped, err := readBatch(ctx, deps)
 	if err != nil {
@@ -208,7 +213,7 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 	chains := planChains(events)
 
 	changed := deps.Publisher.ConnectionChanged()
-	window := deps.Publisher.Window()
+	window := deps.Publisher.WindowUntil(hold.Deadline)
 	result.started = time.Now()
 	sendChains(ctx, fencedSender{Sender: window, hold: hold}, chains)
 
@@ -217,13 +222,12 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 		sent := false
 		for _, send := range event.sends {
 			switch {
-			case errors.Is(send.err, errFenced):
+			case send.fenced:
 				result.fenced = true
-			case send.state == lost && errors.Is(send.err, bus.ErrUnavailable),
-				send.state == failed && errors.Is(send.err, bus.ErrNotAcknowledged):
+			case send.connection:
 				connectionFailed = true
 			}
-			if send.state != unsent && send.state != held && !errors.Is(send.err, errFenced) {
+			if send.sent() {
 				sent = true
 			}
 		}
@@ -374,7 +378,7 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 		case reached:
 			result.reached = append(result.reached, send.dest.subject)
 		case failed:
-			if releaseUnacknowledged && errors.Is(send.err, bus.ErrNotAcknowledged) {
+			if releaseUnacknowledged && send.connection {
 				release = true
 				continue
 			}

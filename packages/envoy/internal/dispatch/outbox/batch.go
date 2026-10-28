@@ -301,15 +301,27 @@ const (
 	held
 )
 
-// chainSend is one send of a chain: event's envelope to dest.
+// chainSend is one send of a chain: event's envelope to dest. Its answer is classified once, as it
+// settles (sendChains): state, and the two facts the batch reads back - fenced, the send refused
+// for the publisher hold's deadline (errFenced), and connection, the send failed for the
+// connection, lost to it (bus.ErrUnavailable) or not acknowledged on it (bus.ErrNotAcknowledged).
 type chainSend struct {
-	event  *batchEvent
-	dest   destination
-	answer <-chan error
-	state  sendState
-	err    error
+	event              *batchEvent
+	dest               destination
+	answer             <-chan error
+	state              sendState
+	err                error
+	fenced, connection bool
 	// heldBy is the event whose failed send held this one back.
 	heldBy *batchEvent
+}
+
+// sent reports whether the send counts as one the batch made: its answer is in, it was not refused
+// for the hold's deadline, and it is not a role route reached with nothing to send
+// (roleForward.skip), which delivers nothing to anyone.
+func (s *chainSend) sent() bool {
+	skipped := s.dest.forward != nil && s.dest.forward.skip != ""
+	return s.state != unsent && s.state != held && !s.fenced && !skipped
 }
 
 // chain is the sends of one owner's events to one destination key, in id order. Its next send is
@@ -394,9 +406,9 @@ func planChains(events []*batchEvent) []*chain {
 // it came back as reached, so the chains proceed side by side and each one in order. A role route
 // is forwarded to its holder with a Request (roleForward.send), or answered at once with why it
 // stays pending. A failed send holds back the rest of its chain. A send that meets a lost
-// connection or a passed deadline (bus.ErrUnavailable, errFenced) stops the batch: no further send
-// of any chain is made. So does ctx ending; the answers already in are still read, and every other
-// send in flight is lost.
+// connection or a passed deadline (bus.ErrUnavailable; errFenced, which the window's
+// bus.ErrWindowDeadline is read as) stops the batch: no further send of any chain is made. So does
+// ctx ending; the answers already in are still read, and every other send in flight is lost.
 func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 	stopped := false
 	var inflight []*chain
@@ -421,7 +433,12 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 		c := inflight[index]
 		inflight = append(inflight[:index], inflight[index+1:]...)
 		send := c.sends[c.next]
+		if errors.Is(err, bus.ErrWindowDeadline) {
+			// The window refused the write for the hold's deadline, the one fencedSender checks.
+			err = fmt.Errorf("%w: %w", errFenced, err)
+		}
 		send.err = err
+		send.fenced = errors.Is(err, errFenced)
 		switch {
 		case err == nil:
 			send.state = reached
@@ -432,13 +449,15 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 			// as reached.
 			slog.Error("dispatch outbox: destination refused", "event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
 			send.state = reached
-		case errors.Is(err, errFenced), errors.Is(err, bus.ErrUnavailable):
+		case send.fenced, errors.Is(err, bus.ErrUnavailable):
 			send.state = lost
+			send.connection = errors.Is(err, bus.ErrUnavailable)
 			stopped = true
 		case ctx.Err() != nil && errors.Is(err, ctx.Err()):
 			send.state = lost
 		default:
 			send.state = failed
+			send.connection = errors.Is(err, bus.ErrNotAcknowledged)
 		}
 		c.next++
 		if send.state != reached {

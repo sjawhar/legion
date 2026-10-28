@@ -253,3 +253,73 @@ func TestProbeAnswersWhetherTheWindowsConnectionStillAnswers(t *testing.T) {
 		t.Fatalf("a Probe of a lost connection returned %v, want ErrUnavailable", err)
 	}
 }
+
+// A window with a deadline (WindowUntil) writes nothing at or past it. Its first send, made while
+// the client has no connection, waits for one only until the deadline, 200 ms on, and answers
+// ErrWindowDeadline then, though the connection comes back later and the window's wait for a
+// connection is otherwise 5 s: the stream holds nothing it sent once the client is connected again.
+// A window pinned to a live connection answers a send past its deadline the same way, at once.
+func TestAWindowSendsNothingPastItsDeadline(t *testing.T) {
+	server, _, client := requestClient(t)
+	subject := contracts.AgentSubject("ses_window_deadline")
+	server.Stop(t)
+	waitUntil := time.Now().Add(5 * time.Second)
+	for client.Connected() {
+		if time.Now().After(waitUntil) {
+			t.Fatal("the client still reads connected 5s after its server stopped")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	started := time.Now()
+	deadline := started.Add(200 * time.Millisecond)
+	window := client.WindowUntil(func() time.Time { return deadline })
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		time.Sleep(100 * time.Millisecond)
+		server.Start(t)
+	}()
+	item := forwardEnvelope("deadline")
+	item.Topic = subject
+	err := answerOf(t, window.PublishAsync(item), 10*time.Second)
+	elapsed := time.Since(started)
+	if !errors.Is(err, bus.ErrWindowDeadline) || errors.Is(err, bus.ErrUnavailable) {
+		t.Fatalf("a send whose wait for a connection met the window's deadline answered %v, want ErrWindowDeadline and not ErrUnavailable", err)
+	}
+	if elapsed > 700*time.Millisecond {
+		t.Fatalf("the send answered %s after it began, want about the 200ms to its deadline", elapsed)
+	}
+	err = answerOf(t, window.Request(subject, forwardEnvelope("deadline-request"), bus.RequestOptions{Timeout: time.Second}), time.Second)
+	if !errors.Is(err, bus.ErrWindowDeadline) {
+		t.Fatalf("a Request past the window's deadline answered %v, want ErrWindowDeadline", err)
+	}
+
+	<-restarted
+	waitUntil = time.Now().Add(10 * time.Second)
+	for !client.Connected() {
+		if time.Now().After(waitUntil) {
+			t.Fatal("the client did not reconnect within 10s of its server starting again")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A send the window had held until the connection came back would be written now.
+	time.Sleep(500 * time.Millisecond)
+	info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if got := info.State.Subjects[subject]; got != 0 {
+		t.Fatalf("the stream holds %d messages the window sent past its deadline, want none", got)
+	}
+
+	pinned := time.Now().Add(time.Hour)
+	live := client.WindowUntil(func() time.Time { return pinned })
+	if err := answerOf(t, live.PublishAsync(item), 5*time.Second); err != nil {
+		t.Fatalf("a send before the window's deadline answered %v, want nil", err)
+	}
+	pinned = time.Now()
+	if err := answerOf(t, live.PublishAsync(item), time.Second); !errors.Is(err, bus.ErrWindowDeadline) {
+		t.Fatalf("a send of a pinned window past its deadline answered %v, want ErrWindowDeadline", err)
+	}
+}

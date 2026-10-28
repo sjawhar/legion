@@ -51,12 +51,20 @@ const silentProbes = 3
 // probes it runs every pass.
 const drainPollInterval = 250 * time.Millisecond
 
+// outboxStopBudget is how long after shutdown starts it waits, at most, for the events outbox to
+// stop before it closes the pool: until the document service's budget would end, 5 s inside
+// stopGrace. The outbox stops with the process context, which is cancelled before shutdown
+// starts, once it has recorded its batch in flight and released the publisher hold, each a
+// statement bounded by the outbox's own record timeout, so it is done well inside the budget
+// unless its database has stopped answering.
+const outboxStopBudget = httpDrainBeforeDocuments + documentShutdownTimeout
+
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It logs the
 // address listener is bound to, whether main bound it or inherited it (DISPATCH_LISTEN_FD), so the
 // line names the port a kernel chose. It returns the error that ended serving when serving failed,
 // which cancels ctx.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
+	documentService *docs.Service, pool *store.Pool, waitDelivery func(), outboxStopped <-chan struct{}) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", listener.Addr().String())
@@ -67,7 +75,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 	}()
 	<-ctx.Done()
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitDelivery)
+	shutdown(server, documentService, pool, waitDelivery, outboxStopped)
 	select {
 	case err := <-serveErr:
 		return err
@@ -81,12 +89,16 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
 // signal with some still running. Hijacked delivery sockets and the delivery hub then finish their
 // Lifetime-driven shutdown. The database pool closes once every request has answered and no
-// connection of the shared or document-rooms pool is in use. While the database answers, nothing
-// but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
-// finishes before the kill. A database that has stopped answering (silentProbes) holds its
+// connection of the shared or document-rooms pool is in use, and once the events outbox has
+// stopped (outboxStopped closes when its Run returns; nil is a process with no outbox), which it
+// waits for until outboxStopBudget after shutdown began: the outbox records its last batch and
+// releases the publisher hold through that pool. While the database answers, nothing but the
+// runtime's kill bounds the wait for the requests, so a write in flight commits and is answered if
+// it finishes before the kill. A database that has stopped answering (silentProbes) holds its
 // connections forever, so Dispatch exits without them, and the database rolls back whatever they
 // held open.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func(), outboxStopped <-chan struct{}) {
+	started := time.Now()
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -106,7 +118,23 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 	}
 	waitDelivery()
 	if waitUntilIdle(drained, pool) {
+		waitForOutbox(outboxStopped, started.Add(outboxStopBudget))
 		pool.Close()
+	}
+}
+
+// waitForOutbox waits until outboxStopped closes or by passes, whichever comes first; a nil
+// outboxStopped is no outbox, and nothing to wait for.
+func waitForOutbox(outboxStopped <-chan struct{}, by time.Time) {
+	if outboxStopped == nil {
+		return
+	}
+	timer := time.NewTimer(time.Until(by))
+	defer timer.Stop()
+	select {
+	case <-outboxStopped:
+	case <-timer.C:
+		slog.Warn("dispatch: close the pool with the events outbox still stopping", "budget", outboxStopBudget)
 	}
 }
 

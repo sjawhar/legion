@@ -756,16 +756,23 @@ func (c *Client) ensureConn() error {
 	return c.ensureConnWithContext(context.Background())
 }
 
+// reconnectRecheck is how long ensureConnWithContext's wait for a reconnect goes without reading
+// the connection's own status again. nats.go runs a connection's callbacks one after another on
+// one goroutine, so the reconnect's event (ConnectionChanged) can wait behind a slow callback
+// queued before it while the connection is already connected; the re-read finds it then.
+const reconnectRecheck = time.Second
+
 // ensureConnWithContext returns once the client has a usable connection. A connection nats.go is
 // reconnecting is waited for, until it reconnects, ctx ends or the client stops, and read again at
-// each connection event (ConnectionChanged) rather than polled: with the reconnect buffer off, a
-// publish while reconnecting would otherwise fail at once, and a webhook that fails answers 503 to
-// a sender that does not redeliver. A closed connection is replaced by dialling a new one, unless
-// the client is stopped. Callers that find the same connection closed at once (the recovery its
-// ClosedCB starts, and a publish) each dial one, and only the first to finish replaces it: the
-// others close theirs and serve with that one. So every connection the client dials is either
-// c.Conn, which Close and Drain close, or closed already; one left open beside it would outlive
-// Close, and, with MaxReconnect -1, reconnect forever once its server is gone.
+// each connection event (ConnectionChanged) and at least every reconnectRecheck, rather than
+// polled: with the reconnect buffer off, a publish while reconnecting would otherwise fail at once,
+// and a webhook that fails answers 503 to a sender that does not redeliver. A closed connection is
+// replaced by dialling a new one, unless the client is stopped. Callers that find the same
+// connection closed at once (the recovery its ClosedCB starts, and a publish) each dial one, and
+// only the first to finish replaces it: the others close theirs and serve with that one. So every
+// connection the client dials is either c.Conn, which Close and Drain close, or closed already; one
+// left open beside it would outlive Close, and, with MaxReconnect -1, reconnect forever once its
+// server is gone.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
 		c.mu.Lock()
@@ -792,13 +799,18 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 				default:
 				}
 			}
+			recheck := time.NewTimer(reconnectRecheck)
 			select {
 			case <-ctx.Done():
+				recheck.Stop()
 				return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
 			case <-c.stopCh:
+				recheck.Stop()
 				return errStopped
 			case <-changed:
+			case <-recheck.C:
 			}
+			recheck.Stop()
 			continue
 		}
 
@@ -1116,13 +1128,19 @@ func ForwardMsgID(dedupeKey, subject string) string {
 // are captured by the notification stream, whose non-empty JetStream publish
 // acknowledgement is not a receiver receipt, and the server's no-responders
 // answer carries a Status header, so neither is one either. The forward
-// carries a Nats-Msg-Id of item's dedupe key and subject (ForwardMsgID), so a
-// sender that forwards one envelope again until a receipt arrives leaves the
-// stream one copy per message and recipient, however many attempts it makes;
-// every attempt still reaches the core subscribers on subject. Because the
-// forward has headers, the server hands its replies to this client with a
-// header block, empty for a receipt, so the receipt is told by its header
-// holding no field rather than by its having none. The flush is bounded by the
+// carries a Nats-Msg-Id of item's dedupe key and subject (ForwardMsgID) when
+// the envelope it forwards names its event: contracts.DedupeKeyNamesTheUpstreamEvent
+// asked of item with contracts.RoleForwardDedupePrefix taken off its dedupe
+// key, since a role forward's key carries that prefix and the original's key
+// is what names the event. A sender that forwards one such envelope again
+// until a receipt arrives then leaves the stream one copy per message and
+// recipient, however many attempts it makes. A forward of an envelope under a
+// key its caller chose carries no MsgId, since two distinct envelopes can
+// share such a key, and the stream stores each. Every attempt still reaches
+// the core subscribers on subject. A forward with the MsgId has headers, so
+// the server hands its replies to this client with a header block, empty for
+// a receipt, and the receipt is told by its header holding no field rather
+// than by its having none. The flush is bounded by the
 // same window as the receipt wait, so the call never outlives timeout by the
 // client's default 10 s flush. A forward the server denied returns at once;
 // one publishConfirmed cannot confirm for another reason still waits, since a
@@ -1149,8 +1167,12 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	defer receipt.Unsubscribe()
-	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
-	forward.Header.Set(nats.MsgIdHdr, ForwardMsgID(item.DedupeKey, subject))
+	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data}
+	original := item
+	original.DedupeKey = strings.TrimPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix)
+	if contracts.DedupeKeyNamesTheUpstreamEvent(original) {
+		forward.Header = nats.Header{nats.MsgIdHdr: []string{ForwardMsgID(item.DedupeKey, subject)}}
+	}
 	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err

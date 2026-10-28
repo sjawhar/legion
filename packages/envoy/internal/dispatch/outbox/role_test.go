@@ -335,6 +335,41 @@ func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
 	}
 }
 
+// A role route reached with nothing to send is no send of its batch. The event's first batch, with
+// no role reader, reaches the issue's topic and leaves the role route pending; once the event is
+// due again, the role, which nobody claims, is its only unreached destination, and the batch that
+// publishes it reports nothing sent.
+func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
+	ctx := context.Background()
+	rig := newRoleRig(t)
+	const role = "unclaimed"
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	rig.silent(t, contracts.AgentTopicPrefix+">")
+	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
+	holder := holding(t, rig.deps()).instance
+
+	first, err := scanBatch(ctx, Deps{Store: rig.database, Publisher: rig.client, Broker: rig.broker}, unfenced{}, holder)
+	if err != nil {
+		t.Fatalf("scan the first batch: %v", err)
+	}
+	if _, _, destinations := eventState(t, rig.database, event.ID); first.sent != 1 || publishedAt(t, rig.database, event.ID) != nil ||
+		len(destinations) == 0 || strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix) {
+		t.Fatalf("the first batch %+v recorded %v, want its topic reached and the role route pending", first, destinations)
+	}
+	dueNow(t, rig.database, event.ID)
+
+	second, err := scanBatch(ctx, rig.deps(), unfenced{}, holder)
+	if err != nil {
+		t.Fatalf("scan the second batch: %v", err)
+	}
+	if publishedAt(t, rig.database, event.ID) == nil {
+		t.Fatal("the event whose only route left is an unclaimed role was not published")
+	}
+	if second.sent != 0 || second.firstID != 0 || second.lastID != 0 || second.published != 1 {
+		t.Fatalf("the second batch = %+v, want it to publish the event with nothing sent", second)
+	}
+}
+
 // A claim whose holder's session is gone is released, with the listener's compare and set, and the
 // role then has no holder: the event is published with nothing sent, and the claim is gone.
 func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T) {
