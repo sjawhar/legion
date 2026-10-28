@@ -16,6 +16,7 @@ import type {
   ArchitectureTreeComponent,
   ArchitectureTreeIssueRef,
   Artifact,
+  AskRead,
   ChangedReference,
   DocumentReferenceSummary,
   Event,
@@ -948,10 +949,54 @@ function changedReferenceTargets(event: Event): RefreshTarget[] {
 }
 
 /**
+ * The issue whose every cached ask thread an event moves, or null. Each open ask card lists who a
+ * person's answer reaches through the ask's issue, read from its thread (`["ask-thread", id]`):
+ * the session holding the issue's claim and the session its route reaches. A claim or a release
+ * moves the claimant. A close that releases a claim appends its own `issue.released`, so an update
+ * or a close moves the threads only when it changed the route (one PATCH that sets the route and
+ * the status `done` emits `issue.closed` alone). Without `changed` (an older server) every update
+ * and close may have. A deploy moves neither.
+ */
+export function askThreadsIssue(event: Event): string | null {
+  switch (event.type) {
+    case "issue.claimed":
+    case "issue.released":
+      return event.issue_key;
+    case "issue.updated":
+    case "issue.closed": {
+      const changes = issueChanges(event);
+      return changes === undefined || changes.has("route") ? event.issue_key : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Every cached ask thread whose ask is on `issue`. The thread key holds only the ask id, so the
+ * test reads the thread: one still on its first load is judged on the response that lands
+ * (`refreshQueries`), and a thread that holds nothing to read (an error) refreshes too.
+ */
+function askThreadsOn(issue: string): RefreshTarget {
+  return {
+    queryKey: ["ask-thread"],
+    when: (data) => {
+      const thread = data as AskRead | undefined;
+      return thread === undefined || thread.ask.issue_key === issue;
+    },
+  };
+}
+
+/**
  * The reads one stream event can change, each a query key (a prefix unless `exact`) and, where
  * only some of a family's reads can have moved, a test of the read's data. `signedInLogin` is the
  * viewer's: the per-viewer events and the Replies rule read it.
  */
 export function eventRefreshTargets(event: Event, signedInLogin?: string): RefreshTarget[] {
-  return [...ownerTargets(event, signedInLogin), ...changedReferenceTargets(event)];
+  const targets = [...ownerTargets(event, signedInLogin), ...changedReferenceTargets(event)];
+  const threadsIssue = askThreadsIssue(event);
+  if (threadsIssue !== null) {
+    targets.push(askThreadsOn(threadsIssue));
+  }
+  return targets;
 }

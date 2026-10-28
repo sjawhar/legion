@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
-import { QueryClient, type QueryKey } from "@tanstack/react-query";
+import { expect, spyOn, test } from "bun:test";
+import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 
-import { eventRefreshTargets } from "../api/event-refresh";
+import { api } from "../api/client";
+import { askThreadsIssue, eventRefreshTargets } from "../api/event-refresh";
 import {
   architectureSourcesQuery,
   inboxQuery,
@@ -12,8 +15,15 @@ import {
   userStateQuery,
 } from "../api/queries";
 import { refreshQueries } from "../api/query-refresh";
-import { mergeEventPages, prependEventToLog } from "../api/sse";
-import type { Event, EventType } from "../api/types";
+import {
+  markAskThreadsSeededByAnInFlightInbox,
+  mergeEventPages,
+  prependEventToLog,
+} from "../api/sse";
+import type { Ask, AskRead, Event, EventType, InboxRow } from "../api/types";
+import { hasPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
+import { issueAsk } from "../features/inbox/inbox-fixture";
+import { useAskAnswerForm } from "../features/inbox/useAskAnswerForm";
 import {
   askQuery,
   blockQuery,
@@ -1066,4 +1076,169 @@ test("a log page that predates streamed events keeps them in front of it", () =>
     pageParams: [null],
     pages: [[seq(7)]],
   });
+});
+
+// Every open ask card lists who a person's answer reaches through its issue, read from its thread:
+// the issue's claimant and the session its route reaches. The thread key holds only the ask id, so
+// the rule tests each cached thread's ask for its issue.
+
+/** A thread read as `GET /asks/{id}` answers it, cut to the one field the rule reads. */
+function cacheThread(client: QueryClient, id: string, issueKey: string | null): void {
+  client.setQueryData(["ask-thread", id], { ask: { id, issue_key: issueKey } });
+}
+
+function refreshedThreads(incoming: Event): string[] {
+  const client = new QueryClient();
+  cacheThread(client, "ask-1", "CORE-1");
+  cacheThread(client, "ask-2", "CORE-2");
+  cacheThread(client, "ask-doc", null);
+  refreshQueries(client, eventRefreshTargets(incoming, "alice"));
+  return ["ask-1", "ask-2", "ask-doc"].filter(
+    (id) => client.getQueryState(["ask-thread", id])?.isInvalidated
+  );
+}
+
+test("a claim, a release or a write that moves the route refreshes the ask threads on its issue and no other", () => {
+  const onIssue = [
+    event("issue.claimed", { key: "CORE-1", claim: null }),
+    event("issue.released", { key: "CORE-1", claim: null }),
+    event("issue.updated", issue({ changed: ["route"], route: "role:reviewer" })),
+    // One PATCH that sets the route and closes the issue emits this alone.
+    event(
+      "issue.closed",
+      issue({
+        changed: ["status", "closed_at", "route"],
+        closed_at: "2026-10-26T00:00:00Z",
+        route: "role:reviewer",
+        status: "done",
+      })
+    ),
+    // An older server says nothing of what moved, so the route may have.
+    event("issue.updated", issue()),
+  ];
+  for (const incoming of onIssue) {
+    expect(askThreadsIssue(incoming)).toBe("CORE-1");
+    expect(refreshedThreads(incoming)).toEqual(["ask-1"]);
+  }
+});
+
+test("a write that moves neither the claimant nor the route refreshes no ask thread", () => {
+  const elsewhere = [
+    event("issue.updated", issue({ changed: ["title"], title: "Renamed" })),
+    // A close that releases a claim appends its own issue.released.
+    event(
+      "issue.closed",
+      issue({ changed: ["status", "closed_at"], closed_at: "2026-10-26T00:00:00Z", status: "done" })
+    ),
+    event("issue.deployed", { number: 501, repo: "acme/widgets" }),
+  ];
+  for (const incoming of elsewhere) {
+    expect(askThreadsIssue(incoming)).toBeNull();
+    expect(refreshedThreads(incoming)).toEqual([]);
+  }
+});
+
+test("a thread on its first load is judged on the response that lands: refreshed on the claimed issue, left alone elsewhere", async () => {
+  const client = new QueryClient();
+  const onIssue = Promise.withResolvers<AskRead>();
+  const elsewhere = Promise.withResolvers<AskRead>();
+  // Neither ask is read yet, so the cache cannot tell their issues when the claim arrives.
+  const loads = [
+    client.prefetchQuery({ queryFn: () => onIssue.promise, queryKey: ["ask-thread", "ask-3"] }),
+    client.prefetchQuery({ queryFn: () => elsewhere.promise, queryKey: ["ask-thread", "ask-4"] }),
+  ];
+  refreshQueries(client, eventRefreshTargets(event("issue.claimed", { key: "CORE-1" }), "alice"));
+  onIssue.resolve({ ask: { id: "ask-3", issue_key: "CORE-1" } } as unknown as AskRead);
+  elsewhere.resolve({ ask: { id: "ask-4", issue_key: "CORE-2" } } as unknown as AskRead);
+  await Promise.all(loads);
+  expect(client.getQueryState(["ask-thread", "ask-3"])?.isInvalidated).toBe(true);
+  expect(client.getQueryState(["ask-thread", "ask-4"])?.isInvalidated).toBe(false);
+});
+
+function threadOf(row: InboxRow, claimant: string | null = row.thread.claimant): AskRead {
+  return { ask: row, ...row.thread, claimant };
+}
+
+test("a claim that moves while the Inbox is in flight sends that issue's later cards to the ask endpoint, until a newer Inbox lands", async () => {
+  const onIssue = issueAsk({ id: "ask-1" });
+  const sibling = issueAsk({ id: "ask-3" });
+  const elsewhere = issueAsk({
+    id: "ask-2",
+    issue: { assignee: "alice", key: "CORE-2", title: "Other" },
+    issue_key: "CORE-2",
+  });
+  const rows = [onIssue, sibling, elsewhere];
+  const inFlight = Promise.withResolvers<InboxRow[]>();
+  const getInbox = spyOn(api, "getInbox").mockImplementationOnce(() => inFlight.promise);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const inboxKey = inboxQuery().queryKey;
+  const reads: string[] = [];
+  // The endpoint answers after the claim: every thread on CORE-1 names the new claimant.
+  const getAskThread = async (id: string): Promise<AskRead> => {
+    reads.push(id);
+    const row = rows.find((candidate) => candidate.id === id) as InboxRow;
+    return threadOf(row, row.issue_key === "CORE-1" ? "session-now" : null);
+  };
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  const mountCard = (row: InboxRow) =>
+    renderHook(
+      () =>
+        useAskAnswerForm({
+          answer: async () => row as Ask,
+          ask: row,
+          createReply: async () => {
+            throw new Error("no reply in this test");
+          },
+          getAskThread,
+          initialThread: threadOf(row),
+          initialThreadUpdatedAt: Date.now(),
+        }),
+      { wrapper }
+    );
+  const cards: { unmount: () => void }[] = [];
+  try {
+    void client.prefetchQuery(inboxQuery());
+    await waitFor(() => expect(client.getQueryState(inboxKey)?.fetchStatus).toBe("fetching"));
+    const claimed = event("issue.claimed", {
+      claim: { actor: { id: "session-now", kind: "session" }, at: "2026-09-24T06:00:00Z" },
+      reason: "claimed",
+    });
+    markAskThreadsSeededByAnInFlightInbox(
+      client,
+      eventRefreshTargets(claimed, "alice"),
+      askThreadsIssue(claimed)
+    );
+    // The in-flight body was composed before the claim.
+    inFlight.resolve(rows);
+    await waitFor(() => expect(client.getQueryState(inboxKey)?.fetchStatus).toBe("idle"));
+    expect(hasPendingAskThreadInvalidation(client, onIssue)).toBe(true);
+    expect(hasPendingAskThreadInvalidation(client, elsewhere)).toBe(false);
+
+    const first = mountCard(onIssue);
+    cards.push(first);
+    await waitFor(() =>
+      expect(first.result.current.threadQuery.data?.claimant).toBe("session-now")
+    );
+    const other = mountCard(elsewhere);
+    cards.push(other);
+    expect(other.result.current.threadQuery.data?.claimant).toBeNull();
+    // One card's own read leaves the issue's mark for the next card on it.
+    const second = mountCard(sibling);
+    cards.push(second);
+    await waitFor(() =>
+      expect(second.result.current.threadQuery.data?.claimant).toBe("session-now")
+    );
+    expect([...reads].sort()).toEqual(["ask-1", "ask-3"]);
+
+    // A newer Inbox, composed after the claim, clears the issue's mark.
+    getInbox.mockResolvedValueOnce(rows);
+    await client.refetchQueries({ queryKey: inboxKey });
+    expect(hasPendingAskThreadInvalidation(client, onIssue)).toBe(false);
+    expect(hasPendingAskThreadInvalidation(client, sibling)).toBe(false);
+  } finally {
+    for (const card of cards) card.unmount();
+    getInbox.mockRestore();
+  }
 });

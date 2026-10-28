@@ -40,7 +40,11 @@ function askRead(question: string): AskRead {
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
 }

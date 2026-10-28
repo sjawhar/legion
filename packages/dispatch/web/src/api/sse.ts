@@ -2,9 +2,12 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { reaskHeldCredentialList } from "../features/credentials/pending";
-import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
+import {
+  markPendingAskThreadInvalidation,
+  markPendingAskThreadsOnIssue,
+} from "../features/inbox/ask-thread-freshness";
 
-import { eventRefreshTargets } from "./event-refresh";
+import { askThreadsIssue, eventRefreshTargets } from "./event-refresh";
 import {
   EventStreamHttpError,
   readEventStream,
@@ -157,11 +160,14 @@ export const WHOLE_CACHE_REFRESH_MS = 5_000;
  * mounts from the landing rows seeds that thread from a body composed before the event. The
  * Inbox's own refetch once its load settles does not reach this - a card can mount from the
  * landing rows first - so the marker makes the card read the ask endpoint instead of trusting
- * the row it mounted from.
+ * the row it mounted from. An event that moves every thread on an issue (`askThreadsIssue`: a
+ * claim, a release, a route change) marks the issue the same way, since its refresh reaches only
+ * the threads already cached. Exported for the tests, which hold an Inbox fetch open around it.
  */
-function markAskThreadsSeededByAnInFlightInbox(
+export function markAskThreadsSeededByAnInFlightInbox(
   queryClient: QueryClient,
-  targets: readonly RefreshTarget[]
+  targets: readonly RefreshTarget[],
+  issue: string | null
 ): void {
   if (queryClient.getQueryState(inboxQueryKey)?.fetchStatus !== "fetching") {
     return;
@@ -174,6 +180,9 @@ function markAskThreadsSeededByAnInFlightInbox(
     ) {
       markPendingAskThreadInvalidation(queryClient, queryKey[1]);
     }
+  }
+  if (issue !== null) {
+    markPendingAskThreadsOnIssue(queryClient, issue);
   }
 }
 
@@ -347,7 +356,7 @@ export function useEventStream({
       prependEventToLog(queryClient, event);
       const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
       const targets = eventRefreshTargets(event, signedInLogin);
-      markAskThreadsSeededByAnInFlightInbox(queryClient, targets);
+      markAskThreadsSeededByAnInFlightInbox(queryClient, targets, askThreadsIssue(event));
       queueRefresh(targets);
     };
 
