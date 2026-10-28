@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T22:14:30Z",
+  "completed": "2026-10-28T23:53:30Z",
   "decision": "approved",
-  "round": 1,
-  "reviewedCodeHead": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
+  "round": 2,
+  "reviewedCodeHead": "ba09bc0cd28a16b3811ccd730b02098d898979d4",
+  "reviewedFrom": "ca71e43f2a7ad1d02179c3ebe1818c9be5f88795 (round-1 approval); the code change since is scripts/dispatch/README.md only (59377f8f, ba09bc0c)",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
   "ci": {
-    "required": "lint, typecheck, test and pr-title, from the main ruleset (branch protection names none): all completed success at CI head 75e39fdb (Tests run 40755477001, PR Title run 40755555281). Compare 75e39fdb...ddbd3fa1: handoffsOnly true, 2 files.",
-    "jobGraph": "Tests 40755477001: lint, typecheck, test. Legion Envoy and Contracts 40755477007: changes, broker-multiprocess, dispatch-memory, envoy-smoke, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, and skipped TypeScript jobs. No Postgres 16 job.",
-    "envoyGo": "envoy-go (job 123086097473) printed '180006|0.8.7' in its Postgres service version step. It failed only because internal/dispatch/deliveryaudit/deliveryaudit_test.go:121 does not compile at base a409c128 (string passed as auth.SigningKeys). Main fixed that in d743376f (#2473). The other 81 packages passed. envoy-go-race failed on the pmdoc timing ratio TestUpdateIsLinearInTheBlockCount/replacing_every_other_block (4.4x, cap 4x). This change touches no Go file. The plan said to approve only after envoy-go succeeds. The reviewer approves anyway because the plan's reason for that rule (the 180006|0.8.7 line) is read. Bringing main in is allowed only on a conflict, and the merge to main carries the fix. The architect is told."
+    "required": "lint, typecheck, test, pr-title (main ruleset): all completed success at CI head ba09bc0c. Compare ba09bc0c...045d2401: handoffsOnly true, 2 files.",
+    "envoyGo": "Not re-read this round. The only code change since round 1 is the README, and the workflows are unchanged since 839a67cb. Round 1 read envoy-go at 75e39fdb printing 180006|0.8.7. It was red only because base a409c128's deliveryaudit_test does not compile, which main fixed in #2473. It is not required."
   },
   "independentChecks": [
-    "Diff from a409c128: deletions of dispatch-go-postgres-16, broker-go-postgres-16 and daemon-go-postgres-16 with their comment blocks, three comment rewrites, the release-engineering.md clause cut, and the README lexeme-database section. Grep of the tree: no other reference to the deleted jobs. The 0.8.7-pg16 digest is left only in packages/envoy/scripts/dev-postgres.test.sh (a fixture) and docs/plans (history).",
-    "README block extracted with awk and run twice in a fresh TMPDIR at 75e39fdb: both runs exit 0, the second printed only the socket path, one postgres process, psql 180006|'add':1,2 'set':3|'add', pg_ctl stop clean."
+    "The README block, extracted with awk, run with env -i and PATH holding only bash, sh, curl, python3, flock, mkdir, rm, mv, cat and env (no PostgreSQL client): run 1 exit 0, run 2 exit 0 printing only the path. A sibling role under unshare --user --map-current-user --pid --ipc --fork --mount-proc exits 0 printing only the path. One postmaster. psql 180006|'add':1,2 'set':3.",
+    "SIGKILL to the postmaster (stale postmaster.pid): the block exits 1 with 'no server answers on <pg>, but data/postmaster.pid is left: ...' and starts nothing. After rm -rf <pg> the block exits 0 with one postmaster. pg_ctl stop was clean, and the directory was removed."
   ],
-  "thermonuclear": "Not run: the diff has no runtime code (workflow job deletions, comments, an architecture note, a README block).",
-  "security": "supply-chain: scripts/dispatch/README.md:342-345 downloads zonky embedded-postgres-binaries 18.6.0 from repo1.maven.org over https, pinned by version, no checksum, the same level as the pgserver==0.1.4 command it replaces. Workflows: only jobs removed, no action, permission or image added."
+  "thermonuclear": "Not run: the round's change is one README section (documentation).",
+  "security": "supply-chain: scripts/dispatch/README.md downloads zonky 18.6.0 from Maven Central over https, pinned by version, unchanged since round 1. untrusted-input: the python3 socket test (README.md:346) passes $pg as argv, not as code text."
 }
