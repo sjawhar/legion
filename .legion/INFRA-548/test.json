@@ -2,35 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T10:40:00Z",
-  "testedHead": "c2db05430618",
-  "round": "Answers review round 3 (314a5977). The only code change since my round-4 head a5a67218 is c2db0543, 18 lines in .github/workflows/envoy-and-contracts.yaml (jj diff --stat --from a5a67218 --to c2db0543 '~.legion': 1 file). In it, the envoy-session-stall job's Go cache follows main's #2328 rule. The product and the tests are byte-identical to round 4, so round 4's real-surface proofs (the stall suites, the two-session run of the committed Claude Code dist, the release-shaped pi-envoy bundle) still apply. This round proves the workflow change and re-runs the job's own steps.",
+  "completed": "2026-10-28T11:30:00Z",
+  "testedHead": "d26157e2b8c3fa266e453c71b2734ff30a27fc49",
+  "round": "Full round after the conflict merge of main aeeee6c0 (d26157e2). The fingerprint at my round-5 head c2db0543 is 86ee20ea…, and at d26157e2 it is d4c90c02…: changed. A per-file interdiff of this issue's own change (old: fork point b295a3fb → c2db0543; new: aeeee6c0 → d26157e2, --context 0, hunk headers and index lines dropped) shows exactly three kinds of difference. (1) The five CHANGELOG.md edits left the diff (each CHANGELOG.md now equals main's). (2) 12 changie fragments were added under packages/{claude-envoy,envoy-client,envoy-plugin,envoy,pi-envoy}/.changes/unreleased/pr2331-*. (3) .dispatch/architecture/claude-envoy-bridge.md and envoy-client.md keep main's new sentence with this issue's text appended. Every source, test, workflow and patch file has identical hunks. The base moved, so I re-ran the product surfaces on the merged tree.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "On Bun 1.4.4 at c2db0543 I ran the stall job's steps as the job does them (frozen install, contracts build, the three stall commands with LEGION_E2E_ENVOY_STACK=1). envoy-client: 3 pass (A 30.0 s; B 50.0 s, hung redial closed 20.0 s after the accept; C with 32 MiB 30.0 s). pi-envoy: 1 pass (29.9 s). claude-envoy: 2 pass (30.0 s; SIGTERM → exited after 0.0 s). Its row C negative control at this head ('reconnect none … [60268.24ms]' with the protocol.js hunk reverted, 32 MiB) matches what I observed at a5a67218, whose product and test code are identical: 'reconnect none … [60077.74ms]'. Its new note that editing node_modules/.bun writes through to bun's install cache holds no risk for this pod: `bun pm cache` lists nats@2.29.3@@@1 unpatched (0/0 hunk markers) and nats@2.29.3@@@1_patch_hash=257c91f8b5726726 patched (1/1), and the installed copy is patched."
+    "how": "On Bun 1.4.4 at d26157e2, after `bun install --frozen-lockfile` (patched nats installed), I ran the envoy-session-stall job's steps. Contracts build, then envoy-client stall: 3 pass (A 30.0 s; B 50.0 s, hung redial closed 20.0 s after the accept; C with 32 MiB 30.1 s). pi-envoy stall: 1 pass (30.0 s). claude-envoy stall: 2 pass (29.8 s; SIGTERM → exited after 0.0 s). claude-envoy check-dist: 'dist/ and legion/ match a fresh build'. Go listener and session tests: ok 18.2 s and 5.8 s. The plugin_version and '10 s' greps each match once in every named architecture file."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review round 3 finding 1: the envoy-session-stall job restores the Go cache on every run and saves it only on main, as #2328 made every other caching Go job do, so a pull-request run writes no cache entry under refs/pull/<n>/merge",
-      "surface": "The job as GitHub Actions reads it: .github/workflows/envoy-and-contracts.yaml, checked by actionlint, its restore key computed against this repository's live Actions caches, and the job's steps run locally",
-      "command": "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/envoy-and-contracts.yaml; the hashFiles('packages/envoy/go.sum') value (sha256 of the file's sha256) compared with `gh api repos/sjawhar/legion/actions/caches?key=go-envoy-`; `gh api repos/sjawhar/legion/actions/caches?ref=refs/pull/2331/merge`; the job's steps run locally on Bun 1.4.4",
-      "observed": "actionlint exit 0, no output. The job's steps are the same as envoy-e2e-local's #2328 block (setup-go `cache: false`, actions/cache/restore with key go-envoy-<os>-<go>-<hash of go.sum> and restore-keys only off main, actions/cache/save only when github.ref is refs/heads/main and the restore missed). On this branch the key is go-envoy-Linux-1.27.1-2d2d4dd406f9a408c824dbfc3a5f4c525611ee1efd65999bb87ab212b63a1eef (go.mod 1.27.1, go.sum unchanged from main). That exact entry exists on refs/heads/main (created 2026-10-28T01:47Z), so the PR run restores main's cache, and its save step is skipped by `if:`. refs/pull/2331/merge holds 0 cache entries. No setup-go in the file uses cache-dependency-path any more. The job's steps run locally: envoy-client 3 pass, pi-envoy 1 pass, claude-envoy 2 pass.",
-      "headSha": "c2db05430618",
-      "negativeControl": "In a scratch copy of the workflow, the save step's key renamed to read steps.go_cachee.outputs.cache-primary-key: actionlint refused it with 'property \"go_cachee\" is not defined in object type {go_cache: …; setup_go: …} [expression]'. So actionlint checks this file's step-output references, and the real file's reference resolves."
+      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s, also with data the frozen path never acknowledged, and a redial nats.js gives up on leaves no socket open; the plugins recover and show the missed message once, replayed; registration carries the plugin version",
+      "surface": "The merged tree, on Bun 1.4.4: real natsd and listener built from it, real nats.js with patches/nats@2.29.3.patch, the stall proxy, the real pi-envoy extension and the real claude-envoy channel server process",
+      "command": "LEGION_E2E_ENVOY_STACK=1: (cd packages/contracts && bun run build); (cd packages/envoy-client && bun test src/__tests__/nats-stall.test.ts); (cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"NATS path freezes\"); (cd packages/claude-envoy && bun test tests/envoy-channel-stall.test.ts && bun run check-dist); (cd packages/envoy && go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry' -count=1)",
+      "observed": "envoy-client 3 pass (A 30.0 s; B 50.0 s, hung redial closed after 20.0 s; C 30.1 s). pi-envoy 1 pass (resubscribed 30.0 s, missed message shown 30.0 s). claude-envoy 2 pass (29.8 s; SIGTERM → exited after 0.0 s). check-dist matches. Go ok.",
+      "headSha": "d26157e2b8c3fa266e453c71b2734ff30a27fc49",
+      "negativeControl": "With the installed nats's protocol.js hunk reverted for one run (copied aside, restored afterwards), row C printed 'reconnect none, first publish received never after the freeze' and failed [60340.82ms]. Afterwards bun's cache holds nats@2.29.3@@@1 unpatched and nats@2.29.3@@@1_patch_hash=257c91f8b5726726 patched."
     },
     {
-      "criterion": "Review round 3 finding 2: the row C negative control is observed at the head the proof names, on Bun 1.4.4, with the 32 MiB backlog",
-      "surface": "envoy-client stall suite against a real natsd and listener built from this tree, with the installed nats's protocol.js hunk reverted for one run",
-      "command": "cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts -t \"^a NATS connection whose path freezes C:\" (Bun 1.4.4)",
-      "observed": "At a5a67218, whose product and test code equal c2db0543: patched, row C 'reconnect 30.0 s, first publish received 30.2 s'. With the hunk reverted: 'reconnect none, first publish received never after the freeze', (fail) [60077.74ms]. The implementer's record at c2db0543 shows the same refusal [60268.24ms]. At c2db0543, the patched row C reconnects at 30.0 s.",
-      "headSha": "c2db05430618",
-      "negativeControl": "The reverted run itself is the control: without the hunk, row C fails."
+      "criterion": "This round's own change: the pull request's changelog entries are changie fragments that the main-only fold renders (main's #2419 rule), with no Dispatch key, and no CHANGELOG.md is edited",
+      "surface": "changie v1.26.0, installed as .github/actions/install-changie installs it (the same tarball and sha256), rendering each package's fragments as release-push.sh's render_notes does (the package's .changie.yaml plus its fragments in a scratch directory, `changie batch 0.0.0`)",
+      "command": "for each of claude-envoy, envoy-client, envoy-plugin, envoy and pi-envoy: copy .changie.yaml and .changes/unreleased/pr2331-*.yaml to a scratch dir and run changie batch 0.0.0; grep for INFRA-/dispatch:// in the fragments; jj diff --stat --from aeeee6c0 --to d26157e2 'glob:\"packages/*/CHANGELOG.md\"'",
+      "observed": "claude-envoy: 3 fragments → 3 bullets (Added, Fixed). envoy-client: 4 → 4 (Added, Changed, Fixed). envoy-plugin: 1 → 1 (Added). envoy: 1 → 1 (Added). pi-envoy: 3 → 3 (Added, Fixed). No fragment names a Dispatch key. The CHANGELOG.md diff against main: 0 files. The envoy-client Fixed fragment names the 32 MiB row C. release-push.sh fold-notes run in a scratch clone wrote claude-envoy's and envoy-client's notes (3 and 4 fragments). Its plan for the tagged packages needs release history my clone lacked, so I rendered those directly as above.",
+      "headSha": "d26157e2b8c3fa266e453c71b2734ff30a27fc49",
+      "negativeControl": "A copy of pi-envoy's Added fragment with `kind: Improved`: changie refused it, 'kind not found but configuration expects one: 'Improved'', exit 1."
     }
   ],
   "observations": [
-    "CI at daa4e513 (the PR head, carrying c2db0543): Docs, Tests and 'Legion Envoy and Contracts' (whose changes job had not started) were queued, Worker Image pending, one PR Title run cancelled and two queued, when I read them. The envoy-session-stall job and its cache steps are first exercised on GitHub in that run.",
-    "The round-3 Fast-follow cleanups (stall-proxy closedAt note and dead guards, one RECOVERY_BOUND_MS, handleAuthError in the README) stay on the PR body's Fast-follow line, as the architect narrowed the round. None changes behaviour."
+    "CI at bb869e98 (the PR head, which carries d26157e2): PR Title, Docs, Tests, Worker Image and Legion Envoy and Contracts were all queued when I read them.",
+    "changie batch accepted a fragment whose custom Issue was an empty string: minLength is enforced only by `changie new`. The pr2331 fragments all carry Issue pr2331, so this does not affect them.",
+    "Round 4's two-session run of the committed Claude Code dist from a plugin-cache path still applies: the bundle is unchanged (check-dist matches a fresh build of a tree whose claude-envoy source is identical)."
   ]
 }
