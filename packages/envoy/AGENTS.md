@@ -3938,11 +3938,11 @@ annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy
 which signs the same digest `image_index` hands over. The attestation is separate from the
 BuildKit provenance (`provenance: mode=min`) each `docker` leg attaches to its platform's image,
 and the index carries both legs' provenance, which a deployment reads to map a digest to its
-commit. Each `docker` leg's BuildKit layer cache is the Actions cache, scope `envoy-<arch>`,
-`mode=min`, written by `main` runs; it is not a registry cache because GitHub does not let a `main`
-run restore a branch's Actions-cache entries, while any run holding `packages: write` can push a
-ghcr.io tag. The package's `buildcache-amd64` and `buildcache-arm64` tags, left from a branch
-measurement run, are not images, and nothing reads them.
+commit. The `docker` legs keep no BuildKit layer cache across runs: `LEGION_COMMIT` enters the
+build stage, so a cache would only serve a re-run at the same commit. They keep no registry cache
+either, since any run holding `packages: write` can push the ghcr.io tag `main`'s attested build
+would read (GHSA-f2v9-hprr-32q3). The package's `buildcache-amd64` and `buildcache-arm64` tags,
+left from a branch measurement run, are not images, and nothing reads them.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux

@@ -99,8 +99,6 @@ docker:
         - arch: arm64
           runner: ubuntu-24.04-arm
   runs-on: ${{ matrix.runner }}
-  env:
-    BUILD_CACHE: type=gha,scope=<name>-${{ matrix.arch }}
   steps:
     - uses: docker/setup-buildx-action@v4
     - id: build
@@ -109,31 +107,33 @@ docker:
         platforms: linux/${{ matrix.arch }}
         provenance: mode=min
         outputs: type=image,name=<image>,push-by-digest=true,name-canonical=true,push=true
-        cache-from: ${{ env.BUILD_CACHE }}
-        cache-to: ${{ github.ref == 'refs/heads/main' && format('{0},mode=min', env.BUILD_CACHE) || '' }}
 ```
 
 - `outputs` replaces `push` and `tags`: the leg pushes an untagged image, and only the join tags
   `envoy:<sha>`, once both legs have pushed. `push: true` beside `outputs` would request a second
   exporter.
-- Each platform needs a cache scope of its own (`scope=<name>-<arch>`). Legs sharing one scope
-  overwrite each other's cache index, so each run would find only the other platform's cache.
-- The layer cache is the Actions cache (`type=gha`), not a registry cache (a `<image>:buildcache`
-  tag), for trust: GitHub scopes Actions-cache entries by ref, and a `main` run restores only
-  `main`'s entries, never a branch's. A registry tag is writable by any run holding
-  `packages: write` (a dispatch of an edited branch copy, another workflow's pull request run), and
-  `main`'s attested build would then read those layers. BuildKit advisory GHSA-f2v9-hprr-32q3: do
-  not share build cache between trusted and untrusted builds.
-- Every build reads the cache; `cache-to` is set only on `main`, through the
-  `github.ref == 'refs/heads/main' && format(...) || ''` expression (the empty string leaves the
-  leg with no cache export), and with `mode=min`. A `mode=max` export added about 1.6 GB of new
-  Actions-cache entries per main run, at 27-29 runs a day (measured 2026-10-27), and evicted the
-  `main` entries pull requests read. `mode=min` exports only the layers of the final image, so an
-  intermediate stage (a Go build stage, say) has no cached steps of its own: when none of its inputs
-  changed, the final layers still match and nothing is rebuilt, but when one did, the stage reruns
-  from its first step (module download included), not from the first step that changed.
-- `docker/setup-buildx-action` stays on every leg: the `gha` cache exporter needs the
-  `docker-container` builder it creates, not the default `docker` driver.
+- If you add a layer cache to a per-platform matrix, give each leg its own cache scope or ref
+  (`scope=<name>-<arch>`). Legs sharing one overwrite each other's cache index, so each run would
+  find only the other platform's cache.
+- Never give a trusted, attested build a registry cache (a `<image>:buildcache` tag) to read: any
+  run holding `packages: write` (a dispatch of an edited branch copy, another workflow's pull
+  request run) can write that tag, and `main`'s attested build would then read those layers.
+  BuildKit advisory GHSA-f2v9-hprr-32q3: do not share build cache between trusted and untrusted
+  builds. The Actions cache (`type=gha`) does not have that hole: GitHub scopes its entries by
+  ref, and a `main` run never restores a branch's entries.
+- Before adding a cache, check what it can hit. `mode=min` exports only the final image's layers,
+  so an intermediate stage (a Go build stage, say) hits only when none of its inputs changed. This
+  image's `build` stage takes the `LEGION_COMMIT` build argument (the commit sha) into its
+  `go build -ldflags` step (`packages/envoy/docker/Dockerfile`), so every new commit reruns the
+  `build` stage and the `web` stage it copies from. A cache would help only a re-run at the same
+  commit (measured 1.6–2.0 minutes per leg) while adding about 137 MB of Actions-cache entries per
+  `main` run (about 1.6 GB with `mode=max`) to an Actions cache already past GitHub's 10 GB limit;
+  uncached, the legs take 4.2–6.9 minutes each, under the 8-minute target. So this workflow keeps
+  no build cache.
+- `docker/setup-buildx-action` stays on every leg: the publish needs the `docker-container`
+  builder it creates, because the default `docker` driver without the containerd image store
+  cannot export the BuildKit provenance attestation or push by digest. Its
+  `provenance-add-gha=false` driver option keeps the GitHub event out of the provenance.
 - The digests travel as artifacts, not job outputs: a matrix job's outputs keep only the last
   leg's value. Each leg writes `steps.build.outputs.digest` as the name of an empty file and
   uploads it as `envoy-image-digest-<arch>`; the join downloads them with `pattern:

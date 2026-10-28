@@ -159,17 +159,6 @@ jobs:
     env:
       # The listener image the smoke test runs against, built by the step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
-      # Each leg's BuildKit layer cache is the Actions cache, scope `envoy-<arch>`: two legs sharing
-      # one scope would overwrite each other's cache index. Every run reads it; this file writes it
-      # only on main (the publish step's `cache-to` is empty elsewhere). What keeps branch layers out
-      # of main's build is not that: GitHub scopes Actions-cache entries by ref, and a run restores
-      # entries of its own ref and of the default branch, never another branch's. A registry cache (a
-      # ghcr.io tag) would not hold that: any run holding `packages: write` can push the tag main's
-      # attested build would then read (BuildKit advisory GHSA-f2v9-hprr-32q3: do not share build
-      # cache between trusted and untrusted builds). `mode=min` exports only the final image's
-      # layers; the earlier `mode=max` export added about 1.6 GB of Actions-cache entries per main
-      # run (INFRA-520, 2026-10-27).
-      BUILD_CACHE: type=gha,scope=envoy-${{ matrix.arch }}
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
       # pull the smoke test could fail on.
@@ -209,8 +198,8 @@ jobs:
       # `load: true` is Docker's documented test-before-push shape, and the only build form
       # .github/scripts/check-image-trigger-paths.sh can read. Same Dockerfile, context, builder
       # and LEGION_COMMIT as the publish step below, so each leg smoke-tests the platform it
-      # pushes, natively, before it pushes it. It reads the leg's Actions cache (BUILD_CACHE),
-      # which main's publish step writes.
+      # pushes, natively, before it pushes it, and the publish step reuses this build's layers
+      # from the same builder: the job builds the image once.
       - name: Build the listener image the smoke test runs against
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
@@ -224,7 +213,6 @@ jobs:
           file: packages/envoy/docker/Dockerfile
           load: true
           provenance: false
-          cache-from: ${{ env.BUILD_CACHE }}
           build-args: |
             LEGION_COMMIT=${{ github.sha }}
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
@@ -257,6 +245,14 @@ jobs:
           # attaches to the pushed image.
           BUILDX_METADATA_PROVENANCE: disabled
           DOCKER_BUILD_SUMMARY: "false"
+        # No BuildKit layer cache is kept across runs. The Dockerfile passes LEGION_COMMIT (this
+        # run's github.sha) into the build stage's `go build -ldflags` step, so every new commit
+        # runs the build stage, and the web stage it copies from, again: an exported cache would
+        # serve only a re-run at the same commit, while each main run would add about 137 MB of
+        # Actions-cache entries (`mode=min`; `mode=max` added about 1.6 GB) to a cache already past
+        # GitHub's 10 GB limit. Not a registry cache either: any run holding `packages: write` can
+        # write a tag main's attested build would read (GHSA-f2v9-hprr-32q3). Uncached, each leg
+        # takes about 4.2-6.9 minutes.
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
@@ -266,9 +262,6 @@ jobs:
           # both legs have pushed. `outputs` replaces `push` and `tags`; `push` beside it would
           # request a second exporter.
           outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
-          # Layer cache: see BUILD_CACHE in the job's env.
-          cache-from: ${{ env.BUILD_CACHE }}
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('{0},mode=min', env.BUILD_CACHE) || '' }}
           # envoy-dispatch's /healthz reports this as the commit it was built from; the
           # Dockerfile refuses anything but a full sha.
           build-args: |
