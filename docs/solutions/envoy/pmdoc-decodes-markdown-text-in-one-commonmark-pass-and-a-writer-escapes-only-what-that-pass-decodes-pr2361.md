@@ -10,9 +10,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/envoy/internal/dispatch/pmdoc
-related_issues:
-  - "INFRA-536"
-  - "sjawhar/legion#2361"
 ---
 
 # pmdoc decodes markdown text in one CommonMark pass, and a writer escapes only what that pass decodes
