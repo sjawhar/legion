@@ -55,7 +55,9 @@ function postAsPage(page: Page, path: string, data?: object) {
   return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
-test("artifacts upload, version, references, and phone layout", async ({ page }, testInfo) => {
+test("artifacts upload, version, references, and phone layout @phone", async ({
+  page,
+}, testInfo) => {
   const sockets = countDocumentSockets(page);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
@@ -189,7 +191,9 @@ test("artifacts upload, version, references, and phone layout", async ({ page },
   }
 });
 
-test("the artifacts tab filter narrows rows by name and kind", async ({ page }, testInfo) => {
+test("the artifacts tab filter narrows rows by name and kind @phone", async ({
+  page,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Artifact filtering" });
   await page.goto(`/issues/${issue.key}`);
@@ -217,7 +221,7 @@ test("the artifacts tab filter narrows rows by name and kind", async ({ page }, 
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 });
 
-test("an uploaded document is linked from the Activity tab and counted on its own tab", async ({
+test("an uploaded document is linked from the Activity tab and counted on its own tab @phone", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -298,7 +302,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
   await expect(page.getByTestId("artifact-header")).toContainText(name);
 });
 
-test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated", async ({
+test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated @phone", async ({
   page,
 }) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -358,7 +362,7 @@ test("an out-of-schema document names its repair and uploads replacement markdow
 // the text it read on the first visit. The second admission reads the text afresh and shows the
 // repair; connecting on the cached text would open a socket into a tree outside the schema. The
 // count is this document's sockets alone: the issue's own spec holds a socket of its own.
-test("an out-of-schema document does not reconnect from cached text", async ({
+test("an out-of-schema document does not reconnect from cached text @phone", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

@@ -230,7 +230,7 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
   }
 });
 
-test("sidebar: an issue event while the sidebar's first reads are in flight discards none of them", async ({
+test("sidebar: an issue event while the sidebar's first reads are in flight discards none of them @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";
@@ -304,7 +304,7 @@ test("sidebar: an issue event while the sidebar's first reads are in flight disc
   }
 });
 
-test("pin: a pin from another tab shows in this tab's sidebar within 2 s with one pinned-list read", async ({
+test("pin: a pin from another tab shows in this tab's sidebar within 2 s with one pinned-list read @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -346,7 +346,7 @@ test("pin: a pin from another tab shows in this tab's sidebar within 2 s with on
   }
 });
 
-test("replies: a reply in a thread alice wrote in moves her Replies count, and one in a thread she never wrote in reads nothing", async ({
+test("replies: a reply in a thread alice wrote in moves her Replies count, and one in a thread she never wrote in reads nothing @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";

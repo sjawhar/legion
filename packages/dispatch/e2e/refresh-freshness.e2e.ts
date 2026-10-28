@@ -91,7 +91,7 @@ test("document panel: a new comment citing a project document shows in its open 
   }
 });
 
-test("reference: a title written while the reference's read is in flight shows after leaving the page and coming back", async ({
+test("reference: a title written while the reference's read is in flight shows after leaving the page and coming back @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -131,7 +131,7 @@ test("reference: a title written while the reference's read is in flight shows a
   }
 });
 
-test("inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox", async ({
+test("inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
