@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-642",
+  "completed": "2026-10-28T12:56:09Z",
+  "headTested": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+  "branchHead": "a7372bd5c9ad5d63ad7129edbaf1cb8e02bb0590 (adds only .legion/INFRA-642/implement.json to 1834eeb8)",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2448#issuecomment-6469539741",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each proof with my own builds from git archive (base 460facf5 sha256 33b0bbb1..., head 1834eeb8 sha256 464d2d00...). A3: the implementer's a3.sh, base vs head, 0 diff lines, and my base record vs its base record also 0 lines. A2: TestAMarginWriteMatchesTheWholeDocumentWrite ok 157.3 s on generated documents, ok 583.3 s with the 5-spec LINUX corpus (596 subtests, 0 failed); its negative control A (applyMargin records content_changed=true) reproduced: 15 subtests fail. A1: checked the quoted arithmetic against its results/*.json (max head 428.37 < min base 432.10, spread 11.79, mean gain 15.61 CPU-s = 0.032 cores) and re-ran 3+3 interleaved: head 437.81/431.13/433.27 vs base 444.58/451.04/444.66 CPU-s, rule holds; per-request CPU also separated (head <= 0.2467, base >= 0.2496), which answers the implementer's runs completing ~1% fewer requests at head."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A3: behaviour kept on the real route (anchored comment create, reply, resolve, reopen, edit) between base and head",
+      "surface": "Local Dispatch server (packages/envoy/cmd/dispatch, GOMAXPROCS=2) on Postgres 17.11 + pgvector with the INFRA-512 replay seed, driven over HTTP as the CLI and a signed-in person send",
+      "command": "/legion/scratch/tmp/a3/a3.sh /legion/scratch/tmp/tester/dispatch-{base,head} /legion/scratch/tmp/tester/a3/{base1,head1}; diff <(jq -S . base1/record.json) <(jq -S . head1/record.json)",
+      "observed": "0 diff lines over 10 steps (responses, 12 comment.anchor_refreshed events with actor and order, /text and document token, /blocks tokens, comments, anchor rows); my base record equals the implementer's base record (0 lines).",
+      "headSha": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+      "negativeControl": "LINUX-36's document put outside the schema with the test hook (DISPATCH_TEST_HOOKS=1, POST /api/v1/artifacts/<id>/_test/outside-schema): agent reply and agent resolve answer 409 DOC_SCHEMA with the message /text answers, byte-identical at base and head, and no reply row or resolution is written."
+    },
+    {
+      "criterion": "Observer skip (X3b) is exact: a margin-only publish keeps the room's rendering only where that cannot change any recorded class",
+      "surface": "Local Dispatch server with a websocket browser peer (person cookie, /ws/doc/<id>) in LINUX-36's room; HTTP agent and person comment routes; stored doc_updates",
+      "command": "/legion/scratch/tmp/tester/probe.sh <binary> <out> (throwaway probe: reply, no-text and typed peer edits, 4 concurrent replies while the peer edits, suggestion + accept, resolve, reopen; then an oracle replays every stored doc_updates row after the start version and re-renders after each)",
+      "observed": "head: 27 rows, 7 changed by render, 0 content_changed mismatches, peer markdown == /text, final /text == oracle render; base identical. A head build with a log line in the skip branch kept the rendering for all 9 margin-only publishes and rendered the 2 text-changing live writes.",
+      "headSha": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+      "negativeControl": "Build that skips rendering for every live-write publish: 1 mismatch (v49, the no-text browser edit after accept stored content_changed=true); the same build and a build that tags cold margin writes against the live room both fail TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto, and the first also fails TestAMarginWriteFromAWarmFork..."
+    },
+    {
+      "criterion": "A2: behaviour kept exactly on real-size documents (equivalence against the whole-document write) and comment routes answer an outside-schema document as /text does",
+      "surface": "docs and api packages against local Postgres 17.11 + pgvector",
+      "command": "go test ./internal/dispatch/docs/ -run '^TestAMarginWriteMatchesTheWholeDocumentWrite$' -count=1 -v; again with DISPATCH_TEST_SPEC_CORPUS=/legion/scratch/tmp/linux-specs; go test ./internal/dispatch/api/ -run '^TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike$' -count=1 -v",
+      "observed": "ok 157.3 s (399,822- and 614,637-byte generated specs, 48 anchors each); with the corpus (5 specs, 149,411-596,774 bytes) ok 583.3 s, 596 subtests passed, 0 failed; schema route test ok for all 4 corruptions including reply, resolve, reopen and edit.",
+      "headSha": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+      "negativeControl": "applyMargin mutated to record content_changed=true: 15 subtests fail with 'appended row N's content_changed differs'."
+    },
+    {
+      "criterion": "A1: merge rule on LINUX's replay (every head run uses less CPU than every base run)",
+      "surface": "Local Dispatch server driven by the INFRA-512 architect's replay of LINUX's write log (tools/load.py F=0.3, rho=1, minutes 27-35, 2 SSE, GOMAXPROCS=2), seed restored before each run",
+      "command": "/legion/scratch/tmp/a1/run.sh /legion/scratch/tmp/tester/dispatch-{base,head} t-{base,head}{1,2,3}, interleaved base/head",
+      "observed": "base 444.58, 451.04, 444.66 CPU-s; head 437.81, 431.13, 433.27 over 480.9 s each: max head < min base; spread 6.46; mean gain 12.69 CPU-s = 0.026 cores (2.8%). pprof -focus ProjectMark 11.70/12.33/11.88% -> 10.18/10.11/10.14%; updateChangesMarkdown 2.65/2.74/2.54% -> 2.49/2.47/2.55%.",
+      "headSha": "1834eeb88b9044fdd71f89cef74a58401d2320a7",
+      "negativeControl": "Base binary (the change absent) is the control: every base run used more CPU than every head run, and per completed request too (base 0.2496-0.2559, head 0.2433-0.2467 CPU-s)."
+    }
+  ],
+  "observations": [
+    "Two Dispatch processes on one database (peer on A, text edits through B, a reply through A after each): head, base and a build that tags cold margin writes all behave the same; A's evictor closes the room B left behind before the reply, so the cold-margin-into-open-stale-room race is not reachable on demand on the real server. The in-process test TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto covers it and fails on that broken build.",
+    "The observer saves little in the CLI-only replay (updateChangesMarkdown share unchanged within noise), as the implementer reported: rooms are mostly cold there. With a browser in the room the skip fires for every margin write (9 of 9 in the probe).",
+    "CI at 1834eeb8: all lanes green (dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go, lint, typecheck, test)."
+  ]
+}
