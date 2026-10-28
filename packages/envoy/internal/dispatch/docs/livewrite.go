@@ -423,7 +423,7 @@ func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 
 // coldFork returns the fork of a write to a document no room holds: the stored document, which is
 // all of it then, with the transaction's writes applied. It loads no room, which would hold a
-// second copy of the document for as long as the write runs (LEGION-504), and neither does the
+// second copy of the document for as long as the write runs, and neither does the
 // write's publish (publishLiveWrite): the next access loads the room from the store, which by then
 // holds the write. A fork it built is kept for the transaction's next operation while no room has
 // loaded since: on this process the transaction's writer slot holds off every other writer and
@@ -769,7 +769,7 @@ func (w *liveWrite) dropRendering() {
 // operations alone. A write can outlive its transaction by a long way: whatever holds the
 // transaction's context holds its ledger and so the write, and a pooled pgx connection keeps the
 // context of the queries it last served. Kept, a heavy document's fork and tree stayed resident
-// after the edit that built them had answered, beside the document's room (LEGION-504).
+// after the edit that built them had answered, beside the document's room.
 func (w *liveWrite) releaseFork() {
 	w.fork, w.forkedFrom, w.cold = nil, weak.Pointer[crdt.Doc]{}, false
 	w.dropRendering()
@@ -999,10 +999,10 @@ func (s *Service) roomHeld(room string) bool {
 const publishedLossTimeout = 10 * time.Second
 
 // recordPublishedLoss judges, once the write is committed and published, which of the write's
-// operations the document at its stored head no longer holds, and records it: LEGION-269's second
-// window, a concurrent change that landed between the version render and this publish. Nothing
-// can be rolled back here - the update is durable and the version written - so the verdict rides
-// the caller's response instead (Ledger.LostOps).
+// operations the document at its stored head no longer holds, and records it: the lost-edit
+// check's second window, a concurrent change that landed between the version render and this
+// publish. Nothing can be rolled back here - the update is durable and the version written - so
+// the verdict rides the caller's response instead (Ledger.LostOps).
 //
 // A write that inserted no text reaches the verdict too, an empty one: a delete, a replace that
 // only shortens, a retype, an operation that changed nothing - none of them wrote anything a

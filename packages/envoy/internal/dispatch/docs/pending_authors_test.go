@@ -320,7 +320,7 @@ func TestTwoProcessesListEveryEditorOnExactlyOneVersion(t *testing.T) {
 // settlement was refused there three times in a row: the third refusal failed the room, and the
 // process's next named version, made before the failure's eviction had run, was refused with it.
 // The first seed also named a version from that room, which recorded text missing the other
-// process's paragraphs at a cursor saying it held them. The third (INFRA-556) had a browser append
+// process's paragraphs at a cursor saying it held them. The third had a browser append
 // refused because a compaction on the other process replaced the history under its room; the room
 // must fail and reload so the browser's resend lands, and a refusal that only asked the room-sync
 // lane for a catch-up lost the edit wherever that lane does not run.
@@ -570,7 +570,7 @@ func TestAnUploadClearsOnlyTheEditsItsForkHeld(t *testing.T) {
 // An upload whose room is behind the durable head is made on the stored document, which holds
 // every update: bob's paragraph, typed on task B after task A's room loaded, is in the text the
 // uploader replaced, so his row goes with the upload's commit and no version lists him. Before
-// INFRA-66's behind-the-head gate task A uploaded from its own room, which never held that paragraph:
+// the behind-the-head gate task A uploaded from its own room, which never held that paragraph:
 // the replacement deleted only what the room held, the paragraph survived the merge, and the
 // document kept text no version recorded while bob stayed owed for it.
 func TestAnUploadOnOneProcessClearsTheAuthorItReadFromTheStore(t *testing.T) {

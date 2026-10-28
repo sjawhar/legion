@@ -17,7 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// Closing or reopening an issue changes every process's rooms of its documents (INFRA-556, plan
+// Closing or reopening an issue changes every process's rooms of its documents (plan
 // D5). The trigger migration 0135 puts on issues.closed_at notifies dispatch_issue_open_changed
 // from the transaction that wrote it, whichever process wrote it; each process's room sync reads
 // the issue and closes its rooms of the issue's documents (issueOpenChanged), so their browsers

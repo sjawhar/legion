@@ -296,7 +296,7 @@ func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn
 // the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
 // block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
 // delivery reconcile, the edit-notice sweep, the document settlement resumption
-// (docs.RunSettlementResumption, INFRA-556) and one per delivery durable for the consumers'
+// (docs.RunSettlementResumption) and one per delivery durable for the consumers'
 // reconciliation (delivery.consumerLease, a name each for delivery-events and delivery-jobs) -
 // taken by eleven callers, since each delivery intake takes its own durable's name from a bind
 // poll of its own, so eleven callers can be inside Exclusive at once. Eleven connections are

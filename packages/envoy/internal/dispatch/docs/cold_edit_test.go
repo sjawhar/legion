@@ -14,8 +14,8 @@ import (
 )
 
 // A write to a document no room holds forks the stored document and loads no room while it runs:
-// a room beside the fork would hold a second copy of a heavy document until the write commits
-// (LEGION-504). Its publish loads none either, which would hold the document with no reader in it
+// a room beside the fork would hold a second copy of a heavy document until the write commits.
+// Its publish loads none either, which would hold the document with no reader in it
 // (audit finding 11): the write keeps no fork, its verdict on what it inserted is judged on the
 // store (nothing was lost), and the next read loads the room from the store, holding the write.
 func TestAColdWriteLoadsNoRoom(t *testing.T) {

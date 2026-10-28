@@ -432,10 +432,13 @@ process holds its own room for a document. Postgres is the only channel between 
   reads) from inside the transaction that wrote it. Every other process that holds a room of the
   document reads the stored rows its room does not hold from `doc_updates` and applies them as one
   batch. The room stays open, and its browsers see the edit on the socket they already have.
-- **A room is closed and reloaded only when its stored history is replaced:** a rebuild, a prune,
-  a delete, or a compaction that folds rows the room has not taken in yet. A compaction keeps the
-  head row, so it closes only a room that is behind at that moment. The browser then reconnects
-  and syncs the reloaded room.
+- **Closes.** Room sync closes and reloads a room only when its stored history is replaced: a
+  rebuild, a prune, a delete, or a compaction that folds rows the room has not taken in yet. A
+  compaction keeps the head row, so it closes only a room that is behind at that moment. The
+  service also closes a room in three other cases: its issue closes or reopens, the room fails
+  and its eviction closes it (`failRoom`), or the process shuts down with an editor connected to
+  the room. No other close disconnects a browser. After a close, the browser reconnects and syncs
+  a reloaded room.
 - **Appends from a room that is behind.** A browser's edit is accepted: it is stored at the head,
   and the room's cursor takes it in when the catch-up fills the gap. A write computed from the
   room's content (a settlement's repair, a live write's fork, a version's capture) still needs a
@@ -452,45 +455,69 @@ process holds its own room for a document. Postgres is the only channel between 
   when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
   build then closes its rooms of the issue's documents, and their browsers reconnect read-only or
   read-write as the issue now allows. A browser's append also reads the issue's state in its own
-  transaction and is refused while the issue is closed.
-- **Questions about a room.** A process asks the other processes about a room on
-  `dispatch_doc_query`, and each one answers on `dispatch_doc_answer`. An agent's write asks every
-  process that holds the room to store its updates before the write forks, so the write sees what
-  a person on another process typed. The lost-edit check after the commit asks again, and
-  `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on every process. A rebuild asks
-  whether any process holds the room and answers `409 DOCUMENT_LIVE` when one does. A process
-  waits 500 ms at most for the answers. Then it continues without the processes that did not
-  answer, and logs a WARN that names them.
+  transaction. The append is refused when its room took the edit more than 2 seconds
+  (`closeMargin`) after the close committed. An edit that the room took before then is stored,
+  even when its append reaches the database after the close, and the document settles it when
+  the issue reopens.
+- **Questions about a room.** A process asks the other members about a room on
+  `dispatch_doc_query`, and each member answers on `dispatch_doc_answer`. For each question, the
+  asker waits 500 ms at most. Then it continues without the members that did not answer, and
+  logs a WARN that names them. An agent's write asks up to three questions, so it can wait up to
+  1.5 seconds in all:
+  1. Before the write forks, every member that holds the room stores its updates, so the write
+     sees what a person on another process typed.
+  2. Before the commit, the lost-edit check has every member share its room's unstored updates
+     and its connected people. `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on
+     this process and on every member that answered.
+  3. After the commit, every member that holds the room stores its updates again, and `lost_ops`
+     is judged on the document at the stored head.
+
+  A rebuild asks whether any member holds the room. It answers `409 DOCUMENT_LIVE` when this
+  process holds one, or when a member that answered holds one.
 - **Reads.** A read compares the room with the stored head. When the room is behind, the read
   takes the stored document and does not wait for the catch-up, so no read returns text older
   than the store.
 - **Ask authors and the edit queue.** The author of an ask block is stored
   (`doc_ask_block_authors`, migration `0136`), so a settlement on any process names who wrote it.
-  The cap of 32 queued conditional edits of one document counts every process's queue
-  (`doc_conditional_edit_queue`, migration `0137`).
-- **Which process served a socket.** Every answer to a `/ws/doc/{room}` request, the `101`
-  upgrade included, carries `X-Dispatch-Process: <host name>`: the pod's name in production. A
+  The cap of 32 queued conditional edits of one document counts the queue of this process and of
+  every other member (`doc_conditional_edit_queue`, migration `0137`). Each process first queues a
+  document's conditional edits in memory and admits them one at a time. Only the edit being
+  admitted holds a database connection, and an admitted edit holds none while it waits for its
+  turn.
+- **Which process served a socket.** Every answer that the document service's handler sends to a
+  `/ws/doc/{room}` request carries `X-Dispatch-Process: <host name>`: the pod's name in
+  production. That includes the `101` upgrade and the handler's `401`, `404` and `503` answers. A
   check that opens sockets through a load balancer reads it to record which process each socket
   reached. A host name the process cannot read, or one that holds bytes a header cannot carry,
-  sends no header.
+  sends no header. The `400` answers sent before that handler carry no header. They refuse a room
+  id or a query parameter that holds U+0000 or bytes that are not UTF-8, and an
+  `X-Dispatch-Actor` header that holds U+0000.
 
 The processes a question waits for are the members: the processes whose listener connection is
 named `dispatch-listener <process id>` in `pg_stat_activity`. Each process makes its id when it
 starts. A process that stops loses that connection, and with it its membership, so nothing has to
-be cleaned up.
+be cleaned up. A process of the earlier build has no such connection, so it is no member.
 
-While a process's listener connection redials (it waits up to 30 seconds between attempts), live
-sync to that process pauses. Its rooms do not catch up and do not receive the other processes'
-awareness, and it is not a member, so no question waits for it. Reads stay fresh, because a read
-compares with the stored head. Appends stay correct, because the append gate reads the head and
-the issue's state under the document's lock. When the LISTEN stands again, the process catches up
-every room it holds and reads the issue state of each one again.
+While a process's listener connection redials, live sync to that process pauses. The wait between
+attempts doubles from 1 second to 30 seconds, plus up to half again, so one wait can last 45
+seconds (`pglisten.RedialBackoff`). In that time its rooms do not catch up and do not receive the
+other processes' awareness, and it is not a member, so no question waits for it. Reads stay fresh,
+because a read compares with the stored head. Appends stay correct, because the append gate reads
+the head and the issue's state under the document's lock. When the LISTEN stands again, the
+process catches up every room it holds and reads the issue state of each one again.
 
-During the roll that releases this behaviour, processes of the earlier build still close a room
-that falls behind (its browsers reconnect), relay no awareness, and are not members, so no question
-waits for them. Every change this build writes still notifies `dispatch_doc_changed`, which the
-earlier build reads, and an issue that the earlier build closes still closes this build's rooms
-through the trigger.
+During the roll that releases this behaviour, processes of the earlier build behave as before:
+
+- They still close a room that falls behind, and its browsers reconnect.
+- They relay no awareness and apply none, so they show no other process's cursors.
+- They do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made
+  through this build. Their open rooms of the issue's documents keep the scope that their browsers
+  connected with.
+- They are not members, so no question waits for them.
+
+Every change this build writes still notifies `dispatch_doc_changed`, which the earlier build
+reads, and an issue that the earlier build closes still closes this build's rooms through the
+trigger.
 
 **A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`,
 `cmd/dispatch/conn_age.go`): the server stamps each connection's accept time and answers the first

@@ -43,7 +43,7 @@ events to the right session.
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
 | Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*`, the AWS SDK's `AWS_*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`); a migration runs while the build before it is still serving, which is what it may add and what it must split across two releases (`cmd/dispatch/README.md`, "Database migrations") |
-| Postgres LISTEN loop's shared rules | `internal/pglisten/` | Dispatch's and the secrets broker's listeners: one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66). `Hub` is a process's one shared LISTEN connection that several subsystems register their channels on, named by its caller so that other processes can read it in `pg_stat_activity`; Dispatch's document rooms register their room sync on it (`internal/dispatch/docs/room_sync.go`, INFRA-556). Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its listener hub; each caller sets `Listener.Owner` (or `Hub.Owner`), the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch` |
+| Postgres LISTEN loop's shared rules | `internal/pglisten/` | Dispatch's and the secrets broker's listeners: one LISTEN connection that dials, reports each notification, pings itself when idle, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server. `Hub` is one shared LISTEN connection for a process. Its caller names the connection, so that other processes can read the name in `pg_stat_activity`. In envoy-dispatch only the document rooms' room sync registers on it (`internal/dispatch/docs/room_sync.go`). The delivery hub and the event stream relay keep a `Listener` each. Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its listener hub; each caller sets `Listener.Owner` (or `Hub.Owner`), the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch` |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Meaning search's embedder and coverage | `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go` | Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`; each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue. `embedqueue/coverage.go` is the coverage pass the server runs at start and every 10 minutes (no backfill subcommand) and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search") |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
@@ -99,9 +99,10 @@ A settlement that wrote into the room commits what it wrote even when the docume
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read
 (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried. Every
-close of a room the service makes - a failed room's eviction, the close of a room behind the
-durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close, `Shutdown`'s
-close of a room with an editor - goes through its server's close gate (`roomServer`: its
+close of a room the service makes - a failed room's eviction, the close of a room whose stored
+history was replaced (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close or
+reopen, `Shutdown`'s close of a room with an editor - goes through its server's close gate
+(`roomServer`: its
 `CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, its
 `closeInstance` for the instance-only close, or its `closeOwned` for a failed room's eviction).
 That close waits for a repair committing into the room and refuses new repairs
@@ -728,7 +729,7 @@ the state that went finishes on the state that counted it (`finishDurableAppend`
 `consumeUpdateClass` found the class on), so no count of it reaches that successor, where one
 below zero would hold it for good.
 
-Two `envoy-dispatch` processes share a live document session through Postgres alone (INFRA-556),
+Two `envoy-dispatch` processes share a live document session through Postgres alone,
 and durable convergence does not depend on it: every edit is appended under the document's advisory
 lock, Yjs updates commute, and the stored history is their union, so no edit is lost whichever
 process took it. Each process holds its own room for a document, and `docs/room_sync.go` is how
@@ -757,10 +758,13 @@ The cursor (`roomCursor`) is the version the instance holds every stored update 
 versions above it that the instance holds with a gap below them, which fold in as the gap fills.
 The append gate (`appendGateStatement`, one read under the document's lock) has two rules. A
 browser's raw delta (`appendBrowser`) is accepted from a room behind an intact history and lands
-at the head. It is refused when the document's issue is closed (`ErrIssueClosed`) or the history
-was replaced. A derived write (`appendDerived`: settlement's repair, a live write's fork, a
-version's capture, the block-id backfill) still needs the room at the head (`ErrRoomBehindHead`,
-`docs/pending_authors.go`), the live write taking the cold path instead. A settlement whose room
+at the head. It is refused when the history was replaced. It is also refused (`ErrIssueClosed`)
+when the document's issue is closed and the room took the delta more than `closeMargin` (2 s)
+after the close committed. A delta the room took before that is stored, even when its append
+reaches the gate after the close, and the issue's reopen settles it. A derived write
+(`appendDerived`: settlement's repair, a live write's fork, a version's capture, the block-id
+backfill) still needs the room at the head (`ErrRoomBehindHead`, `docs/pending_authors.go`), the
+live write taking the cold path instead. A settlement whose room
 is behind catches it up under the document's lock it holds, reading through its own transaction,
 and proceeds: the caught-up rows re-arm it, and the re-armed settlement versions every update. Its
 authors come from `doc_pending_authors` and its actor from `doc_settlements_pending.last_actor`,
@@ -771,14 +775,23 @@ over a cold fork lists the room's in-flight credits (`withoutInflight`): the sto
 those changes. A read (`heldTree`, `docTree`, `joinRead`) compares the room's cursor with the
 stored head and reads the store when the room is behind, without waiting for the catch-up.
 
-A room is closed and reloaded only when its stored history is replaced under it
+Room sync closes and reloads a room only when its stored history is replaced under it
 (`historyReplaced`): a rebuild deleted every row and seeded head+1, a prune or a delete lowered the
 head, or a compaction folded rows the room has not taken in yet (`compactKeep` = 1 keeps the head
 row, so a room at the head is unaffected). The follower confirms the verdict under the document's
 lock (`historyReplacedUnderLock`) and closes the room (`closeRoomBehindHead`, called by
-`roomCatchUps.closeReplaced`). A settlement that finds the history replaced rolls back and closes
+`roomCatchUps.closeReplaced`). The service closes a room, and its browsers reconnect, in these
+cases only:
+
+- room sync finds its stored history replaced, as above;
+- a settlement finds its stored history replaced (below);
+- its issue closes or reopens (`setRoomIssueOpen`, below);
+- the room fails (`failRoom`), and its eviction closes it;
+- `Shutdown` closes a room that has an editor connected.
+
+A settlement that finds the history replaced rolls back and closes
 the room rather than retrying on it (`reloadReplacedRoom`), since no retry on that room can pass
-the gate; the settlement re-arms on the reloaded room. It leaves the room open
+the gate. The settlement re-arms on the reloaded room. It leaves the room open
 while a write of this process is in flight on it (an open live write, which arms the settlement
 when it finishes, or an update its persistence has not stored, whose settlement is armed a settle
 delay later) and during a shutdown, which leaves the settlement to the next process. A write that
@@ -787,7 +800,7 @@ when it ends, whether or not it changed anything (`openLiveWrite`). The follower
 (`closeRoomBehindHead`) and this one both reserve the room under its state lock, in the same hold
 that found nothing there each must wait for (`reserveRoomCloseLocked`): an open live write for the
 follower's (`openLiveWriteLocked`; its other writers take the document's lock, under which the
-follower confirmed its verdict, INFRA-396), any write of this process for the settlement's.
+follower confirmed its verdict), any write of this process for the settlement's.
 Until the close has returned the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as
 on a failed room, rather than handed to a write the close would then retire the instance under:
 the case that check exists to rule out. The refused write's retry lands on the room that replaces
@@ -820,14 +833,19 @@ An issue's close and reopen reach every process through migration 0135's trigger
 process, the patching one included, reads the issue's state and closes its rooms of the issue's
 documents (`issueOpenChanged`, `setRoomIssueOpen`), so their browsers reconnect with the scope the
 issue now allows; `patchIssue` calls no document method for it. Each LISTEN that stands reads the
-issue of every resident room again (`recheckResidentIssues`). A browser's append from a room that
-has not heard of a close yet is refused by the gate's issue read, which closes that room
-(`refuseClosedIssueAppend`).
+issue of every resident room again (`recheckResidentIssues`). The gate's issue read refuses a
+browser's append that its room took more than `closeMargin` (2 s) after the close committed, and
+closes that room when its process has not heard of the close yet (`refuseClosedIssueAppend`). An
+edit the room took before that margin ran out is stored, even when its append reaches the store
+after the close (`appendGate.observedBeforeClose`).
 
 Room queries (`docs/room_query.go`) are a process's questions to the other members:
 `dispatch_doc_query` (`holds`, `flush` or `share`) and `dispatch_doc_answer`, both through the
-sender. The asker waits at most 500 ms (`roomQueryWait`) for every member but itself, then goes on
-and logs a WARN that names the members that did not answer. A live write's first join has every
+sender. For each question, the asker waits at most 500 ms (`roomQueryWait`) for every member but
+itself, then goes on and logs a WARN that names the members that did not answer. An agent's live
+write asks up to three questions, so it can wait up to 1.5 s in all: a flush before it forks
+(`joinLiveWrite`), a share in the lost-edit check (`refuseLostWrite`), and a second flush before
+its published loss is judged (`recordPublishedLoss`). A live write's first join has every
 member that holds the room store its updates before the write forks (`flushOtherRooms`), an open
 write's kept fork follows the stored head (`followStoredHead`), the lost-edit check judges the
 write with the other rooms' unstored updates (`share`) and names every member's connected actors
@@ -837,13 +855,21 @@ cold write publishes only into a resident room (`publishLiveWrite`), so it leave
 An ask block's author is stored in `doc_ask_block_authors` (migration 0136) in the transaction that
 makes the block durable, and a settlement on any process reads it (`askBlockSources.author`). The
 cap of 32 queued conditional edits counts every member's row of `doc_conditional_edit_queue`
-(migration 0137), read under a two-key advisory lock (`conditionalEditQueueLockNamespace`).
+(migration 0137). Each process first serializes the admissions of one document in memory
+(`conditionalEditGate`), so the waiting admissions hold no connection. The one admission that
+runs takes a short transaction of its own on the shared pool. Under a two-key advisory lock
+(`conditionalEditQueueLockNamespace`) it sums the other members' rows, deletes the rows of
+processes that are no members, and writes this process's own count.
 
-While a process's listener redials (up to 30 s between attempts, `pglisten.RedialBackoff`), live
-sync to that process pauses and it is not a member, so no query waits for it. Its reads stay fresh,
+While a process's listener redials, live sync to that process pauses and it is not a member, so no
+query waits for it. The wait between attempts doubles from 1 s to a ceiling of 30 s, plus up to
+half again (`pglisten.RedialBackoff`), so one wait can be 45 s. Its reads stay fresh,
 because they read the stored head, and its appends stay correct, because the gate reads the head
 and the issue under the document's lock. During the roll that releases this, processes of the
-earlier build still close a room that falls behind, relay no awareness and are not members.
+earlier build still close a room that falls behind, relay no awareness and are not members. They
+do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made
+through this build: their open rooms of the issue's documents keep the scope their browsers
+connected with. They show no other process's cursors.
 
 The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms,
 never documents touched since the process started (LEGION-513). A room an `Apply` opened with no
@@ -1038,11 +1064,13 @@ concurrent change could remove and are never reported lost), and the clocks of t
 update left live in each of them. Two windows read it back. Before the version is rendered,
 `captureLiveTextAndAuthors` brings the fork up to date with the room and `refuseLostWrite` refuses
 the whole batch with `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, naming the lost operations and the
-other participants connected to the document on every process (each other process's room shares
-its unstored updates and its connected actors, a `share` room query); the transaction rolls back,
+other participants connected to the document on this process and on every member that answers
+within 500 ms (each other member's room shares its unstored updates and its connected actors, a
+`share` room query); the transaction rolls back,
 so no version, durable update, room update or broadcast survives, and the caller re-reads and
 decides again. After the committed write reaches the room, `recordPublishedLoss` has every other
-process store its room's updates and reads the document at the stored head: nothing can be undone
+member that answers within 500 ms store its room's updates, and reads the document at the stored
+head: nothing can be undone
 there, so the response is `200` with `lost_ops` naming the operations whose text the live document
 does not
 carry, `[]` when everything survived, and `null` when no verdict was reached: the publish failed
@@ -1190,12 +1218,18 @@ document token or one-or-more `{id, token}` block tokens. A document token prote
 operation; a block guard must name every content block the resolved batch changes, while unrelated
 sections can change concurrently. Insert and move require the document token because their meaning
 depends on document order. Tokens include inline marks, so a fresh anchor makes the relevant
-document or block guard stale. After resolving the artifact, the conditional path takes a bounded
-in-memory gate keyed by its artifact id before starting the write transaction or warming its room,
-then takes the document's owner row and writer slot, then
-`pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction; it
-reads, checks, resolves, and applies the batch inside that transaction. Admission waiters hold no
-database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while
+document or block guard stale. After resolving the artifact, the conditional path joins the
+document's bounded queue before starting the write transaction or warming its room
+(`AcquireConditionalEdit`). The queue is an in-memory queue per process plus a count across
+processes in `doc_conditional_edit_queue` (migration 0137). A process admits one edit of a document
+at a time, and the others wait in memory before they take a database connection. The admission is
+a short transaction of its own on the shared pool, under the document's queue lock, which refuses
+the 33rd edit queued across the members with `EDIT_QUEUE_FULL`. Admitted edits take turns in
+admission order. The edit whose turn it is then takes the document's owner row and writer slot,
+then `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction; it
+reads, checks, resolves, and applies the batch inside that transaction. So a document's retry
+storm holds at most one shared-pool connection per process while it waits for admission, and
+none while it waits for its turn. `EDIT_QUEUE_FULL` is a `429` response that means back off, while
 `PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
 authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting
 the shared pool. The advisory → Yjs order matches durable writer and persistence

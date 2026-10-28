@@ -282,8 +282,10 @@ up to 4 for loading documents, one for the health check, and one for the events 
 holds up to four more open for as long as it runs. Three of them wait on Postgres notifications:
 one for delivery, one for the live event stream, and one that the server shares for everything
 else, document sessions included. The other servers on the same database find each server by the
-name of that shared connection. The fourth sends the server's own notifications about documents,
-and opens the first time the server has one to send. That is 85 connections for one server at its
+name of that shared connection. The fourth sends the cursors of the server's document sessions
+and its questions and answers to the other servers about a document. It opens the first time the
+server has one to send. A document edit's own notification goes out in the transaction that
+writes the edit, and needs no connection of its own. That is 85 connections for one server at its
 ceiling, and twice that for two, past a default Postgres's limit of 100. Check the database's
 connection limit before you start the second server: a limit sized for one server, with whatever
 else uses that database counted in, is the thing that runs out.
@@ -294,19 +296,29 @@ What a reader sees while two servers are serving:
   under that document's lock, edits made at the same time merge rather than overwrite, and the
   stored history holds all of them.
 - Two people on one document see each other's typing, cursors and presence, whichever server each
-  one is on, and nobody is disconnected. Each server tells the others through Postgres, so this
-  works while the message bus is down. A read never returns text older than what is stored.
-  Closing or reopening an issue changes the document on every server, and the editors there
-  reconnect read-only or editable to match. An agent's edit sees what a person on another server
-  just typed.
-- When a server's listener connection to the database drops, it waits up to 30 seconds between
-  attempts to reconnect. Until it reconnects, the editors open on that server do not receive the
-  other servers' edits and cursors. They catch up when the connection is back. In that time a read
-  through the API still returns the stored text, and nothing anyone writes is lost.
-- A document whose stored history is replaced (a rebuild, for example) closes its open sessions
-  once, and the browsers reconnect.
-- During the rollout that brings this version, a server of the earlier version still closes a
-  session that falls behind, and its browsers reconnect. It sends no cursors to the other servers.
+  one is on. Each server tells the others through Postgres, so this works while the message bus
+  is down. A read never returns text older than what is stored. An agent's edit sees what a
+  person on another server just typed, when that server answers within half a second.
+- A document session stays open while the other servers write. The server closes it, and its
+  browsers reconnect, in these cases only:
+  - The document's stored history is replaced, for example by a rebuild.
+  - Its issue closes or reopens. The editors on every server reconnect read-only or editable to
+    match.
+  - The session fails on its server, which then reloads it.
+  - Its server shuts down while an editor is connected.
+- A server keeps an edit that it took before an issue closed, or up to 2 seconds after the close,
+  even when the edit reaches the database after the close. It refuses an edit that it took later
+  than that, and the session reconnects read-only.
+- When a server's listener connection to the database drops, the server reconnects. Its first
+  wait is 1 second, plus up to half again. Each next wait doubles, up to 30 seconds plus up to half
+  again, so one wait can last 45 seconds. Until it reconnects, the editors open on that server do
+  not receive the other servers' edits and cursors. They catch up when the connection is back. In
+  that time a read through the API still returns the stored text. Nothing anyone writes is lost,
+  except an edit to a document whose issue closed more than 2 seconds before (above).
+- During the rollout that brings this version, a server of the earlier version behaves as before.
+  It still closes a session that falls behind, and its browsers reconnect. It sends no cursors to
+  the other servers and shows none of theirs. It does not act when an issue is closed or reopened
+  through a server of this version: its open sessions of that issue keep the access they had.
 
 ## Migrations
 

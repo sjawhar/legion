@@ -1198,9 +1198,9 @@ func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int
 	return strings.TrimSpace(string(body)), response.StatusCode
 }
 
-// ───── one document, readers on two processes (INFRA-556) ──────────────────
+// ───── one document, readers on two processes ─────────────────────────────
 //
-// The rows below are dispatch://INFRA-556's: two people, or a person and an agent, on one
+// The rows below are pull request #2414's: two people, or a person and an agent, on one
 // document whose readers are on different processes. Each drives real editors (docstest.Peer
 // speaks the dashboard's Hocuspocus framing) and the processes' own API, hooks and logs, and
 // arranges each race it is about with a test hook (DISPATCH_TEST_HOOKS) - a held persistence, a

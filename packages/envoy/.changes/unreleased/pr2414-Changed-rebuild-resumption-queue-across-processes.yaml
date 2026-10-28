@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+  Rebuild, settlement resumption and the conditional-edit queue hold across processes. A rebuild
+  answers `409 DOCUMENT_LIVE` when this process holds a room of the document, or when another
+  member that answers within 500 ms holds one. Of two rebuilds of one document at once, one
+  answers `409 DOCUMENT_LIVE`. The settlement resumption runs once per minute across the
+  processes, under the lease `settlement-resumption`, not once per process. The cap of 32 queued
+  conditional edits of one document counts the queue of every member
+  (`doc_conditional_edit_queue`, migration `0137`), so the 33rd answers `429 EDIT_QUEUE_FULL`
+  whichever process takes it. Each process first queues a document's conditional edits in memory
+  and admits them one at a time. Only the edit being admitted holds a database connection, and an
+  admitted edit holds none while it waits for its turn. An agent's write to a document that no
+  room holds on its process no longer loads a room there.
+time: 2026-10-28T12:12:17Z
+custom:
+  Issue: pr2414

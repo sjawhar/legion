@@ -1472,7 +1472,7 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // appendDerived): with two envoy-dispatch processes on one Postgres, that room can lack what the
 // other process appended until its catch-up takes it in, and the version would record that
 // update's cursor over text missing it, so no later settlement would version those words
-// (INFRA-218). A room found behind the head inside the Apply, under the document's advisory lock
+// either. A room found behind the head inside the Apply, under the document's advisory lock
 // this transaction holds, is versioned from the stored document instead, as a write behind the
 // head forks from it (coldFork); so is a write's fork that came from the store. Neither holds a
 // change still in flight in the room, so the version lists none of the room's in-flight credits

@@ -175,9 +175,9 @@ func (pair processPair) replaceTaskAsHistory(t *testing.T) {
 // at the head, crediting the other process's author. Without the gate task A's settlement would
 // version its own room's text alone, record doc_update_version at a head that includes task B's
 // update, and delete the doc_settlements_pending row that says the work is still owed: task B's
-// words would then be past no cursor any later settlement looks behind (corruptions 1 and 2 of
-// INFRA-66). Without the catch-up the refusal could only close the room, or count failures against
-// it until it failed (INFRA-218).
+// words would then be past no cursor any later settlement looks behind (corruptions 1 and 2 of the
+// two-process audit). Without the catch-up the refusal could only close the room, or count
+// failures against it until it failed.
 func TestASettlementFromARoomBehindTheHeadCatchesItUpAndTheNextSettlesBoth(t *testing.T) {
 	pair := newProcessPair(t)
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
@@ -1016,7 +1016,7 @@ func TestANamedVersionFromARoomBehindTheHeadRecordsTheStoredDocument(t *testing.
 // hold the edit, so it lists none of the room's in-flight credits, and the edit's append, which
 // the gate admits from the room behind the head, records its author for the next version. Listed
 // from the room's in-flight credits, alice was listed on that version and again on the one holding
-// her stored edit (INFRA-218).
+// her stored edit.
 func TestAnEditInFlightOnARoomBehindTheHeadIsListedOnlyOnceItIsStored(t *testing.T) {
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
@@ -1056,7 +1056,7 @@ func TestAnEditInFlightOnARoomBehindTheHeadIsListedOnlyOnceItIsStored(t *testing
 // stored document and the transaction's write, neither of which holds the in-flight edit, and that
 // edit's append, admitted from the room behind the head, records its author for the next version.
 // Listed from the room's in-flight credits, alice was listed on the transaction's version and again
-// on the one holding her stored edit (INFRA-218).
+// on the one holding her stored edit.
 func TestAColdWritesVersionListsNoneOfItsRoomsEditsInFlight(t *testing.T) {
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
@@ -1100,7 +1100,7 @@ func TestAColdWritesVersionListsNoneOfItsRoomsEditsInFlight(t *testing.T) {
 // retracted: the settlement catches its room up before it reconciles anything, so the tree it
 // reconciles on holds the block. Without the gate task A's stale tree holds no such block, and
 // reconcileAskBlocks retracts the ask and publishes its `ask.resolved` event, over a question
-// nobody answered (corruption 3 of INFRA-66).
+// nobody answered (corruption 3 of the two-process audit).
 func TestAnOpenAskIsNotRetractedByASettlementFromARoomBehindTheHead(t *testing.T) {
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
@@ -1674,7 +1674,7 @@ func TestARoomLoadingWhileAStampCommitsCatchesUpToIt(t *testing.T) {
 // not caught up - keeps writing: its browser's append is stored at the head, the room is not
 // failed or replaced, and once its catch-up takes the other process's row in it stands at the head
 // with both edits. Recovery from behind used to be a refusal, a failure and a reload, and a room
-// refused, failed, reloaded and refused again was the loop INFRA-66's reproduction fell into.
+// refused, failed, reloaded and refused again was the loop the two-process reproduction fell into.
 func TestARoomBehindTheHeadKeepsWritingAndCatchesUp(t *testing.T) {
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")

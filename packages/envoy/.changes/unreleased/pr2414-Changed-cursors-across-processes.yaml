@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+  Cursors and presence cross processes. Each process relays its rooms' awareness on
+  `dispatch_doc_awareness`, at most once per 50 ms per room. A reader who opens a document second
+  sees the first reader's cursor at once, and a reader who leaves on one process leaves on the
+  other. A room forgets a client it hears nothing from for 30 s, so a cursor relayed from a process
+  that stopped without a word goes away. Processes of the earlier build relay none, and show no
+  other process's cursors.
+time: 2026-10-28T12:12:12Z
+custom:
+  Issue: pr2414

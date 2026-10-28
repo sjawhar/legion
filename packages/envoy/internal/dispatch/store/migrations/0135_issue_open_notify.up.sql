@@ -1,5 +1,5 @@
 -- 0135: every change of an issue's closed_at, closing it or reopening it, wakes every envoy-dispatch
--- process (INFRA-556). Each process holds its own room for each document it serves, and a room's
+-- process. Each process holds its own room for each document it serves, and a room's
 -- browsers are read-only exactly while its issue is closed, a scope ygo fixes when a browser
 -- connects; so each process closes its rooms of the issue's documents when it hears this, and
 -- their browsers reconnect with the scope the issue now allows (docs.Service.issueOpenChanged, on

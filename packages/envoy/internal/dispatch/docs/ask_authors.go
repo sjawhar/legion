@@ -100,7 +100,7 @@ func stampedAskBlocks(before, after []string) []stampedAsk {
 // ordinary case, and state.pendingAskAuthors, which a straddling observer's own "newly seen"
 // branch still finds and correctly restores even when its stale read wiped the seen mark
 // (observeAskBlocks consumes a pending entry for any id it sees, seen or newly seen, so one this
-// writes is never orphaned either) - LEGION-503. It returns the author it carried to each minted
+// writes is never orphaned either). It returns the author it carried to each minted
 // id, which the caller records durably in the transaction that stores the stamp
 // (recordStampedAskAuthors). The caller holds state.mu.
 func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) map[string]model.Actor {

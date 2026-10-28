@@ -406,7 +406,7 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
 	go documentService.RunSettlementResumption(ctx, leases)
-	// INFRA-66, INFRA-556: this process's one shared LISTEN connection. Its name is what makes
+	// This process's one shared LISTEN connection. Its name is what makes
 	// this process a member: the other envoy-dispatch processes read it in pg_stat_activity
 	// (docs/room_sync.go). The document rooms' room sync is registered on it: a document written
 	// by another process is announced over Postgres, and the room this process holds for it

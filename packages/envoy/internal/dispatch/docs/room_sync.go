@@ -23,7 +23,7 @@ import (
 )
 
 // Room sync is how the envoy-dispatch processes on one Postgres learn of each other's document
-// work (INFRA-556). Postgres is the only channel between them (the message bus can be down while
+// work. Postgres is the only channel between them (the message bus can be down while
 // the server serves), so each process holds two connections of its own beside its pools:
 //
 //   - the process's one shared LISTEN connection (a pglisten.Hub that cmd/dispatch builds; the

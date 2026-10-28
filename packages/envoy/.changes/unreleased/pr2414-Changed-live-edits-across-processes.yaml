@@ -1,0 +1,23 @@
+kind: Changed
+body: |-
+  Two people on one Dispatch document, each connected to a different `envoy-dispatch` process on
+  one Postgres, now see each other's edits live. Every durable change notifies `dispatch_doc_head`,
+  and `dispatch_doc_changed` for the earlier build, from the transaction that wrote it. Every other
+  process that holds a room of the document reads the rows its room lacks from `doc_updates` and
+  applies them as one batch. A room stays open while another process writes. The service closes a
+  room, and its browsers reconnect, only in these cases: its stored history is replaced (a rebuild,
+  a prune, a delete, or a compaction that folds rows the room has not taken in yet), its issue
+  closes or reopens, the room fails and its eviction closes it, or the process shuts down with an
+  editor connected. A browser's edit from a room that is behind is stored at the head, and a
+  settlement catches its room up under the document's lock and continues. Editors on two processes
+  who type in turn get one version per burst, and it names the last typist whichever process
+  settles it. Before, another process's write closed the room, and every browser in it
+  reconnected.
+
+  While a process's listener connection redials, its rooms do not catch up. The wait between
+  attempts doubles from 1 s to 30 s, plus up to half again, so one wait can last 45 s. Its reads
+  and appends stay correct meanwhile. During the roll that releases this, processes of the earlier
+  build still close their rooms that fall behind.
+time: 2026-10-28T12:12:11Z
+custom:
+  Issue: pr2414
