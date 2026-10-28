@@ -352,17 +352,17 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // still logs and counts as changed.
 //
 // Where the observer does measure an update itself (updateChangesMarkdown), it renders no more of
-// the replica than the update can have changed, and each of its three paths is exact too. ygo
-// names, in each transaction, every shared type an item was integrated into or deleted from
-// (crdt.Transaction.ChangedTypes), and the replica records, for the update it applies, the
-// top-level blocks of its document fragment those types sit in (noteChanged): a change anywhere in
-// a block integrates or deletes an item in a type that block contains, and a block inserted,
-// deleted or moved changes the fragment itself. The rendering reads nothing but the fragment. So an
-// update that changed no type under the fragment left the rendering as it was (untouched); one that
-// changed types inside some blocks, and not the fragment, left every other block's tree as it was,
-// and pmdoc.Layout.Splice renders just those blocks into the markdown, answering exactly what a
-// whole render answers or declining where a guard says the rest of the document could read them
-// differently (incremental); anything else is rendered whole, as it always was (whole).
+// the replica than the update can have changed, and each of its three paths is exact too. The
+// replica's block change finder (blockChangeFinder) records, for the update it applies, the
+// top-level blocks of its document fragment the update changed anything in (touchedBlocks): a
+// change anywhere in a block integrates or deletes an item in a type that block contains, and a
+// block inserted, deleted or moved changes the fragment itself, which the finder records as an
+// update to render whole. The rendering reads nothing but the fragment. So an update that touched
+// no block and not the fragment left the rendering as it was (untouched); one that touched some
+// blocks, and not the fragment, left every other block's tree as it was, and pmdoc.Layout.Splice
+// renders just those blocks into the markdown, answering exactly what a whole render answers or
+// declining where a guard says the rest of the document could read them differently
+// (incremental); anything else is rendered whole, as it always was (whole).
 //
 // The replica starts from the state the log records as of just before the room's first transaction
 // since its load, so a room that is only read holds no replica.
@@ -381,13 +381,14 @@ type renderedReplica struct {
 	// whenever markdown came from a rendering that recorded none (a published rendering without
 	// one), which the next update's whole render records again.
 	layout *pmdoc.Layout
-	// touched lists the top-level blocks of fragment the update being applied changed a type in,
-	// each once, and wholeRender says that the update changed fragment itself or more blocks than
-	// touched lists (maxTouchedBlocks), so the update is rendered whole. noteChanged records them
-	// as doc's transactions commit, and observe resets them before each update it applies, so
-	// neither outlives the update's classification.
-	touched     []crdt.SharedType
-	wholeRender bool
+	// touched records the top-level blocks of fragment the update being applied changed, and
+	// whether it is to be rendered whole (touchedBlocks). finder records into it as doc's
+	// transactions commit, and observe resets it before each update it applies, so nothing in it
+	// outlives the update's classification.
+	touched touchedBlocks
+	// finder is how the replica learns what each update touched: start hands it each document
+	// the replica makes (keepReplica sets it).
+	finder blockChangeFinder
 	// epoch names the replica's run from one state it started from: keepReplica draws it from
 	// replicaEpochs when it makes the replica, and recover draws a fresh one whenever the replica
 	// starts again, so it is unique in the process. No replica of another room instance - the one
@@ -446,9 +447,64 @@ type renderPathCounts struct {
 }
 
 // maxTouchedBlocks is the most top-level blocks one update may change a type in and still be
-// rendered block by block: renderedReplica.touched holds no more, so an update's record stays a
-// few words whatever it changed, and an update past it is rendered whole.
+// rendered block by block: touchedBlocks holds no more, so an update's record stays a few words
+// whatever it changed, and an update past it is rendered whole.
 const maxTouchedBlocks = 64
+
+// touchedBlocks is what the update a replica applies touched under its document fragment: blocks
+// lists the top-level blocks it changed something in, each once, and whole says that it changed
+// the fragment itself, touched more blocks than blocks holds (maxTouchedBlocks), or changed
+// something the finder could not place in a block, so the update is rendered whole and blocks no
+// longer matters. The replica's blockChangeFinder records into it; updateChangesMarkdown and
+// spliceTouched read it, under the replica's mu.
+type touchedBlocks struct {
+	blocks []crdt.SharedType
+	whole  bool
+}
+
+// touch records block, a top-level block of the fragment, as changed by the update, unless the
+// update is already rendered whole; a block past maxTouchedBlocks renders it whole.
+func (t *touchedBlocks) touch(block crdt.SharedType) {
+	if t.whole || slices.Contains(t.blocks, block) {
+		return
+	}
+	if len(t.blocks) == maxTouchedBlocks {
+		t.whole = true
+		return
+	}
+	t.blocks = append(t.blocks, block)
+}
+
+// renderWhole records that the update is rendered whole.
+func (t *touchedBlocks) renderWhole() { t.whole = true }
+
+// reset forgets what the last update touched, dropping its references to the blocks and keeping
+// the list's array for the next update.
+func (t *touchedBlocks) reset() {
+	clear(t.blocks)
+	t.blocks, t.whole = t.blocks[:0], false
+}
+
+// blockChangeFinder is how a replica learns which top-level blocks each update touched. watch is
+// called once for each document the replica makes (start), after the base is applied, with that
+// document, its document fragment and the replica's record; from then on, for each update the
+// replica applies to doc, the finder records into into every top-level block of fragment the
+// update changed something in (touchedBlocks.touch), and calls touchedBlocks.renderWhole for a
+// change to fragment itself or one it cannot place in a block. It records only during the apply,
+// which runs under the replica's mu, and never resets into, which observe does.
+type blockChangeFinder interface {
+	watch(doc *crdt.Doc, fragment *crdt.YXmlFragment, into *touchedBlocks)
+}
+
+// changedTypesFinder is the production blockChangeFinder: it reads, after each transaction of the
+// document, the shared types ygo says the transaction changed (crdt.Transaction.ChangedTypes) and
+// walks each up its Parent chain (noteChangedTypes), so it holds one transaction subscription per
+// replica document and nothing per node.
+type changedTypesFinder struct{}
+
+func (changedTypesFinder) watch(doc *crdt.Doc, fragment *crdt.YXmlFragment, into *touchedBlocks) {
+	doc.OnAfterTransaction(func(txn *crdt.Transaction) { noteChangedTypes(txn, fragment, into) })
+}
 
 // lockForUpdate takes mu for the update observer. A read only tries mu, and takes it only while
 // no observer waits for it, so the observer waits at most for the one read already walking the
@@ -485,7 +541,7 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			r.recover(room, updates[i:], classify)
 			return
 		}
-		r.resetTouched()
+		r.touched.reset()
 		if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], classify)
@@ -499,31 +555,24 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 	}
 }
 
-// resetTouched forgets which blocks the last update applied changed (noteChanged), dropping its
-// references to them and keeping the list's array for the next update. The caller holds mu.
-func (r *renderedReplica) resetTouched() {
-	clear(r.touched)
-	r.touched, r.wholeRender = r.touched[:0], false
-}
-
-// noteChanged records what txn, a transaction of the replica's document, changed under its
-// fragment: each type ygo says txn changed (crdt.Transaction.ChangedTypes) is the fragment itself,
-// so the update is rendered whole, or sits in a top-level block, the type just below the fragment
-// on its Parent chain, which it records as touched; a chain that ends at another root type is
-// outside what the rendering reads, and touches nothing. A type more than pmdoc.MaxTreeDepth
-// levels down stands deeper than any node a document in the schema holds, so the walk up from it
-// stops there and the update is rendered whole, which is exact for any update: each walk costs at
-// most the schema's depth, however deep a peer nested the types it changed. start registers it on
-// each document the replica makes, after applying the base, so it runs for the transactions of the
-// updates observe applies, under mu.
-func (r *renderedReplica) noteChanged(txn *crdt.Transaction) {
-	if r.wholeRender {
+// noteChangedTypes records into what txn, a transaction of fragment's document, changed under
+// fragment: each type ygo says txn changed (crdt.Transaction.ChangedTypes) is fragment itself, so
+// the update is rendered whole, or sits in a top-level block, the type just below fragment on its
+// Parent chain, which it records as touched; a chain that ends at another root type is outside
+// what the rendering reads, and touches nothing. A type more than pmdoc.MaxTreeDepth levels down
+// stands deeper than any node a document in the schema holds, so the walk up from it stops there
+// and the update is rendered whole, which is exact for any update: each walk costs at most the
+// schema's depth, however deep a peer nested the types it changed. changedTypesFinder registers
+// it on each document the replica makes, after applying the base, so it runs for the transactions
+// of the updates observe applies, under mu.
+func noteChangedTypes(txn *crdt.Transaction, fragment *crdt.YXmlFragment, into *touchedBlocks) {
+	if into.whole {
 		return
 	}
-	fragment := crdt.SharedType(r.fragment)
+	root := crdt.SharedType(fragment)
 	for _, changed := range txn.ChangedTypes() {
-		if changed == fragment {
-			r.wholeRender = true
+		if changed == root {
+			into.renderWhole()
 			return
 		}
 		for block, level := changed, 1; ; level++ {
@@ -531,20 +580,17 @@ func (r *renderedReplica) noteChanged(txn *crdt.Transaction) {
 			if parent == nil {
 				break
 			}
-			if parent != fragment {
+			if parent != root {
 				if level == pmdoc.MaxTreeDepth {
-					r.wholeRender = true
+					into.renderWhole()
 					return
 				}
 				block = parent
 				continue
 			}
-			if !slices.Contains(r.touched, block) {
-				if len(r.touched) == maxTouchedBlocks {
-					r.wholeRender = true
-					return
-				}
-				r.touched = append(r.touched, block)
+			into.touch(block)
+			if into.whole {
+				return
 			}
 			break
 		}
@@ -624,8 +670,9 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 
 // start makes the replica from base, the room's state as of just before the first update its log
 // hands over, and takes its rendering, with that rendering's layout, as the one that update is
-// measured against. It registers noteChanged on the new document once base is applied, so what
-// it records is each later update's. A base that does not apply leaves no replica (recover).
+// measured against. It hands the new document to the replica's finder once base is applied
+// (blockChangeFinder.watch), so what it records is each later update's. A base that does not
+// apply leaves no replica (recover).
 func (r *renderedReplica) start(room string, base []byte) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, base, nil); err != nil {
@@ -634,7 +681,7 @@ func (r *renderedReplica) start(room string, base []byte) {
 		return
 	}
 	r.doc, r.fragment = doc, doc.GetXmlFragment(fragmentName)
-	doc.OnAfterTransaction(r.noteChanged)
+	r.finder.watch(doc, r.fragment, &r.touched)
 	if markdown, _, layout, err := renderDocumentForUpdate(r.fragment); err == nil {
 		r.markdown, r.layout = &markdown, layout
 	} else {
@@ -652,7 +699,7 @@ func (r *renderedReplica) start(room string, base []byte) {
 func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, classify func(update crdt.LoggedUpdate, changed bool, asks func() map[string]struct{})) {
 	unplaced = append(unplaced, r.log.Reset()...)
 	r.doc, r.fragment, r.markdown, r.layout = nil, nil, nil, nil
-	r.resetTouched()
+	r.touched.reset()
 	r.epoch.Store(replicaEpochs.Add(1))
 	for _, update := range unplaced {
 		r.consumed(update)
@@ -672,9 +719,10 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, cla
 // holds the replica weakly too, and the observer, which live holds, holds the replica, so the
 // replica, a whole copy of live, is collected with live and in the same cycle. A reader holding an
 // evicted instance of the room reaches that instance's replica or none, never its successor's. The
-// replica takes a fresh epoch (replicaEpochs) and counts its paths on the service's renderPaths.
+// replica takes a fresh epoch (replicaEpochs), counts its paths on the service's renderPaths, and
+// learns what each update touched through changedTypesFinder.
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog) *renderedReplica {
-	replica := &renderedReplica{log: log, paths: &s.renderPaths}
+	replica := &renderedReplica{log: log, paths: &s.renderPaths, finder: changedTypesFinder{}}
 	replica.epoch.Store(replicaEpochs.Add(1))
 	listResident(&s.replicas, live, weak.Make(replica))
 	return replica
@@ -772,12 +820,12 @@ func (r *renderedReplica) hold() *crdt.Doc {
 // rendered markdown, the only document content a version stores, keeps the new rendering and its
 // layout, and answers, when it changed, the ask blocks the update left (observe). It reads the
 // replica, the room's document as of that update, so its caller holds mu, and it reads no more of
-// it than the update can have changed (noteChanged), on one of three paths:
+// it than the update can have changed (touchedBlocks), on one of three paths:
 //
-//   - untouched: an update that changed no type under the fragment, on a replica whose markdown
+//   - untouched: an update that touched no block and not the fragment, on a replica whose markdown
 //     and layout are known, changed nothing: nothing is read or rendered;
-//   - incremental: an update that changed types inside some top-level blocks and not the fragment
-//     itself, on such a replica, left the fragment's blocks as many and in the order the layout
+//   - incremental: an update that touched some top-level blocks and not the fragment itself, on
+//     such a replica, left the fragment's blocks as many and in the order the layout
 //     recorded, so pmdoc.Layout.Splice renders just the touched blocks into the markdown, read
 //     by pmdoc.ReadBlockForRendering, unless one of its guards declines;
 //   - whole: anything else - the fragment itself changed, more blocks were touched than the
@@ -794,8 +842,8 @@ func (r *renderedReplica) hold() *crdt.Doc {
 // knows the answer this would give: a published write's own rendering of the same state, or an
 // update the room's load already held.
 func (r *renderedReplica) updateChangesMarkdown(room string) (bool, func() map[string]struct{}) {
-	if !r.wholeRender && r.markdown != nil && r.layout != nil {
-		if len(r.touched) == 0 {
+	if !r.touched.whole && r.markdown != nil && r.layout != nil {
+		if len(r.touched.blocks) == 0 {
 			r.paths.observerUntouched.Add(1)
 			return false, nil
 		}
@@ -836,17 +884,17 @@ func (r *renderedReplica) spliceTouched() (changed bool, asks func() map[string]
 	if len(children) != r.layout.Blocks() {
 		return false, nil, false
 	}
-	touched := make([]int, 0, len(r.touched))
+	touched := make([]int, 0, len(r.touched.blocks))
 	for index, child := range children {
 		element, isElement := child.(*crdt.YXmlElement)
 		if !isElement {
 			return false, nil, false
 		}
-		if slices.Contains(r.touched, crdt.SharedType(element)) {
+		if slices.Contains(r.touched.blocks, crdt.SharedType(element)) {
 			touched = append(touched, index)
 		}
 	}
-	if len(touched) != len(r.touched) {
+	if len(touched) != len(r.touched.blocks) {
 		return false, nil, false
 	}
 	read := func(index int) (*pmdoc.Node, error) {
