@@ -657,7 +657,7 @@ const askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> ref
 const commentIdProblem =
   "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
 const messageIdProblem =
-  "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+  "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 
 /** The ask id a bare id or dispatch://.../ask/<id> names; `argumentProblems` refused anything else. */
 function askId(args: ToolArguments): string {
@@ -674,6 +674,54 @@ function messageIdOf(value: string): string | undefined {
       })()
     : value;
   return id === undefined ? undefined : normalizeUUID(id);
+}
+
+/** A block reference to a comment's or message's block: the item and the block's id. */
+type ItemBlockRef = ParsedDispatchRef & {
+  readonly item: NonNullable<ParsedDispatchRef["item"]>;
+  readonly block: string;
+};
+
+/** The comment or message block a block reference (`dispatch://KEY/comment/<id>#b-<block id>`)
+ *  names, or undefined for any other value. */
+function itemBlockOf(value: string): ItemBlockRef | undefined {
+  const ref = parseDispatchRef(value);
+  return ref?.item === undefined || ref.block === undefined
+    ? undefined
+    : { ...ref, item: ref.item, block: ref.block };
+}
+
+/**
+ * Why `value`, given to `field` of a `kind` reply, names no block that reply can answer: a block
+ * of another kind of item (a document's included), or one pinned to a revision, since a reply
+ * answers the block whatever its text becomes. Undefined for a block of a `kind` and for a value
+ * that is no block reference at all.
+ */
+function replyBlockProblem(
+  field: "reply_to" | "in_reply_to",
+  kind: "comment" | "message",
+  value: string
+): string | undefined {
+  if (!/^dispatch:\/\/[^#]*#b-/.test(value)) return undefined;
+  const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
+  const ref = parseDispatchRef(value);
+  if (ref?.kind !== "block") {
+    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+  }
+  const other = ref.item?.kind;
+  if (other !== kind) {
+    const answer =
+      other === "comment"
+        ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}`
+        : other === "message"
+          ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}`
+          : "";
+    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+  }
+  if (ref.pin !== undefined) {
+    return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
+  }
+  return undefined;
 }
 
 /** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
@@ -864,10 +912,34 @@ async function resolveAskArgument(
   return { id: resolved, read };
 }
 
-/** The validated reply target; `argumentProblems` refused anything that is not a message id. */
-function messageInReplyTo(args: ToolArguments): string | undefined {
+/** A reply's target: the comment or message it answers and the block of that item it names, if
+ *  any. */
+interface ReplyTarget {
+  readonly id: string;
+  readonly block?: string;
+}
+
+/** The validated reply target; `argumentProblems` refused anything that is not a message id, a
+ *  message reference, or a block of a message. */
+function messageInReplyTo(args: ToolArguments): ReplyTarget | undefined {
   const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
+  if (inReplyTo === undefined) return undefined;
+  const block = itemBlockOf(inReplyTo);
+  if (block !== undefined && block.item.kind !== "message") return undefined;
+  const id = messageIdOf(block?.item.id ?? inReplyTo);
+  return id === undefined
+    ? undefined
+    : { id, ...(block === undefined ? {} : { block: block.block }) };
+}
+
+/** The comment a `reply_to` names: a comment's block reference splits into the comment's id and
+ *  the block's; `argumentProblems` refused any other block reference, and Dispatch checks any
+ *  other value as the comment's id. */
+function commentReplyTo(args: ToolArguments): ReplyTarget | undefined {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined) return undefined;
+  const block = itemBlockOf(replyTo);
+  return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 
 /**
@@ -910,18 +982,22 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       ) {
         problems.push("artifact is required when quote is supplied");
       }
-      if (
-        optionalString(args, "reply_to") !== undefined &&
-        optionalString(args, "reply_to_ask") !== undefined
-      ) {
+      const replyTo = optionalString(args, "reply_to");
+      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const replyBlock =
+        replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
+      if (replyBlock !== undefined) problems.push(replyBlock);
       break;
     }
     case "dispatch_message": {
       const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
+      if (inReplyTo !== undefined) {
+        const problem =
+          replyBlockProblem("in_reply_to", "message", inReplyTo) ??
+          (messageInReplyTo(args) === undefined ? messageIdProblem : undefined);
+        if (problem !== undefined) problems.push(problem);
       }
       break;
     }
@@ -2259,11 +2335,13 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
     ...anchorLines(comment),
+    ...replyBlockLines(comment),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     ...anchorLines(reply),
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -2273,6 +2351,18 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...(chain.length === 0 ? ["- none"] : chain),
     ...graph,
   ].join("\n");
+}
+
+/** The block of its parent a reply answers: its id and the head of its text, or that no current
+ *  revision of the parent holds it. A comment or message that answers no block prints nothing. */
+function replyBlockLines(record: Pick<Comment, "reply_block">): string[] {
+  const block = record.reply_block;
+  if (block === undefined || block === null) return [];
+  return [
+    block.removed
+      ? `Re: block ${block.block_id} (removed)`
+      : `Re: block ${block.block_id}: ${textHead(block.text)}`,
+  ];
 }
 
 /** An anchored record's quote, then where its block stands: the position, or why the read could
@@ -2315,9 +2405,14 @@ export function positionText(block: BlockPath): string {
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {
-  const root = [`${message.id} · ${actorText(message.author)}`, `Body: ${message.body}`];
+  const root = [
+    `${message.id} · ${actorText(message.author)}`,
+    ...replyBlockLines(message),
+    `Body: ${message.body}`,
+  ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -3569,7 +3664,7 @@ export async function executeDispatchTool(
             : undefined
           : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
+      const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk =
         replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
@@ -3589,7 +3684,8 @@ export async function executeDispatchTool(
       const commentInput: CreateCommentInput = {
         body,
         ...(anchored === undefined ? {} : { anchor: anchored }),
-        ...(replyTo === undefined ? {} : { reply_to: replyTo }),
+        ...(replyTo === undefined ? {} : { reply_to: replyTo.id }),
+        ...(replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block }),
         ...(replyToAsk === undefined ? {} : { ask_id: replyToAsk }),
         ...(requestedTurn === undefined ? {} : { turn: requestedTurn }),
         actor,
@@ -3664,7 +3760,8 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
+      const target = messageInReplyTo(args);
+      const inReplyTo = target?.id;
       const written = stringArg(args, "body");
       const bodyLimit: PictureTextLimit = {
         cap: DISPATCH_BODY_MAX,
@@ -3751,6 +3848,7 @@ export async function executeDispatchTool(
       const message = await client.message(issueKey, {
         body,
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
+        ...(target?.block === undefined ? {} : { in_reply_to_block: target.block }),
         actor,
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);

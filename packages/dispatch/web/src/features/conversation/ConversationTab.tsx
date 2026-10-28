@@ -233,6 +233,7 @@ function ConversationReply({
       onReply={isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey))}
       quote={{
         author: parent?.author,
+        block: reply.reply_block,
         excerpt: parent?.body ?? "",
         to:
           reply.in_reply_to === null

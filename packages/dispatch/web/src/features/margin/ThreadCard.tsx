@@ -31,6 +31,7 @@ import {
 } from "../../theme/classes";
 import { useHeldSendsUnder } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
+import { passageItem, ReplyQuote } from "../conversation/ReplyQuote";
 import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -439,6 +440,16 @@ export function ThreadCard({
                       renderEditor(reply)
                     ) : (
                       <>
+                        {reply.reply_block == null ? null : (
+                          <ReplyQuote
+                            author={
+                              passageItem(reply.reply_block, [root, ...thread.replies])?.author
+                            }
+                            block={reply.reply_block}
+                            className="mb-2"
+                            excerpt=""
+                          />
+                        )}
                         <CommentBody
                           artifactSlug={artifactSlug}
                           comment={reply}

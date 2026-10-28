@@ -516,14 +516,14 @@ describe("executeDispatchTool", () => {
     expect(replying.problems).toEqual([
       "--body is required (string)",
       "unknown flag --message",
-      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
     ]);
     expect(replying.message).toBe(
       [
         "dispatch message was not called: 3 problems",
         "- --body is required (string)",
         "- unknown flag --message",
-        "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+        "- in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
         "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
         "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
@@ -908,6 +908,145 @@ describe("executeDispatchTool", () => {
     expect(refResult.text).toBe(posted);
   });
 
+  test("a message reply to a block reference names the block", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-42/messages") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "message-2", issue_key: "DSP-42" });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: {
+        issue: "DSP-42",
+        body: "Sounds good",
+        in_reply_to: `dispatch://DSP-42/message/${parent}#b-b2`,
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(bodies).toEqual([
+      {
+        body: "Sounds good",
+        in_reply_to: parent,
+        in_reply_to_block: "b2",
+        actor: expect.anything(),
+      },
+    ]);
+    expect(result.text).toBe("Posted message message-2 (dispatch://DSP-42/message/message-2)");
+  });
+
+  test("a message reply refuses a block of a comment, naming the reply that answers it", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const comment = `dispatch://DSP-42/comment/${parent}#b-b2`;
+    const error = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { issue: "DSP-42", body: "Sounds good", in_reply_to: comment },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (() => {
+        throw new Error("network must not be called");
+      }) as unknown as typeof fetch,
+    }).then(
+      () => undefined,
+      (thrown: unknown) => thrown
+    );
+
+    if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(error.problems).toEqual([
+      `in_reply_to ${comment} names a block of a comment, but a message reply answers a block of a message (dispatch://KEY/message/<id>#b-<block id>); answer it with dispatch comment --reply-to '${comment}'`,
+    ]);
+  });
+
+  test("a read of a message conversation prints the block each reply answers", async () => {
+    const long = `${"Ship the build tonight. ".repeat(6)}Then tell the team.`;
+    const block = (text: string, removed: boolean) => ({
+      node: "message/message-42#b2",
+      ref: "dispatch://DSP-42/message/message-42#b-b2",
+      block_id: "b2",
+      text,
+      removed,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42/messages/message-42") {
+        return response({
+          message: {
+            id: "message-42",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "writer-1" },
+            body: `Plan.\n\n${long}`,
+            in_reply_to: null,
+            created_at: "2026-09-09T00:00:00Z",
+            reply_block: null,
+          },
+          replies: [
+            {
+              id: "message-43",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Sounds good.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:01:00Z",
+              reply_block: block(long, false),
+            },
+            {
+              id: "message-44",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Never mind.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:02:00Z",
+              reply_block: block("Gone.", true),
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("message"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/message/message-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 12)).toEqual([
+      "Message:",
+      "message-42 · session writer-1",
+      "Body: Plan.",
+      "",
+      long,
+      "Reply chain:",
+      "message-43 · user sami",
+      // The block's text reads as its head, as every other quoted text on a read does.
+      `Re: block b2: ${long.slice(0, 120)}…`,
+      "Body: Sounds good.",
+      "message-44 · user sami",
+      "Re: block b2 (removed)",
+      "Body: Never mind.",
+    ]);
+  });
+
   // A human's direct message to a session (the Agents page, POST /api/v1/agents/{id}/messages)
   // belongs to no issue, and only POST /api/v1/messages/{id}/reply can carry an answer into that
   // conversation. The route the tool picks is decided by what the caller named, not by what the
@@ -1173,7 +1312,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
+      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)"
     );
   });
 
@@ -8243,6 +8382,149 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(/reply_to and reply_to_ask/);
+  });
+
+  test("a comment reply to a block reference names the block", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-1/comments") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "comment-2", issue_key: "DSP-1", ask_id: null, reply_to: parent });
+    };
+    const reply = (replyTo: string) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to: replyTo },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const toBlock = await reply(`dispatch://DSP-1/comment/${parent}#b-b2`);
+    // A reply to the comment itself names no block.
+    await reply(parent);
+
+    expect(bodies).toEqual([
+      { body: "Yes", reply_to: parent, reply_to_block: "b2", actor: expect.anything() },
+      { body: "Yes", reply_to: parent, actor: expect.anything() },
+    ]);
+    expect(toBlock.text).toBe("Posted comment comment-2");
+  });
+
+  test("a comment reply refuses a block reference that names no block of a comment", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const problems = async (replyTo: string) => {
+      const error = await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to: replyTo },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+      if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+      return error.problems;
+    };
+    const message = `dispatch://DSP-1/message/${parent}#b-b2`;
+
+    expect(await problems(message)).toEqual([
+      `reply_to ${message} names a block of a message, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch message --in-reply-to '${message}'`,
+    ]);
+    expect(await problems("dispatch://DSP-1/spec#b-goal")).toEqual([
+      "reply_to dispatch://DSP-1/spec#b-goal names a block of a document, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>)",
+    ]);
+    expect(await problems(`dispatch://DSP-1/comment/${parent}#b-b2@v1`)).toEqual([
+      `reply_to dispatch://DSP-1/comment/${parent}#b-b2@v1 names revision 1 of the block, but a reply answers the block whatever its text becomes: drop @v1`,
+    ]);
+    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2`)).toEqual([
+      `reply_to dispatch://DSP-1/ask/${parent}#b-b2 names no block; a block of a comment reads dispatch://KEY/comment/<id>#b-<block id>`,
+    ]);
+  });
+
+  test("a read of a reply that names a block prints the block before the reply's body", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const replyId = "22222222-2222-4222-8222-222222222222";
+    const node = `comment/${parent}#b2`;
+    const ref = `dispatch://DSP-1/comment/${parent}#b-b2`;
+    const comment = (id: string, body: string, replyBlock: unknown) => ({
+      id,
+      issue_key: "DSP-1",
+      author: { kind: "session", id: "reviewer-1" },
+      body,
+      anchor: null,
+      reply_to: parent,
+      resolved: false,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+      reply_block: replyBlock,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === `/api/v1/comments/${replyId}`) {
+        return response({
+          comment: comment(replyId, "Yes", {
+            node,
+            ref,
+            block_id: "b2",
+            text: "Beta.",
+            removed: false,
+          }),
+          replies: [
+            comment("comment-3", "Still yes", {
+              node,
+              ref,
+              block_id: "b2",
+              text: "Beta.",
+              removed: true,
+            }),
+            comment("comment-4", "Agreed", null),
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: `dispatch://DSP-1/comment/${replyId}` },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 12)).toEqual([
+      "Comment:",
+      `${replyId} · session reviewer-1`,
+      "Re: block b2: Beta.",
+      "Body: Yes",
+      "Reply chain:",
+      "comment-3 · session reviewer-1",
+      "Re: block b2 (removed)",
+      "Body: Still yes",
+      "comment-4 · session reviewer-1",
+      "Body: Agreed",
+      "Referenced by:",
+      "- none",
+    ]);
   });
 
   test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {
