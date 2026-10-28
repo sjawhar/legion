@@ -2,32 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T09:20:00Z",
+  "completed": "2026-10-28T12:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
     {
-      "criterion": "A1. Two editors whose concurrent edits leave an ask holding two lists keep the question and both options in both editors and the stored document; the ask stays open, is marked malformed, and joining the lists clears that",
-      "surface": "Dispatch document editor in headless Chromium (chromium and iphone projects) against the real Go Dispatch server and Postgres 17 in the issue pod",
-      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts --project chromium --project iphone",
-      "observed": "312 passed (17.9m), 0 failed. Both ask-concurrent-edit tests pass in both projects: words Which one?/Option A/Option B in both pages and the stored markdown, data-dispatch-ask-malformed=true on both pages, open_asks still holds a1, Backspace at the start of the second list clears the mark and the ask's options become both; Enter in the malformed ask's question keeps every word; no page error. ask-concurrent-edit alone: 16/16 with --repeat-each 4. Run record: https://github.com/sjawhar/legion/pull/2433#issuecomment-6450418428 Rebase re-check 87ac52a6 -> 1c67b209 (forward merge of main@origin b295a3fb; only conflict packages/envoy/CHANGELOG.md, both entries kept): fingerprint 69e39884… unchanged; the same command re-run at 1c67b209 gave 312 passed (17.4m), 0 failed.",
-      "headSha": "1c67b2094e0c9a2cfd0f15e9c6453306c85cc4bb",
-      "negativeControl": "Same spec file at the base 2df3353c: both tests fail, toContainText \"Option A\" -> element(s) not found and toHaveAttribute data-dispatch-ask-malformed \"true\" -> element(s) not found (the ask and its words deleted; settlement then retracted a1 as system/document-settlement, recorded at dispatch://INFRA-624/comment/3cb60eb2-b4c2-4e0c-883d-f9de8cd7e7fa)"
+      "criterion": "A1. Two editors whose crossed edits leave an ask holding two lists keep the question and both options in both editors and the stored document; the ask stays open, is marked malformed, and joining the lists clears that",
+      "surface": "Dispatch document editor in headless Chromium against the real Go Dispatch server and Postgres 17 in the issue pod",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "168 passed (9.5m), 0 failed (main's #2313 makes the iphone project run only @phone rows). The ask-concurrent-edit rows pass: words kept in both pages and the stored markdown, data-dispatch-ask-malformed=true, open_asks holds a1, Backspace at the start of the second list clears the mark and the ask takes both options; Enter in the question (caret now placed in the question paragraph of the content hole, not the banner) keeps every word and More lands in the question paragraph.",
+      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
+      "negativeControl": "At the base 2df3353c the same spec file fails every row at toHaveAttribute data-dispatch-ask-malformed \"true\" -> element(s) not found (the ask and its words deleted)."
     },
     {
-      "criterion": "P. A pasted unknown typed block keeps every word, drawn as its lines",
-      "surface": "Dispatch document editor in headless Chromium, a real paste (navigator.clipboard.writeText + ControlOrMeta+V, one paste event counted)",
-      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- typed-block-content-rule.e2e.ts --project chromium --project iphone (within the run above)",
-      "observed": "the row 'an unknown typed block pasted as plain text keeps every word as its lines' passes in both projects: paragraphs :::note / hello world / :::, stored markdown exactly \"Intro text.\\n\\n\\\\:::note\\n\\nhello world\\n\\n:::\\n\", no page error; INFRA-565's two rows and INFRA-529's four unknown-directive rows pass Re-run at 1c67b209 within the 312-passed run.",
-      "headSha": "1c67b2094e0c9a2cfd0f15e9c6453306c85cc4bb",
-      "negativeControl": "Same row at the base 2df3353c: fails at p /^:::note$/ -> element(s) not found; the editor showed one paragraph ':::note hello world :::' and the page error 'unknown typed block \"note\" (known types: ask, callout)'"
+      "criterion": "Review item 2: Enter twice to leave a list, Backspace at the start of a first list's first item, and Backspace over a selection from the question into a list are declined inside a broken ask, keeping every word, with no page error",
+      "surface": "Dispatch document editor in headless Chromium (three rows in ask-concurrent-edit.e2e.ts) and the proof-editor live stack in happy-dom (three rows in tests/ask-concurrent-edit.test.ts)",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test",
+      "observed": "the three browser rows pass in the run above (words kept in both pages and the stored markdown, ask still in open_asks, no page error); proof-editor 164 pass, 0 fail.",
+      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
+      "negativeControl": "With the guard's install line `view.setProps({ handleKeyDown: guardBrokenAskKeys })` commented out, the browser rows fail with page errors \"Called contentMatchAt on a node with invalid content\", \"Content does not fit in gap\", \"Content does not fit in gap\", and the happy-dom rows throw the same TransformErrors (3 fail)."
     },
     {
-      "criterion": "Settlement marks a content-rule break invalid, keeps the ask open, clears it on repair",
-      "surface": "Go document service settlement against Postgres (packages/envoy/internal/dispatch/docs)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run 'Invalid|AskReadab|AskBlock|Settlement' -timeout 30m",
-      "observed": "ok; TestSettlementMarksAnAskWithASecondBulletListInvalid and TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid pass: invalid names the content-rule reason, block.invalid emitted, row open with its original question and options, cleared on repair Re-run at 1c67b209: ok.",
-      "headSha": "1c67b2094e0c9a2cfd0f15e9c6453306c85cc4bb",
-      "negativeControl": "with the reconcile change disabled both rows fail: ask invalid = <nil>, want \"ask block \\\"ask-lists\\\" ... holds a second bullet list ...\""
+      "criterion": "Review item 1: a past version's view (live setMarkdown) keeps an answered decision's server attributes after main's INFRA-612 merge",
+      "surface": "@legion/proof-editor live stack in happy-dom (tests/typed-block-drawing.test.ts)",
+      "command": "cd packages/proof-editor && bun run test",
+      "observed": "the row 'the live editor's version view keeps an answered decision's server attributes' passes: state answered, answered_by and selected kept",
+      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
+      "negativeControl": "with liveTypedBlocksRemarkPlugin calling remarkReadOnlyDirectives (which drops server attributes): Expected \"answered\", Received \"open\""
+    },
+    {
+      "criterion": "Settlement marks a content-rule break invalid and keeps an open ask open and a decided ask decided; the ask-edit route refuses an edit that leaves the break unless it sends options",
+      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ -count=1 -timeout 50m",
+      "observed": "ok (777s), TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList and TestSettlementMarksADecidedAskWithASecondBulletListInvalid included",
+      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
+      "negativeControl": "with refuseAskContentBreak switched off: urgency only edit of a two-list ask: err = <nil>, want ErrAskBlockUnrepresentable"
     }
   ],
   "filesChanged": [
@@ -41,7 +49,11 @@
     "packages/envoy/internal/dispatch/docs/ask_blocks.go: reconcileAskBlocks marks a parsed ask that breaks pmdoc.AskContentError invalid; readAskBlockStrictly for askReadability",
     "packages/envoy/internal/dispatch/pmdoc/node.go, docs/websocket.go: comments",
     "tests: packages/proof-editor/tests/ask-concurrent-edit.test.ts (new), typed-block-drawing.test.ts, marks-editor.ts; packages/envoy/internal/dispatch/docs/service_test.go; packages/dispatch/e2e/ask-concurrent-edit.e2e.ts (new), typed-block-content-rule.e2e.ts; packages/dispatch/web/src/features/doc/VersionView.test.tsx",
-    "docs: packages/envoy/CHANGELOG.md, packages/envoy/AGENTS.md, packages/proof-editor/AGENTS.md, three docs/solutions learnings (evidence lines)"
+    "docs: packages/envoy/CHANGELOG.md, packages/envoy/AGENTS.md, packages/proof-editor/AGENTS.md, three docs/solutions learnings (evidence lines)",
+    "round 2: packages/proof-editor/src/ask-content.ts (block group check, guardBrokenAskKeys), src/lib.ts (guard install), src/lib-headless.ts, src/typed-block-commands.ts (retype content match), src/read-only-directives.ts (acceptedTypedBlock; live step keeps server attributes)",
+    "round 2: packages/envoy/internal/dispatch/pmdoc/schema/block-node-types.json (new), pmdoc/node.go (embeds it), docs/ask_block_text.go (refuseAskContentBreak), docs/ask_blocks.go",
+    "round 2: tests in proof-editor, docs/service_test.go, dispatch e2e (ask-concurrent-edit.e2e.ts, editor.ts placeCaret scope), VersionView.test.tsx",
+    "round 2: packages/envoy/.changes/unreleased/pr2433-*.yaml (CHANGELOG.md back to main's), packages/envoy/AGENTS.md, packages/proof-editor/AGENTS.md"
   ],
   "trickyParts": [
     "Which of the two crossed option lists comes first is decided by the two editors' Yjs client ids, so the browser test reads the second list from the page before Backspace; Backspace at the start of the first list lifts its item into the question (a valid ask with one option), which made the first version of the test flaky (2 of 3 runs).",
@@ -51,7 +63,10 @@
     "relaxAskContentCheck takes (schema, blockSchema): the typed block names come from the block schema rather than from node specs.",
     "reconcileAskBlocks calls pmdoc.AskContentError directly (the collector already parsed each block) and readAskBlockStrictly returns only an error, used by askReadability; the plan named one helper used by both. Same rule, one parse per settlement (simplify pass).",
     "The census read every live document through the API (2,520 issues unpaged, 6,029 documents, 636 ask blocks, 19 open): 0 newly marked, so the mark was implemented without waiting, as the architect's condition allows.",
-    "GitHub reported #2433 CONFLICTING after the daemon outage: main@origin merged forward (merge commit 1c67b209, CHANGELOG conflict only, both sides kept); fingerprint unchanged."
+    "GitHub reported #2433 CONFLICTING after the daemon outage: main@origin merged forward (merge commit 1c67b209, CHANGELOG conflict only, both sides kept); fingerprint unchanged.",
+    "Round 2: two Go api tests (TestEventPayloadsAreServedAsStoredForEveryEventKind, TestIssueRanksStayOrdered…) fail on the pod's SQL_ASCII/C Postgres cluster and pass on a UTF-8 ICU en-US cluster (port 55433); environment only, so the docs suite ran there too.",
+    "Round 2: the reviewer's fast-follow (press() key table in tests/marks-editor.ts) is done in this PR."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round": 2
 }
