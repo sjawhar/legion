@@ -2,37 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-647",
-  "completed": "2026-10-28T10:36:26Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T11:46:12Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/settlement_render_once_test.go",
-      "description": "Lines 23 and 88 add '(INFRA-647)' to code comments: a new Dispatch key in author-written text on sjawhar/legion, against the standing rule ('Stop new leaks only', relayed by the controller; code comments named explicitly). Delete both parentheticals."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/testing/a-settlement-race-test-holds-the-peer-at-afterCreditUpdate-and-checks-the-version-by-its-block-rows-pr2416.md",
-      "description": "Lines 38-40 claim the markdown assertion alone could not tell under len(slots) > 0. False: typed blocks render their ids (pmdoc/schema.go:286-290), so the reused read would render the pasted callout as #note while the room renders #<stamped>; requireIndexedBlocks only fails first because it runs first (test lines 147-148)."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/envoy/a-settlement-reuses-an-earlier-result-only-for-the-same-tree-with-an-unshrinking-record-that-nothing-changed-it-pr2416.md",
-      "description": "Line 27 tells authors to name the issues that must keep the invariant in AGENTS.md, which the key rule forbids; name the code paths (readSettlementTree, sweepUnrecordedMarks) instead."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/envoy/a-settlement-reuses-an-earlier-result-only-for-the-same-tree-with-an-unshrinking-record-that-nothing-changed-it-pr2416.md",
-      "description": "Line 45 cites 'the tester's line in the same body' for the either-half negative control; the body's E2E (tester) line does not say it (only test.json does, which retro removes). State the result in the doc."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "scope": "Narrowed round by the parent architect's ruling: only the delta 1fb8a51c..a2de3fde answering the round-2 request. Delta: 59d97d66 (two test comments lose the issue-key parenthetical; line count unchanged), e68b0ea8 (three docs/solutions lines corrected), handoffs. No runtime change.",
+  "verified": [
+    "No Dispatch key or dispatch:// link in any added line outside .legion/ (diff 460facf5..a2de3fde).",
+    "PR body: only the 'Dispatch:' line names a key; Why, Proven by and E2E lines carry none.",
+    "Testing learning now states the markdown check also fails (pmdoc/schema.go:286-290) and the block-row check fails first only by order (test lines 147-148).",
+    "Envoy learning names code paths, and states the either-half result, consistent with the tester's record.",
+    "Five round-2 threads: each fixed by the implementer, resolved, and answered by the reviewer."
   ],
-  "reviewedHead": "99fac39b0152d17b32d94778cd4efd77cb65e6a7",
-  "round": "New round (not a fingerprint confirmation): the head carried changes above the round-1 approval fe20ee29 (main merge 460facf5, changie fragments, docs/solutions). Runtime diff byte-identical to 5d2d9883; main's selected normalization (#2363) does not make the []string{} write redundant.",
-  "prBody": "Author-written keys and dispatch:// links remain in the body's Proven by, E2E (implementer) and Why lines; remove them, keeping the 'Dispatch: INFRA-647' line. Existing branch commit subjects with keys (36cc06eb, def1e3de) are not to be force-pushed (controller's interim rule); new subjects carry no key.",
-  "ci": "Code head 6a4f1234 (newest pull_request run): required lint, typecheck, test, pr-title queued at review time; changes requested do not wait on CI.",
-  "thermonuclear": "Pair at 99fac39b: deep review and code quality both CHANGES, for the findings above; no runtime finding.",
-  "threads": "0 review threads before this round."
+  "ci": "CI head d1891eea (newest pull_request run; e68b0ea8 code plus a handoff): required lint, typecheck, test success, pr-title latest success. Compare d1891eea...a2de3fde: handoffsOnly true.",
+  "thermonuclear": "Not re-run: the narrowed round reviews only a comment and docs delta; the round-2 pair at 99fac39b found no runtime defect and the runtime is unchanged."
 }
