@@ -2,26 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T19:33:00Z",
-  "round": 4,
-  "reviewedCodeHead": "bf30591dd483da80b3cb0e3965416537535329c2",
+  "completed": "2026-10-28T22:33:30Z",
+  "round": 5,
+  "reviewedCodeHead": "2f3bf214764c061c8c3c33ee074083afb03c79ac",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 2,
-  "fingerprint": "738b118668f9a0f1cd055e8a67ec3abd036f6a727e1436e7238bda715f241bb8 at 7797bc61 (last APPROVE) -> 6bcc8281f279876e0f134e4403c42d9087742e2c74e1d5d70702d5861bd7fa3c at bf30591d: changed (the merge ports main's #2366 into the batch model), so a new round.",
-  "ci": "Required set (lint, typecheck, test, pr-title) queued at CI head bf30591d when read; compare bf30591d...44d6c901 is handoffs only. A request for changes does not wait on CI.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at bf30591d over the merge's port of #2366.",
+  "ci": "Required set (lint, typecheck, test, pr-title) queued at CI head 2f3bf214 when read; compare 2f3bf214...110773ea is handoffs only. A request for changes does not wait on CI.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 2f3bf214 over fix 09e871b6 and merge 06960fb3.",
+  "roundFourThreads": "Findings 1, 2 and 4 accepted (replies 4406789972, 4406790324, 4406790913). Thread PRRT_kwDORFy7ds6xSfQa (finding 3) answered as still standing in another form and unresolved (reply 4406790672).",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/batch.go:400", "description": "A failed comment-recipient or primary-author query (lookups.go:228-237, failRecipients) leaves the event with a list cut short at that step (publisher.go:722-727), and planChains holds the owner's later events only on keys in an earlier event's list, so a later event of the same issue reaches a thread or document session (e.g. a comment.resolved through rootCommentAuthor) before the failed reply, which reaches it on retry: per-(owner, destination) order broken through a failed publish and its retry. Before the merge every lookup failure failed the batch."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/lookups.go:222", "description": "loadDocumentSessionAuthors failing (documentCreditsSQL's jsonb_array_elements refusing a non-array credit list, #2366's breakDocumentCredits case) fails the whole batch; the event is never recorded, stays the lowest fresh id, and every later batch fails on it, so the outbox publishes nothing until the row is repaired. Main's #2366 rule backs off only that event."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:625", "description": "Not-due events' ids enter the batch's wanted sets, so one event backed off on a broken thread or issue row fails every reply of every batch that reads its owner's window, where on main it fails only when due again."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:641", "description": "No test pins resolveLost: TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed seeds fresh events whose unsent owner-topic sends release them anyway, so replacing resolveLost with false still passes; a case whose earlier destinations are already in published_destinations would pin it."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/batch.go:457", "description": "With untaken (lookups.go:115-148) a not-due event takes no recipient read, so any not-due event that needs one is incomplete, and its hold names only its short list (owner topic, route, claimant), not the sessions it already reached (delivered). So an event backed off for any reason - a stale role holder, one failed session send - holds every later event of its issue from every other agent and role key until its next retry (up to retry.MaxDelay, 5 min), each round; at bf30591d only the stalled key waited. Contradicts batch.go:367-368 and dispatch-outbox.md:49 ('nothing else') and plan decision 5."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/lookups.go:366", "description": "refusedStatement matches any *pgconn.PgError, including a server refusing the connection at startup (ConnectError unwrapping to 53300, 57P03) and FATAL 57P01 on a live connection, so during a failover each recipient kind runs up to 100 more single-id statements on a refusing server; its comment and AGENTS.md say connection failures are not re-run."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher_comment_recipients_test.go", "description": "No test covers a due later event behind a not-due incomplete event on an unnamed key (deleting batch.go:454-456 stays green), and TestTheBatchTakesNoRecipientReadForAnEventThatIsNotDue passes with untaken deleted."}
   ],
   "verifiedCorrect": [
-    "commentRecipientsQuery, primaryDocumentAuthorsQuery, documentCreditsSQL and sessionCreditSQL match main word for word; step order owner topic, route, claimant, primary authors, author routes, followers, previous claimant matches main's publishDestinations.",
-    "suppressed_authors: no writer or reader remains; an old-build row is suppressed by mentions[].session_id, a superset, so no session the old build suppressed is reached.",
-    "#2366's tests keep their expected session lists; checkSessionRecipients asserts recorded order and exact set equality.",
-    "Migrations 0135 (main), 0136, 0137 (branch); TestDispatchConnectionsPerPodIsTheServers passes at 88."
+    "Round-4 finding 1: a later event of the issue reaches no session an earlier failed read missed before that event does; the test fails at bf30591d.",
+    "Round-4 finding 2: document credits fail per id; a refused batched statement runs again per id; the outbox keeps publishing other owners.",
+    "Round-4 finding 4: resolveLost pinned by a subtest that fails with release := false.",
+    "Merge: 0136_dashboard_assets (main), 0137_duty_holds, 0138_outbox_claim; connections 88."
   ]
 }
