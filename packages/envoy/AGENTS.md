@@ -2588,8 +2588,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `comment.resolved`, `comment.reopened` or `comment.edited` carrying an `ask_id` - is
   additionally published straight to each follower's `notifications.agent.<session_id>` regardless
   of `notify` and of the issue's route, so a session-authored reply on an ask reaches its followers
-  even though it wakes nobody through the issue topic; the acting session is skipped and a session
-  already reached by the issue's route is not sent the envelope twice. A quiet `ask.edited` (a
+  even though it wakes nobody through the issue topic; the acting session is skipped, and so is a
+  follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`,
+  each `mentions[].session_id`) once the mention delivered it (the mention rule below) - the
+  comment's edit, resolution and reopening reach every follower - and a session already reached by
+  the issue's route is not sent the envelope twice. A quiet `ask.edited` (a
   version move of an approval request that an earlier version already moved since it was opened or
   last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed
   `artifact.version` reaches nobody; the first move after an opening or a hand-back is not quiet. A
@@ -2605,10 +2608,81 @@ the synchronous listener call records the sent or failed attempt instead of blin
   issue's document, and the event's own for a project document; a comment on an issue's
   conversation names no document and reaches no author. An author route is skipped for a human
   author, who has no topic, for the event's own actor, so a session commenting on a document it
-  wrote is never told of its own comment, and for a session the comment's mentions already reach
-  (`suppressed_authors`: on a new comment every session a mention resolved to, so a mentioned
-  writer hears the comment once; on a reply only the thread's root author when mentioned). An
-  agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
+  wrote is never told of its own comment, and for a session the comment's mentions resolved to
+  once the mention delivered it (`suppressed_authors`: on a new comment every session a mention
+  resolved to, so a mentioned writer hears the comment once; on a reply only the thread's root
+  author when mentioned; the mention rule below). An agent's comment notifies nobody (`notify` is
+  false), so it takes no author route at all.
+  A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`,
+  `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created`
+  or `message.answered` on an issue also takes the claimant route (`addClaimantRoute`): it is
+  published to the `notifications.agent.<session_id>` of the session holding the issue's claim
+  (`issues.claimed_by` of kind `session`; a person holding the claim has no topic), whether or not
+  that session subscribed to the issue. The claimant route runs beside the route and author routes,
+  under `notify` and never for a targeted message (`message.created` or `message.answered` with a
+  `target`), which reaches only its session. An agent's event of these types takes no claimant
+  route, and neither does any other type, a person's `ask.opened`, `ask.edited`, issue update or
+  document version included. A person's reaches a claimant only through a subscription to the
+  issue topic, or as the route when it notifies; an agent's only through that subscription, since
+  an agent's event of these types never notifies and so takes no route copy either, except that a
+  claimant following the ask gets, as a follower, these events on that ask, other than its own: an
+  agent's or a person's answer, hand-back, resolution or non-quiet edit of the
+  ask, and every reply in it, created, edited, resolved or reopened (`addFollowerRoutes` runs
+  outside the `notify` gate). A
+  `comment.created` whose mentions resolved to the claimant is left to the mention once the
+  mention delivered it (the mention rule below); its edit, resolution and reopening are not. The
+  claim is read when the event is published, not when it was written: the batch's read
+  (`readBatchSQL` in `readBatch`) joins the issue and reads `issues.claimed_by` beside the route
+  for every event it reads (`routing`), one column of the statement that reads the batch, so a
+  retry after the claim moved reaches the current claimant and the claim costs no statement of its
+  own. A project document's event names no issue and takes none. A claimant that is also the
+  route, a follower or an author gets one copy: `destinations` adds each subject once per event.
+  The claimant's `notifications.agent.<session_id>` is an ordinary destination key, so its sends
+  share the one chain of every other route to that session (`destinationKey`, `planChains`).
+  The mention rule (`destinations.leftToMention`) is the one rule the route, claimant, author and
+  follower copies of a new comment apply to a session its mentions resolved to; the route's
+  session is `suppressed_route_session_id`, the session the route resolved to when the comment was
+  written, and the rule applies while the route still names that target or that session
+  (`suppressesCurrentRoute`; `suppress_route` must be set). A mention resolved at write time is a
+  candidate only: its send runs after the comment commits and can fail. The batch reads the
+  `comment_deliveries` of every `comment.created` in it whose mentions resolved to a session in one
+  set-based statement (`loadMentionDeliveries`, `mentionDeliveryQuery`, grouped by comment and
+  session), the fifth lookup kind of `loadLookups`, so a batch costs at most five lookup
+  statements whatever its size; no other event asks, and an event's destinations read the answer
+  before anything else, so a comment id that is no uuid leaves the event with no destination and
+  backs it off.
+  A session with a `sent` row is skipped: the mention delivered the comment. A session with no
+  `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger
+  than `model.DeliveryClaimLapse` (a minute) has its copy held back - left out of the event's
+  destinations, which are sent as usual - and the event marked `mentionPending`; `settleEvent`
+  then records it `deferred`, and `recordBatch` adds the destinations it reached to
+  `published_destinations`, moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves
+  `published_at` null, `attempt_count` and `publish_error` as they were, so waiting on a send never
+  runs the event to its dead letter. Every other session - each attempt `failed`, a `pending` one
+  past the minute (abandoned; the API's `claimLapsed` is built from the same
+  `model.DeliveryClaimLapse`), or no row at all - is published to as if it had not been mentioned.
+  A held-back copy defers the event only when it is the whole of why the event did not finish: a
+  send NATS denied (`bus.ErrPublishDenied`) or any other failure of the event backs it off as a
+  failure, its attempt counted; a send that meets a lost NATS connection (`bus.ErrUnavailable`) or
+  a stopping process releases it, like any event that met them; and an event an earlier event of
+  its owner holds back from another destination (`holdBack`) is `blocked`, falling due at the
+  earlier of its blocker and `mentionPendingDelay`.
+  A comment's edit, resolution and reopening, and every other event, are never left to a mention.
+  One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener
+  may have delivered the mention, and a first attempt stranded `pending` past the minute may have
+  landed before its sender stopped. Either way the outbox also publishes the session's own-topic
+  copy, so the session receives the comment twice, under different dedupe keys (the mention's
+  delivery and the outbox's event); a host treats the second copy as the same comment (same
+  comment id).
+  Nor is order: a held-back copy is no destination of its event, so while the mention's send is
+  undecided it holds none of the owner's later events back, and the same comment's
+  `comment.edited`, `comment.resolved` and `comment.reopened` reach a claimant, follower, author or
+  route topic at once - before the creation, for as long as the send is undecided, normally a
+  listener receipt timeout and at most about a minute for a stranded attempt, plus
+  `mentionPendingDelay`. Once the mention failed the creation's copy is a destination again, and it
+  holds that session's later events of the owner back until it is sent (`planChains`). A host that
+  sees an edit, resolution or reopening for a comment it does not know is seeing this window, not
+  a bug; the creation follows.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and

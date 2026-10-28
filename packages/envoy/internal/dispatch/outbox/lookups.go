@@ -14,14 +14,30 @@ import (
 )
 
 // lookup answers the reads an event's destinations depend on: an ask's followers in the order they
-// joined, a comment's author and its thread root's author, a message's author, and the sessions a
-// document credits. A comment or message that does not exist answers no author, found false.
+// joined, a comment's author and its thread root's author, a message's author, the sessions a
+// document credits, and what a new comment's mentions delivered. A comment or message that does
+// not exist answers no author, found false.
 type lookup interface {
 	followers(askID string) ([]string, error)
 	commentAuthor(commentID string) (model.Actor, bool, error)
 	rootCommentAuthor(commentID string) (model.Actor, bool, error)
 	messageAuthor(messageID string) (model.Actor, bool, error)
 	documentAuthors(artifactID string) ([]string, error)
+	mentionDeliveries(commentID string) (mentionDeliveries, error)
+}
+
+// mentionDeliveries is what a new comment's mentions did for the sessions they resolved to, read
+// from comment_deliveries when the event is published (loadMentionDeliveries). A mention resolved
+// at write time names only a candidate: its send runs after the comment commits and can fail - the
+// listener does not know the session, the receipt times out, the handler is cancelled, the session
+// lacks the delivery mode - and a session whose mention failed has no copy but the outbox's.
+type mentionDeliveries struct {
+	// sent holds each session some attempt of a mention reached.
+	sent map[string]struct{}
+	// pending holds each session no attempt reached yet whose send is still live: an attempt is
+	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
+	// model.DeliveryClaimLapse.
+	pending map[string]struct{}
 }
 
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
@@ -29,13 +45,13 @@ type lookup interface {
 // ask for the same ids whatever the answers are, so a second pass over resolved lookups asks for
 // exactly these.
 type wanted struct {
-	asks, comments, messages, documents map[string]struct{}
+	asks, comments, messages, documents, mentions map[string]struct{}
 }
 
 func newWanted() *wanted {
 	return &wanted{
 		asks: map[string]struct{}{}, comments: map[string]struct{}{},
-		messages: map[string]struct{}{}, documents: map[string]struct{}{},
+		messages: map[string]struct{}{}, documents: map[string]struct{}{}, mentions: map[string]struct{}{},
 	}
 }
 
@@ -64,6 +80,11 @@ func (w *wanted) documentAuthors(artifactID string) ([]string, error) {
 	return nil, nil
 }
 
+func (w *wanted) mentionDeliveries(commentID string) (mentionDeliveries, error) {
+	w.mentions[commentID] = struct{}{}
+	return mentionDeliveries{}, nil
+}
+
 // lookups is what a batch read for the ids its events asked for (loadLookups). failed holds each
 // id that no read can answer - an id that is no uuid, which the column it is read from refuses, or
 // an author whose JSON does not decode - keyed by its kind and id, with the error the event's
@@ -73,6 +94,7 @@ type lookups struct {
 	comments  map[string]commentAuthors
 	messages  map[string]json.RawMessage
 	documents map[string][]string
+	mentions  map[string]mentionDeliveries
 	failed    map[string]error
 }
 
@@ -129,6 +151,13 @@ func (l *lookups) documentAuthors(artifactID string) ([]string, error) {
 	return l.documents[artifactID], nil
 }
 
+func (l *lookups) mentionDeliveries(commentID string) (mentionDeliveries, error) {
+	if err := l.failed["mention:"+commentID]; err != nil {
+		return mentionDeliveries{}, err
+	}
+	return l.mentions[commentID], nil
+}
+
 func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {
 	var author model.Actor
 	if err := json.Unmarshal(raw, &author); err != nil {
@@ -143,19 +172,22 @@ type queryer interface {
 }
 
 // loadLookups reads what want asks for, one statement per kind that asks anything, so a batch costs
-// at most four reads of followers and authors however many events it holds. Each read is the
-// per-id read the outbox made before, over a set of ids: the same rows, in the same order for each
-// id. An id that is no uuid is never sent to Postgres, which would refuse the whole statement over
-// it; it is recorded failed, as the per-id read failed on it before.
+// at most five reads however many events it holds: ask followers, comment authors, message
+// authors, document authors, and mention deliveries. Each read is the per-id read the outbox made
+// before, over a set of ids: the same rows, in the same order for each id. An id that is no uuid
+// is never sent to Postgres, which would refuse the whole statement over it; it is recorded failed,
+// as the per-id read failed on it before.
 func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error) {
 	found := &lookups{
 		asks: map[string][]string{}, comments: map[string]commentAuthors{},
-		messages: map[string]json.RawMessage{}, documents: map[string][]string{}, failed: map[string]error{},
+		messages: map[string]json.RawMessage{}, documents: map[string][]string{},
+		mentions: map[string]mentionDeliveries{}, failed: map[string]error{},
 	}
 	asks := validIDs(want.asks, "ask", "load followers of ask %q", found.failed)
 	comments := validIDs(want.comments, "comment", "load comment author %q", found.failed)
 	messages := validIDs(want.messages, "message", "load message author %q", found.failed)
 	documents := validIDs(want.documents, "document", "load document %q session authors", found.failed)
+	mentions := validIDs(want.mentions, "mention", "load mention deliveries of comment %q", found.failed)
 	if err := loadFollowers(ctx, db, asks, found); err != nil {
 		return nil, err
 	}
@@ -166,6 +198,9 @@ func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error
 		return nil, err
 	}
 	if err := loadDocumentSessionAuthors(ctx, db, documents, found); err != nil {
+		return nil, err
+	}
+	if err := loadMentionDeliveries(ctx, db, mentions, found); err != nil {
 		return nil, err
 	}
 	return found, nil
@@ -318,6 +353,54 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string, f
 	})
 	if err != nil {
 		return fmt.Errorf("load the batch's document session authors: %w", err)
+	}
+	return nil
+}
+
+// mentionDeliveryQuery groups every comment's mention attempts by the comment and the session each
+// was sent to. An attempt pending for longer than model.DeliveryClaimLapse - by its claim, or by
+// its creation when no sender ever claimed it - is abandoned, the same lease the API's claimLapsed
+// gives a sender (internal/dispatch/api), so it no longer holds the outbox's copy back.
+var mentionDeliveryQuery = `
+	select comment_id::text, session_id,
+	       bool_or(state = 'sent'),
+	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
+	from comment_deliveries
+	where comment_id = any($1::text[]::uuid[]) and session_id is not null
+	group by comment_id, session_id
+`
+
+// loadMentionDeliveries reads what the mentions of every comment in ids delivered
+// (mentionDeliveries). Only a comment.created whose mentions resolved to a session asks
+// (eventDestinations): every other event, edits, resolutions and reopenings included, suppresses
+// nothing. A comment no attempt was recorded for answers empty sets, so it suppresses nothing
+// either.
+func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found *lookups) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(ctx, mentionDeliveryQuery, ids)
+	if err != nil {
+		return fmt.Errorf("load the batch's mention deliveries: %w", err)
+	}
+	var commentID, sessionID string
+	var sent, pending bool
+	_, err = pgx.ForEachRow(rows, []any{&commentID, &sessionID, &sent, &pending}, func() error {
+		deliveries, ok := found.mentions[commentID]
+		if !ok {
+			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}}
+			found.mentions[commentID] = deliveries
+		}
+		switch {
+		case sent:
+			deliveries.sent[sessionID] = struct{}{}
+		case pending:
+			deliveries.pending[sessionID] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("load the batch's mention deliveries: %w", err)
 	}
 	return nil
 }

@@ -34,7 +34,7 @@ type pendingEvent struct {
 	attempts     int
 	destinations []string
 	slug         string
-	route        *string
+	routing      routing
 	// candidates are the owner's events that are due and that the batch's choice of owners found
 	// (readBatch), and windowSize how many of the owner's events the batch read before it kept the
 	// first batchSize due ones: a candidate a window read whole does not hold is one past it.
@@ -45,6 +45,16 @@ type pendingEvent struct {
 	// event has no destinations: it is backed off, and holds back no other event.
 	failure    error
 	failureLog string
+}
+
+// routing is what the batch read off the event's issue when it publishes, not what it was when the
+// event was written: the owner's route (the issue's, or the issue's whose document the event is
+// about), and the session holding the issue's claim ("" when the issue is unclaimed or a person
+// holds it, since a person has no Envoy topic). Every batch reads them again (readBatchSQL), so a
+// retry after the route or the claim moved reaches the new destination.
+type routing struct {
+	route    *string
+	claimant string
 }
 
 // readBatchSQL chooses a batch and reads it, writing nothing. It chooses owners that have a due
@@ -62,8 +72,9 @@ type pendingEvent struct {
 // row: at most batchSize events are sent per batch, and each owner keeps a prefix of its events, the
 // owners' events interleaved as they were written, so a backlog over many owners makes short chains
 // rather than long ones for a few. The choice carries only each row's id and back-off: the event's
-// own columns, and the issue, document and project columns a publish needs, are joined onto the
-// kept rows. A kept row's event is read by its id in a lateral subquery with a limit, which
+// own columns, and the issue (its route and claim, routing), document and project columns a
+// publish needs, are joined onto the kept rows. A kept row's event is read by its id in a lateral
+// subquery with a limit, which
 // Postgres does not flatten into a join, so each is one lookup of events_pkey: as a join, the
 // planner, which expects many more kept rows than a batch keeps, merges them with a walk of every
 // event's id.
@@ -121,6 +132,7 @@ const readBatchSQL = `
 	select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''),
 	       e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count,
 	       e.published_destinations, coalesce(ar.slug, ''), coalesce(i.route, ai.route),
+	       coalesce(case when i.claimed_by ->> 'kind' = 'session' then i.claimed_by ->> 'id' end, ''),
 	       coalesce(e.issue_key, e.artifact_id::text, e.project_key), r.due, r.next_attempt_at, r.candidates,
 	       r.window_size
 	from ranked r
@@ -160,7 +172,8 @@ func readBatch(ctx context.Context, deps Deps) (pending []pendingEvent, stopped 
 			&item.attempts,
 			&destinations,
 			&item.slug,
-			&item.route,
+			&item.routing.route,
+			&item.routing.claimant,
 			&owner,
 			&item.due,
 			&item.nextAttempt,
@@ -263,10 +276,14 @@ type batchEvent struct {
 	item contracts.Envelope
 	// delivered is the set of the event's published_destinations (publishedDestinationSet).
 	// destinationsOf are every destination the event has; resolveErr is why the list is
-	// incomplete, when it is (eventDestinations).
+	// incomplete, when it is; mentionPending is a session's copy left out of the list for a
+	// mention still being sent, which defers the event (eventDestinations, settleEvent). A
+	// copy so left out is no destination of the event, so it holds none of the owner's later
+	// events back.
 	delivered      map[string]struct{}
 	destinationsOf []destination
 	resolveErr     error
+	mentionPending bool
 	sends          []*chainSend
 	// held are the not-due events of the owner that held a destination of this one back.
 	held    []blocker

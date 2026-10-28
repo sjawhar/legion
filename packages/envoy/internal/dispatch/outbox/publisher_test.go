@@ -52,10 +52,16 @@ type unfenced struct{}
 
 func (unfenced) Deadline() time.Time { return time.Now().Add(time.Hour) }
 
+// errMentionPending is what publish returns when the event's destinations held a mentioned
+// session's copy back for a mention still being sent (destinations.leftToMention), and nothing
+// else kept the event from finishing: the batch defers such an event (settleEvent).
+var errMentionPending = errors.New("a mention's delivery is still undecided")
+
 // publish sends event to each of its destinations not in delivered, as a batch of that one event
 // would, one at a time - a role route forwarded to its holder as deps resolves it - and returns
-// every failure, each named by its destination.
-func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
+// every failure, each named by its destination, or errMentionPending when there is none and a
+// mentioned session's copy was held back.
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, routing routing, delivered map[string]struct{}) error {
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return nil
 	}
@@ -64,12 +70,12 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 		return err
 	}
 	want := newWanted()
-	_, _ = eventDestinations(event, item.Topic, route, want)
+	_, _, _ = eventDestinations(event, item.Topic, routing, want)
 	found, err := loadLookups(ctx, deps.Store.Pool, want)
 	if err != nil {
 		return err
 	}
-	list, resolveErr := eventDestinations(event, item.Topic, route, found)
+	list, mentionPending, resolveErr := eventDestinations(event, item.Topic, routing, found)
 	single := &batchEvent{item: item, destinationsOf: list}
 	resolveRoleHolders(ctx, deps, []*batchEvent{single})
 	sender := deps.Publisher.WindowUntil(nil)
@@ -95,7 +101,13 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 			failures = append(failures, fmt.Errorf("%s %q: %w", dest.label, dest.id, err))
 		}
 	}
-	return errors.Join(append(failures, resolveErr)...)
+	if err := errors.Join(append(failures, resolveErr)...); err != nil {
+		return err
+	}
+	if mentionPending {
+		return errMentionPending
+	}
+	return nil
 }
 
 // routeTopics runs add, one of an event's route rules, over event with the followers and authors
