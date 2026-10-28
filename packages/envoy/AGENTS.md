@@ -570,6 +570,10 @@ document it was read from
 (`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a
 reader that edits its tree changes nothing a later read of the replica meets
 (`TestEditingALiveReadsTreeChangesNoLaterRead`).
+Inside a write transaction, `docTree` and a version's capture take the write's own rendering in
+place of reading the fork whenever it describes the fork (`liveWrite.rendering`), so a caller of
+`docTree` must not change the tree it gets; `heldTree` still reads the fork and returns a tree its
+reader owns.
 
 A read takes up to three locks, in one order: the room's state lock; then the replica's, which a
 read only tries; then the live document's, for the copy's encode. A version's

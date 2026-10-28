@@ -401,6 +401,23 @@ type renderPathCounts struct {
 	beforeRendered atomic.Uint64
 }
 
+// forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking a
+// tree already in hand avoided, so a test can assert that a write reads its fork no more often than
+// it means to, and a measurement build can report how often each read is avoided. The service
+// keeps one (Service.forkTrees). Nothing in the service reads them.
+type forkTreeCounts struct {
+	// read counts the trees read off a write transaction's fork (readFork): an operation's reads
+	// before and after its write, or its read-back's read in place of the latter (applyLive), and
+	// the reads joined to the transaction (docTree, heldTree, captureLiveTextAndAuthors).
+	read atomic.Uint64
+	// afterShared counts the operations whose tree after the write was the one their read-back
+	// read (applyLive), each a fork read avoided.
+	afterShared atomic.Uint64
+	// renderingReused counts the joined reads that took the write's rendering in place of reading
+	// the fork (reuseRendering), each a fork read avoided.
+	renderingReused atomic.Uint64
+}
+
 // observedAsks is the ask blocks a logged update left in the room's document, as the update
 // observer hands them to classify: walked from tree, the replica's rendering after the update,
 // only on the first call to askBlocks, so a classify that never reads them - an identity repair's,

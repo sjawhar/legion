@@ -125,7 +125,7 @@ func (s *Service) SetAskBlockText(
 			updateErr = pmdoc.Update(transaction, fragment, next)
 		})
 		return updateErr
-	})
+	}, nil)
 	// An edit that re-sends the values the block already holds writes nothing, which the live
 	// path reports as ErrNoChanges. It is the same ask the caller asked for, so it succeeds.
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {

@@ -43,9 +43,11 @@ func mergeInto[K comparable, V any](dst *map[K]V, src map[K]V) {
 	maps.Copy(*dst, src)
 }
 
-// recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
-func recoverMutation(room string, err *error) {
+// recoverMutation, deferred around a document mutation, turns its panic into *err and logs it, and
+// reports through *panicked that the mutation panicked.
+func recoverMutation(room string, err *error, panicked *bool) {
 	if recovered := recover(); recovered != nil {
+		*panicked = true
 		*err = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
 		slog.Error("dispatch: document mutation panicked", "room", room, "error", *err)
 	}
@@ -88,7 +90,13 @@ func recoverMutation(room string, err *error) {
 // is deterministic over one state - pmdoc.Read and ReadForRendering differ only in copying
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
+//
+// readBack, when not nil, is handed the fork's tree as mutate left it, for a caller that reads its
+// own write back (MarkQuote). It runs inside the closure that guards mutate (recoverMutation), so
+// its failure or panic is the operation's and is answered as mutate's would be, before the change
+// check and every refusal after it. Between it and applyLive's read after the write only reads
+// touch the fork, so the tree it was handed is the one that read would make, and serves as both.
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error, readBack func(after *pmdoc.Node) error) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
 	}
@@ -111,11 +119,14 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	read := write.forkRead
 	// An operation that changed the fork but does not reach the end below leaves it holding
 	// changes its transaction never recorded; the next operation rebuilds it. One that changed
-	// nothing leaves the fork as it was, so the next operation keeps it.
+	// nothing leaves the fork as it was, so the next operation keeps it - unless its mutate or its
+	// read-back panicked: the fork is then in a state nothing vouches for, whatever updates holds,
+	// since ygo emits a panicking transaction's update except where its own buildPhase2 panics, and
+	// the rendering a joined read may take (liveWrite.rendering) must never outlive such a fork.
 	var updates [][]byte
-	recorded := false
+	recorded, panicked := false, false
 	defer func() {
-		if !recorded && len(updates) > 0 {
+		if panicked || (!recorded && len(updates) > 0) {
 			// The rendering describes that fork, so it goes with it (releaseFork). forkLive's
 			// rebuild drops it too; abandoning both in one call is what covers an operation that
 			// recorded the rendering and then failed to version.
@@ -134,7 +145,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// (above), and is then picked up here, before mutate moves the fork it describes; only beside
 	// a readable tree, since one the reader refuses is the refusal, whatever else is known. The
 	// path it took is counted once, when it is first needed (renderPathCounts).
-	before, startErr := treeOf(fork)
+	before, startErr := s.readFork(fork)
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
@@ -170,9 +181,19 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		updates = append(updates, append([]byte(nil), update...))
 	})
 	margin, stopMargin := watchMargin(fork)
+	var readBackTree *pmdoc.Node
 	mutateErr := func() (err error) {
-		defer recoverMutation(artifactID, &err)
-		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
+		defer recoverMutation(artifactID, &err, &panicked)
+		if err := mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) }); err != nil {
+			return err
+		}
+		if readBack == nil {
+			return nil
+		}
+		if readBackTree, err = s.readFork(fork); err != nil {
+			return err
+		}
+		return readBack(readBackTree)
 	}()
 	stopMargin()
 	unsubscribe()
@@ -189,7 +210,14 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if len(updates) == 0 {
 		return websocket.ErrNoChanges
 	}
-	tree, err := treeOf(fork)
+	// The tree the write left: the one the read-back read, when there was one (see readBack above),
+	// else read now.
+	tree := readBackTree
+	if tree != nil {
+		s.forkTrees.afterShared.Add(1)
+	} else {
+		tree, err = s.readFork(fork)
+	}
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	if err == nil {
@@ -471,7 +499,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			return updateErr
 		}
 		return nil
-	})
+	}, nil)
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
 		return canonical, nil
 	}
@@ -574,7 +602,7 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 		return nil, false, err
 	}
 	if fork != nil {
-		tree, err := treeOf(fork)
+		tree, err := s.readFork(fork)
 		return tree, true, err
 	}
 	if live := s.srv.GetDoc(artifactID); live != nil {
@@ -1084,7 +1112,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			return mutationErr
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		// A batch that resolved and wrote nothing is not a failure: it is the verdict the route
 		// mints no version for.
@@ -1144,7 +1172,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 			})
 			return updateErr
 		})
-	})
+	}, nil)
 	if err != nil {
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
@@ -1242,7 +1270,7 @@ func (s *Service) setBlockAttributes(ctx context.Context, artifactID, blockID st
 			return updateErr
 		}
 		return nil
-	})
+	}, nil)
 }
 
 // NamedVersion records the live document as a deliberately named immutable version. Like
@@ -1427,10 +1455,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		if write.cold {
 			capture = capture.withoutInflight(write, actor)
 		}
-		if write.tree != nil && write.fork == fork {
-			return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}, capture, nil
+		if rendering, reused := s.reuseRendering(write, fork, "capture"); reused {
+			return rendering, capture, nil
 		}
-		if tree, err = treeOf(fork); err != nil {
+		if tree, err = s.readFork(fork); err != nil {
 			return renderedTree{}, authorCapture{}, err
 		}
 	} else {
