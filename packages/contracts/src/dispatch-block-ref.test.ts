@@ -4,6 +4,7 @@ import {
   blockPointerValueProblem,
   DISPATCH_BLOCK_ID_ENCODINGS,
   DISPATCH_BLOCK_POINTER_VALUES,
+  DISPATCH_TYPED_BLOCK_ID_SPELLINGS,
   decodeBlockId,
   encodeBlockId,
   formatBlockReference,
@@ -11,6 +12,7 @@ import {
   parseBlockFragment,
   parseBlockPointerValue,
   parseCanonicalBlockReference,
+  typedBlockIdAttribute,
 } from "./dispatch-block-ref";
 
 // Ids at the bound and one byte past it, in UTF-8 bytes: an `é` is two, so the multi-byte pair
@@ -126,4 +128,21 @@ test("the Go schema's table of block[] values is the same table", async () => {
     import.meta.url
   );
   expect(JSON.parse(await Bun.file(path).text())).toEqual([...DISPATCH_BLOCK_POINTER_VALUES]);
+});
+
+test.each([...DISPATCH_TYPED_BLOCK_ID_SPELLINGS])("writes typed block id %p", (row) => {
+  expect(typedBlockIdAttribute(row.id)).toBe(row.written);
+});
+
+test("the Go renderer's table of typed block id spellings is the same table", async () => {
+  // `packages/envoy/internal/dispatch/pmdoc` cannot import TypeScript, so it walks a JSON copy.
+  // Regenerate it from `packages/contracts` rather than editing it:
+  //   bun -e 'import { DISPATCH_TYPED_BLOCK_ID_SPELLINGS as t } from "./src/dispatch-block-ref.ts";
+  //           await Bun.write("../envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json",
+  //             JSON.stringify(t, null, 2) + "\n")'
+  const path = new URL(
+    "../../envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json",
+    import.meta.url
+  );
+  expect(JSON.parse(await Bun.file(path).text())).toEqual([...DISPATCH_TYPED_BLOCK_ID_SPELLINGS]);
 });

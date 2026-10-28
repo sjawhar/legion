@@ -1718,14 +1718,14 @@ the fixture generator reads that checked-in file. A typed block is CommonMark ge
 syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
 The renderer writes the id so that both parsers read it back as the tree holds it, whatever id a
 browser set (`pmdoc.TypedBlockIDAttribute`): `#block-id` when the browser editor's parser reads
-all of it as that shortcut and it holds no `&` - no whitespace, `"`, `#`, `'`, `.`, `<`, `=`, `>`,
-backtick or `}` ends it - and `id="…"` otherwise, its `&`, `"`, line feeds and carriage returns
-written as character references (`a b` is written `id="a b"`, `q:1` `#q:1`); a U+0000 is written
-U+FFFD, as markdown reads it. Both parsers read either form, `id="…"` with its character
-references decoded and no backslash escape. Go refuses what the browser editor would read another
-way or not at all: a shortcut holding `&`, which it decodes, or ending at `#`, `.` or `}`, an id
-written twice, an `id` with no value or an empty one, and a `blockId` attribute. A block schema
-declares no attribute named `id` or `blockId`.
+all of it as that shortcut and it holds no `&` - no space, tab or line ending, `"`, `#`, `'`, `.`,
+`<`, `=`, `>`, backtick or `}` ends it - and `id="…"` otherwise, its `&`, `"`, line feeds and
+carriage returns written as character references (`a b` is written `id="a b"`, `q:1` `#q:1`); a
+U+0000 is written U+FFFD, as markdown reads it. Both parsers read either form, `id="…"` with its
+character references decoded and no backslash escape. Go refuses what the browser editor would
+read another way or not at all: a shortcut holding `&`, which it decodes, or ending at `#`, `.` or
+`}`, an id written twice, an `id` with no value or an empty one, and a `blockId` attribute. A
+block schema declares no attribute named `id` or `blockId`.
 Both parsers close a typed block at a line of at least as many colons as the opener, indented less than four
 columns past where its lines start, whatever block inside it the line would otherwise continue - a
 paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text

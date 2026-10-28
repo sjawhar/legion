@@ -270,12 +270,13 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 		}
 		switch value[offset] {
 		case '#':
-			// The id runs to the first character ending the browser editor's shortcut; one that
-			// voids it there (a quote, `<`, `=`, `>`, a backtick), or `&`, which it decodes, is
-			// then no separator, and the line is refused below.
+			// The id runs to the first character no written `#id` holds
+			// (typedBlockIDShortcutExcluded); one that voids the shortcut in the browser editor (a
+			// quote, `<`, `=`, `>`, a backtick), or `&`, which it decodes, is then no separator, and
+			// the line is refused below.
 			start := offset + 1
 			offset = start
-			for offset < len(value) && strings.IndexByte(typedBlockIDShortcutStops+"&", value[offset]) < 0 {
+			for offset < len(value) && strings.IndexByte(typedBlockIDShortcutExcluded, value[offset]) < 0 {
 				offset++
 			}
 			if start == offset || attrs[BlockIDAttr] != nil {
@@ -369,10 +370,13 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 	return attrs, nil
 }
 
-// typedBlockIDShortcutStops is each character that ends a typed block's `#id` in the browser
-// editor's parser (micromark-extension-directive): a space, a tab, a line ending, `#`, `.` or `}`
-// ends it, and a quote, `<`, `=`, `>` or a backtick in it makes the line no directive.
-const typedBlockIDShortcutStops = "\t\n\r \"#'.<=>`}"
+// typedBlockIDShortcutExcluded is each character a typed block's written `#id` cannot hold. The
+// browser editor's parser (micromark-extension-directive) ends the shortcut at a space, a tab, a
+// line ending, `#`, `.` or `}`, and reads a line whose shortcut holds a quote, `<`, `=`, `>` or a
+// backtick as no directive. An `&` ends nothing there, but that parser decodes a character
+// reference in the shortcut and Go's reader refuses one holding `&`, so the two never read one
+// back alike.
+const typedBlockIDShortcutExcluded = "\t\n\r \"#&'.<=>`}"
 
 // typedBlockIDReferences writes the characters of an `id="…"` value that would otherwise end it or
 // decode (`"`, a line ending, `&`) as character references, which both parsers decode.
@@ -381,14 +385,16 @@ var typedBlockIDReferences = strings.NewReplacer("&", "&amp;", `"`, "&#x22;", "\
 // TypedBlockIDAttribute is how a typed block's opening line writes the block's id, which both
 // parsers read back as id, whatever it holds: `#id` when the browser editor's parser reads all of
 // it as that shortcut and neither parser decodes anything in it (it holds no
-// typedBlockIDShortcutStops character and no `&`), and `id="…"` otherwise, its `&`, `"`, line
-// feeds and carriage returns as character references (`q:1` and `décision` are written `#q:1` and
+// typedBlockIDShortcutExcluded character), and `id="…"` otherwise, its `&`, `"`, line feeds and
+// carriage returns as character references (`q:1` and `décision` are written `#q:1` and
 // `#décision`, `a b` is written `id="a b"`). The browser editor writes the same but for an id
 // holding `&`, which it writes raw in either form and reads with each character reference decoded.
 // A browser's update can give a block any id (storedBlockID), and an ask row or anchor keyed on it
-// finds the block by it only while its markdown reads it back.
+// finds the block by it only while its markdown reads it back. `@legion/contracts`'
+// typedBlockIdAttribute is its twin; both are tested against DISPATCH_TYPED_BLOCK_ID_SPELLINGS,
+// whose JSON copy is `testdata/typed-block-id-spellings.json`.
 func TypedBlockIDAttribute(id string) string {
-	if id != "" && !strings.ContainsAny(id, typedBlockIDShortcutStops+"&") {
+	if id != "" && !strings.ContainsAny(id, typedBlockIDShortcutExcluded) {
 		return "#" + id
 	}
 	return `id="` + typedBlockIDReferences.Replace(id) + `"`

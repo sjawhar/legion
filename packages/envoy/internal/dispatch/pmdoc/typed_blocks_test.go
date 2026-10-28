@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -108,6 +109,33 @@ func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
 		}
 		if id := engine.Children[0].Attrs[BlockIDAttr]; id != test.read {
 			t.Errorf("id %q: the engine reads %q with the id %q, want %q", test.id, markdowns[index], id, test.read)
+		}
+	}
+}
+
+// A typed block's id is written the way the one table @legion/contracts holds says, so a client
+// finding a block's opener in a version's markdown (typedBlockIdAttribute) looks for the spelling
+// the renderer wrote: `testdata/typed-block-id-spellings.json` is generated from
+// DISPATCH_TYPED_BLOCK_ID_SPELLINGS, which `packages/contracts/src/dispatch-block-ref.test.ts`
+// holds this file to.
+func TestTypedBlockIDAttributeWritesTheSharedTable(t *testing.T) {
+	raw, err := os.ReadFile("testdata/typed-block-id-spellings.json")
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	var rows []struct {
+		ID      string `json:"id"`
+		Written string `json:"written"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the shared typed block id table is empty")
+	}
+	for _, row := range rows {
+		if written := TypedBlockIDAttribute(row.ID); written != row.Written {
+			t.Errorf("TypedBlockIDAttribute(%q) = %q, want %q", row.ID, written, row.Written)
 		}
 	}
 }

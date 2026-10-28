@@ -1,0 +1,102 @@
+[
+  {
+    "id": "callout-1",
+    "written": "#callout-1"
+  },
+  {
+    "id": "q:1",
+    "written": "#q:1"
+  },
+  {
+    "id": "décision",
+    "written": "#décision"
+  },
+  {
+    "id": "a{b",
+    "written": "#a{b"
+  },
+  {
+    "id": "a\\b",
+    "written": "#a\\b"
+  },
+  {
+    "id": "a b",
+    "written": "#a b"
+  },
+  {
+    "id": "a　b",
+    "written": "#a　b"
+  },
+  {
+    "id": "a�b",
+    "written": "#a�b"
+  },
+  {
+    "id": "a b",
+    "written": "id=\"a b\""
+  },
+  {
+    "id": "a\tb",
+    "written": "id=\"a\tb\""
+  },
+  {
+    "id": "a.b",
+    "written": "id=\"a.b\""
+  },
+  {
+    "id": "a#b",
+    "written": "id=\"a#b\""
+  },
+  {
+    "id": "a}b",
+    "written": "id=\"a}b\""
+  },
+  {
+    "id": "a'b",
+    "written": "id=\"a'b\""
+  },
+  {
+    "id": "a<b",
+    "written": "id=\"a<b\""
+  },
+  {
+    "id": "a=b",
+    "written": "id=\"a=b\""
+  },
+  {
+    "id": "a>b",
+    "written": "id=\"a>b\""
+  },
+  {
+    "id": "a`b",
+    "written": "id=\"a`b\""
+  },
+  {
+    "id": "a\"b",
+    "written": "id=\"a&#x22;b\""
+  },
+  {
+    "id": "R&D",
+    "written": "id=\"R&amp;D\""
+  },
+  {
+    "id": "x&amp;y",
+    "written": "id=\"x&amp;amp;y\""
+  },
+  {
+    "id": "x\ny",
+    "written": "id=\"x&#xA;y\""
+  },
+  {
+    "id": "x\ry",
+    "written": "id=\"x&#xD;y\""
+  },
+  {
+    "id": "x\r\ny",
+    "written": "id=\"x&#xD;&#xA;y\""
+  },
+  {
+    "id": "",
+    "written": "id=\"\""
+  }
+]

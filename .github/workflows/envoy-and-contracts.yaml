@@ -383,10 +383,11 @@ jobs:
               - 'skills/dispatch-writing-specs/**'
               # The Go copies its tests hold the TypeScript to: src/dispatch-text-references.test.ts
               # and src/dispatch-href.test.ts read the Go reader's JSON tables,
-              # src/dispatch-block-ref.test.ts reads pmdoc's block pointer table, and
-              # scripts/gen-go.test.ts checks the generated Go file is current.
+              # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
+              # tables, and scripts/gen-go.test.ts checks the generated Go file is current.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json'
               - 'packages/envoy/internal/contracts/generated.go'
               # The second file scripts/gen-go.ts writes, checked by the same gen-go.test.ts.
               - 'packages/daemon/internal/dispatch/generated.go'

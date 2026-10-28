@@ -193,6 +193,12 @@
 
 ### Fixed
 
+- `dispatch request-approval` finds an ask block whose id the renderer writes `id="…"` (an id
+  holding a space, `&` or another character the `#` shortcut cannot hold, such as `a b` or
+  `R&D`, written `id="a b"` and `id="R&amp;D"`). It looked only for `ask{#<id>`, so it named such
+  a block as one the latest version does not hold yet and refused every request over the
+  document; it now looks for the opener as `@legion/contracts`' `typedBlockIdAttribute` writes it.
+
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file
   that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader

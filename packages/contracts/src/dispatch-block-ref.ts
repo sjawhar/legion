@@ -326,3 +326,64 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly { value: string; ok: boolea
       why: "U+FEFF between references",
     },
   ];
+
+/**
+ * Each character a typed block's written `#id` cannot hold. The browser editor's parser
+ * (micromark-extension-directive) ends the shortcut at a space, a tab, a line ending, `#`, `.` or
+ * `}`, and reads a line whose shortcut holds a quote, `<`, `=`, `>` or a backtick as no directive.
+ * An `&` ends nothing there, but that parser decodes a character reference in the shortcut and
+ * Go's reader refuses one holding `&`, so the two never read one back alike. Go's twin is
+ * `pmdoc.typedBlockIDShortcutExcluded`.
+ */
+export const TYPED_BLOCK_ID_SHORTCUT_EXCLUDED = "\t\n\r \"#&'.<=>`}";
+
+/**
+ * How a typed block's opening line writes the block's id, as Go's renderer
+ * (`pmdoc.TypedBlockIDAttribute`) writes it: `#id` when the id is not empty and holds no
+ * TYPED_BLOCK_ID_SHORTCUT_EXCLUDED character, else `id="…"` with its `&`, `"`, line feeds and
+ * carriage returns as character references (`q:1` is written `#q:1`, `a b` `id="a b"`, `R&D`
+ * `id="R&amp;D"`). A reader finding a block's opener in a version's markdown looks for this
+ * spelling. Both are tested against DISPATCH_TYPED_BLOCK_ID_SPELLINGS, whose JSON copy is
+ * `packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json`.
+ */
+export function typedBlockIdAttribute(id: string): string {
+  if (id !== "" && ![...TYPED_BLOCK_ID_SHORTCUT_EXCLUDED].some((stop) => id.includes(stop))) {
+    return `#${id}`;
+  }
+  // `&` first, so no reference written after it is written again.
+  const value = id
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&#x22;")
+    .replaceAll("\n", "&#xA;")
+    .replaceAll("\r", "&#xD;");
+  return `id="${value}"`;
+}
+
+/** Each typed block id and how its opening line writes it (`typedBlockIdAttribute`). */
+export const DISPATCH_TYPED_BLOCK_ID_SPELLINGS: readonly { id: string; written: string }[] = [
+  { id: "callout-1", written: "#callout-1" },
+  { id: "q:1", written: "#q:1" },
+  { id: "décision", written: "#décision" },
+  { id: "a{b", written: "#a{b" },
+  { id: "a\\b", written: "#a\\b" },
+  { id: "a\u00a0b", written: "#a\u00a0b" },
+  { id: "a\u3000b", written: "#a\u3000b" },
+  { id: "a\uFFFDb", written: "#a\uFFFDb" },
+  { id: "a b", written: 'id="a b"' },
+  { id: "a\tb", written: 'id="a\tb"' },
+  { id: "a.b", written: 'id="a.b"' },
+  { id: "a#b", written: 'id="a#b"' },
+  { id: "a}b", written: 'id="a}b"' },
+  { id: "a'b", written: `id="a'b"` },
+  { id: "a<b", written: 'id="a<b"' },
+  { id: "a=b", written: 'id="a=b"' },
+  { id: "a>b", written: 'id="a>b"' },
+  { id: "a`b", written: 'id="a`b"' },
+  { id: 'a"b', written: 'id="a&#x22;b"' },
+  { id: "R&D", written: 'id="R&amp;D"' },
+  { id: "x&amp;y", written: 'id="x&amp;amp;y"' },
+  { id: "x\ny", written: 'id="x&#xA;y"' },
+  { id: "x\ry", written: 'id="x&#xD;y"' },
+  { id: "x\r\ny", written: 'id="x&#xD;&#xA;y"' },
+  { id: "", written: 'id=""' },
+];

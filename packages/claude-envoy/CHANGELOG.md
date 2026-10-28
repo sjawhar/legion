@@ -149,6 +149,9 @@
 
 ### Fixed
 
+- The bundled `dispatch request-approval` finds an ask block whose id the renderer writes
+  `id="…"`, such as `a b` (`id="a b"`) or `R&D` (`id="R&amp;D"`), instead of naming it as one the
+  latest version does not hold yet and refusing every request over the document.
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
   any fact and names the current run's queued task, so the worker ends the turn and calls
