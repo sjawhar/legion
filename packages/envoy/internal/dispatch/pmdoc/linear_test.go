@@ -297,31 +297,46 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // its domain, its `@` or its previous character, so nothing a refused read scans may be scanned
 // again from the next place. Each shape is one paragraph of one text node, which no element limit
 // stops, read as a rendering is and written from that tree.
+//
+// A paragraph that reads back in no spelling is written in every spelling runSpellings lists for
+// it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
+// and each distinct writing is read back once (TestRenderReadsEachWritingBackUnderAReaderOnce). It
+// is timed up to renderFullTarget, which -race shrinks, as
+// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 	for _, shape := range []string{
 		"_www.a", "-www.x_", `(https://-a.b\`, ".www.a&", ".www", "www.", `www\.`, `www\.a `, "HTTP://a ", ` "'https://-a.b`, `(""www.a_`, ` ".www.a`,
 		";https://-a.b", "x;www.a_", `\*https://-a`, "&amp;https://-a.", "éhttps://-a.", `http\://-a.`, `www\.a_`, `x"www.a_`, ";;", `\*`, ";a_a@", "é+a@b-", `www\.a@`,
 	} {
-		growsLinearly(t, fmt.Sprintf("reading and writing %q", shape), []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) (time.Duration, error) {
-			markdown := strings.Repeat(shape, size/len(shape)) + "._\n"
-			var doc *Node
-			parsed, err := cpuTimeOf(func() {
-				var err error
-				if doc, err = ParseRendering(markdown); err != nil {
-					t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
-				}
-			})
-			if err != nil {
-				return 0, err
-			}
-			rendered, err := cpuTimeOf(func() {
-				if _, err := Render(doc); err != nil {
-					t.Fatalf("render %d bytes of %q: %v", size, shape, err)
-				}
-			})
-			return parsed + rendered, err
-		})
+		readsAndWritesLinearly(t, "", shape, []int{16 << 10, 256 << 10, 1 << 20})
 	}
+	readsAndWritesLinearly(t, unreadableRun, "lorem ipsum ", []int{renderFullTarget / 16, renderFullTarget})
+}
+
+// readsAndWritesLinearly requires a paragraph of head and then shape repeated to each of sizes to be
+// read as a rendering is and written from that tree in time linear in its size (growsLinearly).
+func readsAndWritesLinearly(t *testing.T, head, shape string, sizes []int) {
+	t.Helper()
+	what := head + shape
+	growsLinearly(t, fmt.Sprintf("reading and writing %q", what), sizes, growthAllowance, func(size int) (time.Duration, error) {
+		markdown := head + strings.Repeat(shape, (size-len(head))/len(shape)) + "._\n"
+		var doc *Node
+		parsed, err := cpuTimeOf(func() {
+			var err error
+			if doc, err = ParseRendering(markdown); err != nil {
+				t.Fatalf("parse %d bytes of %q: %v", size, what, err)
+			}
+		})
+		if err != nil {
+			return 0, err
+		}
+		rendered, err := cpuTimeOf(func() {
+			if _, err := Render(doc); err != nil {
+				t.Fatalf("render %d bytes of %q: %v", size, what, err)
+			}
+		})
+		return parsed + rendered, err
+	})
 }
 
 // Writing a tree of many blocks into a document takes time linear in its blocks when the blocks it
