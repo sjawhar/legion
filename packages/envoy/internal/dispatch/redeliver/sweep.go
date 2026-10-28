@@ -234,23 +234,33 @@ type limitRecord struct {
 // times those list calls for one result.
 const webhookRedeliveryLease = "webhook-redelivery"
 
+// jittered is the wait Run leaves after each sweep (duty.Jittered). It is a variable only so a test
+// can fix the draw.
+var jittered = duty.Jittered
+
 // Run sweeps now and then every interval until ctx ends, logging each sweep's counts: the failed
-// attempts listed, the deliveries they belong to, and how many deliveries had each outcome. Each
-// sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what the
-// installation's rate limit pays for that interval however many processes sweep - a process that
-// starts in the middle of another's interval, which is what a rolling update makes, finds that
+// attempts listed, the deliveries they belong to, and how many deliveries had each outcome. After
+// each sweep it waits the interval plus up to a tenth of it again (duty.Jittered), drawn afresh
+// every period, so two processes started together drift apart rather than reaching the lease in
+// step every interval for the life of both. The first sweep is not delayed: a process that starts
+// sweeps at once, as it always has.
+//
+// Each sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what
+// the installation's rate limit pays for that interval however many processes sweep - a process
+// that starts in the middle of another's interval, which is what a rolling update makes, finds that
 // interval swept and skips. The period is interval itself, the loop's own tick, and not the
-// package's Interval. leases is required, as it is of every leased loop (cmd/dispatch exits at
-// boot if the lease pool cannot be opened).
+// package's Interval; a wait of at least one interval always reaches the next period, so the jitter
+// never makes a process skip its own next sweep. leases is required, as it is of every leased loop
+// (cmd/dispatch exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
 		duty.Exclusive(ctx, leases, webhookRedeliveryLease, interval, s.sweepAndReport)
+		timer := time.NewTimer(jittered(interval))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
