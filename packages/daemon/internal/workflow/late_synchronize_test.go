@@ -174,27 +174,49 @@ func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
 }
 
 // Two moves in one second of GitHub's clock, head..h1 and h1..h2, their synchronizes delivered in
-// the reverse of their order, with h2's red between them: the older synchronize is in the newest
-// applied second, and its head h1 is one the record has passed (classify.LateSynchronize), so it
-// moves the head back to nothing and names its move; the head run closes and the red is decided at
-// once. Read by the clock alone it would move the record's head back to h1.
-func TestTwoMovesInOneSecondDeliveredReversedLeaveTheHeadAtTheNewer(t *testing.T) {
+// the reverse of their order: the older synchronize is not late by the clock (LateLifecycle), so it
+// moves the record's head back to h1, as on main - the floor of two moves in one GitHub second
+// delivered reversed. The pull request is judged from there: at h1, with h1's synchronize naming the
+// move from head the record held, nothing waits.
+func TestTwoMovesInOneSecondDeliveredReversedMoveTheHeadBackAsOnMain(t *testing.T) {
 	const dev = "legion-implementer[bot]"
 	second := time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
 	pool := migratedPool(t)
 	seedReviewOf(t, pool, "head", "green")
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	applyRefusingNothing(t, pool, engine, sentPush("head", "h1", dev), sentPush("h1", "h2", dev), namedSync("h1", "h2", dev, second),
-		settledAt("h2", "ci", 2, "ci"), namedSync("head", "h1", dev, second))
-	pr := probePullRequest(t, pool)
-	if pr.HeadSHA != "h2" || pr.Run != nil {
-		t.Fatalf("pull request at %s with a head run open %v, want h2 and closed", pr.HeadSHA, pr.Run != nil)
+		namedSync("head", "h1", dev, second))
+	if pr := probePullRequest(t, pool); pr.HeadSHA != "h1" {
+		t.Fatalf("pull request at %s, want h1: the synchronize of one second delivered last moves the head, as on main", pr.HeadSHA)
 	}
-	if got := issuePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("phase %s, want implementing: h2's red sends the work back", got)
-	}
-	if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
-		t.Fatalf("notices %v, want checks-red", got)
+}
+
+// No synchronize main would apply is dropped (classify.LateLifecycle decides lateness by GitHub's
+// clock alone): a stale push to a head h2's waiting run awaits, then the branch's real move b..y in
+// h2's second; and h1 awaited after a missed head..h1 synchronize, then a reset h2..head with both
+// its webhooks missed and a real head..h1 in h2's second. The pull request moves to the head, as on
+// main.
+func TestNoSynchronizeMainWouldApplyIsDroppedInTheWorkflow(t *testing.T) {
+	const dev = "legion-implementer[bot]"
+	second := time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		facts []intake.Fact
+		head  string
+	}{
+		{"a stale push to an awaited head", []intake.Fact{namedSync("x", "h2", dev, second), sentPush("y", "x", dev), sentPush("b", "y", dev),
+			namedSync("b", "y", dev, second)}, "y"},
+		{"an awaited head reached again after a missed reset", []intake.Fact{sentPush("head", "h1", dev), sentPush("h1", "h2", dev), namedSync("h1", "h2", dev, second),
+			sentPush("head", "h1", dev), namedSync("head", "h1", dev, second)}, "h1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), tc.facts...)
+			if pr := probePullRequest(t, pool); pr.HeadSHA != tc.head {
+				t.Fatalf("pull request at %s, want %s: the synchronize moves the head, as on main", pr.HeadSHA, tc.head)
+			}
+		})
 	}
 }
 

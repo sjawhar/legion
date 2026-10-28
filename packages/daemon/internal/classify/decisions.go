@@ -1125,69 +1125,6 @@ func LateLifecycle(observed, applied time.Time) bool {
 	return !observed.IsZero() && !applied.IsZero() && observed.Before(applied)
 }
 
-// LateSynchronize is whether a synchronize of the move from before to head, by sender, at GitHub's
-// clock at, is late: it names a move the record has already passed, so it moves no head and only
-// names its move (NameMove). It is late when GitHub's clock puts it before the newest applied
-// (LateLifecycle); and, since that clock is to the second, when it is in the newest applied second,
-// names its sender and a before other than the record's head, no chain of recorded pushes leads
-// from the record's head to its before, and its head is one the current path skipped (skipped): two
-// moves of one second whose synchronizes arrived in the reverse of their order. A chain of pushes
-// from the record's head to its before shows the branch went on from the head there, so the
-// synchronize is a new move; and one the record cannot tell either way - its head no skip of the
-// current path it can see, as one in the middle of skipped moves whose pushes are still to come,
-// or a move after a reset whose push and synchronize were both missed - is a move too, which waits
-// as any arrival does that its moves before have not reached, judged meanwhile by the release
-// before's rule (provisional): never dropped. Read as a move, a stale one moves the record's head
-// back (the floor of synchronizes of one second delivered reversed, unspentPushes). A synchronize
-// naming no sender is late by the clock alone, as the release before read it. The workflow decides
-// lateness with this, and the tests deliver every synchronize through it.
-func LateSynchronize(pr record.PullRequest, before, sender, head string, at time.Time) bool {
-	if LateLifecycle(at, pr.HeadUpdatedAt) {
-		return true
-	}
-	if sender == "" || before == "" || head == "" || at.IsZero() || !at.Equal(pr.HeadUpdatedAt) || before == pr.HeadSHA || head == pr.HeadSHA {
-		return false
-	}
-	if chainOf(pr.Pushes, pr.HeadSHA, before) != nil {
-		return false
-	}
-	return skipped(pr, head)
-}
-
-// skipped is whether head is one the current path skipped: the head an arrival of the open head run
-// said it moved from when that was not the head before it - a move whose synchronize the record
-// has not had - or one a chain of recorded pushes and moves named late leads from to such a head.
-// Heads the record held, or held in an earlier run, are not: the branch can return to them.
-func skipped(pr record.PullRequest, head string) bool {
-	if pr.Run == nil {
-		return false
-	}
-	awaited := map[string]bool{}
-	prev := pr.Run.Anchor.HeadSHA
-	for _, s := range pr.Run.Steps {
-		if s.Head == "" {
-			continue
-		}
-		if s.Before != "" && s.Before != prev {
-			awaited[s.Before] = true
-		}
-		prev = s.Head
-	}
-	if awaited[head] {
-		return true
-	}
-	links := clone(pr.Pushes)
-	for _, n := range pr.Run.Names {
-		links = append(links, record.ClassifiedPush{Before: n.Before, SHA: n.SHA})
-	}
-	for r := range awaited {
-		if chainOf(links, head, r) != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // RepeatedClose reports whether a close at observed repeats the close already applied to pr: pr is
 // recorded closed and the close's clock is not after the recorded one, or the close has none. A
 // later close is a second one, whose reopen between the two has not been delivered yet. Unlike

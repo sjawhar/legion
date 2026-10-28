@@ -187,11 +187,12 @@ func randomHistory(rng *rand.Rand) ([]record.ClassifiedPush, []runFact) {
 }
 
 // deliver applies f as the daemon does (workflow's pullRequestSynchronized): a synchronize is late,
-// and only names its move while a head run is open, when the workflow's rule says so
-// (LateSynchronize) or it moves no head (MovesBy) - whatever the history that drew it marked.
+// and only names its move while a head run is open, when GitHub's clock puts it before the newest
+// applied (LateLifecycle, the workflow's rule) or it moves no head (MovesBy) - whatever the history
+// that drew it marked.
 func deliver(f runFact, pr record.PullRequest) record.PullRequest {
 	if f.head != "" {
-		f.late = LateSynchronize(pr, f.before, f.sender, f.head, f.at) || !MovesBy(pr, f.head)
+		f.late = LateLifecycle(f.at, pr.HeadUpdatedAt) || !MovesBy(pr, f.head)
 	}
 	return f.apply(pr)
 }

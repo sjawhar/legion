@@ -292,11 +292,9 @@ func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 
 // A move after a reset whose synchronize was missed is a move, though GitHub's clock puts it in the
 // newest applied second and its head was held before: h0..h1 and h1..h2 arrive, the branch is reset
-// h2..h0 - its synchronize missed - and moves h0..h1 again in the same second as h2's. With the
-// reset's push recorded, a push chain leads from the record's head h2 to the move's before h0, so it
-// is a new move; with the reset's push missed too, nothing tells it from a stale synchronize, and it
-// is a move too. Either way the head is h1, as on main, and its run waits for the reset's
-// synchronize (the floor of a synchronize never delivered).
+// h2..h0 - its synchronize missed, its push delivered or missed too - and moves h0..h1 again in the
+// same second as h2's. Lateness is GitHub's clock alone, as on main, so the head is h1, as on main,
+// and its run waits for the reset's synchronize (the floor of a synchronize never delivered).
 func TestAMoveAfterAMissedResetInTheSameSecondIsAMove(t *testing.T) {
 	const dev = "dev"
 	t1, t2 := time.Date(2026, 10, 1, 0, 0, 1, 0, time.UTC), time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)
@@ -313,12 +311,45 @@ func TestAMoveAfterAMissedResetInTheSameSecondIsAMove(t *testing.T) {
 			pushed(record.ClassifiedPush{Before: "h1", SHA: "h2", Sender: dev}), {head: "h2", before: "h1", sender: dev, at: t2}, settles("h2", 3, "ci")}
 		facts = append(append(facts, tc.reset...), pushed(record.ClassifiedPush{Before: "h0", SHA: "h1", Sender: dev}))
 		pr := delivered(t, redAtH0(), facts...)
-		if LateSynchronize(pr, "h0", dev, "h1", t2) {
-			t.Errorf("%s: the move h0>h1 after the reset is late, want a move", tc.name)
-		}
 		pr = delivered(t, pr, runFact{head: "h1", before: "h0", sender: dev, at: t2})
 		if pr.HeadSHA != "h1" || (pr.Run != nil) != tc.open {
 			t.Errorf("%s: head %s, run open %v; want h1, open %v: the move waits for the reset's synchronize", tc.name, pr.HeadSHA, pr.Run != nil, tc.open)
+		}
+	}
+}
+
+// No synchronize main would apply is dropped: a synchronize in the newest applied second is a move,
+// whatever the record knows of its heads (lateness is GitHub's clock alone, LateLifecycle). Two
+// histories that a same-second lateness rule read as late and lost, each moving the head as on main:
+//
+//   - A stale push. h2's synchronize names x, which the record never held, so its run waits for x;
+//     a push y..x not on the branch's path is recorded, and the branch, having passed b with its
+//     push and synchronize missed, moves b..y in h2's second.
+//   - An awaited head reached again. h0..h1's synchronize is missed, h1..h2 arrives, so the run
+//     waits for h1; the branch is reset h2..h0 with both its webhooks missed, and moves h0..h1 in
+//     h2's second.
+func TestNoSynchronizeMainWouldApplyIsDropped(t *testing.T) {
+	const dev = "dev"
+	second := time.Date(2026, 10, 1, 0, 0, 1, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		facts []runFact
+		move  runFact
+	}{
+		{"a stale push to an awaited head", []runFact{{head: "h2", before: "x", sender: dev, at: second},
+			pushed(record.ClassifiedPush{Before: "y", SHA: "x", Sender: dev}), pushed(record.ClassifiedPush{Before: "b", SHA: "y", Sender: dev})},
+			runFact{head: "y", before: "b", sender: dev, at: second}},
+		{"an awaited head reached again after a missed reset", []runFact{pushed(record.ClassifiedPush{Before: "h0", SHA: "h1", Sender: dev}),
+			pushed(record.ClassifiedPush{Before: "h1", SHA: "h2", Sender: dev}), {head: "h2", before: "h1", sender: dev, at: second},
+			pushed(record.ClassifiedPush{Before: "h0", SHA: "h1", Sender: dev})},
+			runFact{head: "h1", before: "h0", sender: dev, at: second}},
+	} {
+		pr := delivered(t, redAtH0(), tc.facts...)
+		if pr.Run == nil {
+			t.Fatalf("%s: no head run waits", tc.name)
+		}
+		if pr = delivered(t, pr, tc.move); pr.HeadSHA != tc.move.head {
+			t.Errorf("%s: the record is at %s, want %s: the synchronize moves the head, as on main", tc.name, pr.HeadSHA, tc.move.head)
 		}
 	}
 }
