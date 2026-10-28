@@ -1922,13 +1922,15 @@ Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontm
 first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
 the same closes it, and its text is stored between plain `---` fences with line feeds between its
 lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
-as front matter to the document's end, reads no list, quote or footnote definition at the
-document's level in the rest, since no container opens inside front matter; the lines read as the
-other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines. Parse
-reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them as anywhere.
-So the renderer writes a rule that opens a document as `***` where `---` would be misread - a
-later `---` line would close front matter, or the document holds a list, quote or footnote
-definition at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
+as front matter to the document's end, reads no list, quote, footnote definition or typed block at
+the document's level in the rest, since no container opens inside front matter; the lines read as
+the other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines, and
+`---\n:::callout{kind="note" title="T"}\na\n:::` a rule and one paragraph holding the three lines
+after it. Parse reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them
+as anywhere. So the renderer writes a rule that opens a document as `***` where `---` would be
+misread - a later `---` line would close front matter, or the document holds a list, quote,
+footnote definition or typed block at its level (`holdsAContainerTheBrowserDrops`) - and `---`
+everywhere else.
 
 Two lists of one kind side by side read back as one when written with one marker, so the
 renderer writes a list whose kind matches the block before it - past an empty paragraph, which
@@ -2016,7 +2018,9 @@ holds writes its blocks with the item's tight lines, since that parser reads the
 (`itemBlocks`). Where the lines alone do not decide
 the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
 after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or
-typed blocks stand between - a document holding
+typed blocks stand between - or where this reader does not read them - the blank lines that would
+spread a quoted list item ending in a footnote definition whose typed block holds a fence no fence
+closed, which that parser reads as the code's (`quotedDefinitionFenceBlank`) - a document holding
 one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
 refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
 line before a block an item around it holds, however far out, since goldmark ends every item around
@@ -2030,10 +2034,17 @@ footnote definition is refused there too, unless goldmark spreads every item a b
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
 ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
 footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
-one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
-is one inside a typed block, which that parser's references reach only from inside a typed block or
-after it. A definition whose label holds whitespace is refused, which that parser reads as a
-paragraph. A label is stored as that parser reads it, its escapes and character references decoded
+one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text. One
+inside a typed block is read like one inside a quote: that parser reads a typed block as a
+container, so a reference anywhere in the document reaches it. One inside a typed block with a list
+item around it, inside the typed block or outside it, is refused, since that parser counts the
+definition's lines and the blank lines next to it otherwise when it decides whether the item is
+spread: it reads the first line of a definition opening on a later line, or of an empty one, as a
+blank line of the typed block, and a blank line inside the typed block as spacing the item. So
+is one inside a typed block that holds any block but paragraphs (a list, a quote, code): that
+parser reads a list there spread where this one stores it tight, so only a definition of
+paragraphs is read alike by both. A definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
+is stored as that parser reads it, its escapes and character references decoded
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
 end, an ampersand opening a character reference, and white space as a numeric one, so each label

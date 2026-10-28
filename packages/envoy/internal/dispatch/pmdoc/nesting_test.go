@@ -20,12 +20,17 @@ const (
 	expectedMaxTreeDepth       = 1_000
 	expectedMaxNodeAttrNesting = 100
 	expectedMaxMarkAttrNesting = 99
+
+	// expectedMaxTypedNesting is how many typed blocks a document may open inside one another, the
+	// same bound the browser's read-only engine draws a deeper `:::` opener as text past (INFRA-581).
+	expectedMaxTypedNesting = 32
 )
 
 // A markdown document opens at most 100 blocks inside one another, however the nesting is written:
 // all on one line, or one level more on each line, where the line before still holds an open
-// paragraph the next level interrupts. The same parser handles a whole upload and the fragments
-// written by edits and accepted suggestions.
+// paragraph the next level interrupts. Typed blocks count among them, at most 32 of them nested
+// (TestParseForWriteRefusesA33rdNestedTypedBlock), so they nest here inside quotes. The same parser
+// handles a whole upload and the fragments written by edits and accepted suggestions.
 func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 	parsers := blockMarkdownReaders()
 	onOneLine := func(open string) func(int) string {
@@ -53,7 +58,10 @@ func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 		{name: "quotes", markdown: onOneLine("> "), blocks: 1, line: firstLine},
 		{name: "bare quotes", markdown: onOneLine(">"), blocks: 1, line: firstLine},
 		{name: "lists", markdown: onOneLine("- "), blocks: 2, line: firstLine},
-		{name: "callouts", markdown: nestedCallouts, blocks: 1, line: lastLine},
+		{name: "callouts inside quotes", markdown: func(levels int) string {
+			quotes := strings.Repeat("> ", levels-expectedMaxTypedNesting)
+			return quotes + strings.ReplaceAll(nestedCallouts(expectedMaxTypedNesting), "\n", "\n"+quotes)
+		}, blocks: 1, line: func(int) int { return expectedMaxTypedNesting }},
 		{name: "quotes one per line", markdown: onePerLine(func(depth int) string {
 			return strings.Repeat("> ", depth) + "a"
 		}), blocks: 1, line: lastLine},
