@@ -828,15 +828,16 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     no move - because the fresh-commit oracle judged by this rule and the same oracle judged by
 //     the release before then agree that this rule is right where the release before is wrong more
 //     often than the reverse; counting the loop's pushes, they did not agree. In the fuzz's long
-//     mode about 119,500 of 200,000 histories have such a loop, and about 58,500 of those are judged
+//     mode about 119,500 of 200,000 histories have such a loop, and about 66,500 of those are judged
 //     unlike their reference order or the oracle, or leave a run open (78,000 with the clock alone
-//     deciding lateness, as before LateSynchronize). With no synchronize lost, about 39,100 of the
+//     deciding lateness, as before LateSynchronize). With no synchronize lost, about 53,300 of the
 //     200,000 leave a head run open to its bound, every one in this floor or the next (108,000 with
-//     the clock alone).
-//   - Synchronizes of one second delivered reversed, whose head the record cannot yet tell it
-//     passed (LateSynchronize): read as moves, they move the record's head back. About 40,400 of
-//     200,000 histories deliver two synchronizes of one second reversed with no loop; about 1,450
-//     of those are misjudged (with the clock alone, about 36,500).
+//     the clock alone): a same-second synchronize the record cannot tell late is a move that
+//     waits, never dropped.
+//   - Synchronizes of one second delivered reversed, whose head the record cannot yet tell the
+//     current path skipped (LateSynchronize): read as moves, they move the record's head back.
+//     About 40,400 of 200,000 histories deliver two synchronizes of one second reversed with no
+//     loop; about 1,450 of those are misjudged (with the clock alone, about 36,500).
 //   - A synchronize never delivered: the arrival after it waits for the move it names, judged for
 //     now by the newest push of each two heads (provisional, the release before's), until the run's
 //     bound cuts it off.
