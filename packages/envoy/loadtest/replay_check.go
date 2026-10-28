@@ -1,0 +1,635 @@
+package main
+
+// The replay seed's checks: replay-check-seed compares a seeded database with its bundle,
+// replay-checksum fingerprints one, and replay-logical-dump writes one with every uuid and
+// timestamp masked so that two seeds (a stock and a patched Dispatch, say) compare with cmp. Each
+// reads Postgres only and prints keys, names, numbers and digests, never a text.
+
+import (
+	"bufio"
+	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// dbFlags are a check's flags: the stack (for its Postgres URL) and the database.
+type dbFlags struct {
+	ef endpointFlags
+	db *string
+}
+
+func (f *dbFlags) register(fs *flag.FlagSet) {
+	f.ef.register(fs)
+	f.db = fs.String("db", "", "database name, overriding the Postgres URL's")
+}
+
+func (f *dbFlags) connect(ctx context.Context) (*pgx.Conn, error) {
+	if *f.db == "" {
+		return nil, fmt.Errorf("-db is required")
+	}
+	ep, err := f.ef.resolve()
+	if err != nil {
+		return nil, err
+	}
+	u, err := withDatabase(ep.pg, *f.db)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.Connect(ctx, u)
+}
+
+// --- replay-check-seed ---------------------------------------------------------------------------
+
+func runReplayCheckSeed(args []string) error {
+	fs := flag.NewFlagSet("replay-check-seed", flag.ContinueOnError)
+	var df dbFlags
+	df.register(fs)
+	bundleDir := fs.String("bundle", "", "replay bundle directory")
+	keysFile := fs.String("keys-file", "", "the keys file the seed was given")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *bundleDir == "" {
+		return fmt.Errorf("-bundle is required")
+	}
+	b, err := readBundle(*bundleDir)
+	if err != nil {
+		return err
+	}
+	var keys map[string]bool
+	if *keysFile != "" {
+		if keys, err = readKeysFile(*keysFile); err != nil {
+			return err
+		}
+	}
+	plans, err := planIssues(b.State, keys)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	conn, err := df.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+	ids, err := readReplayIDs(ctx, conn)
+	if err != nil {
+		return err
+	}
+	r, err := checkSeed(ctx, conn, b, plans, ids)
+	if err != nil {
+		return err
+	}
+	for _, d := range r.Differences {
+		fmt.Printf("difference %s %s %s: expected %s, found %s\n", d.Issue, d.Artifact, d.What, d.Expected, d.Found)
+	}
+	fmt.Printf("documents compared %d; differences %d; fallbacks %d (comments %d, asks %d)\n",
+		r.Documents, len(r.Differences), r.FallbackComments+r.FallbackAsks, r.FallbackComments, r.FallbackAsks)
+	fmt.Printf("documents with typed ask blocks %d, compared with answered_at masked: %d equal\n", r.AskBlockDocs, r.AskBlockDocsEqual)
+	for _, d := range r.Distribution {
+		fmt.Printf("open anchored roots on written primary documents (%s): documents %d, median %.1f, write-weighted mean %.2f\n",
+			d.When, d.Documents, d.Median, d.WeightedMean)
+	}
+	if len(r.Differences) > 0 {
+		return fmt.Errorf("%d differences", len(r.Differences))
+	}
+	return nil
+}
+
+type seedDifference struct {
+	Issue, Artifact, What, Expected, Found string
+}
+
+type openRootsDistribution struct {
+	When         string
+	Documents    int
+	Median       float64
+	WeightedMean float64
+}
+
+type seedCheck struct {
+	Documents                       int
+	Differences                     []seedDifference
+	FallbackComments, FallbackAsks  int
+	AskBlockDocs, AskBlockDocsEqual int
+	Distribution                    []openRootsDistribution
+}
+
+func readReplayIDs(ctx context.Context, conn *pgx.Conn) (map[[2]string]string, error) {
+	rows, err := conn.Query(ctx, `select kind, logged_id, local_id from loadtest.replay_ids`)
+	if err != nil {
+		return nil, fmt.Errorf("read loadtest.replay_ids: %w", err)
+	}
+	out := map[[2]string]string{}
+	var k, l, v string
+	_, err = pgx.ForEachRow(rows, []any{&k, &l, &v}, func() error {
+		out[[2]string{k, l}] = v
+		return nil
+	})
+	return out, err
+}
+
+// textDigest names a text by its length and sha256 prefix.
+func textDigest(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%d bytes sha256 %s", len(s), hex.EncodeToString(h[:6]))
+}
+
+func checkSeed(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (seedCheck, error) {
+	var r seedCheck
+	diff := func(issue, artifact, what, expected, found string) {
+		r.Differences = append(r.Differences, seedDifference{issue, artifact, what, expected, found})
+	}
+	ww := countWindowWrites(b.Window)
+	var atSeed, withWindow, weights []int
+	for _, p := range plans {
+		if p.Placeholder {
+			continue
+		}
+		is := p.Issue
+		anchored := expectedOpenAnchored(is)
+		for _, c := range is.Comments {
+			if _, ok := ids[[2]string{idFallbackComment, c.ID}]; ok {
+				r.FallbackComments++
+			}
+		}
+		for _, a := range is.Asks {
+			if _, ok := ids[[2]string{idFallbackAsk, a.ID}]; ok {
+				r.FallbackAsks++
+			}
+		}
+		for i := range is.Artifacts {
+			a := &is.Artifacts[i]
+			if a.Kind != "doc" {
+				continue
+			}
+			r.Documents++
+			local, ok := ids[[2]string{idArtifact, a.ID}]
+			if !ok {
+				diff(p.Key, a.Name, "mapping", "a local document", "none")
+				continue
+			}
+			var maxV int
+			var latest string
+			err := conn.QueryRow(ctx, `select coalesce(max(number), 0),
+				coalesce((select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1), '')
+				from artifact_versions where artifact_id = $1`, local).Scan(&maxV, &latest)
+			if err != nil {
+				return r, err
+			}
+			if maxV != a.Version {
+				diff(p.Key, a.Name, "version", fmt.Sprint(a.Version), fmt.Sprint(maxV))
+			}
+			open, err := openAnchored(ctx, conn, local)
+			if err != nil {
+				return r, err
+			}
+			if open != anchored[a.ID] {
+				diff(p.Key, a.Name, "open-anchored", fmt.Sprint(anchored[a.ID]), fmt.Sprint(open))
+			}
+			raw, err := b.readFile(a.TextPath)
+			if err != nil {
+				return r, err
+			}
+			want, masked := maskAnsweredAt(string(raw))
+			got, _ := maskAnsweredAt(latest)
+			if masked {
+				r.AskBlockDocs++
+			}
+			if want != got {
+				diff(p.Key, a.Name, "text", textDigest(want), textDigest(got))
+			} else if masked {
+				r.AskBlockDocsEqual++
+			}
+		}
+		if w := ww.Writes[p.Key]; w > 0 {
+			pa := primaryArtifact(is)
+			local, ok := ids[[2]string{idArtifact, pa.ID}]
+			if !ok {
+				continue
+			}
+			var n int
+			if err := conn.QueryRow(ctx, `select count(*) from comments where anchor->>'artifact_id' = $1 and reply_to is null and not resolved`, local).Scan(&n); err != nil {
+				return r, err
+			}
+			atSeed = append(atSeed, n)
+			withWindow = append(withWindow, n+ww.AnchoredRoots[pa.ID])
+			weights = append(weights, w)
+		}
+	}
+	for _, d := range []struct {
+		when   string
+		values []int
+	}{{"at the seed", atSeed}, {"with the window's anchored roots", withWindow}} {
+		med, mean := distribution(d.values, weights)
+		r.Distribution = append(r.Distribution, openRootsDistribution{d.when, len(d.values), med, mean})
+	}
+	return r, nil
+}
+
+// --- replay-checksum -----------------------------------------------------------------------------
+
+func runReplayChecksum(args []string) error {
+	fs := flag.NewFlagSet("replay-checksum", flag.ContinueOnError)
+	var df dbFlags
+	df.register(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	conn, err := df.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+	sum, err := replayChecksum(ctx, conn)
+	if err != nil {
+		return err
+	}
+	out, _ := json.Marshal(sum)
+	fmt.Println(string(out))
+	return nil
+}
+
+type replaySum struct {
+	Issues           int64  `json:"issues"`
+	Artifacts        int64  `json:"artifacts"`
+	ArtifactVersions int64  `json:"artifact_versions"`
+	Comments         int64  `json:"comments"`
+	Asks             int64  `json:"asks"`
+	Events           int64  `json:"events"`
+	MD5              string `json:"md5"`
+}
+
+// md5Fields feeds each field length-prefixed, so field boundaries are part of the digest.
+func md5Fields(h interface{ Write([]byte) (int, error) }, fields ...string) {
+	var n [8]byte
+	for _, f := range fields {
+		binary.LittleEndian.PutUint64(n[:], uint64(len(f)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write([]byte(f))
+	}
+}
+
+func replayChecksum(ctx context.Context, conn *pgx.Conn) (replaySum, error) {
+	var s replaySum
+	if err := conn.QueryRow(ctx, `select (select count(*) from issues), (select count(*) from artifacts),
+		(select count(*) from artifact_versions), (select count(*) from comments), (select count(*) from asks),
+		(select count(*) from events)`).Scan(&s.Issues, &s.Artifacts, &s.ArtifactVersions, &s.Comments, &s.Asks, &s.Events); err != nil {
+		return s, err
+	}
+	h := md5.New()
+	var key, name, slug, md, sha string
+	var number int
+	rows, err := conn.Query(ctx, `select coalesce(a.issue_key, ''), a.name, a.slug, v.number, coalesce(v.markdown, ''), coalesce(v.sha256, '')
+		from artifact_versions v join artifacts a on a.id = v.artifact_id
+		order by 1, 2, 3, 4`)
+	if err != nil {
+		return s, err
+	}
+	if _, err := pgx.ForEachRow(rows, []any{&key, &name, &slug, &number, &md, &sha}, func() error {
+		// A typed ask block's answered_at is the time the seed answered it, so it is masked.
+		masked, _ := maskAnsweredAt(md)
+		md5Fields(h, "version", key, name, slug, fmt.Sprint(number), masked, sha)
+		return nil
+	}); err != nil {
+		return s, err
+	}
+	var body string
+	rows, err = conn.Query(ctx, `select issue_key, body from comments order by issue_key, created_at, id`)
+	if err != nil {
+		return s, err
+	}
+	if _, err := pgx.ForEachRow(rows, []any{&key, &body}, func() error {
+		md5Fields(h, "comment", key, body)
+		return nil
+	}); err != nil {
+		return s, err
+	}
+	s.MD5 = hex.EncodeToString(h.Sum(nil))
+	return s, nil
+}
+
+// --- replay-logical-dump -------------------------------------------------------------------------
+
+func runReplayLogicalDump(args []string) error {
+	fs := flag.NewFlagSet("replay-logical-dump", flag.ContinueOnError)
+	var df dbFlags
+	df.register(fs)
+	out := fs.String("out", "", "output file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *out == "" {
+		return fmt.Errorf("-out is required")
+	}
+	ctx := context.Background()
+	conn, err := df.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+	f, err := os.Create(*out)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	n, err := logicalDump(ctx, conn, w)
+	if err == nil {
+		err = w.Flush()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("wrote %d lines to %s\n", n, *out)
+	return nil
+}
+
+var (
+	uuidPattern      = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	timestampPattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}(:?\d{2})?)?`)
+)
+
+// ordinals numbers ids in order of first appearance within one scope.
+type ordinals map[string]int
+
+func (o ordinals) of(id string) int {
+	if n, ok := o[id]; ok {
+		return n
+	}
+	o[id] = len(o) + 1
+	return o[id]
+}
+
+// maskText replaces every uuid in s by its ordinal in o and every timestamp by "<ts>".
+func maskText(s string, o ordinals) string {
+	s = uuidPattern.ReplaceAllStringFunc(s, func(u string) string { return fmt.Sprintf("<id%d>", o.of(strings.ToLower(u))) })
+	return timestampPattern.ReplaceAllString(s, "<ts>")
+}
+
+// maskJSON masks a JSON value: every string through maskText, every object's keys kept.
+func maskJSON(raw []byte, o ordinals) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "<undecodable>"
+	}
+	var walk func(any) any
+	walk = func(v any) any {
+		switch x := v.(type) {
+		case string:
+			return maskText(x, o)
+		case []any:
+			for i := range x {
+				x[i] = walk(x[i])
+			}
+			return x
+		case map[string]any:
+			for k := range x {
+				x[k] = walk(x[k])
+			}
+			return x
+		}
+		return v
+	}
+	return walk(v)
+}
+
+// dumpAnchor is a stored anchor (model.Anchor at 0114), its ids as ordinals in the document's
+// scope. 0114 keeps no mark position in any column: a mark lives in the document's Yjs state only.
+type dumpAnchor struct {
+	Doc      int    `json:"doc"`
+	Quote    string `json:"quote"`
+	Block    int    `json:"block,omitempty"`
+	Mark     int    `json:"mark"`
+	Version  int    `json:"version"`
+	Orphaned bool   `json:"orphaned"`
+}
+
+// logicalDump writes one JSON line per issue, document version, comment and ask, in an order and
+// with ids that two seeds of the same bundle share: documents by issue key and name, comments and
+// asks by issue key and creation order, every uuid as an ordinal (per document for block and mark
+// ids, per issue otherwise) and every timestamp masked.
+func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, error) {
+	lines := 0
+	emit := func(v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		lines++
+		_, err = w.Write(append(b, '\n'))
+		return err
+	}
+	// Issues.
+	type issueRow struct {
+		Key, Title, Status      string
+		Priority                *int
+		Labels                  []string
+		Parent, Route, Assignee *string
+		Blocked, Claim, Creator []byte
+		ClaimedAt               *string
+	}
+	rows, err := conn.Query(ctx, `select i.key, i.title, i.status, i.priority, i.labels, i.parent_key, i.route, i.assignee,
+		coalesce((select json_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '[]'),
+		i.claimed_by, i.created_by, i.claimed_at::text
+		from issues i order by i.project_key, i.number`)
+	if err != nil {
+		return lines, fmt.Errorf("issues: %w", err)
+	}
+	issues, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (issueRow, error) {
+		var x issueRow
+		return x, r.Scan(&x.Key, &x.Title, &x.Status, &x.Priority, &x.Labels, &x.Parent, &x.Route, &x.Assignee,
+			&x.Blocked, &x.Claim, &x.Creator, &x.ClaimedAt)
+	})
+	if err != nil {
+		return lines, fmt.Errorf("issues: %w", err)
+	}
+	scopes := map[string]ordinals{} // issue key or document id -> ordinals
+	scope := func(k string) ordinals {
+		if scopes[k] == nil {
+			scopes[k] = ordinals{}
+		}
+		return scopes[k]
+	}
+	for _, x := range issues {
+		o := scope(x.Key)
+		if err := emit(map[string]any{"issue": x.Key, "title": x.Title, "status": x.Status, "priority": x.Priority,
+			"labels": x.Labels, "parent": x.Parent, "route": x.Route, "assignee": x.Assignee, "blocked_by": maskJSON(x.Blocked, o),
+			"claimed_by": maskJSON(x.Claim, o), "claimed": x.ClaimedAt != nil, "created_by": maskJSON(x.Creator, o)}); err != nil {
+			return lines, err
+		}
+	}
+	// Documents and their versions; a document's ordinal is its place in this order within its issue.
+	docOrd := map[string]int{} // local artifact id -> ordinal within its issue
+	var id, key, name, slug, kind string
+	var primary bool
+	rows, err = conn.Query(ctx, `select id::text, coalesce(issue_key, project_key), name, slug, kind, is_primary
+		from artifacts order by 2, name, slug`)
+	if err != nil {
+		return lines, fmt.Errorf("artifacts: %w", err)
+	}
+	type art struct {
+		id, key, name, slug, kind string
+		primary                   bool
+	}
+	var arts []art
+	if _, err := pgx.ForEachRow(rows, []any{&id, &key, &name, &slug, &kind, &primary}, func() error {
+		arts = append(arts, art{id, key, name, slug, kind, primary})
+		return nil
+	}); err != nil {
+		return lines, fmt.Errorf("artifacts: %w", err)
+	}
+	perIssue := map[string]int{}
+	for _, a := range arts {
+		perIssue[a.key]++
+		docOrd[a.id] = perIssue[a.key]
+		if err := emit(map[string]any{"artifact": a.key, "ordinal": docOrd[a.id], "name": a.name, "slug": a.slug, "kind": a.kind, "primary": a.primary}); err != nil {
+			return lines, err
+		}
+		vrows, err := conn.Query(ctx, `select number, coalesce(markdown, ''), coalesce(sha256, ''), coalesce(size, 0), coalesce(mime, ''),
+			named, coalesce(summary, ''), authors
+			from artifact_versions where artifact_id = $1 order by number`, a.id)
+		if err != nil {
+			return lines, fmt.Errorf("artifact_versions: %w", err)
+		}
+		var number, size int
+		var md, sha, mimeType, summary string
+		var named bool
+		var authors []byte
+		o := scope(a.id)
+		if _, err := pgx.ForEachRow(vrows, []any{&number, &md, &sha, &size, &mimeType, &named, &summary, &authors}, func() error {
+			return emit(map[string]any{"version": a.key, "doc": docOrd[a.id], "number": number, "named": named,
+				"summary": maskText(summary, o), "size": size, "mime": mimeType, "sha256": sha,
+				"authors": maskJSON(authors, o), "markdown": maskText(md, o)})
+		}); err != nil {
+			return lines, err
+		}
+	}
+	// Asks before comments, so a comment names its ask's ordinal.
+	askOrd := map[string]int{}
+	type askRow struct {
+		ID, Key, Kind, State, Question, Urgency string
+		Options, Anchor, Answer, Approval, Res  []byte
+		Multiple                                bool
+		BlockID                                 *string
+		BlockArtifact                           *string
+	}
+	rows, err = conn.Query(ctx, `select id::text, issue_key, kind, state, question, urgency, options, anchor, answer, approval,
+		resolution, multiple, block_id, block_artifact_id::text
+		from asks order by issue_key, created_at, coalesce(block_id, ''), question, id`)
+	if err != nil {
+		return lines, fmt.Errorf("asks: %w", err)
+	}
+	asks, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (askRow, error) {
+		var x askRow
+		return x, r.Scan(&x.ID, &x.Key, &x.Kind, &x.State, &x.Question, &x.Urgency, &x.Options, &x.Anchor, &x.Answer,
+			&x.Approval, &x.Res, &x.Multiple, &x.BlockID, &x.BlockArtifact)
+	})
+	if err != nil {
+		return lines, fmt.Errorf("asks: %w", err)
+	}
+	perIssue = map[string]int{}
+	for _, x := range asks {
+		perIssue[x.Key]++
+		askOrd[x.ID] = perIssue[x.Key]
+		o := scope(x.Key)
+		line := map[string]any{"ask": x.Key, "ordinal": askOrd[x.ID], "kind": x.Kind, "state": x.State,
+			"question": x.Question, "urgency": x.Urgency, "multiple": x.Multiple, "options": maskJSON(x.Options, o),
+			"answer": maskJSON(x.Answer, o), "approval": maskJSON(x.Approval, o), "resolution": maskJSON(x.Res, o),
+			"anchor": dumpAnchorOf(x.Anchor, docOrd, scope)}
+		if x.BlockArtifact != nil {
+			line["block_doc"] = docOrd[*x.BlockArtifact]
+			if x.BlockID != nil {
+				line["block"] = scope(*x.BlockArtifact).of(*x.BlockID)
+			}
+		}
+		if err := emit(line); err != nil {
+			return lines, err
+		}
+	}
+	// Comments.
+	type commentRow struct {
+		ID, Key, Body                   string
+		Author, Anchor, Sug, ResolvedBy []byte
+		ReplyTo, AskID, ArtifactID      *string
+		Resolved                        bool
+		Turn                            *string
+	}
+	rows, err = conn.Query(ctx, `select id::text, issue_key, body, author, anchor, suggestion, resolved_by, reply_to::text, ask_id::text,
+		artifact_id::text, resolved, turn
+		from comments order by issue_key, created_at, id`)
+	if err != nil {
+		return lines, fmt.Errorf("comments: %w", err)
+	}
+	comments, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (commentRow, error) {
+		var x commentRow
+		return x, r.Scan(&x.ID, &x.Key, &x.Body, &x.Author, &x.Anchor, &x.Sug, &x.ResolvedBy, &x.ReplyTo, &x.AskID,
+			&x.ArtifactID, &x.Resolved, &x.Turn)
+	})
+	if err != nil {
+		return lines, fmt.Errorf("comments: %w", err)
+	}
+	commentOrd := map[string]int{}
+	perIssue = map[string]int{}
+	for _, x := range comments {
+		perIssue[x.Key]++
+		commentOrd[x.ID] = perIssue[x.Key]
+		o := scope(x.Key)
+		line := map[string]any{"comment": x.Key, "ordinal": commentOrd[x.ID], "body": x.Body, "resolved": x.Resolved,
+			"resolved_by": maskJSON(x.ResolvedBy, o), "author": maskJSON(x.Author, o), "suggestion": maskJSON(x.Sug, o),
+			"turn": x.Turn, "anchor": dumpAnchorOf(x.Anchor, docOrd, scope)}
+		if x.ArtifactID != nil {
+			line["doc"] = docOrd[*x.ArtifactID]
+		}
+		if x.ReplyTo != nil {
+			line["reply_to"] = commentOrd[*x.ReplyTo]
+		}
+		if x.AskID != nil {
+			line["ask"] = askOrd[*x.AskID]
+		}
+		if err := emit(line); err != nil {
+			return lines, err
+		}
+	}
+	return lines, nil
+}
+
+// dumpAnchorOf masks a stored anchor; nil when there is none.
+func dumpAnchorOf(raw []byte, docOrd map[string]int, scope func(string) ordinals) *dumpAnchor {
+	if len(raw) == 0 {
+		return nil
+	}
+	var a struct {
+		ArtifactID string  `json:"artifact_id"`
+		BlockID    *string `json:"block_id"`
+		MarkID     string  `json:"mark_id"`
+		Version    int     `json:"version"`
+		Quote      string  `json:"quote"`
+		Orphaned   bool    `json:"orphaned"`
+	}
+	if json.Unmarshal(raw, &a) != nil {
+		return &dumpAnchor{Quote: "<undecodable>"}
+	}
+	o := scope(a.ArtifactID)
+	d := &dumpAnchor{Doc: docOrd[a.ArtifactID], Quote: a.Quote, Mark: o.of("mark:" + a.MarkID), Version: a.Version, Orphaned: a.Orphaned}
+	if a.BlockID != nil {
+		d.Block = o.of(strings.ToLower(*a.BlockID))
+	}
+	return d
+}

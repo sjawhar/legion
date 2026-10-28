@@ -17,8 +17,8 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack` |
-| `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump` |
+| `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload) |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
@@ -38,6 +38,9 @@ same step before and after its change, and compares the two rows.
 | `replay_bundle.go` | The replay bundle: a project's state at an instant plus its window of writes (`state.json`, `docs/`, `window.jsonl`, `created-docs/`, `roster.json`, `bundle.meta.json`), `readBundle`, which verifies every file's sha256, and `keepIssue`, the per-issue sample |
 | `replay_fetch.go` | `loadgen replay-fetch`: reads a project's issues, event logs, artifact listings and document texts from a Dispatch, read-only (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`), caches every response under `<out>/raw/`, and reconstructs the bundle |
 | `replay_pack.go` | `loadgen replay-pack` and `replay-unpack`: a bundle (not `raw/`) as deterministic zstd tar parts, and back |
+| `replay_seed_plan.go` | What the replay seed sends, decided from the bundle alone: issue numbers and placeholders (`-keys-file`), each document's marker history to its logged version, which comments are recreated and in what order, fallback anchor sentences, approval and issue-field mappings |
+| `replay_seed.go` | `loadgen replay-seed`: recreates a bundle's state through Dispatch's API, mapping every logged id to its local one in `loadtest.replay_ids` as it goes, so a killed seed resumes; `-ops-log` writes one CSV row per write with Dispatch's CPU ticks around it |
+| `replay_check.go` | `loadgen replay-check-seed` (each seeded document's version, open anchored items and text against the bundle, and the open-anchored-root distribution of the window's written documents), `replay-checksum` (row counts and an md5 of the versions and comment bodies) and `replay-logical-dump` (a seed with every uuid and timestamp masked, for `cmp`) |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
 | `routes-2026-10-26-1719Z.txt` | The default route mix |
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen` |

@@ -28,6 +28,13 @@ commands:
                    writes a replay bundle (DISPATCH_URL, DISPATCH_TOKEN_FILE)
   replay-pack      pack a replay bundle as deterministic zstd tar parts
   replay-unpack    unpack replay-pack's parts into a directory
+  replay-seed      recreate a replay bundle's state on the stack through Dispatch's API, resumably
+                   (loadtest.replay_ids maps each logged id to the local one)
+  replay-check-seed
+                   compare a replay seed's documents with the bundle; exit 1 on a difference
+  replay-checksum  print row counts and an md5 of every version's markdown and comment body
+  replay-logical-dump
+                   write a replay seed's documents and comments with every uuid and timestamp masked
 
 Run "loadgen <command> -h" for a command's flags.
 `
@@ -55,6 +62,14 @@ func main() {
 		err = runReplayPack(os.Args[2:])
 	case "replay-unpack":
 		err = runReplayUnpack(os.Args[2:])
+	case "replay-seed":
+		err = runReplaySeed(os.Args[2:])
+	case "replay-check-seed":
+		err = runReplayCheckSeed(os.Args[2:])
+	case "replay-checksum":
+		err = runReplayChecksum(os.Args[2:])
+	case "replay-logical-dump":
+		err = runReplayLogicalDump(os.Args[2:])
 	case "trigger-sql":
 		fmt.Print(commitTriggerSQL)
 	case "box-busy":
