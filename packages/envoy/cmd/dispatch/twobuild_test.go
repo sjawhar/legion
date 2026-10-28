@@ -174,10 +174,17 @@ func (b *twoBuilds) current() *dispatchProcess  { return b.b }
 // buildName is what a failure calls a process: which build it runs.
 func (b *twoBuilds) buildName(p *dispatchProcess) string {
 	if p == b.a {
-		return "previous build (" + shortCommit(b.build.commit) + ")"
+		return b.previousName()
 	}
-	return "current build"
+	return b.currentName()
 }
+
+// previousName and currentName are what a failure calls each build.
+func (b *twoBuilds) previousName() string {
+	return "previous build (" + shortCommit(b.build.commit) + ")"
+}
+
+func (b *twoBuilds) currentName() string { return "current build" }
 
 func shortCommit(commit string) string {
 	if len(commit) > 12 {
@@ -1179,24 +1186,38 @@ func requireBusSettings(t *testing.T, js natsgo.JetStreamContext, want busSettin
 }
 
 // pullRequestFake is the loopback GitHub both builds' intakes call while they handle a merged pull
-// request: the App's installation and token, the pull request, and its first commit. The first
-// commit is the handler's last call before it acknowledges the message, and the fake takes delay
-// to answer it, which spreads the messages' handling over a stop. A handling counts as done when
-// that answer is sent; one whose process went away while it waited (the request's context ended)
-// is counted as abandoned instead, since a message a process stopped handling unfinished is one
-// NATS must deliver again. Anything else is answered with an empty list.
+// request: the App's installation and token, the pull request, and its first commit. It is one
+// state served by one server per build (serve), so each handling is recorded with the build that
+// did it. The first commit is the handler's last call to GitHub before it writes the pull
+// request's rows and acknowledges the message, and the fake takes delay to answer it, which spreads
+// the messages' handling over a stop. A handling counts as done when that answer is sent, so a
+// handling counted done can still be unacknowledged; one whose process went away while it waited
+// (the request's context ended) is counted as abandoned instead, since a message a process stopped
+// handling unfinished is one NATS must deliver again. Anything else is answered with an empty list.
 type pullRequestFake struct {
-	server *httptest.Server
-	delay  time.Duration
+	delay time.Duration
 
 	mu        sync.Mutex
-	done      map[int]int
+	done      map[int][]handling
 	abandoned map[int]int
 }
 
-func startPullRequestFake(t *testing.T, delay time.Duration) *pullRequestFake {
+// handling is one done handling of a pull request: the build whose server answered it, and when.
+type handling struct {
+	build string
+	at    time.Time
+}
+
+func (h handling) String() string { return h.build + " at " + h.at.Format("15:04:05.000") }
+
+func startPullRequestFake(delay time.Duration) *pullRequestFake {
+	return &pullRequestFake{delay: delay, done: map[int][]handling{}, abandoned: map[int]int{}}
+}
+
+// serve starts a server on the fake's state whose done handlings are build's, and returns its URL:
+// the DISPATCH_GITHUB_API_BASE of build's processes.
+func (f *pullRequestFake) serve(t *testing.T, build string) string {
 	t.Helper()
-	fake := &pullRequestFake{delay: delay, done: map[int]int{}, abandoned: map[int]int{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":1,"app_slug":"twobuild","permissions":{"contents":"read","actions":"read","pull_requests":"read"}}`)
@@ -1215,33 +1236,37 @@ func startPullRequestFake(t *testing.T, delay time.Duration) *pullRequestFake {
 			return
 		}
 		select {
-		case <-time.After(fake.delay):
+		case <-time.After(f.delay):
 		case <-r.Context().Done():
-			fake.mu.Lock()
-			fake.abandoned[number]++
-			fake.mu.Unlock()
+			f.mu.Lock()
+			f.abandoned[number]++
+			f.mu.Unlock()
 			return
 		}
 		_, _ = io.WriteString(w, `[{"sha":"0000000000000000000000000000000000000001","commit":{"message":"A change.","author":{"date":"2026-10-26T00:00:00Z"},"committer":{"date":"2026-10-26T00:00:00Z"}}}]`)
-		fake.mu.Lock()
-		fake.done[number]++
-		fake.mu.Unlock()
+		f.mu.Lock()
+		f.done[number] = append(f.done[number], handling{build: build, at: time.Now()})
+		f.mu.Unlock()
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, "[]")
 	})
-	fake.server = httptest.NewServer(mux)
-	t.Cleanup(fake.server.Close)
-	return fake
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server.URL
 }
 
-// handled is how many times each pull request's handling was done, by number, and how many times
-// a stopping process abandoned it.
-func (f *pullRequestFake) handled() (done, abandoned map[int]int) {
+// handled is each pull request's done handlings, by number, in the order they were done, and how
+// many times a stopping process abandoned it.
+func (f *pullRequestFake) handled() (done map[int][]handling, abandoned map[int]int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return maps.Clone(f.done), maps.Clone(f.abandoned)
+	done = make(map[int][]handling, len(f.done))
+	for number, handlings := range f.done {
+		done[number] = slices.Clone(handlings)
+	}
+	return done, maps.Clone(f.abandoned)
 }
 
 // seedPullRequestSettings writes the delivery settings the intakes route by: acme/deploy as the
@@ -1329,14 +1354,15 @@ const pullRequestMessages = 50
 
 // publishAcrossStop publishes a merged pull request for each of numbers while holder delivers from
 // the events durable, stops holder gracefully once ten of them are handled, and waits for standby to
-// take the durable over and for every one of numbers to be handled.
-func publishAcrossStop(t *testing.T, builds *twoBuilds, js natsgo.JetStreamContext, fake *pullRequestFake, numbers []int, holder, standby *dispatchProcess) {
+// take the durable over and for every one of numbers to be handled. It returns the time holder's
+// stop returned, which is after holder's process exited: every handling holder did is before it.
+func publishAcrossStop(t *testing.T, builds *twoBuilds, js natsgo.JetStreamContext, fake *pullRequestFake, numbers []int, holder, standby *dispatchProcess) time.Time {
 	t.Helper()
 	handledOf := func() int {
 		done, _ := fake.handled()
 		count := 0
 		for _, number := range numbers {
-			if done[number] > 0 {
+			if len(done[number]) > 0 {
 				count++
 			}
 		}
@@ -1356,6 +1382,7 @@ func publishAcrossStop(t *testing.T, builds *twoBuilds, js natsgo.JetStreamConte
 	}
 	standbyBound := boundLines(standby, bus.DispatchDeliveryDurable)
 	stop(t, holder)
+	stopped := time.Now()
 	t.Logf("stopped the %s with %d of %d pull requests handled", builds.buildName(holder), handledOf(), len(numbers))
 	waitForBound(t, standby, builds.buildName(standby), bus.DispatchDeliveryDurable, standbyBound, 60*time.Second)
 	deadline = time.Now().Add(120 * time.Second)
@@ -1366,6 +1393,7 @@ func publishAcrossStop(t *testing.T, builds *twoBuilds, js natsgo.JetStreamConte
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	return stopped
 }
 
 // pullRequestNumbers is count pull request numbers from first.
@@ -1377,11 +1405,18 @@ func pullRequestNumbers(first, count int) []int {
 	return numbers
 }
 
-// Messages and subscription settings pass between the two builds with none skipped or repeated.
-// Issues created on either build produce outbox events whose ids are exactly the ids the stream
-// holds. GitHub-shaped messages are each handled once, the set of their delivery ids the set
-// handled, across a graceful stop of the build that holds the intake: this tree first, then the
-// previous build. The delivery durables' filter, ack wait, ack bound and generation, and the
+// Messages and subscription settings pass between the two builds with none skipped or repeated,
+// but for the one repeat at-least-once delivery allows. Issues created on either build produce
+// outbox events whose ids are exactly the ids the stream holds. GitHub-shaped messages are each
+// handled once, the set of their delivery ids the set handled, across a graceful stop of the build
+// that holds the intake: this tree first, then the previous build. The one message the previous
+// build had in its handler when it was stopped may be handled again, by this tree after the
+// previous build exited: the previous build's stop does not wait for the message in its handler
+// (delivery.StartIntakes of that release says so), so its process can exit after the handling's
+// last GitHub call and before it acknowledges the message, and NATS delivers that message again to
+// this tree when it takes the durable over. This tree's stop waits for the message in its handler
+// and acknowledges it, so every other repeat fails the test, one whose first handling is this
+// tree's included. The delivery durables' filter, ack wait, ack bound and generation, and the
 // stream's age, duplicate window, subjects and replicas, stay as they are across two settings polls
 // with both builds running, and across a restart of each build in turn. While a process of the
 // previous build, which holds no hold, delivers from the durable, a restarted process of this tree
@@ -1389,16 +1424,21 @@ func pullRequestNumbers(first, count int) []int {
 func TestTwoBuildsPassMessagesBothWays(t *testing.T) {
 	builds := newTwoBuilds(t)
 	seedPullRequestSettings(t, builds)
-	fake := startPullRequestFake(t, 300*time.Millisecond)
-	env := githubAppEnv(t, fake.server.URL)
+	// One App key for both builds; each build calls its own server of the one fake, so each
+	// handling is recorded with the build that did it.
+	fake := startPullRequestFake(300 * time.Millisecond)
+	app := githubAppEnv(t, "")
+	previousEnv, currentEnv := maps.Clone(app), maps.Clone(app)
+	previousEnv["DISPATCH_GITHUB_API_BASE"] = fake.serve(t, builds.previousName())
+	currentEnv["DISPATCH_GITHUB_API_BASE"] = fake.serve(t, builds.currentName())
 
 	// This tree creates the durables, stamped with its generation, and holds them; the previous
 	// build starts beside it as a standby, which is a rolling release's first moment.
-	builds.startCurrent(t, env)
+	builds.startCurrent(t, currentEnv)
 	for _, durable := range deliveryDurables {
 		waitForBound(t, builds.current(), builds.buildName(builds.current()), durable, 0, 60*time.Second)
 	}
-	builds.startPrevious(t, env)
+	builds.startPrevious(t, previousEnv)
 
 	js, err := testnats.Connect(t, builds.nats).JetStream()
 	if err != nil {
@@ -1442,7 +1482,7 @@ func TestTwoBuildsPassMessagesBothWays(t *testing.T) {
 	// under no hold, as every build before holds does: it stands by and never takes the binding
 	// from it.
 	binding := consumerBinding(t, js, bus.DispatchDeliveryDurable)
-	builds.startCurrent(t, env)
+	builds.startCurrent(t, currentEnv)
 	time.Sleep(standbyWindow)
 	if bound, now := boundLines(builds.current(), bus.DispatchDeliveryDurable), consumerBinding(t, js, bus.DispatchDeliveryDurable); bound > 0 || now != binding {
 		t.Errorf("the restarted %s took %s from the %s, which delivers from it under no hold: the durable was %s and is %s, and the restarted build logged %d binds:\n%s",
@@ -1452,33 +1492,54 @@ func TestTwoBuildsPassMessagesBothWays(t *testing.T) {
 
 	// The previous build, now the holder, stops with the second half part handled; this tree
 	// takes the durables over, and the previous build comes back.
-	publishAcrossStop(t, builds, js, fake, pullRequestNumbers(1001+half, pullRequestMessages-half), builds.previous(), builds.current())
-	builds.startPrevious(t, env)
+	previousStopped := publishAcrossStop(t, builds, js, fake, pullRequestNumbers(1001+half, pullRequestMessages-half), builds.previous(), builds.current())
+	builds.startPrevious(t, previousEnv)
 	requireBusSettings(t, js, baseline, "after the previous build restarted")
 
 	// Read last, after both restarts, so a message either stop had redelivered and handled again
 	// is counted. A handling a stopping process abandoned is not one: NATS delivers that message
-	// again, which is what at-least-once delivery is for.
+	// again, which is what at-least-once delivery is for. Neither is the handling the previous
+	// build had in its handler when it was stopped, done but not acknowledged when its process
+	// exited (see the doc comment): that message may be handled again, once, by this tree.
 	time.Sleep(5 * time.Second)
 	done, abandoned := fake.handled()
-	var twice, unhandled []string
-	for number, count := range done {
-		if count != 1 {
-			twice = append(twice, fmt.Sprintf("#%d %d times", number, count))
+	previousName, currentName := builds.previousName(), builds.currentName()
+	var previousLast time.Time
+	for _, handlings := range done {
+		for _, h := range handlings {
+			if h.build == previousName && !h.at.After(previousStopped) && h.at.After(previousLast) {
+				previousLast = h.at
+			}
+		}
+	}
+	var twice, again, unhandled []string
+	for number, handlings := range done {
+		switch {
+		case len(handlings) == 1:
+		case len(handlings) == 2 &&
+			handlings[0].build == previousName && handlings[0].at.Equal(previousLast) &&
+			handlings[1].build == currentName && handlings[1].at.After(previousStopped):
+			again = append(again, fmt.Sprintf("#%d %v", number, handlings))
+		default:
+			twice = append(twice, fmt.Sprintf("#%d %d times %v", number, len(handlings), handlings))
 		}
 	}
 	for _, number := range pullRequestNumbers(1001, pullRequestMessages) {
-		if done[number] == 0 {
+		if len(done[number]) == 0 {
 			unhandled = append(unhandled, "#"+strconv.Itoa(number))
 		}
 	}
 	if len(done) != pullRequestMessages || len(twice) > 0 || len(unhandled) > 0 {
 		slices.Sort(twice)
-		t.Errorf("the %d GitHub messages were handled as %d distinct pull requests; handled more than once: %v; never handled: %v",
-			pullRequestMessages, len(done), twice, unhandled)
+		t.Errorf("the %d GitHub messages were handled as %d distinct pull requests; handled more than once: %v; never handled: %v (the %s exited at %s)",
+			pullRequestMessages, len(done), twice, unhandled, previousName, previousStopped.Format("15:04:05.000"))
 	}
 	if len(abandoned) > 0 {
 		t.Logf("handlings a stopping process abandoned unfinished, each handled again after: %v", abandoned)
+	}
+	if len(again) > 0 {
+		t.Logf("the handling the %s had in its handler when it was stopped (it exited at %s), handled again by the %s: %v",
+			previousName, previousStopped.Format("15:04:05.000"), currentName, again)
 	}
 }
 
