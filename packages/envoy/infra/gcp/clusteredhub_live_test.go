@@ -436,15 +436,19 @@ func (s *hubServer) commandArgs() []string {
 }
 
 // start starts the server and waits until it listens on all three of its ports (its last bind is
-// the route port's); the test kills it by its PID when it ends if it is still running. A start
-// that another program's hold on one of its ports refused is retried on three new ports. A peer
-// started earlier still names the old route port, which costs nothing: a route is one connection
-// both servers use, so this server's own routes to its peers complete the mesh.
+// the route port's); the test kills it by its PID when it ends if it is still running. A first
+// start that another program's hold on one of its ports refused is retried on three new ports. A
+// peer started earlier still names the old route port, which costs nothing: a route is one
+// connection both servers use, so this server's own routes to its peers complete the mesh. A
+// restart keeps the ports the server has, and its retries outlast a short-lived holder on them,
+// since the test holds those ports after the first start, in the clients' urls and in each
+// exporter's scrape target, as a restarted pod keeps its address.
 func (s *hubServer) start(t *testing.T) {
 	t.Helper()
+	first := s.proc == nil
 	attempt := 0
 	s.proc = startBound(t, s.name, func() *exec.Cmd {
-		if attempt++; attempt > 1 {
+		if attempt++; first && attempt > 1 {
 			drawn := s.ports.draw(t, 3)
 			s.client, s.monitor, s.route = drawn[0], drawn[1], drawn[2]
 		}
@@ -477,7 +481,7 @@ func startLogged(t *testing.T, name string, cmd *exec.Cmd) *cmdtest.Process {
 // cannot give them one. A draw holds every socket it opens until it has all the ports it was asked
 // for, so the kernel cannot give one port twice within a draw, and it passes over a port an
 // earlier draw handed out, whose socket is closed. Another program can still take a port before
-// the process binds it, which startBound answers with a new draw.
+// the process binds it, which startBound answers with a retry, on a new draw where build makes one.
 type loopbackPorts struct {
 	mu   sync.Mutex
 	used map[int]bool
@@ -513,8 +517,9 @@ func (p *loopbackPorts) draw(t *testing.T, n int) []int {
 
 // startBound starts the process build makes and waits up to 30 s for ready to return nil. A
 // process that exits because a port it binds is taken is started again, from a new build, up to
-// 10 times; each build draws its ports anew (loopbackPorts), since another program, or an
-// outgoing connection's ephemeral port, can hold a drawn port when the process binds it.
+// 10 times, since another program, or an outgoing connection's ephemeral port, can hold a drawn
+// port when the process binds it: a build that may move its ports draws new ones (an exporter, a
+// server's first start), and one that may not (a server's restart) waits out the holder.
 func startBound(t *testing.T, name string, build func() *exec.Cmd, ready func(*cmdtest.Process) error) *cmdtest.Process {
 	t.Helper()
 	for attempt := 1; ; attempt++ {
