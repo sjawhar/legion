@@ -2,34 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-278",
-  "completed": "2026-10-28T10:05:00Z",
+  "completed": "2026-10-28T10:22:00Z",
   "generation": 3,
-  "round": 9,
-  "headSha": "ac25d944ad7a8ad1c27a4e5a5255df8723f4c9e4",
-  "codeHeadSha": "c597c1440ff6",
-  "recheck": "Docs-only since the full pass at code head 99f818ca: the round changed one sentence of packages/envoy/AGENTS.md (c597c144). Bare gates plus a check of the sentence",
+  "round": 10,
+  "headSha": "682f672d5b1dc2ec71b6b9c2c93213a268d51d2f",
+  "codeHeadSha": "2b85c1a909400b8700d5d907f561cb66754c3c12",
+  "fingerprint": "641ea9b9… at bf25fa26 → 684435c0… at 2b85c1a9 (recomputed; matches the implementer's comment 6466332263). With **/CHANGELOG.md and **/.changes/** also excluded, both heads give ff48b88f…, so the merge of main 460facf5 changed only the changelog files (main #2419's fragments)",
   "verdictProvider": "provider not verified: no subagent ran, and the tester did not read the provider of its own turns from its transcript",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "The implementer's sentence claims more than the code does: 'every event on that ask'. The enumerated list after the colon matches publishFollowerRoutes (publisher.go:886-897); the leading absolute does not (failure below)"
+    "verdict": "verified",
+    "how": "The AGENTS.md follower exception reads 'these events on that ask, other than its own:' followed by the exact list (publisher.go:886-897). The smoke script gives 9 ok. The changelog entries are moved unchanged into packages/*/.changes/unreleased/pr2225-*.yaml"
   },
   "failures": [
     {
-      "criterion": "packages/envoy/AGENTS.md's claimant paragraph is true (the architect's check of the widened follower exception)",
-      "evidence": "Line 2624 says a claimant following the ask 'gets, as a follower, every event on that ask but its own and a quiet `ask.edited`'. ask.follower_added and ask.follower_removed reach only the added or removed session (publisher.go:1002-1006), and ask.anchor_refreshed never notifies (events/broker.go:258) and is not in publishFollowerRoutes' switch. Live at this head ($TMPDIR/infra278-test/mini.sh, a one-case copy of the e2e runner): C opened an ask on the claimed issue and claimant P followed it. A person adding R as a follower gave {\"adv-r\":1}; removing R gave {\"adv-r\":1}; P got neither. Control: an agent's reply in that ask reached {\"adv-c\":1,\"adv-p\":1}. Corrected sentence: '… except that a claimant following the ask gets, as a follower, any session's but its own or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs outside the `notify` gate).' A shorter fix: replace 'every event on that ask but its own and a quiet `ask.edited`:' with 'these events on that ask, other than its own:'. No red test: a test of the document's wording is a source-text test, which the repository's test rules forbid"
+      "criterion": "Agent-facing text is true: the dispatch_claim description (packages/contracts/src/dispatch-tools.ts:530-531), as the architect asked this round",
+      "evidence": "It says 'an agent's events and every other change on the issue still need a subscription to it'. False for a claimant that follows an ask: publishFollowerRoutes (publisher.go:886-897) sends an ask's answer, hand-back, resolution and non-quiet edit, and every reply in it (created, edited, resolved, reopened), to its followers from any actor but the follower itself, outside the notify gate. Live at this head ($TMPDIR/infra278-test/mini.sh): claimant P followed C's ask, and agent Q's reply reached {\"adv-c\":1,\"adv-p\":1} with no subscription. The same text is in packages/contracts/.changes/unreleased/pr2225-claim-description.yaml and embedded in packages/claude-envoy/dist/dispatch.js, envoy-channel.js and session-hook.js. Fix, in dispatch-tools.ts and the fragment: '… still need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, resolution or edit of it, and every reply there (new, edited, resolved or reopened), reach you as its follower.' Then rebuild packages/claude-envoy/dist. The architect's shorter 'that ask's events' would overclaim: live, ask.follower_added and ask.follower_removed for R reached {\"adv-r\":1} only (publisher.go:1002-1006), and ask.anchor_refreshed never notifies. No red test: a test of the description's wording is a source-text test, which the repository's test rules forbid"
     }
   ],
   "failed": 1,
   "passedChecks": [
     {
+      "criterion": "The merge forced no code change; the changelog key removal; the pr2225 names",
+      "surface": "jj diff fingerprints; repository text",
+      "command": "the unchanged-diff fingerprint at bf25fa26 and 2b85c1a9, with and without '**/CHANGELOG.md | **/.changes/**'; grep 'INFRA-278\\|dispatch://INFRA' over packages/*/.changes/unreleased/pr2225-* and docs/solutions/*/*pr2225*, and over the CHANGELOG lines this PR adds",
+      "observed": "Full 641ea9b9… → 684435c0… (changed only by the changelog move); ff48b88f… at both heads without the changelog files. Eight pr2225 fragments, three *-pr2225.md learnings. No Dispatch key in any of them or in the PR's CHANGELOG lines",
+      "headSha": "682f672d5b1dc2ec71b6b9c2c93213a268d51d2f",
+      "negativeControl": "At bf25fa26 the entries lived in the CHANGELOG.md files, which the full fingerprint counts"
+    },
+    {
       "criterion": "Smoke at the new head",
       "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
       "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/tester_claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "summary: 9 ok, 0 FAIL, PASS in 50s",
-      "headSha": "ac25d944ad7a8ad1c27a4e5a5255df8723f4c9e4",
+      "observed": "summary: 9 ok, 0 FAIL",
+      "headSha": "682f672d5b1dc2ec71b6b9c2c93213a268d51d2f",
       "negativeControl": "Main b295a3fb fails 14 of 23 live cases (round 7); no code changed since"
     }
   ],
-  "ci": "At ac25d944, read at 10:02Z: Tests 40668552413, Docs 40668552396, Worker Image 40668552445, Legion Envoy and Contracts 40668552381 and PR Title 40668552460 queued; not waited for. GitHub reports MERGEABLE.",
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6466070884"
+  "ci": "At 682f672d, read at 10:19Z: Tests 40670689558, Docs 40670689565, Worker Image 40670689562, Legion Envoy and Contracts 40670689650 and PR Title 40670692140 queued; not waited for. GitHub reports MERGEABLE.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2225#issuecomment-6466417890"
 }
