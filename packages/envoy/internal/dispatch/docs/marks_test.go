@@ -1492,11 +1492,11 @@ func TestRefreshAnchorsFollowsAMarkRemovedRestoredAndRemovedAgain(t *testing.T) 
 	}
 }
 
-// One refresh of asks, comments and a suggestion announces each row in the order the refresh lists
-// the rows, with each row's own event type and quote. The listing has no ORDER BY, so the want is
-// read from it rather than written down. The rows go stale and are refreshed again for several
-// rounds: a refresh in a map's order matches five rows' listing by chance in about one round of
-// five, so one round would often miss it.
+// One refresh of asks, comments and a suggestion announces the asks, then the comments, each by
+// creation time and then id, with each row's own event type and quote. The creation times are set
+// so that order is neither the ids' nor the inserts'. The rows go stale and are refreshed again
+// for several rounds, and every round announces them in that same order: a listing with no stable
+// order, or a refresh in a map's order, matches five rows by chance in about one round of five.
 func TestRefreshAnchorsAnnouncesEveryKindInRowOrder(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1521,6 +1521,33 @@ func TestRefreshAnchorsAnnouncesEveryKindInRowOrder(t *testing.T) {
 	for _, row := range rows {
 		insertAnchorRow(t, service, artifactID, row.kind, row.id, row.id, "stale")
 	}
+	// Each update writes a new row version at the end of its table, so updating in the reverse of
+	// the wanted order leaves the tables' physical order the opposite of it: a listing that leans
+	// on that order announces the rows backwards.
+	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		id     string
+		offset time.Duration
+	}{
+		{"00000000-0000-4000-8000-0000000000d3", time.Second},
+		{"00000000-0000-4000-8000-0000000000d1", time.Second},
+		{"00000000-0000-4000-8000-0000000000d5", 0},
+		{"00000000-0000-4000-8000-0000000000d2", time.Second},
+		{"00000000-0000-4000-8000-0000000000d4", 0},
+	} {
+		for _, table := range []string{"asks", "comments"} {
+			if _, err := service.store.Pool.Exec(context.Background(),
+				"update "+table+" set created_at = $2 where id = $1::uuid", row.id, created.Add(row.offset)); err != nil {
+				t.Fatalf("set %s %s created_at: %v", table, row.id, err)
+			}
+		}
+	}
+	// Asks by creation time, then comments by creation time and, for d1 and d3 created together, id.
+	want := []string{
+		"00000000-0000-4000-8000-0000000000d4", "00000000-0000-4000-8000-0000000000d2",
+		"00000000-0000-4000-8000-0000000000d5", "00000000-0000-4000-8000-0000000000d1",
+		"00000000-0000-4000-8000-0000000000d3",
+	}
 
 	ids := slices.Collect(maps.Keys(quotes))
 	for round := range 4 {
@@ -1533,18 +1560,18 @@ func TestRefreshAnchorsAnnouncesEveryKindInRowOrder(t *testing.T) {
 			}
 		}
 		listed, refreshed := refreshLiveAnchors(t, service, artifactID)
-		if len(listed) != len(rows) || len(refreshed) != len(listed) {
-			t.Fatalf("round %d: refresh listed %d rows and announced %d events, want %d of each", round, len(listed), len(refreshed), len(rows))
+		if len(listed) != len(want) || len(refreshed) != len(want) {
+			t.Fatalf("round %d: refresh listed %d rows and announced %d events, want %d of each", round, len(listed), len(refreshed), len(want))
 		}
-		for index, row := range listed {
+		for index, wantID := range want {
 			wantType := "comment.anchor_refreshed"
-			if row.markType == string(MarkAsk) {
+			if strings.HasSuffix(wantID, "d2") || strings.HasSuffix(wantID, "d4") {
 				wantType = "ask.anchor_refreshed"
 			}
 			id, anchor := refreshedAnchor(t, refreshed[index])
-			if id != row.id || refreshed[index].Type != wantType || anchor.Quote != quotes[row.id] || anchor.Orphaned {
-				t.Fatalf("round %d: event %d = %s for row %s quote %q orphaned %t, want %s for row %s quote %q",
-					round, index, refreshed[index].Type, id, anchor.Quote, anchor.Orphaned, wantType, row.id, quotes[row.id])
+			if listed[index].id != wantID || id != wantID || refreshed[index].Type != wantType || anchor.Quote != quotes[wantID] || anchor.Orphaned {
+				t.Fatalf("round %d: row %d listed %s, event %s for row %s quote %q orphaned %t, want %s for row %s quote %q",
+					round, index, listed[index].id, refreshed[index].Type, id, anchor.Quote, anchor.Orphaned, wantType, wantID, quotes[wantID])
 			}
 		}
 	}

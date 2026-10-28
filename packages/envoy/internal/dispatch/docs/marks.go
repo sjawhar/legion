@@ -452,6 +452,9 @@ func (m anchoredMark) markRef() pmdoc.MarkRef {
 	return pmdoc.MarkRef{Type: m.markType, ID: m.anchor.MarkID}
 }
 
+// openAnchoredMarks lists the open anchored asks, then the unresolved anchored comments, each by
+// creation time and id, so a refresh announces its rows, and an upload re-anchors them, in the same
+// order every time it runs over the same rows.
 func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifactID string) ([]anchoredMark, error) {
 	var marks []anchoredMark
 	for _, target := range []struct {
@@ -465,6 +468,7 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 			select id::text, anchor, %s
 			from %s
 			where anchor is not null and anchor->>'artifact_id' = $1 and %s
+			order by created_at, id
 		`, commentMarkType(target.table), target.table, target.where), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
