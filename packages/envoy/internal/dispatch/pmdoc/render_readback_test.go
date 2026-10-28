@@ -204,6 +204,14 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		{"link destination ending in a backslash", bareURL("https://x.com/a>b\\"), "[https://x.com/a>b\\\\](https://x.com/a>b\\\\) b\n"},
 		{"link destination holding a backslash before punctuation", bareURL("https://x.com/a\\@b>"), "[https://x.com/a\\\\@b>](https://x.com/a\\\\@b>) b\n"},
 		{"link destinations holding escapes", parsed("[a](<x\\>y\\\\>) [b](x\\_y) [c](<\\<z>)\n"), "[a](x>y\\\\) [b](x_y) [c](\\<z)\n"},
+		// A control character a destination's reference decodes to is written as that reference
+		// again: raw, a tab or line feed ends the destination and a form feed is no destination
+		// character to the engine.
+		{"link destination holding a decoded line feed", parsed("[x](https://a.b/?q=a&#10;b)\n"), "[x](https://a.b/?q=a&#10;b)\n"},
+		{"link destination holding a decoded tab", parsed("[x](a&#9;b)\n"), "[x](a&#9;b)\n"},
+		{"link destination holding a decoded form feed", parsed("[x](a&#12;b)\n"), "[x](a&#12;b)\n"},
+		{"image address holding a decoded tab", parsed("![a](u&#9;v)\n"), "![a](u&#9;v)\n"},
+		{"cell link destination holding a decoded line feed", parsed("| h |\n| --- |\n| [x](a&#10;b) |\n"), "| h |\n| --- |\n| [x](a&#10;b) |\n"},
 		// 11. Plain text whose www domain an underscore in its last two parts spoils reads as text,
 		// but the backslash the writer escapes that underscore with ends the domain before it,
 		// which then reads as a www URL; the dot after `www` is escaped as well, so neither reads one.
@@ -459,12 +467,18 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 
 // A link Go reads from a bare address at a position the engine starts one is written back as Go
 // read it and the engine reads that writing alike, so a document holding it is stored rather than
-// refused (INFRA-531 testing): an address holding `>` after a closing parenthesis, and one ending
-// in a backslash before an escaped character.
+// refused (INFRA-531 testing): an address holding `>` after a closing parenthesis, one ending in a
+// backslash before an escaped character, and one between a text `<` and a later `>`.
 func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 	markdowns := []string{
 		"x;https://x.test/(a)> b\n",
 		"\\(http://x.test/a>b\\_\n",
+		// A text `<` whose `>` comes after an address in a later text node is escaped, so the two
+		// never form one autolink around the address's link.
+		"&lt;mailto:x;a@b.cc>\n",
+		"&lt;javascript:alert(1);'a@b.cc'>\n",
+		"&lt;javascript:void(0);www.a.b>\n",
+		"&lt;javascript:void(a@b.cc)>\n",
 	}
 	docs := make([]*Node, len(markdowns))
 	rendered := make([]string, len(markdowns))

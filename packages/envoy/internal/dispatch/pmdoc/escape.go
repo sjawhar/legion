@@ -745,6 +745,9 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 	return label.String()
 }
 
+// angleConstruct reports whether the `<` at offset opens an autolink or HTML with a `>` later in
+// its own text; one a later node's markdown closes is judged once the run is written
+// (writeInlineRun).
 func angleConstruct(value string, offset int, scan *forwardScan) bool {
 	if offset+1 >= len(value) || !isASCIIAlphaNumeric(value[offset+1]) && value[offset+1] != '/' && value[offset+1] != '!' && value[offset+1] != '?' {
 		return false

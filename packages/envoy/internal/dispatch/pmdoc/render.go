@@ -18,6 +18,9 @@ type renderer struct {
 	labelBrackets labelBrackets
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
+	// openers is each text `<` the inline run being written wrote as it is (angleOpener), and
+	// escapedOpeners those of them its writing again escapes (writeInlineRun).
+	openers, escapedOpeners []angleOpener
 	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
@@ -797,12 +800,15 @@ func escapeImageSource(src string, escapePipes bool) string {
 // escapeDestination writes href as a destination that both readers, which decode a destination's
 // escapes and character references, read back as href: a backslash before ASCII punctuation or
 // ending href, which would escape what follows it, is escaped, an ampersand where it would open a
-// character reference (characterReferenceAt) is written as ampersand, and a pipe in a table cell
-// is escaped. An href holding a space or a parenthesis is written between angle brackets, a `<` or
-// `>` in it escaped; any other is written bare, a `<` opening it escaped.
+// character reference (characterReferenceAt) is written as ampersand, an ASCII control character
+// (asciiControl), which ends a destination or is none to the engine's parser, is written as its
+// numeric reference, and a pipe in a table cell is escaped. An href holding a space or a
+// parenthesis is written between angle brackets, a `<` or `>` in it escaped; any other is written
+// bare, a `<` opening it escaped.
 func escapeDestination(href string, escapePipes bool, ampersand string) string {
 	angle := strings.ContainsAny(href, " ()")
-	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) {
+	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) &&
+		!strings.ContainsFunc(href, asciiControl) {
 		return href
 	}
 	var written strings.Builder
@@ -823,6 +829,9 @@ func escapeDestination(href string, escapePipes bool, ampersand string) string {
 				written.WriteString(ampersand)
 				continue
 			}
+		case asciiControl(rune(char)):
+			written.WriteString(numericEntity(rune(char)))
+			continue
 		}
 		written.WriteByte(char)
 	}
@@ -830,6 +839,11 @@ func escapeDestination(href string, escapePipes bool, ampersand string) string {
 		written.WriteByte('>')
 	}
 	return written.String()
+}
+
+// asciiControl reports whether char is an ASCII control character, U+0000 to U+001F or U+007F.
+func asciiControl(char rune) bool {
+	return char < ' ' || char == 0x7f
 }
 
 // titleSuffix writes a link or image title, quoted, so that the browser editor's parser, which

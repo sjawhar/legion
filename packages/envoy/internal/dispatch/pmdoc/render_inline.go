@@ -449,7 +449,76 @@ func (r *renderer) wwwMayFollow() bool {
 // writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
 // mark and at once opened one written with the same delimiter character, which the parser reads as
 // one run.
+//
+// A text `<` the escape rules leave as it is (angleConstruct judges it within its own node) can
+// still open an autolink with what the run writes after it, out to a `>` in a later node: the
+// text after an address, which the readers split off from the text before it, or a link's syntax
+// (`&lt;javascript:void(a@b.cc)>` written `<javascript:void([a@b.cc](mailto:a@b.cc))>` reads as
+// one autolink to a `javascript:` address). So the run is written, and where the markdown it wrote
+// opens an autolink at such a `<` (autolinkAt), it is written again with each of those escaped.
+// That markdown reads back as no run that holds the `<` as text, so a run that reads back keeps
+// its bytes; and escaping a `<` changes no autolink at another, which stops at any `<`.
 func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, spelling runSpelling) (fused bool) {
+	from := r.b.Len()
+	r.openers = r.openers[:0]
+	fused = r.writeInlineNodes(nodes, prefix, context, spelling)
+	if r.err != nil {
+		return fused
+	}
+	written := r.b.Bytes()
+	var escaped []angleOpener
+	for _, opener := range r.openers {
+		if written[opener.at] == '<' && autolinkAt(written[opener.at+1:]) {
+			escaped = append(escaped, opener)
+		}
+	}
+	if len(escaped) == 0 {
+		return fused
+	}
+	r.b.Truncate(from)
+	r.escapedOpeners = escaped
+	fused = r.writeInlineNodes(nodes, prefix, context, spelling)
+	r.escapedOpeners = nil
+	return fused
+}
+
+// angleOpener is a text `<` written as it is: where it stands in the markdown, and the node and
+// offset in its text it is written from.
+type angleOpener struct {
+	at     int
+	node   *Node
+	offset int
+}
+
+// autolinkAt reports whether markdown written after a `<` closes it into an autolink, as goldmark
+// reads one and CommonMark defines it: an email address or a scheme and its URL, then the `>`.
+// Neither holds whitespace, a control character, `<` or `>`, so only the bytes before the first of
+// those are read, which a `<` after this one bounds.
+func autolinkAt(after []byte) bool {
+	end := 0
+	for end < len(after) && after[end] > ' ' && after[end] != '<' && after[end] != '>' && after[end] != 0x7f {
+		end++
+	}
+	if end == 0 || end == len(after) || after[end] != '>' {
+		return false
+	}
+	address := after[:end]
+	return util.FindURLIndex(address) == end || util.FindEmailIndex(address) == end
+}
+
+// escapesOpener reports whether the text `<` at offset in node is the next of the openers the run's
+// writing escapes (writeInlineRun), which the writing reaches in the order it recorded them.
+func (r *renderer) escapesOpener(node *Node, offset int) bool {
+	if len(r.escapedOpeners) == 0 || r.escapedOpeners[0].node != node || r.escapedOpeners[0].offset != offset {
+		return false
+	}
+	r.escapedOpeners = r.escapedOpeners[1:]
+	return true
+}
+
+// writeInlineNodes writes nodes in spelling for writeInlineRun, recording each text `<` it writes
+// as it is (angleOpener).
+func (r *renderer) writeInlineNodes(nodes []*Node, prefix string, context inlineContext, spelling runSpelling) (fused bool) {
 	escapePipes := context.tableCell
 	var active []Mark
 	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
@@ -632,6 +701,10 @@ func (r *renderer) endLine(continues bool) {
 	r.b.Truncate(candidate.at)
 	r.b.WriteString(escape)
 	r.b.WriteString(tail)
+	// The openers after the escaped character are on its line, the last ones recorded.
+	for index := len(r.openers) - 1; index >= 0 && r.openers[index].at > candidate.at; index-- {
+		r.openers[index].at += len(escape) - width
+	}
 }
 
 func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {
@@ -785,7 +858,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		width := utf8.RuneLen(char)
 		context.textLineStart = textLineStart
 		context.afterMarker = position.afterMarker
-		escape := needsInlineEscape(value, byteOffset, char, context)
+		escape := needsInlineEscape(value, byteOffset, char, context) || char == '<' && r.escapesOpener(node, byteOffset)
 		if lineStart >= 0 && r.heldLineStart == nil {
 			switch lineStartOf(value, lineStart, byteOffset, char, escape) {
 			case lineStartEscaped:
@@ -810,6 +883,8 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.writeText(value[segmentStart:byteOffset])
 			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
+		} else if char == '<' {
+			r.openers = append(r.openers, angleOpener{at: r.b.Len() + byteOffset - segmentStart, node: node, offset: byteOffset})
 		}
 		lineEnd := char == '\n'
 		if lineEnd {
