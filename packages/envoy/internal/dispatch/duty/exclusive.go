@@ -73,16 +73,21 @@ const (
 //
 // The boundary is on this process's clock, the clock the tick's own timer runs on, so two
 // processes judge the same period by their hosts' clocks, which NTP keeps within milliseconds of
-// each other. A process whose clock runs ahead by an offset records a boundary the other reaches
-// that much later, so the other skips a tick that falls inside that offset of a boundary - the
-// period it skips is the one the first has just served - and a process whose clock runs behind
-// runs a tick inside the offset that the first would have skipped, one extra pass. While both
-// run, every period gets its pass; once the process ahead stops, the other's ticks are skipped for
-// at most that offset. The alternative this replaced, the database's clock read at the gate, held
-// the clocks equal but let the gate's own delay decide the period, which costs a lone loop a
-// period on any host. The boundary crosses as a timestamp and the period as the whole number of
-// nanoseconds a Go duration is, stored and compared as that integer: a scale equality decided by
-// a float's rounding would be the scale defect above in a new coat.
+// each other. While both run, every period gets its pass, and an offset between the clocks costs
+// at most one extra pass, when the process behind made the last pass and the next tick of the one
+// ahead lands in a later period by its own clock (measured: one process 300 ms behind ticking at
+// x.1 s, the other at x.2 s, a one-second period - six passes over five periods, both at 20.1 s
+// and 20.2 s, then only the second). What an offset can cost is a skipped pass once the process
+// ahead stops: its last record names the period its own clock was in, which can be the whole of
+// the other's next period, so with a chance of about offset/period that period's tick is refused
+// and two passes stand up to two periods apart, once (measured against Postgres: one process
+// 300 ms ahead ticking at x.7 s, the other at x.9 s, a one-second period - the first's last pass
+// at 19.7 s recorded period 20, and the other's tick at 20.9 s was refused). A clock stepped back
+// by X skips at most ceil(X / period) ticks. The alternative this replaced, the database's clock
+// read at the gate, held the clocks equal but let the gate's own delay decide the period, which
+// costs a lone loop a period on any host. The boundary crosses as a timestamp and the period as
+// the whole number of nanoseconds a Go duration is, stored and compared as that integer: a scale
+// equality decided by a float's rounding would be the scale defect above in a new coat.
 const (
 	readPeriod = `select exists (
 			select 1 from duty_passes
