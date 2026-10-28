@@ -2,23 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T12:31:48Z",
-  "round": 1,
-  "reviewedHead": "55265661df7cdd206ee52e58c0edf0c957c93a62",
+  "completed": "2026-10-28T13:41:49Z",
+  "round": 2,
+  "reviewedHead": "621cf3e59315",
+  "scope": "Narrowed by the architect to review 5682630000's six findings and CI at the new code head.",
   "decision": "changes_requested",
-  "critical": 0,
-  "important": 3,
-  "minor": 3,
-  "ci": "Code head 55265661 (newest pull_request runs; compare 55265661...10bcb505 is .legion/ only, 2 files). At 12:30Z: Docs, PR Title, typecheck, pr-title success; Tests (lint, test), Legion Envoy and Contracts and Worker Image still queued or running. The request for changes does not wait on them.",
-  "thermonuclear": "deep-review and code-quality run once at 10bcb505 (code identical to 55265661): deep found no defect in the six product race fixes and raised the session-title and deep-links findings; quality raised cleanup only.",
+  "critical": 1,
+  "important": 0,
+  "minor": 0,
+  "ci": "Code head 621cf3e5 (compare 621cf3e5...7fb2e587 is .legion/ only). Required checks read at 13:40Z: lint, typecheck and pr-title succeeded. test (run 40689830074, job 122821769457) failed: four scratch-Dispatch tests in packages/daemon/internal/daemon could not build Dispatch from the pull request's merge ref, because main's #2233 (2d872499b6, merged 12:18Z) added packages/envoy/internal/dispatch/api/issue_ask_repair.go:121, which calls duty.Exclusive with the old signature (no due time).",
+  "roundOneFindings": "All six checked at 621cf3e5. 1: session-title.test.ts is main's strict test again (stub sleeps 5 s, bound < 3 s); 10/10 green on the pinned Bun 1.4.4 in this pod. 2: kept by the architect's decision; the layout shift is INFRA-662's. 3: the census is in the body; five hits of its own second search were missing, all of them set Lifetime or never reach Register; the reviewer added them. 4: sweep.go reads due before NewTicker. 5: beforeNextBoundary uses periodBoundary on the process's clock; comments corrected. 6: fragments added for envoy (two), claude-envoy and pi-legion.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/claude-envoy/tests/session-title.test.ts:412", "description": "The stub's 2 s self-end plus the < 3000 ms bound let the test pass when queryTmux's kill never arrives. The workaround is for Bun 1.3.14 (the pod's bun: 7 of 12 timed-out execFileSync calls waited the child's full 5 s with no signal); at the pinned Bun 1.4.4 (.bun-version, CI) 12 of 12 were killed at about 1 s. Restore a bound that fails a missing kill (elapsed < 2000, or drop the self-end) and run it on the pinned Bun."},
-    {"severity": "important", "file": "packages/dispatch/e2e/deep-links.e2e.ts:636", "description": "The test pre-reads the issue to avoid a product layout shift: the unread mark's own row (ConversationTab.tsx:621-624, :1212-1216) disappears when the read mark answers and moves the cards up under the pointer. Fix the shift at its source with a browser test that fails before, then drop the pre-read; or send the scope decision to the architect. 'Not changed' in the PR body is no outcome."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/server.go:335", "description": "The PR makes Deps.Lifetime required (register panics without it) at the api package boundary and carries no '## Contract change census' (search commands, every hit with its disposition, rollout line)."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:241", "description": "due := time.Now() comes after time.NewTicker(interval), so the first two due times are less than one period apart and can share a bucket: the second sweep is refused and a lone sweeper loses that period. Take due before NewTicker."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/duty/exclusive_test.go:320", "description": "beforeNextBoundary aims at a boundary on the database's clock while Exclusive now buckets on the process's clock, so with a database clock offset the two boundary tests no longer place a tick near the boundary the code uses and stop catching a regression. exclusive_latency_test.go:33-36 and exclusive.go:55-59, :86-88 describe a measure the code no longer makes."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased", "description": "No changelog fragments: packages/envoy (leased loops lose no period; event stream reset read), packages/claude-envoy (one heartbeat at startup) and packages/pi-legion (the bundled merge-gate skill's re-run) change behaviour, and AGENTS.md asks for a fragment per package."}
+    {"severity": "critical", "file": "packages/envoy/internal/dispatch/api/issue_ask_repair.go:121 (main)", "description": "The required test check is red at the code head: the merge with main does not compile, because main's new leased loop RunIssueAskRepair calls duty.Exclusive without a due time. Bring main into the branch (GitHub reports no textual conflict, but the merge ref fails the build, so this is a real conflict), pass the ticker's value as the due time (case due := <-ticker.C), grep main for any other caller of duty.Exclusive or duty.RunJittered, add the loop to the envoy fragment's list, and get CI green."}
   ],
-  "fastFollow": "Test and helper cleanup: one lock-wait helper for ask_turn_test.go and suggestions_test.go on storetest.QueuedBehind; the four leased loops' due plumbing in one duty helper; waitOutABucketBoundary's unused parameter; machine_logins_test.go:397 through logtest.Swap; tmux launch's credential mint and write in one helper; Deps.Lifetime as a Register parameter rather than a nil-able field.",
-  "threads": "No review threads on the pull request before this round."
+  "threads": "Replied on all five round-1 threads (PRRT_kwDORFy7ds6xHnSP, SV, SY, Se, Sj), each accepted; the implementer had already resolved them.",
+  "fastFollow": "Test and helper cleanup from round 1: one lock-wait helper on storetest.QueuedBehind; the four leased loops' due plumbing in one duty helper; waitOutABucketBoundary's unused parameter; machine_logins_test.go:397 through logtest.Swap; tmux launch's credential mint and write in one helper; Deps.Lifetime as a Register parameter."
 }
