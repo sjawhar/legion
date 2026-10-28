@@ -2,62 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "completed": "2026-10-28T19:47:00Z",
-  "headTested": "9eb0b4e29b083ab4e51076ca79e633f164084715",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-tar-gz",
+  "completed": "2026-10-28T22:45:00Z",
+  "round": 2,
+  "headTested": "d1939c8689f53e46ea10804b353f13aa312425aa",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-2-tar-gz",
+  "previousRound": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's e2e steps (scenA.sh with the hour's document-compaction pass cleared) on my own Postgres 16.2 with envoy-dispatch built from 9eb0b4e2: sweep at +16 s logged candidates=1 compacted=1 rows_deleted=37, 3 young rows unchanged in version/xmin/md5, text sha256 identical, a 31st upload reads back; main 20ba65a6 folded all 41 rows at shutdown. Re-measured BenchmarkRoomLoad (10 interleaved rounds: 240 versions 489.6 -> 101.1 ms, 4.84x; growth 1.89x and 1.64x) and BenchmarkUploadVersion (5 rounds: 530.9 -> 527.0 ms, p=0.42; loadRoom 0.91 -> 0.61 s), matching the PR body."
+    "how": "Re-ran the implementer's e2e steps (scenA.sh, hour pass cleared) with envoy-dispatch built from d1939c86: sweep candidates=1 compacted=1 rows_deleted=37, the 3 young rows unchanged in version/xmin/md5, text sha256 identical, a 31st upload reads back. Re-ran its listing EXPLAIN on a 100,000-document database migrated by the head: Seq Scan of the empty doc_compaction_owed, 0.047 ms. The round-1 red test TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue is byte-identical at the head (function and helper hash as in 267322ef) and passes with the other CompactionSweep tests."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "INFRA-514 architect's check (dispatch://INFRA-593/comment/542d490a-194e-4c90-9cf2-243ecc788b28): the hourly compaction sweep, when nothing is due, does an index read of due documents only, no scan of every document.",
-      "evidence": "compactionCandidates (internal/dispatch/docs/compaction_sweep.go:133-143) runs `select artifact_id from doc_updates group by artifact_id having count(*) > 1` every hour. EXPLAIN (ANALYZE, BUFFERS) on 100,000 one-row documents, none due: HashAggregate over Seq Scan on doc_updates, Rows Removed by Filter: 100000, shared hit=11334 (the whole 89 MB heap), 113 ms; with compressible 2-KB rows also a Seq Scan, 77 ms. The PR body's 2,000,000-row run got an index-only scan of the primary key; either plan reads one entry per document. Plan D3 chose this query and forbids a doc_updates migration, so the remedy is the architect's decision. Red test (commit 267322ef): TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue in packages/envoy/internal/dispatch/docs/compaction_sweep_test.go; `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<postgres> go test ./internal/dispatch/docs -run TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue -count=3` fails 3 of 3: 'the sweep read 2024 doc_updates rows to fold one document of 3 rows among 2000 documents with nothing to fold, want fewer than 2000'. The due document's own reads are 21 rows, so a listing of due documents only passes."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "Architect check 2: a restart within an hour after a sweep leaves due documents to the queue or the next hour, and a load in that window still reads the compacted row plus newer rows correctly.",
-      "surface": "envoy-dispatch built from 9eb0b4e2, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
-      "command": "bash $TMPDIR/t593/scenA.sh (in dispatch://INFRA-593/artifact/infra-593-tester-rig-tar-gz)",
-      "observed": "Process 1 swept the 18:00 hour with nothing due (candidates=1 compacted=0). After stop, backdate of 38 of 41 rows and restart, the restarted tick logged 'leased pass skipped lease=document-compaction'. A cold read 35 s after the restart read the 41 stored rows and returned the same text sha256 (db68d573...). That load noted the room; the queue folded the log to 1 row 2 minutes later. A 31st upload read back.",
-      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
-      "negativeControl": "Main 20ba65a6 with the same uploads: its shutdown compaction folded all 41 rows into one and rewrote the newest row 67 s after it was written (xmin 1414 -> 1465); the head kept rows younger than 2 minutes as written."
+      "criterion": "Round 1 failure / INFRA-514 architect's check: the hourly sweep reads only documents with rows to fold, no scan of every document.",
+      "surface": "envoy-dispatch built from d1939c86 booted on a Postgres 16.2 database of 100,000 one-row documents (round 1's), and the docs package against the same Postgres",
+      "command": "start the head on t593_big (migrations 0136-0137 applied in a 1.6 s boot); EXPLAIN (ANALYZE, BUFFERS) select artifact_id::text from doc_compaction_owed; insert 50 stale entries, clear the hour's pass, restart; go test ./internal/dispatch/docs -run CompactionSweep -count=1",
+      "observed": "First sweep candidates=0. Listing: Seq Scan on doc_compaction_owed, 0 rows, 0.047 ms; with 50 rows, 1 buffer, 0.067 ms. The next sweep logged candidates=50 compacted=0 forgotten=50 and emptied the table. All 7 CompactionSweep tests pass, the round-1 red test included.",
+      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
+      "negativeControl": "Round 1 at 9eb0b4e2 on the same database: Seq Scan of the whole 89 MB heap, Rows Removed by Filter 100000, 113 ms; the red test failed 3 of 3 (2,024 rows read)."
     },
     {
-      "criterion": "Architect comment a31b1f1f: a failed load's caller response matches main apart from the error wording, and nothing matches on the old text.",
-      "surface": "envoy-dispatch main 20ba65a6 and head 9eb0b4e2 on copies of one corrupted database, HTTP API and websocket upgrade",
-      "command": "bash $TMPDIR/t593/scenB2.sh <main> one; bash scenB2.sh <head> two; bash scenB3.sh one; repository grep and gh search code in theorem-labs/agent-infra for 'loading room', 'settle document', OnLoadDocument",
-      "observed": "One row cut to half: GET text, upload, anchored comment and a second upload answer 409 DOCUMENT_UNLOADABLE on both builds, websocket 503 on both, responses byte-identical. Two rows with the newest cut: 503 DOC_SERVICE_UNAVAILABLE on both, identical. The room's own load hook, reached by an owed settlement resumed at boot: main logs 'warm document for settlement: loading room \"<id>\": crdt: invalid update: encoding: unexpected end of input', head logs '... OnLoadDocument for room \"<id>\": crdt: ...' at the same level and message. No code, script, doc or alert matches the old text.",
-      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
-      "negativeControl": "The cut row is the broken input, and both builds refuse it with the same code and status; the same document before the cut was written through the seed build's upload route (201) and loaded."
+      "criterion": "Upgrade and rolling update: migration 0137 names every document an older release left with rows to fold, and a document the old release appends to during the roll is still compacted.",
+      "surface": "envoy-dispatch main 1767c9af and head d1939c86 serving one Postgres 16.2 database, HTTP API",
+      "command": "bash $TMPDIR/t593/scenU.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-2-tar-gz)",
+      "observed": "Main wrote 4 documents of 11, 11, 11 and 2 rows. Head booted on that database: doc_compaction_owed held all 4 (no document with more than one row missing). Its first sweep logged candidates=4 compacted=4 rows_deleted=31 and the table emptied. A head upload to a compacted document named it again. With main serving beside head, a main upload gave a document a second row and no entry. A cold read through head noted it, and head's queue folded it to one row.",
+      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
+      "negativeControl": "The main upload is the case the table misses (docs with >1 row not owed: 1 right after it). Only head's queue, through the read, folded that document. One the old release alone appends to and nobody reads during the roll waits for its next append or load through the new release, as migration 0137's comment says."
     },
     {
-      "criterion": "Acceptance 6 (plan): the 240-version load at least 3x cheaper than main and each doubling at most 2.3x; architect: docs.fold allocations fell.",
-      "surface": "BenchmarkRoomLoad in internal/dispatch/docs against Postgres 16.2, main 20ba65a6 with the benchmark file and head 9eb0b4e2, interleaved",
-      "command": "bash $TMPDIR/t593/bench.sh (10 rounds, -benchtime 10x, -benchmem, memprofile in round 1); benchstat golang.org/x/perf v0.0.0-20261009192801-be2c69fb417e; go tool pprof -sample_index=alloc_space -focus='roomLoadFixture\\)\\.run'",
-      "observed": "60 versions 76.8 -> 32.7 ms, 120 163.1 -> 53.6 ms, 240 489.6 -> 101.1 ms (4.84x); head 240/120 = 1.89x, 120/60 = 1.64x; B/op -47%, allocs/op -50%. Timed-loop heap: one compacted row main 997 MB (docs.fold 59 MB, validateUpdate 485 MB) vs head 531 MB (no docs.fold); one row plus 15 young at 240 versions docs.fold 768 -> 681 MB, 1,207 -> 399 ms per load.",
-      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
-      "negativeControl": "Main in the same interleaved rounds is the control: 489.6 ms at 240 versions, two decodes (validateUpdate plus the room) where head has one."
+      "criterion": "Acceptance 3 with the new table: writes during a sweep land, texts stay exact, and every document with rows to fold stays named.",
+      "surface": "envoy-dispatch built from d1939c86, real process, 12 concurrent HTTP writers",
+      "command": "bash $TMPDIR/t593/scenC2.sh",
+      "observed": "12 documents of 21 rows backdated, hour pass cleared, restart; 96 uploads and 96 anchored comments while the sweep logged candidates=12 compacted=10 rows_deleted=200 left_to_queue=2. Every document reads exactly as version 27 with 8 anchored comments, also after a cold restart. Afterwards 0 documents with more than one row were missing from doc_compaction_owed (12 owed). No ERROR line.",
+      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
+      "negativeControl": "The two documents whose lock a writer held (left_to_queue=2) were not waited for; the queue took them, and their texts are exact."
     },
     {
-      "criterion": "Acceptance 3: compaction never blocks requests and a write during compaction lands; the stored text stays exact.",
-      "surface": "envoy-dispatch built from 9eb0b4e2, real process, 12 concurrent HTTP writers",
-      "command": "bash $TMPDIR/t593/scenC.sh",
-      "observed": "12 documents of 21 rows, backdated, hour pass cleared, restart: 12 writers made 96 uploads and 96 anchored comments between 19:23:58 and 19:24:27 while the sweep compacted 12 documents (rows_deleted=240) at 19:24:24. Every document reads exactly as version 27 with 8 anchored comments, also after a cold restart; no ERROR line.",
-      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
-      "negativeControl": "scenD.sh: a log with row 10 cut to half is not folded: the sweep and the queue leave all 21 rows as stored (version, xmin, md5), log 'compaction leaves them as stored' once, and the process uses 0.21 CPU-seconds in the next 200 s."
-    },
-    {
-      "criterion": "Architect check 1, second half: the sweep's statements per hour at idle on two processes.",
-      "surface": "two envoy-dispatch processes from 9eb0b4e2 on one Postgres holding 100,000 one-row documents, log_statement=all",
-      "command": "bash $TMPDIR/t593/idle.sh (25 minutes, 19:05:41-19:30:42 UTC), statements classified from the Postgres log",
-      "observed": "20 compaction statements in 25 minutes: each tick 3 lease-pool statements (try lock, duty_passes period read, unlock), 3 ticks per process; one pass (process B, 19:05:57) ran the listing (115 ms) and the duty record; every other tick skipped. About 38 statements an hour for both processes, beside about 20,000 statements a process from the other loops.",
-      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
-      "negativeControl": "Process A's ticks in the hour B swept logged 'leased pass skipped lease=document-compaction' and ran no listing."
+      "criterion": "Acceptance 1, 2 and 5 at the merged head: compaction survives a restart, runs without NATS, folds only rows older than 2 minutes; a restart inside a swept hour costs time, not correctness.",
+      "surface": "envoy-dispatch built from d1939c86, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
+      "command": "CLEAR_PASS=1 bash $TMPDIR/t593/scenA.sh; bash $TMPDIR/t593/scenA.sh",
+      "observed": "Hour pass cleared: 41 rows; sweep at +23 s compacted=1 rows_deleted=37; 4 rows left, the 3 young rows unchanged (version, xmin, md5); text sha256 identical; a 31st upload reads back. Hour already swept: the restarted tick skipped; a cold read of the 41 uncompacted rows gave the same text; the queue folded the log 2 minutes after that read.",
+      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
+      "negativeControl": "Main 1767c9af, serving beside head in scenU.sh, folded a row head had written that same second (its keep-1 room-close compaction); round 1's main 20ba65a6 folded a 67-second-old row at shutdown. The head kept every row younger than 2 minutes."
     }
   ],
-  "ci": "Read on GitHub at 9eb0b4e2, 19:45 UTC: lint, typecheck, build, changes and the daemon Go suite success; dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-smoke, envoy-e2e-local, broker suites and pi-legion queued; test in progress."
+  "notRerun": "Code unchanged since round 1 for these, so not re-run: failed-load wording comparison, BenchmarkRoomLoad and heap profiles, BenchmarkUploadVersion, the unfoldable-log probe, the idle statement count (round 1 report).",
+  "observations": [
+    "Wording only: packages/envoy/internal/dispatch/store/migrations/0137_doc_compaction_owed.census.sql says '0136 creates doc_compaction_owed'; the file is 0137 (main's 0136 is dashboard_assets)."
+  ],
+  "ci": "Read on GitHub at d1939c86, 22:39 UTC: every lane queued (build, changes, lint, test, typecheck, the daemon Go suite)."
 }
