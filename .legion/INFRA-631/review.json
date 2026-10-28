@@ -2,33 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T14:53:36Z",
-  "round": 7,
-  "headReviewed": "the handoff commit this file is pushed in (code head 7d024719, merge of main d47dbf05)",
+  "completed": "2026-10-28T15:17:54Z",
+  "round": 8,
+  "headReviewed": "the handoff commit this file is pushed in (code head bbcf3e77, on the merge of main d47dbf05)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
   "minor": 0,
-  "roundSixFindings": "fixed: all nine CommonMark-vs-HTML5 inputs leave the file unchanged with exit 0, stable on a second --write, as do every earlier round's reproductions; main merged (d47dbf05) and restructure.ts --strict on its files is byte-identical to the head guides",
+  "roundSevenFindings": "fixed: both <source reproductions leave the file unchanged with exit 0; VERBATIM_OPEN's names and case are pinned (mutations in a scratch copy: dropping /i fails 64 tests, each name dropped fails 2-23, the lookahead removed fails 2, 'source' dropped fails 2)",
   "verified": [
-    "checker exit 0 on both guides; bun test of the two test files: 61 pass, 0 fail",
-    "required checks (lint, typecheck, test, pr-title) at CI head 7d024719 all queued at 14:53Z; compare 7d024719...1fa9862d is .legion/ only; PR MERGEABLE"
+    "checker exit 0 on both guides; bun test of the two test files: 81 pass, 0 fail",
+    "GitHub reports the pull request CONFLICTING with main 690c0136: git merge-tree conflicts in packages/envoy/AGENTS.md (main added 18 lines); restructure.ts --strict on 690c0136's two files exits 0",
+    "required checks (lint, typecheck, test, pr-title) at CI head bbcf3e77 queued at 15:17Z"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:74",
-      "description": "HTML_BLOCK_TAG follows CommonMark 0.31 (and micromark), which dropped 'source' from the kind-6 list; GitHub's cmark-gfm still has it, so on GitHub '<source' starts an HTML block that may interrupt a paragraph. The scanner and the guard both read the line as paragraph text and --write joins it, exit 0: 'Some words here\\n<source \"x\"> *a* more words.' renders on GitHub (POST /markdown) as '<p>Some words here</p><source> *a* more words.' before and '<p>Some words here &lt;source \"x\"&gt; <em>a</em> more words.</p>' after; 'Intro words.\\n<source \"x\"> <code \"y\">alpha\\nbeta gamma</code> tail.' loses its <code> element. Fix: add 'source' (keep 'search'), say the list follows cmark-gfm, add both inputs as tests."
+      "file": "packages/envoy/AGENTS.md",
+      "description": "The head conflicts with main 690c0136. Merge main and regenerate the guides with restructure.ts --strict on main's files."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:100",
-      "description": "No test checks what VERBATIM_OPEN matches, and the guard reads the same constant, so it cannot catch a narrowing: dropping the /i flag or removing tt, samp, textarea, script or style passes all 60 tests (code quality, scratch copy), and with /i dropped 'Output <PRE>one. Two\\nthree</PRE> here.' is rewritten inside the <pre> with exit 0. Add one table test over the eight names and one uppercase form."
+      "file": "scripts/semantic-line-breaks.ts:77",
+      "description": "After the tag name, HTML_BLOCK_TAG (and kind 1 at :66, and GFM_ONLY_HTML_BLOCK_LINE at :1001) accept only space, tab, '>' or '/>', where cmark-gfm's spacechar is [ \\t\\v\\f\\r\\n]. 'Some words here\\n<source\\fsrc=x> more words.' is joined with exit 0; GitHub renders '<p>Some words here</p>\\n<source> more words.' before and '<p>Some words here <source> more words.</p>' after. With a bare \\r ('<source\\rmore words.') the literal '&lt;source' appears on the page. Fix: [ \\t\\v\\f\\r] in each; delete GFM_ONLY_HTML_BLOCK_LINE and its check, which never fires once HTML_BLOCK_TAG has 'source' (deleting it leaves 80/80 tests passing; 40,000 random inputs refused 0), so the rule lives once."
     }
   ],
-  "fastFollow": "Five test titles describe the close-tag counting round 7 removed (semantic-line-breaks.test.ts:336,343,391,399,407); plus the cleanups named in rounds 3 and 5.",
+  "notADefect": "Code quality's '- beta. Gamma\\n- ' case: R2's blank line between list items makes the list loose, which the spec requires and the plan accepts ('loose-list <p> normalised', plan.json acceptanceEvidence 2).",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 1fa9862d (1 High: source missing from the kind-6 list). Entities, GFM tagfilter, sanitizer-stripped elements, tables, link reference and footnote definitions checked and not holes",
-    "codeQuality": "Verdict: CHANGES at 1fa9862d (VERBATIM_OPEN's names and case untested; stale test titles)"
+    "deepReview": "Verdict: CHANGES at 6decae7c (1 Medium: \\f, \\v, bare \\r after the tag name). Case, '</source', '<source/>', indent up to 3, tabs, blockquotes, list items, cuts of long lines and CRLF checked and not defects",
+    "codeQuality": "Verdict: CHANGES at 6decae7c (GFM_ONLY_HTML_BLOCK_LINE never fires and no test catches its removal)"
   }
 }
