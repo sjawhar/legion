@@ -2,50 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T15:43:00Z",
-  "round": 9,
-  "headTested": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1 (code head e99901ae5857; 8ab4da93 adds only .legion/INFRA-177/implement.json)",
-  "fingerprint": "changed by the forward merge e99901ae with main (#2423 among it; Dispatch migration renumbered to 0136), so a full round",
-  "mergeability": "git merge-tree of main c44c1469 with 8ab4da93 -> no conflict (GitHub's mergeable read UNKNOWN while it computed); contract 41, daemon 0062_handoff_records and Dispatch 0136_handoffs free on main (40, 0061, 0135_server_processes).",
-  "ci": "Read 15:42Z at code head e99901ae: every lane queued (build x2, changes, lint, pr-title, test, typecheck, the Daemon Go suite on Postgres 16). Read as running, not waited for.",
-  "claudeEnvoyBuild": {
-    "how": "As #2423 builds it: `bun scripts/build.ts --out $TMPDIR/ce-build` in packages/claude-envoy on Bun 1.4.4 (.bun-version), from this head's source. The tracked dist/ and legion/ at the head are main's (git diff main..8ab4da93 over them is empty), as #2423 requires of a pull request.",
-    "built": "dist/envoy-channel.js holds latestHandoff (5), handoffId (2), handoffVersion (2), `dispatch handoff-write` (3), HANDOFF_NOT_FOUND (3), JJ_USER (0), and reports daemonApiVersion 41; dist/dispatch.js carries handoff-write/handoff-read; legion/skills is byte-identical to skills/legion-worker and names handoff-write in SKILL.md and merge-gate.md, with no skip-checks rule (0 files) and no skip-checks-trailer.md.",
-    "trackedOldBuild": "main's tracked bundle: none of the handoff names, JJ_USER (1), daemonApiVersion 40 compiled in, and legion/ with skip-checks in 7 files and skip-checks-trailer.md. A Claude Code worker on it is refused, never served the old text: it registers with plugin contract 40, which a contract-41 daemon refuses, and its strict reader refuses a contract-41 state (observed: 'GET /legion/v1/state answered 200 with a body the daemon API contract does not describe: issues.LEGT-1.workers.planner: Unrecognized key: \"handoffRecord\"'). docs/deployment.md (#2423) says how to bridge the window between a merge and main's rebuild commit: build with --out and point LEGION_CLAUDE_PLUGIN_DIR at it."
-  },
-  "dispatchMigration0136": "Dispatch built from main c44c1469 migrates a fresh database to 135 and answers the handoff route 404; the head's Dispatch migrates it to 136, keeps the existing issue and records plan v1; 0136's census answers 0; main's Dispatch then serves the 136 database (GET UPG-1 200), the binary rollback the README's expand-only rule gives a new table.",
+  "completed": "2026-10-28T16:03:00Z",
+  "round": 10,
+  "headTested": "e6980f49522675a1634de6ed65a6cbd7093d4470 (code head abdef8d9d4c2)",
+  "fingerprint": "unchanged in code: `git diff --stat 46727fbe e6980f49` lists only .legion/INFRA-177/{implement,review}.json and packages/claude-envoy/.changes/unreleased/pr2354-Changed-20261028-103904.yaml, a release-note fragment. Round 9's real-surface verification at 8ab4da93 stands for the code; this round checks the fragment and the bare gates.",
+  "fragment": "The claude-envoy Changed fragment no longer says dist/ and legion/ were regenerated or to install from the same commit: it says main's Rebuild Claude Envoy plugin workflow builds them after the merge, that until then the committed plugin is the contract-40 build a contract-41 daemon refuses at registration, and to install from main once the rebuild commit is there. That matches round 9's observation (the tracked bundle compiles in daemonApiVersion 40; a build from this source reports 41 and sends the handoff record). No Dispatch key in it; `changie batch v9.9.9 --dry-run` (v1.26.0) in packages/claude-envoy folds it, exit 0, wrapped under its bullet.",
+  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 80cc97a6 with e6980f49 -> no conflict; contract 41, daemon 0062, Dispatch 0136 still free on main (40, 0061, 0135).",
+  "ci": "Read 16:02Z at code head abdef8d9: every lane queued (build x2, changes, lint, pr-title, test, typecheck, the Daemon Go suite on Postgres 16); the runs at e99901ae were cancelled by the newer push. Read as running, not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "P1 on a fresh database: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t9?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s. A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t9?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. handoffimport ok. P7 and P4 not re-run (implement App, model route)."
+    "how": "Smoke at the head: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t10?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, `--- PASS: TestHandoffRecordsLive (30.10s)`, PASS in 45s."
   },
   "failures": [],
   "failed": 0,
-  "notes": [
-    "Wording, for the reviewer's Fast-follow judgement: claude-envoy's pr2354 Changed fragment still ends 'since `dist/` and `legion/` were regenerated' and says 'Install it with a `legion` built from the same commit'; after #2423 this pull request regenerates neither, and the merge commit's tracked bundle is the old contract-40 build until main's rebuild commit lands. The behaviour is safe (refused at the gate) and docs/deployment.md covers the window."
-  ],
   "proof": [
     {
-      "criterion": "A claude-envoy built from this head's source as #2423 builds it carries the handoff record: the legion MCP tool's handoff_complete reports the Dispatch record, and the generated skills teach it",
-      "surface": "the built dist/envoy-channel.js run as a Legion tester pane's MCP server (bun, stdio, as Claude Code runs it) with a daemon stand-in and a scratch Dispatch built from the head holding LEGT-1's test record v1 under the pane's session; a throwaway test, deleted afterwards",
-      "command": "bun scripts/build.ts --out $TMPDIR/ce-build; BUILT_ENTRY=$TMPDIR/ce-build/dist/envoy-channel.js bun test tests/zz-tester-built-handoff.test.ts (legion tool: handoff_complete, verdict pass)",
-      "observed": "the daemon stand-in received POST /legion/v1/handoff/complete {grantId, summary, verdict: pass, ready: false, handoffId: ef076fc6-…, handoffVersion: 1}, the record Dispatch holds; the built dist/dispatch.js reads it back with handoff-read",
-      "headSha": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1",
-      "negativeControl": "the same pane on main's tracked dist/envoy-channel.js (the merge's copy): its contract-40 reader refuses the daemon's state ('Unrecognized key: \"handoffRecord\"'), the claim never serves a tool call, and nothing reaches /legion/v1/handoff/complete"
+      "criterion": "The claude-envoy release note states what #2423 makes true: main's rebuild builds the plugin after the merge, and the committed contract-40 build is refused until then",
+      "surface": "the fragment as changie folds it into packages/claude-envoy/CHANGELOG.md",
+      "command": "cd packages/claude-envoy (copied to a scratch directory) && go run github.com/miniscruff/changie@v1.26.0 batch v9.9.9 --dry-run",
+      "observed": "exit 0; the bullet ends 'Main's Rebuild Claude Envoy plugin workflow builds `dist/` and `legion/` from this commit's source after the merge; until that rebuild lands, the committed plugin is the contract-40 build, which a contract-41 daemon refuses at registration. Install the plugin from main once the rebuild commit is there…'",
+      "headSha": "e6980f49522675a1634de6ed65a6cbd7093d4470",
+      "negativeControl": "round 9 at 8ab4da93: the tracked dist/envoy-channel.js compiles in daemonApiVersion 40 and refuses a contract-41 state ('Unrecognized key: \"handoffRecord\"'), while the --out build reports 41 and sends handoffId/handoffVersion"
     },
     {
-      "criterion": "Dispatch migration 0136 applies on main's 0135, and the release before runs over it",
-      "surface": "Dispatch built from main c44c1469 and from the head on one database",
-      "command": "./dispatch-main, create UPG/UPG-1, POST …/handoffs/plan; ./dispatch-srv on the same database, POST again; ./dispatch-main again; 0136_handoffs.census.sql",
-      "observed": "main at 135; head at 136 with UPG-1 kept and plan v1 recorded; census 0; main serves the 136 database (200)",
-      "headSha": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1",
-      "negativeControl": "main's Dispatch answers POST /api/v1/issues/UPG-1/handoffs/plan 404"
-    },
-    {
-      "criterion": "A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon; A1 in the dashboard",
-      "surface": "scripts/e2e/handoff-records.sh; the Dispatch browser suite",
-      "command": "handoff-records.sh (legion_t9); dispatch-e2e.sh … e2e/handoffs.e2e.ts",
-      "observed": "9 checks ok; 2 passed",
-      "headSha": "8ab4da937ffb34fabc73982dcd8a0409ec23fda1",
+      "criterion": "Smoke: A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon",
+      "surface": "scripts/e2e/handoff-records.sh",
+      "command": "LEGION_TEST_PG_DSN=…/legion_t10 … bash scripts/e2e/handoff-records.sh",
+      "observed": "9 checks ok, PASS in 45s",
+      "headSha": "e6980f49522675a1634de6ed65a6cbd7093d4470",
       "negativeControl": "a 262,145-byte body -> 413 CAP_EXCEEDED (a6-control); another session's record -> 403 HANDOFF_SESSION_MISMATCH (a3)"
     }
   ]
