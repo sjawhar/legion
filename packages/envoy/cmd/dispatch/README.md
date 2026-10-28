@@ -1332,7 +1332,7 @@ lists the links from the blocks of one document to the blocks of another. Text s
 release, and text an earlier build writes during the roll, is indexed by the server's block-index
 reconciliation (lease `block-index`), with no command run.
 
-A comment and a message are blocks too (migrations `0135`-`0137`; `packages/envoy/AGENTS.md`,
+A comment and a message are blocks too (migrations `0136`-`0138`; `packages/envoy/AGENTS.md`,
 "References form one graph"). The server splits a body into its top-level blocks as the document
 parser reads them, each block the text as its author wrote it (a body the parser refuses, such as
 one holding block HTML, splits at blank lines into blocks of type `text`; a body of only
@@ -1358,7 +1358,7 @@ edge to that block, and every comment and message a route or event returns carri
 `reply_block`, `null` when it names none. `GET /api/v1/comments/{id}/blocks` and
 `GET /api/v1/messages/{id}/blocks` list an item's current blocks. A comment or message an earlier
 build writes during the roll, or after a rollback, is owed its blocks (`owed_at`, set by the
-triggers of `0136` and `0137`), which the same block-index reconciliation indexes, at most 200 a
+triggers of `0137` and `0138`), which the same block-index reconciliation indexes, at most 200 a
 tick, with no command run.
 
 ```bash
