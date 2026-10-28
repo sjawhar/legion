@@ -2,41 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-576",
-  "round": 2,
-  "completed": "2026-10-28T09:40:00Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "235e89096447",
-  "ci": "Required set (rulesets on main): lint, typecheck, test, pr-title. CI head 235e89096447 (newest pull_request run): lint, typecheck, test success, newest pr-title success; compare 235e8909...6e95cc79 handoffsOnly true, 2 files.",
-  "thermonuclear": "Both run at 6e95cc79 (code of 235e8909). Deep review: one Medium (call mode false while unset still admitted: non-empty default, numeric coercion), Minors. Code quality: the same gap as Important, cleanup otherwise. Round-1 fixes, merge resolution, label logic and release.yaml cleanup traced correct.",
-  "roundOneThreads": "All five round-1 threads verified fixed at 4507cb60/91ec4a79 (call mode now refuses == '<non-empty>' and != ''; label = legion_build's version on main; comments corrected) and replied to.",
+  "round": 3,
+  "completed": "2026-10-28T10:30:00Z",
+  "decision": "approved",
+  "reviewedCodeHead": "e1badaa641ee",
+  "scope": "Narrowed by the INFRA-490 architect (Envoy 2026-10-28T09:05Z) to review 5680136398's items: the unset-input rule with its refusal cases, the docs and comment fixes, the census; other wording to Fast-follow.",
+  "ci": "Required set (rulesets on main): lint, typecheck, test, pr-title. CI head e1badaa641ee (newest pull_request run): lint success 09:59Z, typecheck success 09:52Z, test success 10:21Z, newest pr-title success 09:47Z; compare e1badaa6...effca14a handoffsOnly true, 2 files.",
+  "verification": "check-image-trigger-paths.test.sh 886 passed; real check exits 0; round-2 repros (== '' default \"build\", != '0', != 'attest' default \"attest\") each exit 1, == '' default \"\" exits 0; check-release-credentials.sh exits 0 over 4 workflows; census searches re-run at head match the body's dispositions.",
+  "thermonuclear": "Both at effca14a (code e1badaa6), scoped to the round-2 delta and the #2419 merge: no correctness defect; Minors are comment/test wording (Fast-follow).",
+  "threads": "All 9 threads (5 round 1, 4 round 2) answered by the reviewer and resolved by the implementer; round-2 thread ids accepted: PRRT_kwDORFy7ds6xDFJs, PRRT_kwDORFy7ds6xDFJ1, PRRT_kwDORFy7ds6xDFJ7, PRRT_kwDORFy7ds6xDFJ_.",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
+  "important": 0,
+  "minor": 1,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": ".github/scripts/check-image-trigger-paths.sh",
-      "description": "true_unset/call_inputs (154-170) model an unset input as ''. A workflow_call that omits an input gets its declared default, and on the workflow's own pull_request run the input is null, which GitHub coerces to 0 against a numeric-looking literal. Reproduced with the test file's fixture/call_modes: inputs.mode == '' with default \"build\" -> exit 0; inputs.mode != 'attest' with default \"attest\" -> exit 0; inputs.mode != '0' -> exit 0. Each turns the build off on every call or every pull request while the required lint check passes. Fix: admit only inputs.<name> == '' on a type: string input whose default is absent or \"\" (drop the != admission, which worker-image.yaml does not use), add refusal cases, correct the 'compares as ''' wording."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md",
-      "description": "554: a whole-run rerun 're-executes legion_build, which releases that tag again' - legion_build decides the version; publish releases it and worker_image_release moves the tag. 455: the version tag goes on the digest worker_image pushed, not on whatever the mutable sha- tag names."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/workflows/worker-image.yaml",
-      "description": "119-123: 'a dropped pending main run never leaves a commit with no image to pin' does not hold for release.yaml's attest-only call, which shares worker-image-<sha>: a pending attest call replaced by a further same-sha run leaves the released digest unattested (fails closed at verify). Say so."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body",
-      "description": "Census: row 1 says agent-infra has no legion_version hit, but legion-worker.yaml:289 matches (its own step output); search 1's legion_version also matches every pi_legion_version (use \\blegion_version\\b); release-push.test.sh:1141 (search 2) is unlisted; agent-infra legion/Pulumi.prod.yaml:159 (attestation comment) unlisted. Rollout line must say immediate refusal (GitHub 422 on -f legion_version) and what it closes."
-    },
-    {
       "severity": "minor",
       "file": ".github/scripts/check-image-trigger-paths.sh",
-      "description": "Cleanup (fast-follow): gate_outputs' modes_false_unset comprehension (746-767) repeats neutral()'s match and builds a list to use [0]; the true-while-unset rule is stated five times."
+      "description": "Fast-follow, wording only: the GATES paragraph (28-41), call_inputs docstring and test comments (444-446, 481) give the wrong reason other shapes are refused (a deliberate narrowing, not each being false while unset) and claim null on workflow_dispatch; the boolean refusal fixture is refused by its default, not its type; test labels at 354 and 529 describe the round-2 rule; docs/kubernetes.md:554's '(it holds no credential)' reads as the reason the version repeats."
     }
   ]
 }
