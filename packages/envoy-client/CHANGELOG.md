@@ -226,7 +226,7 @@
   flushing it first: behind data the dead path never acknowledged that flush never completed, so
   the transport never closed and a session that had published since the path froze never
   redialed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed, and that a client
-  that wrote 4 MiB the frozen path never read reconnects within 60 s (INFRA-548).
+  that wrote 32 MiB the frozen path never read reconnects within 60 s (INFRA-548).
 
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file

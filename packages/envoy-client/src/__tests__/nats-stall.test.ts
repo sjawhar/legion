@@ -36,7 +36,10 @@ describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () =
       row: "C: with natsConnectionOptions it reconnects and receives again within 60 s of the freeze when it wrote data the frozen path never acknowledged",
       slug: "c",
       stalledRedials: 0,
-      unackedBytes: 4 * 1024 * 1024,
+      // Without patches/nats@2.29.3.patch's protocol.js hunk this row must fail: on Bun 1.4.4 a
+      // 4 MiB backlog still drains into the kernel and the stale close's flush completes, 8 MiB
+      // already hangs it, and 32 MiB leaves a margin.
+      unackedBytes: 32 * 1024 * 1024,
     },
   ]) {
     test(row, async () => {
