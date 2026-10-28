@@ -234,19 +234,26 @@ func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, 
 
 // getIssueReferences answers an issue's reference closure. ?versions=latest leaves each member's
 // artifact.versions holding only its latest version, under its own ETag; absent or all is the
-// full answer.
+// full answer. A repeated versions is refused rather than read by its first value.
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var latestOnly bool
-	switch r.URL.Query().Get("versions") {
-	case "", "all":
-	case "latest":
-		latestOnly = true
-	default:
-		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be all or latest"))
+	versionsValues := r.URL.Query()["versions"]
+	if len(versionsValues) > 1 {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be given once, as all or latest"))
 		return
+	}
+	var latestOnly bool
+	if len(versionsValues) == 1 {
+		switch versionsValues[0] {
+		case "", "all":
+		case "latest":
+			latestOnly = true
+		default:
+			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be all or latest"))
+			return
+		}
 	}
 	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
 	if err != nil {
@@ -336,11 +343,7 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 	versions := `join artifact_versions v on v.artifact_id = a.id`
 	if latestOnly {
 		versions = `join lateral (
-			select v.number, v.named, v.summary, v.authors, v.created_at, v.size, v.markdown, v.mime, v.sha256
-			from artifact_versions v
-			where v.artifact_id = a.id
-			order by v.number desc
-			limit 1
+			select * from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1
 		) v on true`
 	}
 	rows, err := q.Query(ctx, `
