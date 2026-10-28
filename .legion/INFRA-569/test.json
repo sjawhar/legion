@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-569",
+  "completed": "2026-10-28T09:00:45Z",
+  "round": 8,
+  "testedHead": "169d044518eca818711c0f434a40c586b30b79de",
+  "rebaseRecheck": {
+    "from": "e72fb7e79669f0d559dc94d9fe1e85666a751299",
+    "to": "169d044518eca818711c0f434a40c586b30b79de",
+    "fingerprintFrom": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa",
+    "fingerprintTo": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa",
+    "verdict": "rebase re-check e72fb7e7 → 169d0445: fingerprint unchanged, bare gates only",
+    "intermediate": "The earlier merge head 73cf3712 also gives 2ad6e933…, so neither conflict merge since my last verified head changed the branch's diff.",
+    "smoke": "The pod replacement removed the Postgres harness and my scratch scripts, so I rebuilt both. Postgres 17.11 with pgvector 0.8.0 now runs rootless from the Debian trixie debs on 127.0.0.1:5434 (/legion/harness/pg, /legion/harness/tester-env.sh), per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md. With pinned Bun 1.4.4, bun run dispatch:local at 169d0445 built the SPA, booted the server and passed its seed. I then ran the recreated /legion/scratch/tmp/i569-test/r2.sh, which exited 0. In dispatch search: a changed answer prints 'Answered by alice at 2026-10-28T09:00:13.30991998Z · options chosen: none', equal to the newest of the 2 answers on GET /api/v1/asks/<id>, with its two text lines indented. A three-line reason sent with a CRLF stays indented under 'Closed with no answer'. A legacy settlement retraction shows 'Closed after an answer' with its indented second line and 'Last answer … options chosen: Arc'. An open ask shows 'Open: no answer yet.'. A text-only answer reads selected [] on the POST, GET /api/v1/asks/{id}, the issue ask list with thread, /api/v1/me/answers and search, as written, with the key removed from the row and event, and with both set to null (log /legion/scratch/tmp/i569-test/r8-smoke.log)."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I computed the fingerprint myself at e72fb7e7 (my last verified head), at 73cf3712 and at 169d0445: all three are 2ad6e933…, matching the implementer's. My smoke run at 169d0445 reproduced the CLI and route results of my full round at a494be24."
+  },
+  "failures": [],
+  "failed": 0,
+  "ci": "At 09:00Z, at merge head 169d0445, the required lint, typecheck, test and pr-title runs and the build runs had succeeded on GitHub. The dispatch, envoy-go and envoy-go-race jobs were still in progress; I read them as running and did not wait. Handoff head 39ce3361 carries skip-checks: true.",
+  "observations": [
+    "Retro's commit 86ada3dd removed .legion/INFRA-569/ before READY. The conflict-merge rounds after it added .legion/INFRA-569/implement.json back, and this handoff adds test.json, so the directory is on the branch again above retro's removal.",
+    "Not a defect: when markdownHead cuts inside a Markdown link or code fence, the palette shows the cut source text. The preview links to the full ask."
+  ]
+}
