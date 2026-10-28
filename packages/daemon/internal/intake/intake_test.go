@@ -344,7 +344,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request synchronized",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-synchronized.json",
-			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
+			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: "head-before", Sender: "legion-implementer[bot]", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request closed",
@@ -374,7 +374,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "branch push",
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", Pusher: "author"},
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", Pusher: "author", Sender: "author"},
 		},
 		{
 			name:    "comment",
@@ -432,6 +432,53 @@ func TestIssueEventIgnoresFieldsTheDaemonDoesNotConsume(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Fact, want.Fact) {
 		t.Fatalf("widened fact = %#v, want %#v", got.Fact, want.Fact)
+	}
+}
+
+// A listener released before it forwarded a synchronize's before and sender sends the synchronize
+// without them, and a push without its sender: the daemon decodes the synchronize as an arrival
+// that names no move (PullRequestSynchronized.Before and Sender empty), which classify judges as the
+// release before this one did, the push with no sender, and every other field as before. A listener
+// that sends before but not the sender gives an arrival naming its before alone (design (c′)).
+func TestASynchronizeFromAListenerWithoutBeforeNamesNoMove(t *testing.T) {
+	data, err := os.ReadFile("testdata/github/pr-synchronized.json")
+	if err != nil {
+		t.Fatalf("read captured envelope: %v", err)
+	}
+	noSender := strings.Replace(string(data), `\"sender\":\"legion-implementer[bot]\",`, "", 1)
+	older := strings.Replace(noSender, `\"before\":\"head-before\",`, "", 1)
+	if older == noSender || noSender == string(data) {
+		t.Fatal("captured synchronize fixture carries no before or no sender to take out")
+	}
+	want := PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208",
+		UpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)}
+	for _, tc := range []struct {
+		name, data string
+		before     string
+	}{{"neither", older, ""}, {"before alone", noSender, "head-before"}} {
+		got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, []byte(tc.data))
+		if err != nil {
+			t.Fatalf("%s: decode: %v", tc.name, err)
+		}
+		want.Before = tc.before
+		if !reflect.DeepEqual(got.Fact, want) {
+			t.Fatalf("%s: fact = %#v, want %#v", tc.name, got.Fact, want)
+		}
+	}
+	push, err := os.ReadFile("testdata/github/push.json")
+	if err != nil {
+		t.Fatalf("read captured push: %v", err)
+	}
+	unsent := strings.Replace(string(push), `,\"sender\":\"author\"`, "", 1)
+	if unsent == string(push) {
+		t.Fatal("captured push fixture carries no sender to take out")
+	}
+	got, err := decodeMessage("notifications.github.sjawhar.legion.push", "CAPTURE", capturedRepositories, []byte(unsent))
+	if err != nil {
+		t.Fatalf("decode a push without sender: %v", err)
+	}
+	if p, ok := got.Fact.(Push); !ok || p.Sender != "" || p.Pusher != "author" {
+		t.Fatalf("push fact = %#v, want one with no sender and its pusher", got.Fact)
 	}
 }
 

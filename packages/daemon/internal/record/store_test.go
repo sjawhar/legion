@@ -370,14 +370,15 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"}, {Before: "a0b1c2", SHA: "b1c2d3"}},
+		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"},
+			{Before: "a0b1c2", SHA: "b1c2d3", Pushed: true, Repeats: []ClassifiedPush{{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true}, {SHA: "b1c2d3", Before: "a0b1c2", Sender: "legion-implement[bot]"}}}},
 		HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
 		// A run's anchor keeps a set never read apart from an empty one, and so do its steps.
 		Run: &HeadRun{
 			Anchor: Judgement{HeadSHA: "a0b1c2", FixAttempts: 1, HeadCounted: "a0b1c2", CheckedHead: "a0b1c2", Failing: []string{"unit"},
 				CheckRuns: []AttemptRun{{Name: "unit", ID: 90}}, Generation: 3, Snapshot: "snapshot-3", Workflows: []RequiredWorkflow{}},
 			Pushes: pushes[:1],
-			Steps: []RunStep{{Head: "b1c2d3", At: time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)}, {Settlement: &Settlement{Head: "b1c2d3", CheckRuns: []AttemptRun{{Name: "unit", ID: 91}}, Generation: 4,
+			Steps: []RunStep{{Head: "b1c2d3", Before: "a0b1c2", At: time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)}, {Settlement: &Settlement{Head: "b1c2d3", CheckRuns: []AttemptRun{{Name: "unit", ID: 91}}, Generation: 4,
 				Snapshot: "snapshot-4", Failing: []string{"unit"}, Cancelled: []string{"e2e"}}},
 				{Required: &RequiredRead{Names: []string{}, Workflows: []RequiredWorkflow{}}}, {WorkflowsCleared: true}, {Reopened: true}},
 			Decided: "b1c2d3",
@@ -455,6 +456,37 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		must(t, err)
 		if len(slots) != 0 {
 			t.Fatalf("slots after release = %#v, want no rows", slots)
+		}
+	})
+}
+
+// A row the release before this one wrote holds its moves as their two heads alone, in head_moves
+// and in its head run's anchor, and its head steps with no before. It reads back as moves not
+// pushed, with no repeats, and steps that name no move, so the next push of each move's two heads
+// is taken as its own and no arrival takes a repeat (classify.arrivalPushes), as before.
+func TestARowFromBeforeRepeatsReadsAsMovesNotPushed(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-208")
+	pr := PullRequest{Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208", HeadSHA: "b1", State: PullRequestOpen,
+		Failing: []string{}, Cancelled: []string{}, Run: &HeadRun{Anchor: Judgement{HeadSHA: "a0"}, Steps: []RunStep{{Head: "b1"}}}}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+		_, err := tx.Exec(ctx, `update pull_requests set head_moves = '[{"before":"9f","sha":"a0"},{"before":"a0","sha":"b1"}]'::jsonb,
+			head_run = '{"anchor":{"headSha":"a0","failing":[],"cancelled":[],"checkRuns":null,"required":null,"workflows":null,"moves":[{"before":"9f","sha":"a0"}]},"pushes":[],"steps":[{"head":"b1"}]}'::jsonb
+			where issue = $1`, issue.Key)
+		must(t, err)
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.PullRequest(ctx, tx, issue.Key)
+		must(t, err)
+		if want := []Move{{Before: "9f", SHA: "a0"}, {Before: "a0", SHA: "b1"}}; !reflect.DeepEqual(got.Moves, want) {
+			t.Fatalf("moves = %#v, want %#v", got.Moves, want)
+		}
+		if got.Run == nil || !reflect.DeepEqual(got.Run.Anchor.Moves, []Move{{Before: "9f", SHA: "a0"}}) || !reflect.DeepEqual(got.Run.Steps, []RunStep{{Head: "b1"}}) {
+			t.Fatalf("head run = %#v, want its anchor's one move not pushed and one head step naming no move", got.Run)
 		}
 	})
 }

@@ -13,6 +13,7 @@ import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typ
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -127,10 +128,14 @@ export interface RenderedMarkdownOptions {
  * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names.
  * Where the app provides a decision card (`TextAskCard`), each `ask` shell a parsed `paint` drew
  * gets one, mounted in the same commit (`collectAskHosts`); the card is a dependency, so a new
- * provider value renders again. `onRendered` fires after each render lands; the newest callback
- * is the one called, and a new callback alone re-renders nothing. `paint` and `decorate` are
- * dependencies: a caller passes a module-level function or memoises one on what it reads. The
- * options object itself is not one, so a caller builds it inline on every render.
+ * provider value renders again. On a painted body, each fenced `mermaid` block then draws as its
+ * diagram (`drawMermaidDiagrams`, which draws a source it has not drawn before late, once its
+ * worker answers; the effect's cleanup cancels that). It runs after every other pass, so a
+ * `dispatch://` in a diagram's label is never wrapped as a link or collected as a reference.
+ * `onRendered` fires after each render lands; the newest callback is the one called, and a new
+ * callback alone re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a
+ * module-level function or memoises one on what it reads. The options object itself is not one,
+ * so a caller builds it inline on every render.
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
@@ -152,7 +157,8 @@ export function useRenderedMarkdown(
       throw new Error("The Markdown element is unavailable.");
     }
     setIsFallback(false);
-    return renderWithEngine((engine) => {
+    let cancelDraw: (() => void) | undefined;
+    const cancelRender = renderWithEngine((engine) => {
       const parsed = engine?.parse(markdown, softBreaks);
       let hosts = NO_ASK_HOSTS;
       if (engine === undefined || parsed === undefined) {
@@ -171,8 +177,17 @@ export function useRenderedMarkdown(
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       const placeholders = collectPictureAnchors(element);
       setPictureAnchors(placeholders.length === 0 ? NO_PICTURES : placeholders);
+      if (engine !== undefined && parsed !== undefined) {
+        cancelDraw = drawMermaidDiagrams(element, parsed, markdown, (source) =>
+          engine.parse(source, softBreaks)
+        );
+      }
       onRenderedRef.current?.();
     });
+    return () => {
+      cancelRender();
+      cancelDraw?.();
+    };
   }, [Card, decorate, markdown, paint, root, softBreaks]);
 
   return {

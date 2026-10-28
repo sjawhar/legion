@@ -264,7 +264,7 @@ function gatewayAdvice(method: string, status: number): string {
  * Whether a status that did not come from Dispatch can clear on its own: a gateway's 5xx, a
  * timeout or a rate limit can; any other status answers the same request the same way.
  */
-function transientStatus(status: number): boolean {
+export function transientStatus(status: number): boolean {
   return status >= 500 || status === 408 || status === 429;
 }
 
