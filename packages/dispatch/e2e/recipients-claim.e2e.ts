@@ -9,6 +9,7 @@ import {
   getAsk,
   getIssue,
   patchIssue,
+  putIssueState,
   releaseClaim,
 } from "./api";
 import { resetDatabase } from "./seed";
@@ -366,6 +367,8 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: asker, as: "agent" }
   );
+  // Pinned, so a rename of it refreshes alice's pinned list and nothing the Inbox shows.
+  await putIssueState(other.key, { pinned: true });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
     { session_id: claimant.id, title: "Claimant (e2e)" },
@@ -373,34 +376,22 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  // The stale body must land after the claim's flush, or the flush itself refreshes the card it
-  // seeded (it reads the cached threads on the issue) and nothing here depends on the issue's
-  // mark. A flush cancels an Inbox first load the first time it reaches it, so the first request
-  // is held only until an earlier, unrelated write's flush has spent that cancel; the second
-  // request is the first load the claim then finds in flight, and is let land (and refreshed when
-  // it settles) rather than cancelled. Every later request reaches the server.
-  const firstRequested = Promise.withResolvers<void>();
-  const secondFetched = Promise.withResolvers<void>();
-  const releaseSecond = Promise.withResolvers<void>();
+  // The Inbox's first load is composed now, before the claim, and held until the claim has been
+  // handled. No cached thread names the ask yet, so the claim's refresh of the threads on its
+  // issue reaches nothing: only the issue's mark sends the card that mounts from this body to the
+  // ask endpoint. Every later request reaches the server.
+  const firstFetched = Promise.withResolvers<void>();
+  const releaseFirst = Promise.withResolvers<void>();
   let staleClaimant: unknown;
   let inboxRequests = 0;
   await page.route("**/api/v1/inbox*", async (route) => {
     inboxRequests += 1;
     if (inboxRequests === 1) {
       const response = await route.fetch();
-      firstRequested.resolve();
-      await secondFetched.promise;
-      // Cancelled by the first flush: the client discards this body.
-      await route.fulfill({ response });
-      return;
-    }
-    if (inboxRequests === 2) {
-      // Composed after the unrelated write and before the claim.
-      const response = await route.fetch();
       const rows = (await response.json()) as { id: string; thread: { claimant: unknown } }[];
       staleClaimant = rows.find((row) => row.id === ask.id)?.thread.claimant;
-      secondFetched.resolve();
-      await releaseSecond.promise;
+      firstFetched.resolve();
+      await releaseFirst.promise;
       await route.fulfill({ response });
       return;
     }
@@ -409,25 +400,25 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
   const streamOpened = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/api/v1/events"
   );
-  // Every issue event's flush refreshes the issue lists, the shell's pinned list among them: its
-  // request is the page's own word that it has handled the event.
-  const pinnedListRequested = () =>
+  const pinnedListRead = () =>
     page.waitForRequest((request) => {
       const url = new URL(request.url());
       return url.pathname === "/api/v1/issues" && url.searchParams.get("pinned") === "true";
     });
   try {
+    const firstPinnedRead = pinnedListRead();
     const navigation = page.goto("/");
-    // The writes must reach an open stream: a cold client's stream replays nothing from before.
-    await Promise.all([firstRequested.promise, streamOpened]);
-    await patchIssue(other.key, { title: "Edited while the Inbox loads" });
-    await secondFetched.promise;
+    // The claim must reach an open stream: a cold client's stream replays nothing from before.
+    await Promise.all([firstFetched.promise, streamOpened, firstPinnedRead]);
     expect(staleClaimant).toBeNull();
 
-    const claimFlushed = pinnedListRequested();
     await claimIssue(issue.key, { actor: claimant, as: "agent" });
-    await claimFlushed;
-    releaseSecond.resolve();
+    // Events reach the page in order, so once the rename written after the claim has made the
+    // page read its pinned list again, the claim's event has been handled too.
+    const renameHandled = pinnedListRead();
+    await patchIssue(other.key, { title: "Renamed after the claim" });
+    await renameHandled;
+    releaseFirst.resolve();
     await navigation;
 
     // The card mounts from the body that names no claimant, and shows the claim anyway.
@@ -442,8 +433,7 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     await expect(claimRow).toContainText("Claimant (e2e)");
     await expect(claimRow).toContainText("via claim");
   } finally {
-    secondFetched.resolve();
-    releaseSecond.resolve();
+    releaseFirst.resolve();
     await alice.close();
   }
 });
