@@ -2,19 +2,19 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T17:10:00Z",
-  "round": 6,
-  "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
-  "ci": "read on GitHub at f0259648 at 17:08Z: Tests 40730686837, Legion Envoy and Contracts 40730687005, Worker Image 40730687107, Docs 40730686810 and PR Title 40730808336 pending or queued - read as running, no verdict; nothing re-run. Every run at ec4448fb was cancelled by this push.",
-  "scope": "ec4448fb -> f0259648 changes only duty.RunLeased (fixed schedule; nextDue; sleepUntil) and its new sibling RunLeasedAfterEachPass with their callers and tests, the envoy fragment, and tmux_real_test.go (6afef8ce, f0259648); round 5's full round at ec4448fb stands for every other path.",
+  "completed": "2026-10-28T18:51:00Z",
+  "round": 7,
+  "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
+  "ci": "read on GitHub at 0a38d434 at 18:50Z: Tests 40747034353, Legion Envoy and Contracts 40747034612, Worker Image 40747034297, Docs 40747034270 and PR Title 40747126321 queued - read as running, no verdict; nothing re-run. At f0259648 Tests, Worker Image, Docs and PR Title were success and Legion Envoy and Contracts 40730687005 was cancelled by this push, as it was at ec4448fb: the Envoy lanes have given no verdict since f26dca26.",
+  "scope": "f0259648 -> 0a38d434 (the reviewer's round-3 fast-follow): duty.RunLeased is a time.NewTicker loop again and its pass returns nothing (callers in issue_ask_repair, suggestion_outcomes, outbox, processes, redeliver), nextDue/sleepUntil and their test removed, comments corrected, and storetest.WaitForQueuedBehind always takes a bound (suggestions_test passes 3 x the 5 s allowance). The tester's red test run_leased_period_test.go changed only by the pass signature (the func returns nothing; 'return interval' dropped); its assertions are untouched.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's round-6 claims at f0259648: the round-5 red test, unchanged byte for byte, passes 5/5 and fails 2/2 when RunLeased arms its next due from the pass's end (due = time.Now().Add(wait)); the RunLeased and RunLeasedAfterEachPass tests 5/5 each; the duty, redeliver, processes and outbox packages pass twice; the multiprocess leased-loop tests pass ('A ran 1 skipped 0, B ran 0 skipped 1' for block-index, webhook-redelivery, reference-excerpts and suggestion-outcomes); the strengthened real-tmux test passes 5/5 and fails 2/2 when the gh bundle is written before the refusal."
+    "how": "Re-ran at 0a38d434: the red test 5/5 and every RunLeased/RunLeasedAfterEachPass test 5/5; re-arming the ticker after each pass fails the red test 2/2; probes at 90% load and 150% overrun; multiprocess leased loops pass; lone runner and two-runner tests -race 5/5; the WaitForQueuedBehind callers 3/3; duty, redeliver, processes and outbox packages pass; go vet -tags multiprocess ./... clean."
   },
   "failures": [],
   "failed": 0,
   "observations": [
-    "RunLeased schedules on the monotonic clock from one time.Now() at start, so after a host wall-clock step its period boundaries stay on the old timeline until the process restarts; the cost is the clock-offset case exclusive.go states (one extra pass while both run, one skipped period once the process ahead stops). Edit notices, block index and reference excerpts keep waiting after each pass (RunLeasedAfterEachPass), as on main.",
+    "The round-6 wall-clock observation is resolved: RunLeased's due times are the ticker's values, read from the wall clock at each tick (time/sleep.go:154).",
     "The census nit and routes.BuildAppContext's late refusal of a missing Lifetime (round 5) stand as observations.",
     "deep-links.e2e.ts keeps its read-mark pre-read (dispatch://INFRA-662), with no retry or sleep.",
     "T6: no suite test fails main's wakeLane order deterministically.",
@@ -22,12 +22,20 @@
   ],
   "proof": [
     {
-      "criterion": "Round-5 finding 1: a lone fixed-cadence leased loop (webhook redelivery, suggestion outcomes, compaction, issue-ask repair, prune) serves every period however long its passes take, and an overrunning pass neither runs a backlog nor drifts",
+      "criterion": "A2 T2 and round-5 finding 1 on the ticker form of RunLeased: a lone fixed-cadence leased loop serves every period however long its passes take, an overrunning pass runs no backlog, and a wall-clock step moves its due times",
       "surface": "packages/envoy duty.RunLeased against Postgres 17.11 in the issue pod",
-      "command": "cd packages/envoy && go test -count=5 -v -run '^(TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime|TestRunLeased.*)$' ./internal/dispatch/duty/; a throwaway probe of RunLeased with interval 500 ms and passes of 450 ms (8 passes) and 750 ms (6 passes), each pass reading the period its predecessor recorded",
-      "observed": "red test 5/5 pass; TestRunLeasedTicksAtOnceAtTheLatestMomentDueWhenAPassOverruns, TestRunLeasedWaitsAnIntervalBeforeTheFirstTickWhenAsked and TestRunLeasedAfterEachPassTicksAtStartAndThenAtTheWaitEachPassAsksFor 5/5 each; at 90% load passes begin 499-501 ms apart and every recorded period is the next (step 500 ms); at 150% they begin 753-761 ms apart with recorded-period steps of 500 ms and 1 s alternating: the overrun moments dropped as a ticker drops them, no back-to-back catch-up passes",
-      "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
-      "negativeControl": "scratch copy, RunLeased's next due taken from the pass's end (due = time.Now().Add(wait)): the red test fails 2/2 'pass 2 served the period at 17:03:11.000 and the pass after it the period at 17:03:13.000, 2s later: 1 period(s) between them got no pass'"
+      "command": "cd packages/envoy && go test -count=5 -v -run '^(TestRunLeased.*)$' ./internal/dispatch/duty/; a throwaway probe of RunLeased (interval 500 ms; passes of 450 ms x8 and 750 ms x7, each reading the period its predecessor recorded); read of $(go env GOROOT)/src/time/sleep.go:147-157 (Go 1.27.1)",
+      "observed": "TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime, TestRunLeasedWaitsAnIntervalBeforeTheFirstTickWhenAsked and TestRunLeasedAfterEachPassTicksAtStartAndThenAtTheWaitEachPassAsksFor 5/5 each; at 90% load passes begin 499-501 ms apart and each recorded period is the next (500 ms steps); at 150% passes run back to back 753-755 ms apart with period steps alternating 500 ms and 1 s, so overrun ticks are dropped and none queue; the ticker sends Now().Add(-delta) at each fire, the wall clock read then, so a step of the wall clock reaches the due times",
+      "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
+      "negativeControl": "scratch copy, the ticker re-armed after each pass (due = time.Now() at receipt, ticker.Reset(interval) after the pass): the red test fails 2/2 'pass 3 served the period at 18:43:12.000 and the pass after it the period at 18:43:14.000, 2s later: 1 period(s) between them got no pass'"
+    },
+    {
+      "criterion": "Leased loops across two processes still run once per period, and the lock-wait helper's bound adds no failure mode",
+      "surface": "two envoy-dispatch processes on one Postgres (cmd/dispatch multiprocess tests); internal/dispatch/api tests in the issue pod",
+      "command": "go test -tags multiprocess -count=1 -v -run '^(TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses|TestALeasedLoopRunsOnceAcrossAStaggeredStart)$' ./cmd/dispatch; CGO_ENABLED=1 go test -race -count=5 -run '^(TestALoneRunnerMakesAPassOnEveryTick|TestTwoSweepRunnersRunThePassOnceAndSkipOnce)$' ./internal/dispatch/api/; go test -count=3 -run '^(TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock|TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked|TestAReplyThatWaitedForTheOwnerRowIsTheNewest)$' ./internal/dispatch/api/",
+      "observed": "block-index, webhook-redelivery, reference-excerpts, suggestion-outcomes each 'A ran 1 skipped 0, B ran 0 skipped 1' (staggered start too); lone and two-runner ok under -race; the three lock-wait callers 3/3 each. The new 15 s bound (3 x lockedSuggestionAllowance) is reached only by a call that neither queued nor answered: the call ends on its own when its 5 s allowance does, and the helper returns at once on that answer",
+      "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
+      "negativeControl": "round 5: with a 300 ms delay before the call, a transaction_timestamp() mutant at comment_create.go:493 passes under a no-op helper and fails 3/3 under the real one ('ask detail waiting_on = \"agent\", want human')"
     },
     {
       "criterion": "Round-5 finding 2: a refused tmux spawn or resume rewrites none of the live pane's per-claim files, the gh bundle included",
@@ -36,14 +44,6 @@
       "observed": "5/5 pass (each mint a fresh token; the snapshot reads the secret files and the claim's gh directory, after the refused spawn and after the refused resume)",
       "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
       "negativeControl": "scratch copy, writeGitHubCredential moved above refuseLiveIncarnation: FAIL 2/2 'tmux_real_test.go:1200: the refused second spawn rewrote the live tester's secret files from map[\".../legion-...-tester-gh/acme/config.yml\":...' and ':1210: the refused resume rewrote ...'"
-    },
-    {
-      "criterion": "Leased loops across two processes still run once per period after the RunLeased change (A2 T2)",
-      "surface": "two real envoy-dispatch processes on one Postgres (cmd/dispatch multiprocess tests) in the issue pod",
-      "command": "go test -tags multiprocess -count=1 -v -run '^(TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses|TestALeasedLoopRunsOnceAcrossAStaggeredStart)$' ./cmd/dispatch; CGO_ENABLED=1 go test -race -count=5 -run '^(TestALoneRunnerMakesAPassOnEveryTick|TestTwoSweepRunnersRunThePassOnceAndSkipOnce)$' ./internal/dispatch/api/",
-      "observed": "both pass: block-index, webhook-redelivery, reference-excerpts, suggestion-outcomes each 'A ran 1 skipped 0, B ran 0 skipped 1'; edit-notices 13 passes over its 5 s periods; the api lease tests ok under -race",
-      "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
-      "negativeControl": "the gate bucketing its own moment (periodBoundary(time.Now())) fails both Exclusive boundary tests 5/5 (round 4); the leased loops' exclusion is the same Exclusive call"
     },
     {
       "criterion": "Round 5 (full round after two merges of main): the census entry api.Register(mux, lifetime, deps), the merges and every cause's loop",
