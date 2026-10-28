@@ -1,6 +1,6 @@
 import { type QueryClient, type QueryStatus, queryOptions, useQuery } from "@tanstack/react-query";
 
-import { api, artifactVersionPath } from "../../api/client";
+import { ApiError, api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import type {
   Artifact,
@@ -145,7 +145,8 @@ export const referencesQuery = (reference: string | undefined) =>
  *  block's whole text and, for a pinned reference, its pin. A link to a block reads it as a link
  *  to an issue reads its summary, fetched again only by an event that can change it (a version of
  *  the block's document, a citation of the block added or removed, an edit of the comment whose
- *  block it is, or a reply that names the block), or on focus after it failed. */
+ *  block it is, or a reply that names the block), or on focus after it failed. A read that answers
+ *  that the block is gone shows none of the text it held before (`useReferenceData`). */
 export const blockQuery = (reference: string | undefined) =>
   queryOptions({
     ...referencesQuery(reference),
@@ -191,8 +192,8 @@ function blockReferenceOf(route: DispatchReferenceRoute | undefined): string | u
  * document/artifact reference names (never the owning issue's primary spec); `markdown` is that
  * document's text at the referenced version, read only when the caller asked for it; `block` is a
  * block reference's graph read, whose node carries the block's whole text and, for a pinned
- * reference, its pin. A block reference reads that alone: its document's name is the hover card's
- * own read (`useBlockDocument`). */
+ * reference, its pin, undefined once the read answers that the block is gone. A block reference
+ * reads that alone: its document's name is the hover card's own read (`useBlockDocument`). */
 export interface ReferenceData {
   readonly issue: IssueReferenceSummary | undefined;
   readonly artifact: ReferenceArtifact | undefined;
@@ -382,7 +383,18 @@ export function useReferenceData(
     ask: ask.data,
     comment: comment.data,
     message: messageQueryResult.data,
-    block: block.data,
+    // TanStack keeps a query's last data through a failed refetch, so a link or card open when an
+    // edit deletes its block would go on showing text its document or item no longer holds. The
+    // read answers 404 `NOT_FOUND` for that block, and the link and card then read as a freshly
+    // loaded page reads the same link. A pinned reference to a removed block answers 200 with the
+    // pin's `removed` state and keeps its pinned text; any other failure (a dropped connection, a
+    // 5xx) leaves the last data shown.
+    block:
+      block.error instanceof ApiError &&
+      block.error.status === 404 &&
+      block.error.code === "NOT_FOUND"
+        ? undefined
+        : block.data,
   };
 }
 

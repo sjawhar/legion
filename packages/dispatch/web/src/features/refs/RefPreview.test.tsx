@@ -5,7 +5,7 @@ import { type ReactNode, useEffect, useRef } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   AskRead,
   BlockPin,
@@ -16,6 +16,7 @@ import type {
 } from "../../api/types";
 import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
+import { shortForm } from "./routes";
 
 function issue(key: string, title: string): IssueDetails {
   return {
@@ -788,6 +789,92 @@ test("an unpinned block's card shows its current text, and a block that cannot b
     );
     await act(async () => {});
     expect(screen.getByRole("tooltip").textContent).toBe("CORE-1 spec block");
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getIssueSummary.mockRestore();
+  }
+});
+
+// An open card's block read is fetched again by an event that can change it (`blockQuery`). An
+// edit that deletes the block makes that read answer 404: the card drops the text it showed and
+// reads as a freshly loaded page's card for the same link, its short form. A pinned reference to
+// the removed block answers 200 with the pin's `removed` state and keeps the pinned text, and any
+// other failure leaves the text it last read.
+test.each([
+  [
+    "a comment block deleted by its author",
+    {
+      block: { id: "b2" },
+      id: "11111111-1111-4111-8111-111111111111",
+      key: "CORE-1",
+      kind: "comment",
+    } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a spec block deleted by a document edit",
+    { block: { id: "p1" }, key: "CORE-1", kind: "spec" } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a spec block whose refresh failed with a 500",
+    { block: { id: "p1" }, key: "CORE-1", kind: "spec" } as const,
+    new ApiError(500, { code: "INTERNAL", error: "boom" }),
+    ["Ship it on Friday."],
+  ],
+  [
+    "a pinned spec block whose refresh answers it removed",
+    { block: { id: "p1", pin: "2" }, key: "CORE-1", kind: "spec" } as const,
+    pinnedRead({ removed_version: 4, state: "removed", text: "Ship it on Friday." }),
+    ["Version 2", "Removed in version 4", "Ship it on Friday."],
+  ],
+] as const)("an open card of %s shows what the refresh leaves it", async (_case, route, refresh, kept) => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(summaryWithSpec());
+  const first = pinnedRead({ state: "unchanged", text: "Ship it on Friday." });
+  const getReferences = spyOn(api, "getReferences")
+    .mockResolvedValueOnce({
+      ...first,
+      node: {
+        ...first.node,
+        made_by: [{ id: "alice", kind: "user" }],
+        pin: "pin" in route.block ? first.node.pin : undefined,
+        text: "Ship it on Friday.",
+      },
+    })
+    .mockImplementationOnce(() =>
+      refresh instanceof Error ? Promise.reject(refresh) : Promise.resolve(refresh)
+    );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Link to="/" {...referenceTriggerProps(route)}>
+          the block
+        </Link>
+        <RefPreviewHost />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the block" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Ship it on Friday."));
+
+    await act(() => queryClient.refetchQueries({ queryKey: ["references", "to"] }));
+    expect(getReferences).toHaveBeenCalledTimes(2);
+    const after = screen.getByRole("tooltip");
+    if (kept === undefined) {
+      await waitFor(() => expect(after.textContent).toBe(shortForm(route)));
+    } else {
+      for (const text of kept) {
+        expect(after.textContent).toContain(text);
+      }
+    }
   } finally {
     view.unmount();
     getReferences.mockRestore();
