@@ -141,6 +141,8 @@ var settings = []setting{
 		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
 		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",
+		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

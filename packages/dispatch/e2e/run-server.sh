@@ -148,6 +148,7 @@ exec "${listen[@]}" env \
   DISPATCH_NATS_DISABLED=1 \
   "${port_env[@]}" \
   DISPATCH_TEST_HOOKS=1 \
+  DISPATCH_TEST_ROSTER_UNCACHED=1 \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
