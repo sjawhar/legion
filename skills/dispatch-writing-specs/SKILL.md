@@ -30,8 +30,8 @@ Another agent can build and check the work from the spec alone. A small change g
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- State the current design, never the person or how people reached it. Never quote people or upload their words.
-- Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
+- Write about the current design, never the person or how people reached it. Never quote people or upload their words.
+- Link each source where the person wrote it. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (a test, review, check or proof) also says, in that sentence, what the pass does not show: "The tests pass; they catch a wrong verdict, not a proof of a contradiction."
 - Name your session only if a reader must reach it.
@@ -63,11 +63,11 @@ For each spec, ask, comment and message:
 
 ## Old specs
 
-At your next edit, rewrite a spec outside the outline whole, in one version. Move its ask blocks with `doc-edit`'s `move`. Kept text follows the text rules: restate each retelling, quotation or attribution as design, or cut it.
+At your next edit, rewrite a spec outside the outline whole, in one version. Move its ask blocks with `doc-edit`'s `move`. Kept text follows the text rules: restate each retelling, quotation or unlinked attribution as design, or cut it.
 
 ## Approval
 
-- Request approval once, when each ask block is answered or waived and this version is unapproved. Unbuilt acceptance checks never delay it.
+- Request approval once, when each ask block is answered or waived, each claim is checked, and this version is unapproved. Unbuilt acceptance checks never delay it.
 - After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once. Put other fixes in the plan or a comment.
 
 ## The plan

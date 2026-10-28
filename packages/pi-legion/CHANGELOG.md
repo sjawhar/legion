@@ -47,8 +47,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   an ask.
 - `legion-architect`: before it requests approval of the root spec, an architect checks every
   factual claim in the spec against the code, the docs or a command, resolves each finding of the
-  fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Each version" and
-  "Approval", say the same for every spec.
+  fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Approval", says the
+  same for every spec.
 - A root spec gets a cross review before every approval request. `legion-architect`'s step 3 runs
   two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
   is a spec, for each factual claim. The architect verifies with a command, or removes, each claim

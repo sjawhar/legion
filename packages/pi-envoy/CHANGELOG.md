@@ -336,13 +336,15 @@
 ### Changed
 
 - `dispatch-writing-specs`, "Old specs": text kept in a rewrite follows the text rules, and each
-  retelling, quotation or attribution in the old spec is restated as design or cut. Rewrites kept
-  passages such as "You asked if …" word for word, because the agent carried them over rather than
-  wrote them. To stay under the 2,000-word guard, lines another loaded text already says are cut or
-  merged: "never the person" joins "State the current design", the claim check in "Approval"
-  ("Each version" step 3 runs it), "A person's decision is their answered ask block" (`dispatch`:
-  "Decisions are asks"), and "approved spec's" in "The plan" (`dispatch-first`'s table says when
-  to plan).
+  retelling, quotation or unlinked attribution in the old spec is restated as design or cut; a
+  requirement's linked `From:` source stays. Rewrites kept passages such as "You asked if …" word
+  for word, because the agent carried them over rather than wrote them. To stay under the
+  2,000-word guard, lines another loaded text already says are cut or merged: "Write about the
+  design, never the person" joins "State the current design, never how people reached it" as
+  "Write about the current design, never the person or how people reached it"; the list of
+  reference forms after "Link each source where the person wrote it" (`dispatch`, "References",
+  lists them); "A person's decision is their answered ask block" (`dispatch`: "Decisions are
+  asks"); and "approved spec's" in "The plan" (`dispatch-first`'s table says when to plan).
 
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
