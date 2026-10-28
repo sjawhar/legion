@@ -157,10 +157,13 @@
 #     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
 #     session a work directory starts carries the directory's digest in its name.
-#   - Its agent can still read the whole filesystem, including the other label's checkout and the
-#     checkout this script runs from, and write the machine's /tmp, which nothing here cleans.
-#     score.ts does not score a run that read outside its own label, or whose PR body carries
-#     another run's line (unscored, testerProof).
+#   - Its agent can still read the whole filesystem, the operator's home included, and write the
+#     machine's /tmp, which nothing here cleans: a namespace sandbox needs user namespaces, which
+#     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run whose tool
+#     calls name a path outside its work directory, its label's checkout and the system
+#     locations, or a skill outside its own label, or whose PR body carries another run's line
+#     (unscored, testerProof). A path a call reaches without naming it, as a glob from `/` does,
+#     is not caught.
 #   - An exit stops what its command started (on_exit, stop_run, stop_batch).
 #
 # A spec run (run_spec) is a conversation of at most 8 turns. Turn 1 is the prompt. After each turn,

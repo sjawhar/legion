@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 
@@ -1621,6 +1621,32 @@ specRun("spec-writing-head-91", {
     finish
   ),
 });
+// A run that read a file of the operator's home: nothing stops an agent reading it, so the run may
+// have drawn on it. Run 93 names only a URL, an API route, /tmp and relative paths.
+specRun("spec-writing-head-92", {
+  transcript: conversation(
+    routedRead,
+    readOf("o1", path.join(homedir(), "src", "other-repo", "README.md")),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-93", {
+  transcript: conversation(
+    routedRead,
+    sh("o2", "curl -s https://example.invalid/v1/messages -o /tmp/m.json; cat ./notes/plan.md"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
 // counted once, at the command, so the read before it is no read between it and its fix.
@@ -2039,6 +2065,14 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
 
 test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {
   expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
+});
+
+test("a run whose tool call names a path outside its sandbox is a rig error; URLs and routes are not", () => {
+  expect(out).toContain(
+    `spec-writing-head-92\trig error: a read call names ${path.join(homedir(), "src", "other-repo", "README.md")}, outside the run's work directory, its label's checkout and the system locations`
+  );
+  expect(out).not.toContain("spec-writing-head-92\tpass=");
+  expect(scoresOf("spec-writing-head-93")).toEqual(allPass);
 });
 
 test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {

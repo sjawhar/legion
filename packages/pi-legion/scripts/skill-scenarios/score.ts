@@ -34,7 +34,7 @@ import {
   SharedRunsFile,
 } from "./judge-prompts";
 import { byCreatedAt } from "./production-dispatch";
-import { CREATED, type SessionEntry, session, sessionId, toolResults } from "./transcript";
+import { CREATED, SessionEntry, session, sessionId, toolResults } from "./transcript";
 
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
 const IssueAsks = z.array(
@@ -2351,7 +2351,13 @@ function median(values: number[]): number {
  *     or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
- *     rig.sh runs from.
+ *     rig.sh runs from;
+ *   - it reached outside its own sandbox: a tool call, its own or a subagent's, names an absolute
+ *     path (outsidePath) that is outside the work directory, its label's checkout and the usual
+ *     system locations, such as the operator's home or another repository. Nothing stops an agent
+ *     reading the operator's files (rig.sh runs it with no filesystem isolation), so a run that
+ *     read them may have drawn on them. A path the call does not name, as a glob from `/` finds
+ *     one, is not caught.
  * A record missing or malformed is a rig error too, thrown by the scenario's function. */
 function unscored(
   runDir: string,
@@ -2387,6 +2393,63 @@ function unscored(
       if (!allowed.some((dir) => skillPath.startsWith(dir)))
         return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
   }
+  const work = path.dirname(path.dirname(runDir));
+  const reached = outsidePath(runDir, [work, labels.get(label) ?? work]);
+  if (reached !== undefined)
+    return `a ${reached.tool} call names ${reached.path}, outside the run's work directory, its label's checkout and the system locations`;
+  return undefined;
+}
+
+/** Where a run's tools may name an absolute path without reaching outside its sandbox, besides the
+ * work directory and the label's checkout. */
+const SYSTEM_DIRS = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/tmp", "/proc", "/sys", "/dev", "/var", "/opt", "/run"];
+/** An absolute path in text: a `/` that starts no URL, ref (`dispatch://…/spec`) or relative path. */
+const ABSOLUTE_PATH = /(?<![\w:/.~-])\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._@+-]+)*/g;
+/** Argument fields that carry the text a write puts in a file: a path inside that text is no access. */
+const FILE_CONTENT = new Set(["content", "input", "ops", "body", "text", "new_string", "old_string"]);
+function argumentStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(argumentStrings);
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, field]) =>
+    FILE_CONTENT.has(key) ? [] : argumentStrings(field)
+  );
+}
+/** The first absolute path a tool call of the run, its own or a subagent's (each transcript under
+ * sessions/), names outside `allowed` and SYSTEM_DIRS, whose top-level directory exists on this
+ * machine (so a route such as `/v1/messages` in a command is no path). */
+function outsidePath(runDir: string, allowed: string[]): { tool: string; path: string } | undefined {
+  const inside = (target: string) =>
+    [...allowed, ...SYSTEM_DIRS].some((dir) => target === dir || target.startsWith(`${dir}/`));
+  const transcripts = (dir: string): string[] =>
+    existsSync(dir)
+      ? readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+          entry.isDirectory()
+            ? transcripts(path.join(dir, entry.name))
+            : entry.name.endsWith(".jsonl")
+              ? [path.join(dir, entry.name)]
+              : []
+        )
+      : [];
+  for (const file of transcripts(path.join(runDir, "sessions")))
+    for (const line of lines(file)) {
+      let entry: unknown;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const parsed = SessionEntry.safeParse(entry);
+      if (!parsed.success || parsed.data.message?.role !== "assistant") continue;
+      for (const part of parsed.data.message.content ?? []) {
+        if (part.type !== "toolCall") continue;
+        for (const [target] of argumentStrings(part.arguments).join("\n").matchAll(ABSOLUTE_PATH)) {
+          const top = `/${target.split("/")[1] ?? ""}`;
+          if (top !== "/" && existsSync(top) && !inside(target))
+            return { tool: part.name ?? "tool", path: target };
+        }
+      }
+    }
   return undefined;
 }
 
