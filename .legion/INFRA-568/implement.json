@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T21:57:42Z",
+  "completed": "2026-10-28T22:14:27Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -12,10 +12,19 @@
       "observed": "MERGEABLE; migrations 0136_dashboard_assets (main), 0137_related_checks, 0138_issue_embedding_spec, TestMigrationSetIsNumberedOneToN passes; dispatchConnectionsPerPod 87 passes; the CHANGELOG, dist and legion diffs are empty; the key grep prints nothing; the suites pass; fingerprint a0b437d3… -> 03557e7b… (https://github.com/sjawhar/legion/pull/2397#issuecomment-6481687006)",
       "headSha": "e64224e5503c79febb49fbb03946b3bda72dce3b",
       "negativeControl": "before the merge GitHub reported CONFLICTING on envoy-client.md, cmd/dispatch/README.md and routes_table_test.go, and the branch's 0136_related_checks collided with main's 0136_dashboard_assets"
+    },
+    {
+      "criterion": "Tester's failure at e64224e5: no conflict-marker line in any file the pull request changes",
+      "surface": "the pull request's changed files at the new head",
+      "command": "jj diff --from 'fork_point(main@origin | @)' --name-only | xargs grep -n -E '^(\\+{7}|-{7}|%{7}|<{7}|>{7}) '",
+      "observed": "prints nothing; packages/envoy/cmd/dispatch/README.md reads main's 0136 paragraph, a blank line, then this branch's 0137 paragraph",
+      "headSha": "1d89163d5f616f3a593ee5fa566302dea37ca474",
+      "negativeControl": "at ec152514 the same check printed README.md:1108 `+++++++ uxwtkurr 8e58845b …`"
     }
   ],
   "filesChanged": [
-    "merge e64224e5: .dispatch/architecture/{envoy-client,dispatch-store}.md, packages/envoy/cmd/dispatch/{README,AGENTS}.md, api/routes_table_test.go (145 routes), the four migration files renamed to 0137/0138 and their references, packages/envoy/.changes/unreleased/pr2397-Added-*.yaml"
+    "merge e64224e5: .dispatch/architecture/{envoy-client,dispatch-store}.md, packages/envoy/cmd/dispatch/{README,AGENTS}.md, api/routes_table_test.go (145 routes), the four migration files renamed to 0137/0138 and their references, packages/envoy/.changes/unreleased/pr2397-Added-*.yaml",
+    "Round after the tester's failure: packages/envoy/cmd/dispatch/README.md (one marker line removed)"
   ],
   "trickyParts": [
     "The retro learnings (docs/solutions/*/*-pr2397.md) stay; the next retro removes this .legion/INFRA-568/ directory again."
