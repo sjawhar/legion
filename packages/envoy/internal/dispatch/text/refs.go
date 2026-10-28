@@ -466,9 +466,9 @@ func decodeItemID(value string) (string, bool) {
 // parseServer reads a dashboard URL against its parsed server URL as the dashboard's
 // `referenceRouteFromHref` reads it: the key and the path's item id as written, the query as
 // `searchParams` reads it, a version a positive decimal, and a `#b-` fragment on a document page
-// as documentPage reads it and on a comment's or a message's page as pageBlock reads it (an ask's
-// page names the ask whatever its fragment). A URL holding a control character names nothing;
-// net/url refuses only the ASCII ones.
+// as documentPage reads it and on an issue comment's or message's page as pageBlock reads it (an
+// ask's page names the ask whatever its fragment). A URL holding a control character names
+// nothing; net/url refuses only the ASCII ones.
 func parseServer(raw string, base *url.URL) (Ref, bool) {
 	if base == nil || base.Scheme == "" || base.Host == "" {
 		return Ref{}, false
@@ -540,21 +540,19 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 }
 
 // documentPage reads a document page of an issue or a project: the item its query names, as
-// documentItem reads it, else the document; and on either but an ask, the block of it the page's
-// fragment names (pageBlock). A version page (`versionParam` set) is the document whatever its
-// fragment: a version's stored markdown carries no block ids to land on. A comment's blocks are
-// its own, so a version page's `?comment=` names the comment's block all the same. Extract holds
-// what this names to the bounds in text (pageInBound): a block past them is its document or
-// comment, a document or item past them nothing.
+// documentItem reads it, else the block of the document its `#b-<block id>` fragment names
+// (pageBlock), else the document. A `?comment=` names the comment whatever the fragment: the
+// dashboard writes a document block's fragment beside it, so the fragment there is never a block
+// of the comment. A version page (`versionParam` set) is the document whatever its fragment: a
+// version's stored markdown carries no block ids to land on. Extract holds what this names to
+// the bounds in text (pageInBound): a block past them is the document, a document or item past
+// them nothing.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
-	if !ok {
-		return ref, false
+	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {
+		return ref, ok
 	}
-	if ref.Kind == "comment" || ref.Kind == "artifact" && query.Get(versionParam) == "" {
-		return pageBlock(ref, page), true
-	}
-	return ref, true
+	return pageBlock(ref, page), true
 }
 
 // pageBlock is what a dashboard page showing ref - a document, or a comment or a message - names:

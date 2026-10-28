@@ -186,9 +186,9 @@ func TestEncodeBlockIDMatchesTheSharedTable(t *testing.T) {
 
 // A dashboard page's `#b-` fragment names the block the page lands on, read with any
 // percent-encoding. A pin is written only as a `dispatch://` reference, so a raw `@` in a page's
-// fragment names no block; a version page is the document whatever its fragment. A comment in the
-// query of a document page is the page's item, and the fragment names a block of that comment;
-// an ask in the query names the ask whatever the fragment.
+// fragment names no block; an item in the query or a version page is what it names today. The
+// dashboard writes a document block's fragment beside a `?comment=`, so the fragment there names
+// no block of the comment, on any version of the page.
 func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 	const server = "https://dispatch.test"
 	cases := []struct {
@@ -202,7 +202,9 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 		{"/issues/CORE-1/spec#b-%0A", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
 		{"/issues/CORE-1/spec?v=2#b-ship-it", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
 		{"/projects/CORE/documents/handbook-md?version=3#b-ship-it", Ref{Kind: "artifact", Project: "CORE", ID: "handbook-md"}},
-		{"/issues/CORE-1/spec?comment=c1#b-ship-it", Ref{Kind: "block", Item: "comment", IssueKey: "CORE-1", ID: "c1", Block: "ship-it"}},
+		{"/issues/CORE-1/spec?comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
+		{"/issues/CORE-1/spec?v=2&comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
+		{"/projects/CORE/documents/handbook-md?comment=c1#b-b2", Ref{Kind: "comment", Project: "CORE", ID: "c1"}},
 		{"/issues/CORE-1/spec?ask=a1#b-ship-it", Ref{Kind: "ask", IssueKey: "CORE-1", ID: "a1"}},
 	}
 	for _, tc := range cases {
@@ -217,7 +219,9 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 // reference or the item's dashboard page, and its target id is `<item kind>/<item id>#<block
 // id>`. A comment block can be pinned to a revision of its comment; a message never changes, so a
 // pinned message block names nothing, nor does a block of an ask or of a project document's
-// message, which no reference addresses. A page's raw `@` is no pin: the page names the item.
+// message, which no reference addresses. A page's raw `@` is no pin: the page names the item. A
+// project document's page names its comment, never the comment's block: the fragment beside a
+// `?comment=` is the document's.
 func TestExtractParsesItemBlockReferences(t *testing.T) {
 	const server = "https://dispatch.test"
 	const comment, message = "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333"
@@ -245,7 +249,7 @@ func TestExtractParsesItemBlockReferences(t *testing.T) {
 		{"dispatch://CORE-1/comment/" + comment + "#c-b2", []Ref{}, ""},
 		{server + "/issues/CORE-1/comments/" + comment + "#b-b2", []Ref{commentBlock}, "comment/" + comment + "#b2"},
 		{server + "/issues/CORE-1/messages/" + message + "#b-b2", []Ref{messageBlock}, "message/" + message + "#b2"},
-		{server + "/projects/CORE/documents/handbook-md?comment=" + comment + "#b-b2", []Ref{projectBlock}, "comment/" + comment + "#b2"},
+		{server + "/projects/CORE/documents/handbook-md?comment=" + comment + "#b-b2", []Ref{{Kind: "comment", Project: "CORE", ID: comment}}, comment},
 		{server + "/issues/CORE-1/comments/" + comment + "#b-b2@v1", []Ref{{Kind: "comment", IssueKey: "CORE-1", ID: comment}}, comment},
 		{server + "/issues/CORE-1/asks/" + comment + "#b-b2", []Ref{{Kind: "ask", IssueKey: "CORE-1", ID: comment}}, comment},
 	} {

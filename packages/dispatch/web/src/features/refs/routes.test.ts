@@ -232,7 +232,7 @@ test("a block names nothing on a versioned document, an ask, an issue or a malfo
   ]) {
     expect(parseDispatchReference(reference)).toBeUndefined();
   }
-  // A page's raw `@` is no pin, and a version page or an ask's page is the page whatever its
+  // A page's raw `@` is no pin, and a version page or an item page is the page whatever its
   // fragment.
   const origin = "https://dispatch.test";
   expect(referenceRouteFromHref("/issues/CORE-1/spec#b-p1@v2", origin)).toEqual({
@@ -244,6 +244,11 @@ test("a block names nothing on a versioned document, an ask, an issue or a malfo
     kind: "artifact",
     slug: "notes-md",
     version: 2,
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/spec?comment=c1#b-p1", origin)).toEqual({
+    id: "c1",
+    key: "CORE-1",
+    kind: "comment",
   });
   expect(referenceRouteFromHref("/issues/CORE-1/spec?ask=a1#b-p1", origin)).toEqual({
     id: "a1",
@@ -269,9 +274,11 @@ test("a block names nothing on a versioned document, an ask, an issue or a malfo
 });
 
 // A block of a comment or an issue message is named under its item, by a `dispatch://` reference
-// or the item's page, and its target id is `<item kind>/<item id>#<block id>`: a comment block can
-// be pinned to a revision of its comment, and opens the live comment at the block; a message never
-// changes, so a pinned message block names nothing.
+// or the issue item's page, and its target id is `<item kind>/<item id>#<block id>`: a comment
+// block can be pinned to a revision of its comment, and opens the live comment at the block; a
+// message never changes, so a pinned message block names nothing. A document page's `#b-` names a
+// block of the document, so a `?comment=` page names the comment whatever its fragment, and a
+// project document's comment block opens its comment with no fragment.
 test("a block of a comment or a message is named under its item, as the server reads it", () => {
   const origin = "https://dispatch.test";
   const comment = "11111111-1111-4111-8111-111111111111";
@@ -287,10 +294,15 @@ test("a block of a comment or a message is named under its item, as the server r
   expect(referenceRouteFromHref(`/issues/CORE-1/comments/${comment}#b-b2`, origin)).toEqual(
     commentBlock
   );
-  // A document page's `?comment=` names the comment's block at any version of the document.
-  expect(referenceRouteFromHref(`/issues/CORE-1/spec?v=2&comment=${comment}#b-b2`, origin)).toEqual(
-    commentBlock
-  );
+  // A document page's `?comment=` names the comment, never its block, at any version of the
+  // document: the dashboard writes a document block's fragment there.
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read(`/issues/CORE-1/spec?v=2&comment=${comment}#b-b2`, origin)).toEqual({
+      id: comment,
+      key: "CORE-1",
+      kind: "comment",
+    });
+  }
   expect(buildDispatchReference(commentBlock)).toBe(commentReference);
   expect(buildReferencePath(commentBlock)).toBe(`/issues/CORE-1/comments/${comment}#b-b2`);
   expect(referenceTargetKind(commentBlock)).toBe("block");
@@ -331,20 +343,30 @@ test("a block of a comment or a message is named under its item, as the server r
     ...projectBlock,
     block: { id: "b2", pin: "3" },
   });
-  expect(
-    referenceRouteFromHref(
-      `/projects/CORE/documents/handbook-md?version=3&comment=${comment}#b-b2`,
-      origin
-    )
-  ).toEqual(projectBlock);
+  const projectComment: DispatchReferenceRoute = {
+    item: { id: comment, kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "handbook-md",
+  };
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read(`/projects/CORE/documents/handbook-md?comment=${comment}#b-b2`, origin)).toEqual(
+      projectComment
+    );
+    expect(
+      read(`/projects/CORE/documents/handbook-md?version=3&comment=${comment}#b-b2`, origin)
+    ).toEqual({ ...projectComment, version: 3 });
+  }
+  // Its link opens the comment on its document's page, with no fragment that would name a block
+  // of the document; a pinned one opens the live comment too.
   expect(buildReferencePath(projectBlock)).toBe(
-    `/projects/CORE/documents/handbook-md?comment=${comment}#b-b2`
+    `/projects/CORE/documents/handbook-md?comment=${comment}`
   );
   const projectPinned = parseDispatchReference(`${projectReference}@v3`);
   if (projectPinned === undefined)
     throw new Error("the pinned project comment block did not parse");
   expect(buildReferencePath(projectPinned)).toBe(
-    `/projects/CORE/documents/handbook-md?comment=${comment}#b-b2`
+    `/projects/CORE/documents/handbook-md?comment=${comment}`
   );
   expect(shortForm(projectBlock)).toBe("CORE/handbook-md comment block");
   // No block of a versioned document's comment reference, nor of a project document's message.

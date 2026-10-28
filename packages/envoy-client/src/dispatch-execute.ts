@@ -1092,9 +1092,9 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, project document pages (with their ?ask= / ?comment= deep links), the `#b-<block id>`
- * of a live document page, a comment's or a message's page, or a document page's ?comment=,
- * which names that block, and the page of an upload an agent's conversation owns
+ * pages, project document pages (with their ?ask= / ?comment= deep links, which name the item
+ * whatever the fragment), the `#b-<block id>` of a live document page or of an issue comment's or
+ * message's page, which names that block, and the page of an upload an agent's conversation owns
  * (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
@@ -1115,8 +1115,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   // The block a page lands on (`#b-<block id>`), written as `encodeBlockId` writes it, a pin being
   // written only as a dispatch:// reference. A document's version page (`versionName` set) names
   // the document whatever its fragment: a version's stored markdown carries no block ids to land
-  // on. A comment's blocks are its own, so a document page's ?comment= names its block at any
-  // version of the document.
+  // on.
   const blockOf = (versionName?: string): string => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
     return id === undefined || (versionName !== undefined && url.searchParams.get(versionName))
@@ -1129,14 +1128,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
-    // A document page carrying `?comment=`/`?ask=` names that item, not the document: that is
+    // A document page carrying `?comment=`/`?ask=` names that item, not the document, whatever
+    // its fragment (the dashboard writes a document block's fragment beside `?comment=`): that is
     // the href `dispatch_search` returns for an anchored comment or ask on an issue's document.
     if (page === "spec" || artifact !== undefined) {
       const item = itemFromSearch(url.search);
       if (item === null) return undefined;
-      if (item !== undefined) {
-        return `dispatch://${key}/${item.kind}/${item.id}${item.kind === "comment" ? blockOf() : ""}`;
-      }
+      if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
@@ -1173,7 +1171,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   // An ask or comment has no version; the page's version selector names the document's.
   return item === undefined
     ? `${document}${versionOf("version")}${blockOf("version")}`
-    : `${document}/${item.kind}/${item.id}${item.kind === "comment" ? blockOf() : ""}`;
+    : `${document}/${item.kind}/${item.id}`;
 }
 
 const refGrammarProblem =

@@ -267,3 +267,41 @@ test("blocks of one comment citing the node are rows under that comment, labelle
   );
   expect(messageSource.getByText("The message cites dispatch://CORE-1.")).toBeTruthy();
 });
+
+// A project document's comment opens on its document's page (`?comment=`), where a `#b-`
+// fragment names a block of the document: a block of that comment links to the comment, with no
+// fragment.
+test("a block of a project document's comment links to its comment, with no fragment", async () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const item = `dispatch://CORE/artifact/handbook-md/comment/${comment}`;
+  const { getReferences, view } = renderPanel({
+    edges: [
+      {
+        created_at: createdAt,
+        direction: "in",
+        excerpt: { block_id: "b2", text: "Beta cites dispatch://CORE-1." },
+        kind: "mentions",
+        node: {
+          block_id: "b2",
+          id: `comment/${comment}#b2`,
+          kind: "block",
+          parent: { id: comment, kind: "comment", ref: item },
+          project: "CORE",
+          ref: `${item}#b-b2`,
+        },
+        source_seq: 10,
+      },
+    ],
+    node: { id: "CORE-1", issue_key: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  await within(panel).findByText("Beta cites dispatch://CORE-1.");
+  expect(within(panel).getByRole("link", { name: "Comment · CORE" }).getAttribute("href")).toBe(
+    `/projects/CORE/documents/handbook-md?comment=${comment}`
+  );
+});
