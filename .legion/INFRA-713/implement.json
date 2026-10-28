@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-713",
+  "completed": "2026-10-28T17:31:00Z",
+  "proof": [
+    {
+      "criterion": "A1 pod: the row passes in chromium, iphone, webkit and firefox on the issue pod",
+      "surface": "Real Go Dispatch server (e2e/run.ts harness), Postgres 17 with pgvector, production web/dist bundle, Playwright 1.63.0 browsers on the INFRA-713 issue pod",
+      "command": "cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project=<chromium|iphone|webkit|firefox> --workers=1 --reporter=list, once per project, and the same with -g 'too large to draw' --repeat-each=5. Record: https://github.com/sjawhar/legion/pull/2470#issuecomment-6475984614",
+      "observed": "Whole spec 8 passed in each project. Row lines: ✓ [chromium|iphone|webkit|firefox] › e2e/mermaid.e2e.ts:216:1 › a diagram too large to draw in time shows the reason, and the page keeps responding @phone (8.9-11.2 s). --repeat-each=5: 5 passed in each project (20/20). At the previous head 0a517f03 a temporary log showed 1 chunk load and 1 hold report in every run.",
+      "headSha": "315813eb6f1b429c0c2aa9aa432d29eecb4f6981",
+      "negativeControl": "Chunk route renamed so it never matches (lapse L1, chromium): ✘ at mermaid.e2e.ts:251, 'the Mermaid worker took the diagram's source and holds it', Expected >= 1, Received 0. A repeating 1.2 s page-thread block before the samples (lapse L2, chromium): ✘ at :271, expect(elapsed).toBeLessThan(1000), Received 2401.9."
+    },
+    {
+      "criterion": "A2: with the refusal disabled in the page code (restored afterwards), the row fails",
+      "surface": "Same pod harness, page code edited in the working copy and web/dist rebuilt before each run",
+      "command": "Control 1: RENDER_TIME_LIMIT_MS = 600_000 in mermaid-diagrams.ts; control 2: window.setTimeout(noop, timeLimitMs) in sendNext. bun run build:web, then the row command per project with --retries=0; restored and rebuilt after each (jj status clean).",
+      "observed": "Both controls: ✘ in chromium, iphone, webkit and firefox at mermaid.e2e.ts:269, await expect(refusal).toHaveText(...): element(s) not found, after the hold poll (:251) and the five samples passed. CI control PR https://github.com/sjawhar/legion/pull/2471 (head da4fb160 = this head + the 600_000 edit) is queued, run 40732919704.",
+      "headSha": "315813eb6f1b429c0c2aa9aa432d29eecb4f6981",
+      "negativeControl": "The control is itself the broken input: the same row at the unedited head passes 8/8 and 20/20 in the four projects (A1 pod entry)."
+    },
+    {
+      "criterion": "A3: the shipped limit is unchanged and no test-only hook can be set by page content or a URL",
+      "surface": "Source of the shipped bundle, packages/dispatch/web/src",
+      "command": "jj diff --git --from main --to legion/INFRA-713 -- packages/dispatch/web/src; grep -n 'RENDER_TIME_LIMIT_MS = ' mermaid-diagrams.ts; grep -rn resetMermaidDiagrams packages/dispatch/web/src; grep -n timeLimitMs mermaid-diagrams.ts",
+      "observed": "The web/src diff is the RENDER_TIME_LIMIT_MS doc comment only. Line 78: const RENDER_TIME_LIMIT_MS = 5000. resetMermaidDiagrams appears only in its module (export, :377) and MarkdownBody.test.tsx. timeLimitMs is set only from RENDER_TIME_LIMIT_MS (:102) and resetMermaidDiagrams (:383); no location, URLSearchParams or window read feeds it. The row asserts the exact text 'within 5 seconds', built from the timeLimitMs that arms the timer (:236, :271).",
+      "headSha": "315813eb6f1b429c0c2aa9aa432d29eecb4f6981",
+      "negativeControl": "Control 1 changes only the limit value and the row fails at the refusal text in all four projects, so a changed shipped value does not pass unnoticed."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/e2e/mermaid.e2e.ts",
+    "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts (comment only)",
+    "packages/dispatch/AGENTS.md",
+    "docs/solutions/dispatch-web/draw-untrusted-content-with-a-layout-engine-in-a-worker-whose-clock-starts-at-ready-pr2311.md"
+  ],
+  "trickyParts": [
+    "The 5 s timer starts at postMessage, before the hold report; the hold is an expect.poll bounded by the 15 s expect timeout, and the samples take about 0.6-1 s inside the 5 s window (observed passes in all four projects).",
+    "A one-shot page-thread block queued with setTimeout(…, 0) does not fail a sample: the next page.evaluate waits behind it and starts its 100 ms timer afterwards. A repeating block (setInterval) is what fails it."
+  ],
+  "deviations": [
+    "A1 CI is not recorded in this handoff: the issue PR's CI run 40732897855 and the control PR's run 40732919704 were still queued (no job started) at completion, and the role rule is push then complete, never wait for CI. The tester reads the dispatch job's row lines at head 315813eb; the implementer stays subscribed to both PRs and posts the row lines on #2470 and closes #2471 with its branch once they settle.",
+    "Lapse L2 uses a repeating 1.2 s block (setInterval) instead of the plan's one-shot 2 s setTimeout block, which passed (see trickyParts).",
+    "The control branch is mermaid-time-limit-negative-control, not infra-713-negative-control: the architect asked for no Dispatch key in its branch, title or commits. After the simplify commit it took the new head through a merge commit (no force-push).",
+    "ce-simplify-code applied two findings in a third commit (hold route matched by workerHeldPath, redundant loads counter removed); every pod proof above was re-run at the applied head."
+  ],
+  "openQuestions": []
+}
