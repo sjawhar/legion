@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T13:10:00Z",
+  "completed": "2026-10-28T13:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
-  "round": "3: the round-1 review (changes requested at 3d0b23c8). All 10 threads answered and resolved; CI path filters (d47d6243); behaviour fixes with failing-before tests (9e6b8247); docs (790c651a); census follow-ups and Client.Window removed (ab5984da); contract change census in the PR body and in comment 6467221040; the review's fast-follow (one send classification) done; three forward merges of main (cb499793, a9b57a7b, f10d635e: connection count 85, changelog fragment, #2225's claimant routing in the batch model with a 5-statement lookup bound).",
+  "head": "83dd924b2e06f96a54a9b35d26b1831e028972aa",
+  "round": "4 (after the review-round cap; the INFRA-514 architect scoped it to the tester's one failure): no Dispatch key in the added text. The changelog fragment is recreated with changie --custom Issue=pr2395 (pr2395-Changed-20261028-131137.yaml, body unchanged and keyless); the keys in the workflow comments, outbox/role.go, migrations 0135 and 0136, dispatch-outbox.md, infra/README.md, THROUGHPUT.md and the pr2225 docs/solutions note now name #2395 or the case; the grep is in the PR body. No code change. Earlier rounds: round 3 answered the round-1 review at f10d635e.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -70,6 +70,14 @@
       "observed": "summary: 9 ok, 0 FAIL; dispatch claimant delivery e2e: PASS in 41s. A person's answer, thread reply and untargeted message on a claimed issue reach the claimant's agent topic; an unclaimed issue reaches none; a delivered mention suppresses the claimant copy (dispatch-14 on no agent topic); a failed mention gets the copy (dispatch-16 on notifications.agent.claimant-e2e-p, dispatch-20 on the follower's)",
       "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
       "negativeControl": "The script's own unclaimed-issue case: a person's comment on an issue nobody claims (dispatch-13) reaches no agent topic"
+    },
+    {
+      "criterion": "No Dispatch key in what this PR adds outside .legion/ (the controller's rule, the tester's round-3 failure)",
+      "surface": "the pull request's diff against its merge base, the changelog fragment's file name and fields, and the migrations whose comments changed",
+      "command": "git diff 2d872499b668aabf3331ce95d429f83aaabc04af 83dd924b -- . ':(exclude).legion' | grep '^+' | grep -v '^+++' | grep -cE 'INFRA-[0-9]+|LEGION-[0-9]+|dispatch://'; git diff --name-only 2d872499 83dd924b | grep -E 'INFRA-[0-9]|LEGION-[0-9]'; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -run 'TestMigrate|Census|TestEveryMigration|TestTouchedTables' ./internal/dispatch/store/",
+      "observed": "1 added line, in core-nats-receipt-backed-current-holder-delivery.md, whose LEGION-101 was already on main (4 occurrences at 2d872499); no added path names a key outside .legion/; the fragment is pr2395-Changed-20261028-131137.yaml with custom Issue: pr2395 and the same body; store migration tests ok (66.9 s); gofmt and go vet of the outbox package clean",
+      "headSha": "83dd924b2e06f96a54a9b35d26b1831e028972aa",
+      "negativeControl": "The same grep at the tester's head f10d635e counted the keys the tester listed (workflow :223 and :273, role.go:164, 0135:1-2, 0136:1, dispatch-outbox.md:63, infra/README.md:580, THROUGHPUT.md:18 and :36-39, the pr2225 note :43) and the fragment path INFRA-590-outbox-one-publisher.yaml"
     }
   ],
   "filesChanged": [
