@@ -74,6 +74,10 @@
 
 ### Changed
 
+- The linked `dispatch-writing-specs` skill holds text kept in a rewrite of an old spec to the
+  text rules: each retelling, quotation or attribution is restated as design or cut. The lines it
+  cuts to stay under the 2,000-word guard are listed in `@sjawhar/pi-envoy`'s changelog.
+
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:
