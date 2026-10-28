@@ -190,10 +190,9 @@ func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workf
 
 func runDaemonGrantConsumers(t *testing.T, w *workflowRuntime, handlers ...intake.Handler) func() {
 	t.Helper()
-	pool := isolatedOutboxPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(ctx, pool, handlers...) }()
+	go func() { done <- w.consumers.Run(ctx, handlers...) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {

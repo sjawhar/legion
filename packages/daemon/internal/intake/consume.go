@@ -85,9 +85,11 @@ func (r *RetryLater) Unwrap() error { return r.Err }
 
 // Consumers are this project's three durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
-// set GitHub intake hears and decodes, which SetRepositories replaces under mu.
+// set GitHub intake hears and decodes, which SetRepositories replaces under mu. pool is the
+// Postgres every fact is applied on and every consumer's position is kept in (consumer_positions).
 type Consumers struct {
 	spec     ConsumerSpec
+	pool     *pgxpool.Pool
 	stream   jetstream.Stream
 	dispatch jetstream.Consumer
 	// server is the durable on Dispatch's own start (serverStartedSubject), a durable of its own
@@ -103,16 +105,21 @@ type Consumers struct {
 }
 
 // OpenConsumers creates or updates this project's Dispatch, Dispatch-server and GitHub durable
-// consumers. A consumer created here starts at the next message, so a first daemon on a stream that
-// already holds history (production keeps 72 hours of it) does not replay it into admission, nor
-// Dispatch's earlier starts into the production checks: the daemon's own boot covers its own build,
-// and a Dispatch-only change the daemon's build does not carry waits for the check's bound. Boot
-// opens the consumers before it reads its Dispatch listing, so the listing covers the state before
-// them and the consumers everything published since, including what lands while the listing is
-// read. A consumer that exists keeps its position and the policy that created it — so a Dispatch
-// start published while the daemon was down is delivered once it is back — and takes the rest of
-// this boot's configuration.
-func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec) (*Consumers, error) {
+// consumers. A consumer created here for the first time starts at the next message, so a first
+// daemon on a stream that already holds history (production keeps 72 hours of it) does not replay
+// it into admission, nor Dispatch's earlier starts into the production checks: the daemon's own
+// boot covers its own build, and a Dispatch-only change the daemon's build does not carry waits for
+// the check's bound. Boot opens the consumers before it reads its Dispatch listing, so the listing
+// covers the state before them and the consumers everything published since, including what lands
+// while the listing is read. A consumer that exists keeps its position and the policy that created
+// it — so a Dispatch start published while the daemon was down is delivered once it is back — and
+// takes the rest of this boot's configuration. A consumer that applied messages before and is now
+// missing starts at the last one it applied (openConsumer). pool is required: it is where facts are
+// applied and positions kept.
+func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Pool, spec ConsumerSpec) (*Consumers, error) {
+	if pool == nil {
+		return nil, errors.New("intake consumers need the Postgres pool facts are applied on")
+	}
 	spec, err := normalizedSpec(spec)
 	if err != nil {
 		return nil, err
@@ -122,7 +129,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 		return nil, fmt.Errorf("open %s: %w", notificationStream, err)
 	}
 
-	dispatch, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
+	dispatch, err := openConsumer(ctx, stream, pool, spec, jetstream.ConsumerConfig{
 		Durable:        dispatchConsumerName(spec.Project),
 		FilterSubjects: []string{"notifications.dispatch.issue.>", mappingSubject(spec.Project)},
 		AckPolicy:      jetstream.AckExplicitPolicy,
@@ -131,7 +138,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	if err != nil {
 		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
 	}
-	server, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
+	server, err := openConsumer(ctx, stream, pool, spec, jetstream.ConsumerConfig{
 		Durable:       dispatchServerConsumerName(spec.Project),
 		FilterSubject: serverStartedSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
@@ -140,11 +147,11 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	if err != nil {
 		return nil, fmt.Errorf("open the Dispatch server durable consumer: %w", err)
 	}
-	github, err := openConsumer(ctx, stream, githubConsumerConfig(spec, spec.Repositories))
+	github, err := openConsumer(ctx, stream, pool, spec, githubConsumerConfig(spec, spec.Repositories))
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}, nil
+	return &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}, nil
 }
 
 func githubConsumerConfig(spec ConsumerSpec, repositories []ghrepo.Repository) jetstream.ConsumerConfig {
@@ -169,7 +176,7 @@ func (c *Consumers) SetRepositories(ctx context.Context, repositories []ghrepo.R
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	github, err := openConsumer(ctx, c.stream, githubConsumerConfig(c.spec, repositories))
+	github, err := openConsumer(ctx, c.stream, c.pool, c.spec, githubConsumerConfig(c.spec, repositories))
 	if err != nil {
 		return fmt.Errorf("update the GitHub durable consumer's repositories: %w", err)
 	}
@@ -185,12 +192,17 @@ func (c *Consumers) repositories() []ghrepo.Repository {
 }
 
 // openConsumer updates the durable consumer config names, keeping the start position it was created
-// with (JetStream refuses to change it), or creates it delivering only new messages.
-func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+// with (JetStream refuses to change it), or creates it. A consumer created where pool keeps a
+// position for it (recordStreamPosition) starts at that position's stream time, so the messages
+// published while it was missing are delivered; the one at that time, which it applied, is
+// delivered again and dropped as a duplicate (processed_events). The start is logged; one older
+// than the stream's first message (the stream keeps 72 hours) is logged as an error too, since the
+// messages between were lost: the pass heals their pull requests. A consumer with no position
+// starts at the next message.
+func openConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, spec ConsumerSpec, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 	existing, err := stream.Consumer(ctx, config.Durable)
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
-		config.DeliverPolicy = jetstream.DeliverNewPolicy
-		return stream.CreateConsumer(ctx, config)
+		return createConsumer(ctx, stream, pool, spec, config)
 	}
 	if err != nil {
 		return nil, err
@@ -198,6 +210,37 @@ func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream
 	created := existing.CachedInfo().Config
 	config.DeliverPolicy, config.OptStartSeq, config.OptStartTime = created.DeliverPolicy, created.OptStartSeq, created.OptStartTime
 	return stream.UpdateConsumer(ctx, config)
+}
+
+// createConsumer creates the missing durable consumer config names, at its stored position when
+// pool keeps one and at the next message otherwise (openConsumer).
+func createConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, spec ConsumerSpec, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+	start, stored, err := storedStreamTime(ctx, pool, config.Durable)
+	if err != nil {
+		return nil, err
+	}
+	if !stored {
+		config.DeliverPolicy = jetstream.DeliverNewPolicy
+		return stream.CreateConsumer(ctx, config)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read %s info: %w", notificationStream, err)
+	}
+	config.DeliverPolicy, config.OptStartTime = jetstream.DeliverByStartTimePolicy, &start
+	consumer, err := stream.CreateConsumer(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	spec.Logger.Info("intake: a missing durable consumer is created at the last message it applied",
+		"consumer", config.Durable, "start", start.UTC().Format(time.RFC3339Nano))
+	// The stored time keeps microseconds; the stream's, nanoseconds. A start at the stream's first
+	// message itself is not before it.
+	if first := info.State.FirstTime; start.Before(first.Truncate(time.Microsecond)) {
+		spec.Logger.Error("intake: a missing durable consumer's last applied message is older than the stream's first message; any event published between was lost, and the pass heals their pull requests",
+			"consumer", config.Durable, "start", start.UTC().Format(time.RFC3339Nano), "stream_first", first.UTC().Format(time.RFC3339Nano))
+	}
+	return consumer, nil
 }
 
 // DispatchTarget is the notification stream's own current last sequence, read fresh from
@@ -239,21 +282,23 @@ func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
 }
 
 // Run consumes the three durable consumers until ctx ends, and returns the error of the one that
-// stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
-// rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
-// logged then acknowledged. The Dispatch consumer's own position, and admission's hold on it, are
-// the daemon's boot-owned concern (workflowRuntime.pollHoldRelease), not intake's: this loop knows
-// nothing about either.
-func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
+// stops first. Every decoded fact enters ApplyFact on the consumers' pool; a committed transaction
+// is acknowledged, a rolled-back transaction is nacked with a delay, poison is terminated, and a
+// committed refusal is logged then acknowledged. The Dispatch consumer's own position, and
+// admission's hold on it, are the daemon's boot-owned concern (workflowRuntime.pollHoldRelease),
+// not intake's: this loop knows nothing about either.
+func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 	c.mu.Lock()
 	dispatch, github := c.dispatch, c.github
 	c.mu.Unlock()
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, dispatch, c.spec, c.repositories, pool, handlers)
+		return consumeConsumer(consumeContext, dispatch, c.spec, c.repositories, c.pool, handlers)
 	})
-	group.Go(func() error { return consumeConsumer(consumeContext, c.server, c.spec, c.repositories, pool, handlers) })
-	group.Go(func() error { return consumeConsumer(consumeContext, github, c.spec, c.repositories, pool, handlers) })
+	group.Go(func() error {
+		return consumeConsumer(consumeContext, c.server, c.spec, c.repositories, c.pool, handlers)
+	})
+	group.Go(func() error { return consumeConsumer(consumeContext, github, c.spec, c.repositories, c.pool, handlers) })
 	return group.Wait()
 }
 
@@ -382,7 +427,7 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	}
 	decoded.Fact = fact
 
-	result, err := ApplyFact(ctx, pool, decoded.Source, decoded.EventID, decoded.Fact, handlers...)
+	result, err := ApplyFact(withStreamPosition(ctx, message), pool, decoded.Source, decoded.EventID, decoded.Fact, handlers...)
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelWarn, "retryable intake processing failure", message, "event_id", decoded.EventID, "error", err)
 		if nakErr := message.NakWithDelay(spec.NakDelay); nakErr != nil {

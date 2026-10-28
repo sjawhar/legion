@@ -45,7 +45,7 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 		prepared[issue.Key]++
 		return issue, nil
 	}
-	consumers, err := OpenConsumers(context.Background(), js, spec)
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 				`"payload":{"key":%q,"status":"backlog","title":"a backlog event","parent":null,"rank":"A","labels":[],"resolved_repo":"sjawhar/legion"}}`, i+1, key, key)))
 	}
 
-	defer runConsumers(t, consumers, pool, slowFacts{work: 300 * time.Millisecond})()
+	defer runConsumers(t, consumers, slowFacts{work: 300 * time.Millisecond})()
 	testwait.Eventually(t, "every event of the backlog prepared", func() bool {
 		mu.Lock()
 		defer mu.Unlock()

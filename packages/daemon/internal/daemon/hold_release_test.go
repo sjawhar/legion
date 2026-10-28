@@ -46,7 +46,7 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 		t.Fatalf("open JetStream: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {
@@ -343,7 +343,7 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 		t.Fatalf("open JetStream: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {
@@ -411,7 +411,7 @@ func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {

@@ -124,7 +124,7 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 				w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: newRepositories("LEGION")}
 				spec.PrepareRepository = w.prepareRepository
 			}
-			consumers, err := intake.OpenConsumers(ctx, js, spec)
+			consumers, err := intake.OpenConsumers(ctx, js, pool, spec)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,7 +145,7 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 			}
 			run, cancel := context.WithCancel(ctx)
 			done := make(chan error, 1)
-			go func() { done <- consumers.Run(run, pool, engine, admission) }()
+			go func() { done <- consumers.Run(run, engine, admission) }()
 			t.Cleanup(func() {
 				cancel()
 				if err := <-done; err != nil {
@@ -206,7 +206,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
-	consumers, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, Logger: quietLogger(), PrepareRepository: w.prepareRepository})
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(run, pool, engine, admission) }()
+	go func() { done <- consumers.Run(run, engine, admission) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -283,7 +283,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 		}
 		return intake.Result{}, nil
 	})
-	consumers, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, Logger: quietLogger(), PrepareRepository: w.prepareRepository})
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(run, pool, failOnce, engine, admission) }()
+	go func() { done <- consumers.Run(run, failOnce, engine, admission) }()
 	stopped := false
 	t.Cleanup(func() {
 		if !stopped {

@@ -957,7 +957,10 @@ func ChildNotAdoptable(key, tree, reason string) *Refusal {
 // API, or supervision. It records the event before running handlers, skips duplicates before any
 // handler runs, remembers the first refusal while completing every handler, and rolls all writes
 // back when any handler returns an error. An Observed issue fact is settled first, under the lock
-// (settleObserved): the handlers see its view only while the workflow records no such issue.
+// (settleObserved): the handlers see its view only while the workflow records no such issue. A
+// fact a durable consumer delivered (withStreamPosition) records that consumer's stream position
+// in the same transaction (recordStreamPosition), so a consumer found missing is created at the
+// last message it applied (openConsumer).
 //
 // Facts apply one at a time. Handlers read and rewrite whole records, and admission's slots span
 // every tree, so two facts in flight together would each act on what the other is about to change;
@@ -987,6 +990,11 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 
 	fresh, err := record.NewStore().MarkProcessed(ctx, tx, source, eventID)
 	if err != nil {
+		return Result{}, err
+	}
+	// A duplicate records its position too: it is acknowledged as applied, so its consumer is past
+	// it either way.
+	if err := recordStreamPosition(ctx, tx); err != nil {
 		return Result{}, err
 	}
 	if !fresh {

@@ -590,7 +590,7 @@ func TestTheDispatchConsumerHearsTheProjectsMappingSubject(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create the earlier daemon's consumer: %v", err)
 	}
-	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
+	if _, err := OpenConsumers(context.Background(), js, migratedPool(t), spec); err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 	config := consumerInfo(t, stream, dispatchConsumerName(spec.Project)).Config
@@ -608,11 +608,11 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	createWrites(t, pool)
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
-	consumers, err := OpenConsumers(context.Background(), js, spec)
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
-	stop := runConsumers(t, consumers, pool, writeHandler("github", nil))
+	stop := runConsumers(t, consumers, writeHandler("github", nil))
 	defer stop()
 
 	widgets := []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
@@ -651,7 +651,7 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 func TestAFailedSetRepositoriesChangesNothing(t *testing.T) {
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
-	consumers, err := OpenConsumers(context.Background(), js, spec)
+	consumers, err := OpenConsumers(context.Background(), js, migratedPool(t), spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
@@ -1276,7 +1276,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
 
-	consumers, err := OpenConsumers(context.Background(), js, spec)
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
@@ -1285,7 +1285,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 			t.Errorf("%s was created with %d messages of history pending, want 0", name, pending)
 		}
 	}
-	stop := runConsumers(t, consumers, pool, writeHandler("fresh", nil))
+	stop := runConsumers(t, consumers, writeHandler("fresh", nil))
 	defer stop()
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
 	testwait.Eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
@@ -1317,7 +1317,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	}
 
 	spec.Repositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
-	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
+	if _, err := OpenConsumers(context.Background(), js, pool, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
 	for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
@@ -1406,18 +1406,18 @@ func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 
 func startConsume(t *testing.T, js jetstream.JetStream, spec ConsumerSpec, pool *pgxpool.Pool, handlers ...Handler) func() {
 	t.Helper()
-	consumers, err := OpenConsumers(context.Background(), js, spec)
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
-	return runConsumers(t, consumers, pool, handlers...)
+	return runConsumers(t, consumers, handlers...)
 }
 
-func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handlers ...Handler) func() {
+func runConsumers(t *testing.T, consumers *Consumers, handlers ...Handler) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, handlers...) }()
+	go func() { done <- consumers.Run(ctx, handlers...) }()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
