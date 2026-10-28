@@ -229,8 +229,10 @@ When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `tru
 The last row is the subject a consumer acknowledges a message on. Replies to the API requests come
 back on `_INBOX.>`. The stored-message get (`STREAM.MSG.GET`) is how `legion state` reads each
 consumer's oldest waiting message, whose time is the consumer's lag; it only reads, one message at
-a time. A daemon whose user lacks it still runs, and its state names the refusal as each waiting
-consumer's `unavailable`.
+a time. A daemon whose user lacks it still runs. NATS does not answer a request it refuses, so the
+daemon's state shows each consumer with messages waiting as `unavailable: read the oldest waiting
+message: context deadline exceeded`, its waiting count still shown and the other consumers
+unchanged, and the daemon's log names the refused subject.
 
 The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
 not just the daemon's three: a holder of the daemon's seed can read, recreate with another filter,

@@ -780,16 +780,21 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   `retryable intake processing failure` and the other warnings naming a `subject` of that
   consumer, whose `error` says what fails. A consumer that stops is not a stall: it stops the
   daemon (`workflow intake stopped: …`).
-- **`unavailable`** names what NATS did not answer within two seconds, or refused; the rest of
-  the state is served all the same. `read the consumer's info: …` leaves `waiting` 0 and `stalled`
-  false, since neither is known: check that the daemon reaches NATS and that the consumer exists
-  (`nats consumer info ENVOY_NOTIFICATIONS <name>`). `read the oldest waiting message: …` leaves
-  `waiting` and `stalled` standing and the oldest unknown (`oldest unknown` on the text line); with
-  `nats: permissions violation` it is the daemon's NATS user lacking
-  `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`
+- **`unavailable`** names what NATS did not answer in time, or refused; the rest of the state is
+  served all the same. The three consumers are read at the same time, each within two seconds,
+  so one consumer's read that does not answer leaves the others' as they are. `read the consumer's
+  info: …` leaves `waiting` 0 and `stalled` false, since neither is known: check that the daemon
+  reaches NATS and that the consumer exists (`nats consumer info ENVOY_NOTIFICATIONS <name>`).
+  `read the oldest waiting message: …` leaves `waiting` and `stalled` standing and the oldest
+  unknown (`oldest unknown` on the text line); that read has one second of its own. NATS refuses a
+  request the daemon's user has no grant for without answering it, so a missing grant shows as
+  `context deadline exceeded`, with the daemon's error line `NATS refused the daemon a permission:
+  its NATS user lacks that grant` naming the subject. With subject
+  `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` it is the stored-message get
   ([Envoy](/legion/dispatch/envoy/#the-nats-grant-a-legion-daemon-needs)). A deployment gets that
   grant with the envoy-infra plugin release that carries it: until that release is applied, the
-  oldest message is `unavailable` whenever messages wait, and nothing else changes.
+  oldest message is `unavailable` on each consumer while messages wait on it, and nothing else
+  changes.
 
 While a GitHub event waits, or was lost on its way, the daemon's two-minute pass
 ([Running Legion](/legion/legion/running-legion/#the-github-apps)) still records each open pull
@@ -853,10 +858,12 @@ notice comes once per handoff commit, from whichever pass finds it first.
   applied already, is dropped as a duplicate. Nothing to do. A consumer the daemon has no applied
   message recorded for starts at the next message instead, with no line.
 - **`intake: a missing durable consumer's last applied message is older than the stream's first
-  message; …`** (an error line with `consumer`, `start` and `stream_first`). The stream keeps 72
-  hours of messages, and the consumer's last applied message is older than the oldest it still
-  holds: the consumer's events published between `start` and `stream_first` are gone. The
-  two-minute pass heals the pull requests of the GitHub events among them.
+  message; …`** (a warning with `consumer`, `start` and `stream_first`). The stream keeps 72 hours
+  of messages, and the last message the consumer applied is older than the oldest it still holds.
+  Only an applied event moves that position, not one the daemon acknowledged without acting on, so
+  on a quiet project the consumer may have handled every event between `start` and `stream_first`
+  before it went missing. Any it had not reached may have been missed: the daemon applied none of
+  them, and the two-minute pass heals the pull requests of the GitHub events among them.
 - **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at

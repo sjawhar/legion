@@ -205,10 +205,11 @@ func TestAMissingConsumerWithNoStoredPositionStartsAtTheNextMessage(t *testing.T
 }
 
 // A position older than the stream's first message — the consumer was missing longer than the
-// stream keeps messages (72 hours), or the stream was recreated — starts the consumer at the
-// stream's first message, and an ERROR line names the gap: the events published between are lost,
-// and only the pass's read of each pull request heals them.
-func TestAStoredPositionOlderThanTheStreamLogsTheLostEvents(t *testing.T) {
+// stream keeps messages (72 hours), the stream was recreated, or the project was quiet, since only
+// an applied fact moves the position — starts the consumer at the stream's first message, and a
+// WARN line names the gap: the events published between may have been missed, the daemon applied
+// none of them, and the pass's read of each pull request heals those it would have acted on.
+func TestAStoredPositionOlderThanTheStreamWarnsOfEventsThatMayHaveBeenMissed(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
 	js, stream := testJetStream(t)
@@ -224,8 +225,8 @@ func TestAStoredPositionOlderThanTheStreamLogsTheLostEvents(t *testing.T) {
 	defer startConsume(t, js, spec, pool, factMarks())()
 	waitDelivered(t, stream, github)
 	testwait.Eventually(t, "the stream's first event applied", func() bool { return slices.Equal(writeHandlers(t, pool), []string{"pr-1"}) })
-	if line := logLine(logs.String(), "level=ERROR", "consumer="+github, "older than the stream's first message", "lost"); line == "" {
-		t.Fatalf("no ERROR line names the events lost before the stream's first message; logs:\n%s", logs)
+	if line := logLine(logs.String(), "level=WARN", "consumer="+github, "older than the stream's first message", "may have been missed"); line == "" {
+		t.Fatalf("no WARN line names the events that may have been missed before the stream's first message; logs:\n%s", logs)
 	}
 }
 

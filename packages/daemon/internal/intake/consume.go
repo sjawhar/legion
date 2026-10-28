@@ -209,9 +209,12 @@ func (c *Consumers) repositories() []ghrepo.Repository {
 // position for it (recordStreamPosition) starts at that position's stream time, so the messages
 // published while it was missing are delivered; the one at that time, which it applied, is
 // delivered again and dropped as a duplicate (processed_events). The start is logged; one older
-// than the stream's first message (the stream keeps 72 hours) is logged as an error too, since the
-// messages between were lost: the pass heals their pull requests. A consumer with no position
-// starts at the next message.
+// than the stream's first message (the stream keeps 72 hours) is warned of too. The position moves
+// only when a fact is applied, never for a message acknowledged without a transaction, so on a
+// quiet project an old position is no sign of loss: the messages between it and the stream's first
+// may have been handled by the consumer before it went missing, or may have been missed. The
+// daemon applied none of them, and the pass heals those it would have acted on. A consumer with no
+// position starts at the next message.
 func openConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, logger *slog.Logger, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 	existing, err := stream.Consumer(ctx, config.Durable)
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
@@ -250,7 +253,7 @@ func createConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.
 	// The stored time keeps microseconds; the stream's, nanoseconds. A start at the stream's first
 	// message itself is not before it.
 	if first := info.State.FirstTime; start.Before(first.Truncate(time.Microsecond)) {
-		logger.Error("intake: a missing durable consumer's last applied message is older than the stream's first message; any event published between was lost, and the pass heals their pull requests",
+		logger.Warn("intake: a missing durable consumer's last applied message is older than the stream's first message; events published between may have been missed: the daemon applied none of them, and the pass heals those it would have acted on",
 			"consumer", config.Durable, "start", start.UTC().Format(time.RFC3339Nano), "stream_first", first.UTC().Format(time.RFC3339Nano))
 	}
 	return consumer, nil
@@ -295,9 +298,16 @@ func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
 }
 
 const (
-	// consumerLagBound bounds one Lag read: the state route waits on it, so a NATS server that does
-	// not answer costs a state read two seconds and an unavailable line, not the request's life.
+	// consumerLagBound bounds one consumer's Lag read: the state route waits on it, so a NATS server
+	// that does not answer costs a state read two seconds and an unavailable line, not the
+	// request's life.
 	consumerLagBound = 2 * time.Second
+	// consumerOldestBound bounds the read of one consumer's oldest waiting message, all its
+	// STREAM.MSG.GET together, from when the consumer's info answered. A NATS server that refuses a
+	// publish answers only with an asynchronous -ERR, so a get the daemon's user lacks the grant
+	// for never answers and waits this bound out; it ends within consumerLagBound, so the waiting
+	// count and stalled flag the info gave are still the consumer's answer.
+	consumerOldestBound = time.Second
 	// consumerStallAfter is how long a consumer with messages waiting may go without handling one
 	// before Lag calls it stalled: a healthy consumer handles a message in well under a second, and
 	// a stalled one holds every event behind the message it is stuck on.
@@ -354,25 +364,32 @@ func (p *consumerProgress) lastHandled() time.Time {
 }
 
 // Lag is the lag of the Dispatch, Dispatch-server and GitHub durable consumers, in that order
-// (ConsumerLag), read fresh from JetStream within consumerLagBound: per consumer one CONSUMER.INFO
-// and, while messages wait, one STREAM.MSG.GET per filter subject for the first message at or after
-// the sequence above its ack floor on that subject, the smallest sequence's time being the oldest;
-// a message at that sequence ends the reads, since no filter can give an older one.
+// (ConsumerLag), read fresh from JetStream: per consumer one CONSUMER.INFO and, while messages
+// wait, one STREAM.MSG.GET per filter subject for the first message at or after the sequence above
+// its ack floor on that subject, the smallest sequence's time being the oldest; a message at that
+// sequence ends the reads, since no filter can give an older one. The three consumers are read at
+// the same time, each within consumerLagBound of its own, and each consumer's gets within
+// consumerOldestBound of their own, so a read that does not answer costs only its own consumer
+// its answer: never another consumer's info, nor its own consumer's waiting count.
 // Each consumer's info is read through a handle of its own, as DispatchPosition reads, so nothing
-// races Run's. A read that fails or runs out of the bound is that consumer's Unavailable; Lag
+// races Run's. A read that fails or runs out of its bound is that consumer's Unavailable; Lag
 // itself never fails, so the state that shows it is still served.
 func (c *Consumers) Lag(ctx context.Context) []ConsumerLag {
-	read, cancel := context.WithTimeout(ctx, consumerLagBound)
-	defer cancel()
 	progress := []*consumerProgress{c.progress.dispatch, c.progress.server, c.progress.github}
 	lags := make([]ConsumerLag, len(progress))
+	var reads sync.WaitGroup
 	for i, consumer := range progress {
-		lags[i] = c.lagOf(read, consumer)
+		reads.Go(func() { lags[i] = c.lagOf(ctx, consumer) })
 	}
+	reads.Wait()
 	return lags
 }
 
+// lagOf reads one consumer's lag (Lag) within consumerLagBound, its oldest waiting message within
+// consumerOldestBound of the info's answer.
 func (c *Consumers) lagOf(ctx context.Context, progress *consumerProgress) ConsumerLag {
+	ctx, cancel := context.WithTimeout(ctx, consumerLagBound)
+	defer cancel()
 	handled := progress.lastHandled()
 	lag := ConsumerLag{Name: progress.name, LastHandledAt: handled}
 	consumer, err := c.stream.Consumer(ctx, progress.name)
@@ -391,7 +408,9 @@ func (c *Consumers) lagOf(ctx context.Context, progress *consumerProgress) Consu
 		since = progress.opened
 	}
 	lag.Stalled = now.Sub(since) >= consumerStallAfter
-	oldest, err := c.oldestWaiting(ctx, info)
+	read, cancelRead := context.WithTimeout(ctx, consumerOldestBound)
+	defer cancelRead()
+	oldest, err := c.oldestWaiting(read, info)
 	if err != nil {
 		lag.Unavailable = "read the oldest waiting message: " + err.Error()
 		return lag

@@ -799,9 +799,10 @@ Closing the terminal leaves the project without one, and the daemon logs
   once the daemon acknowledged it, or terminated it as poison; a message put back to retry is not.
   `STALLED: none handled for <d>` ends the line when messages wait and the daemon has handled
   none of that consumer's for 60 seconds, since the last it handled (named) or, before the first,
-  since the daemon started. `unavailable: <error>` names what NATS did not answer within the
-  read's two seconds, or refused: alone on the line when the consumer's info could not be read,
-  since nothing else is known then. A daemon with no workflow prints `durable consumers: none`.
+  since the daemon started. `unavailable: <error>` names what NATS did not answer in time (two
+  seconds for the consumer, one of them for its oldest message), or refused: alone on the line
+  when the consumer's info could not be read, since nothing else is known then. A daemon with no
+  workflow prints `durable consumers: none`.
   [GitHub events wait](/legion/legion/troubleshooting/#github-events-wait) says what each means
   and what to check.
 

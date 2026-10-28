@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -104,7 +106,7 @@ func TestConsumerLagCountsWhatWaitsAndCallsAConsumerStalledWhenNoneIsHandledFor6
 // What NATS does not answer, or refuses, is named in the consumer's unavailable, and Lag still
 // returns every consumer: a CONSUMER.INFO that fails leaves waiting and stalled unknown; a
 // STREAM.MSG.GET that fails or never answers leaves only the oldest unknown, the never-answered
-// read cut at the bound.
+// read cut at its own bound, before the consumer's.
 func TestConsumerLagNamesWhatNATSDidNotAnswer(t *testing.T) {
 	ctx := context.Background()
 	served, stream := testJetStream(t)
@@ -155,14 +157,76 @@ func TestConsumerLagNamesWhatNATSDidNotAnswer(t *testing.T) {
 		}
 		started := time.Now()
 		lags := consumers.Lag(ctx)
-		if took := time.Since(started); took < consumerLagBound || took > consumerLagBound+time.Second {
-			t.Fatalf("Lag took %s against a read that never answers, want it cut at its %s bound", took, consumerLagBound)
+		if took := time.Since(started); took < consumerOldestBound || took >= consumerLagBound {
+			t.Fatalf("Lag took %s against a read that never answers, want it cut at the oldest message's %s bound, before the consumer's %s", took, consumerOldestBound, consumerLagBound)
 		}
 		got := lagNamed(t, lags, github)
 		if got.Waiting != 1 || !got.Stalled || !got.OldestAt.IsZero() || got.Unavailable != "read the oldest waiting message: "+context.DeadlineExceeded.Error() {
 			t.Fatalf("GitHub consumer = %+v, want 1 waiting and stalled kept, the oldest unknown and the deadline named", got)
 		}
 	})
+}
+
+// A NATS server refuses a publish its user lacks with an asynchronous -ERR alone and never answers
+// the request, so a stored-message get (STREAM.MSG.GET, which a deployment's daemon user lacks
+// until its envoy-infra release grants it) waits out its bound. The Dispatch consumer, the first of
+// the three, has a message waiting, so its get waits; the GitHub consumer's info, read after it,
+// still answers, and each consumer whose oldest message could not be read keeps its waiting count
+// and stalled flag and names that read.
+func TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead(t *testing.T) {
+	ctx := context.Background()
+	daemonSeed, daemonPublic := testnats.User(t)
+	adminSeed, adminPublic := testnats.User(t)
+	_, uri := testnats.StartNkeyAuthorizedUsers(t, testnats.Image,
+		testnats.NkeyUser{Public: daemonPublic, Permissions: `{ publish: { deny: ["$JS.API.STREAM.MSG.GET.>"] } }`},
+		testnats.NkeyUser{Public: adminPublic})
+	admin := jetStreamAs(t, uri, adminSeed)
+	if _, err := admin.CreateStream(ctx, jetstream.StreamConfig{Name: notificationStream, Subjects: []string{"notifications.>"}}); err != nil {
+		t.Fatalf("create the notification stream: %v", err)
+	}
+	clock := &lagClock{now: time.Now()}
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Now = clock.Now
+	consumers, err := OpenConsumers(ctx, jetStreamAs(t, uri, daemonSeed), migratedPool(t), spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers as the daemon's user: %v", err)
+	}
+	publish(t, admin, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	for number := 1; number <= 3; number++ {
+		publish(t, admin, fmt.Sprintf("notifications.github.sjawhar.legion.pr.%d", number), pullRequestOpenedEnvelope(t, number))
+	}
+	clock.advance(consumerStallAfter + time.Second)
+
+	started := time.Now()
+	lags := consumers.Lag(ctx)
+	if took := time.Since(started); took > consumerLagBound+time.Second {
+		t.Fatalf("Lag took %s, want it within its %s bound", took, consumerLagBound)
+	}
+	refused := "read the oldest waiting message: " + context.DeadlineExceeded.Error()
+	want := []ConsumerLag{
+		{Name: dispatchConsumerName(spec.Project), Waiting: 1, Stalled: true, Unavailable: refused},
+		{Name: dispatchServerConsumerName(spec.Project)},
+		{Name: githubConsumerName(spec.Project), Waiting: 3, Stalled: true, Unavailable: refused},
+	}
+	if !slices.Equal(lags, want) {
+		t.Fatalf("Lag with the stored-message get refused =\n%+v\nwant\n%+v", lags, want)
+	}
+}
+
+// jetStreamAs is a JetStream client of the server at uri, connected as the nkey user seed is the
+// seed of, closed when t ends.
+func jetStreamAs(t *testing.T, uri, seed string) jetstream.JetStream {
+	t.Helper()
+	conn, err := natsauth.Connect([]string{uri}, seed)
+	if err != nil {
+		t.Fatalf("connect to NATS: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	return js
 }
 
 // lagClock is a clock a test moves by hand (ConsumerSpec.Now).

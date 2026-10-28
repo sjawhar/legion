@@ -2517,7 +2517,8 @@ three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-di
 each host's listener consumer included, and lets the seed create a push consumer that delivers
 stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message
 get `legion state` reads each consumer's oldest waiting message with; without it the state's
-`consumers` name the refusal as `unavailable` whenever messages wait), and
+`consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each
+consumer with messages waiting, its waiting count still shown), and
 subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
 every reply any client on the server gets, key-value reads and watch updates included, such as
 the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
