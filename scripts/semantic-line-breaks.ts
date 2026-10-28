@@ -4,11 +4,12 @@
 // packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
 // `--write` fixes it by changing only whitespace.
 //
-// `--write` is conservative by rule. It leaves a leading YAML front matter block byte for byte. It
-// never joins a line onto the one before when the line could open or interrupt a block, nor cuts
-// a line where the new line would start so. It never joins or cuts inside a code span or inline
-// HTML: the content of `<pre>`, `<textarea>`, `<script>`, `<style>`, `<code>`, `<tt>`, `<kbd>` and
-// `<samp>` stays as it is through the close tag.
+// `--write` is conservative by rule. It leaves a leading YAML front matter block and the text of a
+// setext heading byte for byte, and R1 does not read them. It never joins a line onto the one
+// before when the line could open or interrupt a block, nor cuts a line where the new line would
+// start so. It never joins or cuts inside a code span or inline HTML (a tag runs through its
+// quoted attribute values): the content of `<pre>`, `<textarea>`, `<script>`, `<style>`, `<code>`,
+// `<tt>`, `<kbd>` and `<samp>` stays as it is through the close tag.
 //
 // `--write` then writes a file only when two guards hold: the text is the same once whitespace is
 // folded, and the file renders the same, parsed before and after with micromark and its GFM and
@@ -84,8 +85,11 @@ const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
  * joined or cut: a raw-text element, or inline code, whose line breaks GitHub shows.
  */
 const VERBATIM_OPEN = /^<(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\n/>])/i;
-/** A YAML front matter block as micromark's front matter extension reads it: a closed one. */
-const CLOSED_FRONT_MATTER = /^---[ \t]*\r?\n(?:[^\n]*\n)*?---[ \t]*(?:\r?\n|$)/;
+/**
+ * A fence line of a YAML front matter block as micromark's front matter extension reads it, both
+ * the opener on the first line and the closer: `---`, then only spaces or tabs.
+ */
+const FRONT_MATTER_FENCE = /^---[ \t]*\r?$/;
 
 const SENTENCE_MARKS = ".!?";
 const SENTENCE_CLOSERS = ")]\"'*_”’";
@@ -171,7 +175,7 @@ type BlockStart =
   /** `end` is the text whose line ends the block, undefined when the start line already did. */
   | { type: "html"; end: RegExp | undefined }
   | { type: "definition"; tail: DefinitionTail | undefined }
-  | { type: "code" | "table" | "heading" | "other" };
+  | { type: "code" | "table" | "heading" | "underline" | "other" };
 
 interface Finding {
   line: number;
@@ -238,6 +242,15 @@ function definitionTail(rest: string): DefinitionTail | undefined {
 }
 
 /**
+ * The index of the line that closes the YAML front matter block the document opens with, or -1
+ * when there is none: micromark's front matter extension reads one only when a fence closes it.
+ */
+function frontMatterEnd(lines: readonly string[]): number {
+  if (!FRONT_MATTER_FENCE.test(lines[0] ?? "")) return -1;
+  return lines.findIndex((line, index) => index > 0 && FRONT_MATTER_FENCE.test(line));
+}
+
+/**
  * The block the line opens at `at`, `rel` columns past its container's content column, or
  * undefined for paragraph text. `interrupts` is set when the line would otherwise continue an open
  * paragraph in the same container, which only some blocks may interrupt; `next` is the line after
@@ -259,7 +272,7 @@ function blockStart(
     return { type: "fence", fence: { char: run.charAt(0), length: run.length } };
   }
   if (ATX_HEADING.test(rest)) return { type: "heading" };
-  if (interrupts && SETEXT_UNDERLINE.test(rest)) return { type: "other" };
+  if (interrupts && SETEXT_UNDERLINE.test(rest)) return { type: "underline" };
   if (THEMATIC_BREAK.test(rest)) return { type: "other" };
   const marker = parseItemMarker(line, at);
   if (marker && (!interrupts || (!marker.empty && (marker.bullet || marker.startsAtOne)))) {
@@ -308,12 +321,7 @@ function scanBlocks(source: readonly string[]): Blocks {
   let html: RegExp | undefined;
   let definition: DefinitionTail | undefined;
   let table = false;
-  // Front matter runs from a first line `---` through the next `---` or `...`; without one, the
-  // first line is a thematic break.
-  const frontMatterEnd =
-    source[0] === "---"
-      ? source.findIndex((line, index) => index > 0 && (line === "---" || line === "..."))
-      : -1;
+  const frontMatter = frontMatterEnd(source);
 
   const info = (kind: LineKind, itemStart = false): LineInfo => ({ kind, itemStart });
 
@@ -397,6 +405,12 @@ function scanBlocks(source: readonly string[]): Blocks {
       open.length = matched;
       return startParagraph(index, open.length > 0 ? line.slice(0, at) : "");
     }
+    // A setext underline makes the paragraph it ends a heading, left as it is and not read by R1.
+    if (start.type === "underline" && paragraph) {
+      for (let n = paragraph.first; n <= paragraph.last; n++) {
+        lines[n] = info("other", lines[n]?.itemStart);
+      }
+    }
     // A table line inside a paragraph keeps the paragraph's items open, as a lazy line would.
     if (!(start.type === "table" && inParagraph)) open.length = matched;
     paragraph = undefined;
@@ -425,7 +439,7 @@ function scanBlocks(source: readonly string[]): Blocks {
   };
 
   for (const [index, line] of source.entries()) {
-    if (index <= frontMatterEnd) {
+    if (index <= frontMatter) {
       lines.push(info("other"));
       continue;
     }
@@ -504,16 +518,28 @@ function destinationEnd(line: string, from: number): number {
 }
 
 /**
- * Index just past the inline HTML that opens at `from`, or -1 when no `>` closes it. An element
- * VERBATIM_OPEN opens runs through its close tag, so its content is never joined or cut.
+ * Index just past the inline HTML that opens at `from`, or -1 when no `>` closes it. An open tag
+ * runs through its quoted attribute values, as in CommonMark: a `"` or `'` after an attribute's
+ * `=` opens one, and an open tag with a value no quote closes is none. An element VERBATIM_OPEN
+ * opens runs through its close tag, so its content is never joined or cut.
  */
 function htmlEnd(text: string, from: number): number {
   if (text.startsWith("<!--", from)) {
     const close = text.indexOf("-->", from + 4);
     if (close !== -1) return close + 3;
   }
-  const tagEnd = text.indexOf(">", from);
-  if (tagEnd === -1) return -1;
+  const openTag = /[A-Za-z]/.test(text.charAt(from + 1));
+  let tagEnd = from + 1;
+  for (; tagEnd < text.length && text[tagEnd] !== ">"; tagEnd++) {
+    if (!openTag || text[tagEnd] !== "=") continue;
+    let value = tagEnd + 1;
+    while (/[ \t\r\n]/.test(text.charAt(value))) value++;
+    const quote = text.charAt(value);
+    if (quote !== '"' && quote !== "'") continue;
+    tagEnd = text.indexOf(quote, value + 1);
+    if (tagEnd === -1) return -1;
+  }
+  if (tagEnd === text.length) return -1;
   const element = VERBATIM_OPEN.exec(text.slice(from, tagEnd + 1))?.[1];
   if (element === undefined) return tagEnd + 1;
   const close = new RegExp(`</${element}[ \\t\\n]*>`, "gi");
@@ -782,8 +808,8 @@ interface ParsedNode {
 
 /**
  * A parsed node as it renders: positions dropped, the looseness of lists dropped, and whitespace
- * folded in values that run as text (text, inline code, inline HTML, an image's alt text). Code
- * blocks, HTML blocks and link titles keep their values exactly.
+ * folded in values that run as text (text, inline code, an image's alt text). Code blocks, HTML,
+ * inline or not, and link titles keep their values exactly.
  */
 function renderedForm(node: ParsedNode, inText: boolean): unknown {
   const form: Record<string, unknown> = {};
@@ -793,7 +819,12 @@ function renderedForm(node: ParsedNode, inText: boolean): unknown {
     if (key === "spread" && (node.type === "list" || node.type === "listItem")) continue;
     if (key === "children") {
       form.children = node.children?.map((child) => renderedForm(child, childrenInText));
-    } else if ((key === "value" || key === "alt") && inText && typeof value === "string") {
+    } else if (
+      (key === "value" || key === "alt") &&
+      inText &&
+      node.type !== "html" &&
+      typeof value === "string"
+    ) {
       form[key] = value.replace(WHITESPACE_RUN, " ");
     } else {
       form[key] = value;
@@ -807,11 +838,11 @@ type Parse = (text: string) => ParsedNode[];
 
 /**
  * The parser `--write` compares renderings with: micromark with GFM and, where the file opens
- * with a closed YAML front matter block, the front matter extension. After an opener with no
- * closing `---` that extension misreads every block (a list becomes a paragraph), where GitHub
- * reads the opener as a rule. The parser is imported only once a node_modules directory holding
- * it is in the script's directory or above: where there is none, Bun would install an unpinned
- * copy itself. Undefined, after saying why on stderr, when it is not installed.
+ * with a YAML front matter block frontMatterEnd finds, the front matter extension. After an opener
+ * with no closing fence that extension misreads every block (a list becomes a paragraph), where
+ * GitHub reads the opener as a rule. The parser is imported only once a node_modules directory
+ * holding it is in the script's directory or above: where there is none, Bun would install an
+ * unpinned copy itself. Undefined, after saying why on stderr, when it is not installed.
  */
 async function loadParser(): Promise<Parse | undefined> {
   let installed = false;
@@ -841,8 +872,10 @@ async function loadParser(): Promise<Parse | undefined> {
         ],
       };
       return (text) =>
-        markdown.fromMarkdown(text, CLOSED_FRONT_MATTER.test(text) ? matterOptions : gfmOptions)
-          .children;
+        markdown.fromMarkdown(
+          text,
+          frontMatterEnd(splitLines(text).lines) === -1 ? gfmOptions : matterOptions
+        ).children;
     } catch (error) {
       failure = `\n${error instanceof Error ? error.message : String(error)}`;
     }
@@ -896,8 +929,9 @@ function check(text: string): Finding[] {
     }
     if (info.kind === "fence" || info.kind === "code") continue;
     // R1 reads a paragraph whole, so a code span a line break cuts in two still masks its text.
-    // Outside paragraphs it reads only headings and table rows, never lines `--write` keeps as
-    // they are for another reason: HTML blocks, link reference definitions, quotes.
+    // Outside paragraphs it reads only ATX headings and table rows, never lines `--write` keeps as
+    // they are for another reason: HTML blocks, link reference definitions, quotes, setext
+    // headings.
     const paragraph = info.paragraph;
     if (paragraph === undefined) {
       const prose = info.kind === "heading" || info.kind === "table";

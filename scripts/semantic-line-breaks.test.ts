@@ -179,3 +179,50 @@ test("--write keeps the line break inside inline <code> HTML, which GitHub shows
   const result = await written(text);
   expect(result.text).toBe(text);
 });
+
+test("--write does not cut inside an inline HTML attribute value that holds a >", async () => {
+  const text = 'Hover <abbr title="a>b. Second line of the tip">here</abbr> to see it.\n';
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write does not join the lines of an inline HTML attribute value that holds a >", async () => {
+  const text = 'Hover <abbr title="x>y\nz">here</abbr> now.\n';
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("a multi-line setext heading underlined with = is not checked for R1 or re-laid out", async () => {
+  const text = "Setup. Then run\nthe tool\n===\n";
+  const path = await markdownFile(text);
+  const checked = run([path]);
+  expect(checked.stdout).toBe("");
+  expect(checked.exitCode).toBe(0);
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("a setext heading underlined with - is left as it is, while a rule after a blank line is not one", async () => {
+  const text = "Setup. Then run\nthe tool\n---\n\nOne. Two\n\n---\n";
+  const path = await markdownFile(text);
+  const checked = run([path]);
+  expect(checked.stdout).toBe(`${path}:5: R1: One. Two\n`);
+  expect(checked.exitCode).toBe(1);
+  const result = await written(text);
+  expect(result.text).toBe("Setup. Then run\nthe tool\n---\n\nOne.\nTwo\n\n---\n");
+  expect(result.exitCode).toBe(0);
+});
+
+test("front matter whose opener has trailing spaces is front matter to check and --write", async () => {
+  const text = "--- \ntitle: One. Two\ntags: x\n---\n\nBody. More.\n";
+  const path = await markdownFile(text);
+  const checked = run([path]);
+  expect(checked.stdout).toBe(`${path}:6: R1: Body. More.\n`);
+  expect(checked.exitCode).toBe(1);
+  const result = await written(text);
+  expect(result.text).toBe("--- \ntitle: One. Two\ntags: x\n---\n\nBody.\nMore.\n");
+  expect(result.exitCode).toBe(0);
+});
