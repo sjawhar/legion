@@ -483,6 +483,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// since the outbox reads the document's writers only when it publishes. An author route still
 	// duplicates an unanswered role:X mention whose holder is the root author or a document
 	// writer: only the listener knows that holder.
+	//
+	// Either suppression holds only while the mention can still deliver: a mention whose send
+	// fails lifts what was suppressed for its session and has the outbox publish that copy then
+	// (restoreSuppressedCopy), so a session suppressed here hears the comment once - from the
+	// mention, or, when it fails, from the route or author copy. The two-copy cases above are
+	// unchanged.
 	suppressedAuthors := []string{}
 	switch {
 	case replyRoot != nil:

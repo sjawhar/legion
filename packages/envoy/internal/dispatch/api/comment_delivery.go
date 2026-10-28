@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -325,7 +326,9 @@ func commentDeliveryReceipt(
 // what the send did on the attempt this sender claimed and appends the comment.delivery
 // receipt, holding no listener call. recorded is the row recordCommentDeliveryResolution left
 // before the send, so this receipt states what that row says - the session holding the frame
-// included - rather than what the resolution behind the send happened to find.
+// included - rather than what the resolution behind the send happened to find. A send that
+// failed hands its session the copy the comment's creation suppressed for it, in the same
+// transaction (restoreSuppressedCopy).
 func (s *server) completeCommentDelivery(
 	ctx context.Context,
 	comment model.Comment,
@@ -341,13 +344,17 @@ func (s *server) completeCommentDelivery(
 	sent.Duplicate, sent.EnvelopeID = duplicate, envelopeID
 	return settleDeliveryAttempt(ctx, s, commentDeliveryReceipt(comment, actor, sent),
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, error) {
-			return scanCommentDelivery(tx.QueryRow(ctx, `
+			settled, err := scanCommentDelivery(tx.QueryRow(ctx, `
 				update comment_deliveries set envelope_id = $5, state = $6, error = $7, duplicate = $8
 				where comment_id = $1 and target = $2 and attempt = $3
 				  and state = 'pending' and claimed_at = $4
 				returning `+commentDeliveryColumns,
 				comment.ID, sent.Target, claim.attempt, claim.claimedAt, envelopeID, sent.State, sent.Error, duplicate,
 			))
+			if err != nil || settled.State != "failed" {
+				return settled, err
+			}
+			return settled, restoreSuppressedCopy(ctx, tx, comment, settled)
 		},
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, bool, *string, error) {
 			var mine bool
@@ -362,6 +369,110 @@ func (s *server) completeCommentDelivery(
 			return commentDeliveryReceipt(comment, actor, answered)
 		},
 	)
+}
+
+// restoreSuppressedCopy runs in the settle transaction of a mention attempt its sender settled
+// failed. The comment's creation skipped the route copy, or an author copy, for the session this
+// mention was to deliver it to (model.CommentEventPayload.SuppressRoute); with the mention
+// failed, that session would hear the comment from no copy at all. So this lifts the
+// suppression for that session alone and reopens the comment's comment.created event for the
+// outbox: published_at and next_attempt_at are cleared, so the next scan claims the row again,
+// and an in-flight publish of the row as it read it before this write does not mark it published
+// (recordBatch's claim guard). The outbox sends an event only to destinations its
+// published_destinations does not hold, so the owner topic and every session the event already
+// reached are not sent it again: the lifted copy alone is new, under the event's own dedupe key,
+// which that session never received. The session hears the comment once, from that copy, as it
+// would had no mention named it.
+//
+// The session is the one createCommentFor counted (mentionedSession): the attempt's pinned
+// session, else the <id> of a session:<id> target. A route suppressed by its string alone is
+// lifted when that string is this attempt's target. Nothing is lifted while another attempt of
+// the comment for that session or target is sent, or pending and so still able to send - a
+// retry after a send that landed, or a second mention of the same session - so neither adds a
+// copy to one the session has or may yet have. A payload lifted once names the session no
+// more, so a later failure of the same mention lifts nothing.
+func restoreSuppressedCopy(ctx context.Context, tx pgx.Tx, comment model.Comment, failed model.CommentDelivery) error {
+	sessionID := ""
+	if failed.SessionID != nil {
+		sessionID = *failed.SessionID
+	} else if id, named := strings.CutPrefix(failed.Target, "session:"); named {
+		sessionID = id
+	}
+	var reaching bool
+	if err := tx.QueryRow(ctx, `
+		select exists (
+			select 1 from comment_deliveries
+			where comment_id = $1 and state in ('sent', 'pending')
+			  and (target = $2 or ($3 <> '' and (session_id = $3 or target = 'session:' || $3)))
+		)
+	`, comment.ID, failed.Target, sessionID).Scan(&reaching); err != nil {
+		return fmt.Errorf("read the comment's other deliveries to %s: %w", failed.Target, err)
+	}
+	if reaching {
+		return nil
+	}
+	ownerColumn, ownerID := commentEventOwner(comment)
+	var eventID int64
+	var raw []byte
+	if err := tx.QueryRow(ctx, `
+		select id, payload from events
+		where `+ownerColumn+` = $1 and type = 'comment.created' and payload ->> 'id' = $2
+		order by seq desc
+		limit 1
+		for update
+	`, ownerID, comment.ID).Scan(&eventID, &raw); err != nil {
+		return fmt.Errorf("lock the comment-created event of %s: %w", comment.ID, err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return fmt.Errorf("decode comment-created event payload: %w", err)
+	}
+	var suppression struct {
+		route        bool
+		routeString  string
+		routeSession *string
+		authors      []string
+	}
+	for key, into := range map[string]any{
+		"suppress_route": &suppression.route, "suppressed_route": &suppression.routeString,
+		"suppressed_route_session_id": &suppression.routeSession, "suppressed_authors": &suppression.authors,
+	} {
+		if value, present := payload[key]; present {
+			if err := json.Unmarshal(value, into); err != nil {
+				return fmt.Errorf("decode comment-created event %s: %w", key, err)
+			}
+		}
+	}
+	routeNamed := suppression.route && (suppression.routeString == failed.Target ||
+		(sessionID != "" && suppression.routeSession != nil && *suppression.routeSession == sessionID))
+	authorNamed := sessionID != "" && slices.Contains(suppression.authors, sessionID)
+	if !routeNamed && !authorNamed {
+		return nil
+	}
+	if routeNamed {
+		payload["suppress_route"] = json.RawMessage("false")
+		delete(payload, "suppressed_route")
+		delete(payload, "suppressed_route_session_id")
+	}
+	if authorNamed {
+		authors, err := json.Marshal(slices.DeleteFunc(suppression.authors, func(author string) bool {
+			return author == sessionID
+		}))
+		if err != nil {
+			return fmt.Errorf("encode suppressed authors: %w", err)
+		}
+		payload["suppressed_authors"] = authors
+	}
+	lifted, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode comment-created event payload: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update events set payload = $2, published_at = null, next_attempt_at = null where id = $1
+	`, eventID, lifted); err != nil {
+		return fmt.Errorf("reopen the comment-created event of %s: %w", comment.ID, err)
+	}
+	return nil
 }
 
 // mentionResolutionFor is the resolution one mention delivery is sent with, and the resolve
@@ -507,13 +618,7 @@ func (s *server) deliverResolvedCommentMention(
 // of matching the payload id across the whole log. A comment has one comment.created event, and
 // both callers ask about recent comments, so the walk starts from the owner's newest event.
 func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment model.Comment) (model.Event, error) {
-	ownerColumn, ownerID := "issue_key", ""
-	switch {
-	case comment.IssueKey != nil:
-		ownerID = *comment.IssueKey
-	case comment.ArtifactID != nil:
-		ownerColumn, ownerID = "artifact_id", *comment.ArtifactID
-	}
+	ownerColumn, ownerID := commentEventOwner(comment)
 	var event model.Event
 	var actor, payload []byte
 	if err := q.QueryRow(ctx, `
@@ -535,6 +640,18 @@ func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment
 		return model.Event{}, fmt.Errorf("decode comment-created event payload: %w", err)
 	}
 	return event, nil
+}
+
+// commentEventOwner is the events column and value naming comment's owner, so a read of its
+// events walks that owner's (issue_key, seq) or (artifact_id, seq) index.
+func commentEventOwner(comment model.Comment) (column, id string) {
+	switch {
+	case comment.IssueKey != nil:
+		return "issue_key", *comment.IssueKey
+	case comment.ArtifactID != nil:
+		return "artifact_id", *comment.ArtifactID
+	}
+	return "issue_key", ""
 }
 
 // commentDeliveryColumns is the comment_deliveries select list scanCommentDelivery reads, in

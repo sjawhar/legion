@@ -1310,7 +1310,17 @@ Both delivery paths are that pair, and the same claim. A comment mention's attem
 with it still `pending`; the post-commit sender - and every later `POST
 /api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration `0046`), resolves,
 records that resolution on the claimed row, sends, and records `sent` or `failed` with its
-`comment.delivery` event in a second transaction. The post-commit sender (`mentionSender`,
+`comment.delivery` event in a second transaction. A session the comment's creation skipped on the
+issue's route or an author route because a mention delivers to it (`suppress_route`,
+`suppressed_authors`) hears the comment once: from the mention, or, when the mention's send
+fails, from that route or author copy. The failed attempt's settle lifts the suppression for
+that session alone and reopens `comment.created` (`restoreSuppressedCopy`); the outbox sends it
+only to destinations its `published_destinations` lacks, so only the lifted copy is new, under
+the event's own dedupe key. A publish already in flight with the payload as it was does not
+mark the row published (`recordBatch` marks a row only while it carries the claim the batch read
+it under), and nothing is lifted while another attempt to that session is sent or pending. The
+two-copy cases (an unanswered `role:X` mention whose holder the route or an author route names)
+are unchanged. The post-commit sender (`mentionSender`,
 `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
 session the mention's lookup pinned, else its target as written: `role:X` shares
 `session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X`
@@ -2639,7 +2649,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   wrote is never told of its own comment, and for a session the comment's mentions already reach
   (`suppressed_authors`: on a new comment every mentioned session - one a mention's lookup
   pinned, or the `<id>` of a `session:<id>` mention whose lookup went unanswered - so a mentioned
-  writer hears the comment once; on a reply only the thread's root author when mentioned). An
+  writer hears the comment once; on a reply only the thread's root author when mentioned; a
+  mention whose send fails lifts its session from the list and the author copy is published
+  then, as the mention-sender passage above says). An
   unanswered `role:X` mention names no session, so a root author or writer who holds `role:X`
   hears the comment twice. An
   agent's comment notifies nobody (`notify` is false), so it takes no author route at all.

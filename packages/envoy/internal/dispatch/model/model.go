@@ -1272,6 +1272,14 @@ type CommentEventPayload struct {
 	// mentioned session, since the outbox reads the document's authors only when it publishes.
 	// An author route still duplicates an unanswered role:X mention whose holder is the root
 	// author or a document writer.
+	// A suppression holds while the mention can still deliver. When the mention to a session
+	// fails, its attempt's settle lifts what was suppressed for that session alone - the route
+	// suppression when it names that session or the failed target, and the session in
+	// SuppressedAuthors - and reopens this event, so the outbox publishes that session the copy
+	// it skipped, to no destination the event already reached (restoreSuppressedCopy in
+	// api/comment_delivery.go). A session a suppression names hears the comment once: from the
+	// mention, or, when the mention fails, from the route or author copy published then. The
+	// two-copy cases above are unchanged.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

@@ -47,15 +47,20 @@ const (
 	//
 	// What the claim gives, for a batch that finishes inside the window: two healthy processes
 	// no longer publish one event twice, and each events row still reaches published_at exactly
-	// once - the terminal write is guarded on published_at is null, so a second one changes no
-	// row. A batch that overruns the window gets no such guarantee: claimPendingEvents commits
-	// the claim, and scanBatch then publishes up to batchSize events outside any transaction,
-	// re-checking nothing, so once the window lapses the other process claims the rows this one
-	// has not reached yet - legitimately, by the same statement, their next_attempt_at being due
-	// again - and publishes them a second time; the guarded write discards RowsAffected, so
-	// neither process notices. Nor does the claim cover a process that dies between a successful
-	// publish and its published_at write: it leaves the row claimed but unmarked, and the other
-	// process republishes it once the window lapses. Either repeat is the same at-least-once on
+	// once each time it is opened - the terminal write is guarded on published_at is null, so a
+	// second one changes no row. A row is opened when it is appended, and once more when its
+	// writer reopens it (a comment's comment.created when its mention failed,
+	// api.restoreSuppressedCopy), which the next scan publishes to the destinations it has not
+	// reached. A batch that overruns the window gets no such guarantee: claimPendingEvents
+	// commits the claim, and scanBatch then publishes up to batchSize events outside any
+	// transaction, re-checking nothing, so once the window lapses the other process claims the
+	// rows this one has not reached yet - legitimately, by the same statement, their
+	// next_attempt_at being due again - and publishes them a second time. The late process's
+	// record then finds the other's claim on the row (recordBatch's claim guard) and adds only
+	// the destinations it reached, so the row's mark is the other's. Nor does the claim cover a
+	// process that dies between a successful publish and its published_at write: it leaves the
+	// row claimed but unmarked, and the other process republishes it once the window lapses.
+	// Either repeat is the same at-least-once on
 	// the role lanes (notifications.role.*), which go over core NATS with no nats.MsgId on the
 	// envelope (internal/bus/nats.go) and so carry no deduplication of their own; their receivers
 	// already drop the repeat by its dedupe key (internal/contracts/dedupe.go). A JetStream
@@ -185,6 +190,10 @@ type pendingEvent struct {
 	destinations []string
 	slug         string
 	route        *string
+	// claim is the row's next_attempt_at as this batch read it, the claim claimPendingEvents
+	// wrote (nil when a writer cleared it in between): recordBatch writes the row's outcome only
+	// while the row still carries it.
+	claim *time.Time
 	// failure is why the row cannot be published as it was read - it did not scan, or its
 	// actor or payload JSON did not decode - and failureLog is the predicate it reports
 	// under. The batch backs such an event off instead of publishing it.
@@ -269,6 +278,8 @@ const (
 type outcome struct {
 	id    int64
 	state outcomeState
+	// claim is the claim the batch read the event under (pendingEvent.claim).
+	claim *time.Time
 	// reached is every destination the attempt reached, in the order it sent them.
 	reached []string
 	// attempts and retryAt are the backed-off event's attempt count and next attempt.
@@ -279,7 +290,7 @@ type outcome struct {
 // settle waits for the answers to item's attempt (nil when it was never sent) and returns what the
 // event came to.
 func settle(ctx context.Context, item pendingEvent, a *attempt) outcome {
-	result := outcome{id: item.event.ID}
+	result := outcome{id: item.event.ID, claim: item.claim}
 	if item.failure != nil {
 		return backOff(result, item, item.failureLog, item.failure)
 	}
@@ -324,6 +335,14 @@ func backOff(result outcome, item pendingEvent, what string, cause error) outcom
 // write leaves too: the batch is published again once claimWindow lapses. JetStream drops each
 // repeat inside its duplicate window by its MsgId; a role lane, over core NATS, carries the repeat,
 // and its receivers drop it by its dedupe key (internal/contracts/dedupe.go).
+//
+// The mark, and the next_attempt_at this write sets, are also guarded on the claim the batch read
+// the row under (pendingEvent.claim): a row whose next_attempt_at has moved since was claimed by
+// another process once this one's window lapsed, or was rewritten and reopened by its writer (a
+// comment's comment.created when its mention failed, api.restoreSuppressedCopy). Such a row gets
+// the destinations this batch reached and nothing more, so the payload the batch published is not
+// marked as the row's last word: the next scan publishes the row as it now reads, to the
+// destinations it has not reached.
 func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 	if len(outcomes) == 0 {
 		return nil
@@ -332,11 +351,13 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 	states := make([]string, 0, len(outcomes))
 	attempts := make([]*int32, 0, len(outcomes))
 	retryAt := make([]*time.Time, 0, len(outcomes))
+	claims := make([]*time.Time, 0, len(outcomes))
 	var reachedIDs []int64
 	var reachedTopics []string
 	for _, result := range outcomes {
 		ids = append(ids, result.id)
 		states = append(states, string(result.state))
+		claims = append(claims, result.claim)
 		if result.state == backedOff {
 			attempts = append(attempts, new(int32(result.attempts)))
 			retryAt = append(retryAt, new(result.retryAt))
@@ -351,8 +372,8 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 	}
 	if _, err := deps.Store.Pool.Exec(ctx, `
 		with outcome as (
-			select * from unnest($1::bigint[], $2::text[], $3::int[], $4::timestamptz[])
-				as o(id, state, attempts, retry_at)
+			select * from unnest($1::bigint[], $2::text[], $3::int[], $4::timestamptz[], $7::timestamptz[])
+				as o(id, state, attempts, retry_at, claim)
 		), reached as (
 			select id, array_agg(topic order by position) as topics
 			from unnest($5::bigint[], $6::text[]) with ordinality as r(id, topic, position)
@@ -364,13 +385,18 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 				where t.topic <> all(e.published_destinations)
 				order by t.position
 			),
-			published_at = case when o.state = 'published' then now() end,
+			published_at = case
+				when o.state = 'published' and e.next_attempt_at is not distinct from o.claim then now()
+			end,
 			attempt_count = coalesce(o.attempts, e.attempt_count),
-			next_attempt_at = o.retry_at
+			next_attempt_at = case
+				when e.next_attempt_at is not distinct from o.claim then o.retry_at
+				else e.next_attempt_at
+			end
 		from outcome o
 		left join reached r on r.id = o.id
 		where e.id = o.id and e.published_at is null
-	`, ids, states, attempts, retryAt, reachedIDs, reachedTopics); err != nil {
+	`, ids, states, attempts, retryAt, reachedIDs, reachedTopics, claims); err != nil {
 		return fmt.Errorf("record the batch's outcome: %w", err)
 	}
 	return nil
@@ -423,7 +449,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 		return nil, false, nil
 	}
 	rows, err := deps.Store.Pool.Query(ctx, `
-		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
+		select e.id, e.next_attempt_at, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
 		       coalesce(ar.slug, ''), coalesce(i.route, ai.route)
 		from events e
@@ -445,6 +471,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 		var actor, payload []byte
 		if err := rows.Scan(
 			&item.event.ID,
+			&item.claim,
 			&item.event.IssueKey,
 			&item.event.ArtifactID,
 			&item.event.Project,
@@ -462,8 +489,8 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 			// pgx scans positionally and treats a failure as fatal to the cursor, so this
 			// row ends the batch and rows.Err() below repeats the same error. Carrying the
 			// row on as a failure backs it off like any other unpublishable event, which is
-			// what lets the events queued behind it be read at all; e.id is the first
-			// destination, so the row scanned that far before it failed. The rest of the
+			// what lets the events queued behind it be read at all; e.id and the claim are the
+			// first destinations, so the row scanned that far before it failed. The rest of the
 			// batch is claimed (claimPendingEvents) and is never read here, so its claim
 			// is cleared below instead of left to lapse, and this row is backed off
 			// rather than left to poison every batch after it too.
