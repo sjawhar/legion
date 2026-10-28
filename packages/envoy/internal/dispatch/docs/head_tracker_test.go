@@ -543,6 +543,56 @@ func TestAServiceWithNothingTheTrackerProtectsSendsNoPing(t *testing.T) {
 	}
 }
 
+// A tracker entry that only records another process's write - a document this process never read,
+// holds no room for, caches nothing of and has no preload of - protects nothing, so hearing that
+// write does not start this process pinging. Every process hears every write in the deployment,
+// and an entry stays until the LISTEN reconnects, so counting such entries as something held would
+// have every process ping for good after the first write anywhere. On a real Dispatch pair, one
+// REST edit on the first process left both pinging 47 times a minute two minutes later, each with
+// no room and no cached read and one tracker entry.
+func TestHearingAnotherProcesssWriteAloneStartsNoPing(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	writer, _ := newTestServiceInstance(t, database)
+	listenerStore := storetest.SecondProcess(t, database)
+	listener := newReadCacheService(t, listenerStore, NewPgVersioned(listenerStore))
+	listen, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("connect the ping listener: %v", err)
+	}
+	t.Cleanup(func() { _ = listen.Close(context.Background()) })
+	if _, err := listen.Exec(ctx, "listen "+documentPingChannel); err != nil {
+		t.Fatalf("listen on %s: %v", documentPingChannel, err)
+	}
+	runProbedEvictor(t, listener, nil)
+	seedServiceText(t, writer, artifactID, "Write 0.\n")
+	waitFor(t, roomWait(t), "the listening service's tracker to hear the other service's write", func() bool {
+		return listener.RoomFigures().HeadTracker.Entries > 0
+	})
+
+	window := headTrustWindow + 2*headPingAfter
+	deadline := time.Now().Add(window)
+	pings := 0
+	for {
+		waitCtx, cancel := context.WithDeadline(ctx, deadline)
+		notification, err := listen.WaitForNotification(waitCtx)
+		cancel()
+		if err != nil {
+			break
+		}
+		if notification.Payload == listener.ProcessID() {
+			pings++
+		}
+	}
+	if figures := listener.RoomFigures(); figures.ResidentRooms != 0 || figures.ReadCache.Entries != 0 || figures.Preloads != 0 {
+		t.Fatalf("the listening service came to hold a room, a cached read or a preload (%+v), so nothing here is tested", figures)
+	}
+	if pings != 0 {
+		t.Errorf("a service that only heard another service's write - no room, no cached read, no preload - sent %d pings on %s in %s, want none: a tracker entry for a document it never read protects nothing", pings, documentPingChannel, window)
+	}
+}
+
 // Four processes on one database, each holding a cached cold read with its evictor running, send
 // about one ping a second between them, not one each: every ping reaches every listener and draws
 // each one's quiet window afresh, and the jitter keeps the processes that heard it from pinging
