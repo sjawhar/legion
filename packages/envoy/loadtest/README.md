@@ -1620,7 +1620,7 @@ the worker pod.
 | `curves/KNEES.md` | Each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
 | `curves/refine.txt` | The refinement's factors, one per line. Empty when no knee needs another step. |
 | `curves/TREND.md` | Only with an hour step: the trend of Dispatch's cores, working set and Go heap over minutes 5 to 60. The heap series is `Go heap live MiB (heap profile)`, or, from an older run's `samples.json` (`heap_inuse`), `MemStats HeapInuse MiB (older run)`. |
-| `upload/` | The tar parts, `cluster-load-test-<date>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The phase `results` holds `curves/`, `TABLES.md`, `STORED-ORDER.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
+| `upload/` | The tar parts, `cluster-load-test-<run id>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The run id begins with the run's date and time, so two runs of one day upload apart. The phase `results` holds `curves/`, `TABLES.md`, `STORED-ORDER.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
 | `logs/` | The heartbeat's and the sampler's logs, `seed.log`, `seed-finish.log`, `replay-restore.log` (`pg_restore`'s output), and the reset record of each `redeploy`. |
 
 A step directory holds the files of `loadgen run` (The step directory, above). `TABLES.md` takes

@@ -1782,8 +1782,9 @@ zstd_compress() {
 }
 
 # pack_tar NAME ISSUE STAMP DIR PATH...: the PATHs under DIR as one zstd tar, split into parts
-# under 24 MiB (upload/cluster-load-test-<date>-raw-<NAME>.tar.zst.partNN); with ISSUE, each part
-# goes to that Dispatch issue. upload/NAME.packed keeps a copy of the file STAMP (the phase's list
+# under 24 MiB (upload/cluster-load-test-<run id>-raw-<NAME>.tar.zst.partNN: the run id, which
+# begins with the run's date and time, keeps two runs of one day apart on the issue); with ISSUE,
+# each part goes to that Dispatch issue. upload/NAME.packed keeps a copy of the file STAMP (the phase's list
 # of steps) as it was at the last pack, so a tar packed and uploaded from the same list is left
 # alone, and a list that gained a step, however soon after the last pack, packs again. The copy is
 # compared, not the two files' times, since two steps of a phase can end within one tick of the
@@ -1794,7 +1795,7 @@ pack_tar() {
   local name=$1 issue=$2 stamp=$3 dir=$4 up=$RUN_DIR/upload base part
   shift 4
   mkdir -p -- "$up"
-  base=$up/cluster-load-test-$(state '.created[0:10]')-raw-$name.tar.zst.part
+  base=$up/cluster-load-test-$RUN-raw-$name.tar.zst.part
   if [ -z "$stamp" ] || ! cmp -s -- "$stamp" "$up/$name.packed"; then
     rm -f -- "$base"[0-9][0-9] "$up/$name.uploaded" "$up/$name.packed"
     tar -C "$dir" --exclude=stored-order-evidence -cf - "$@" | zstd_compress | split -b 24000000 -d -a 2 - "$base" ||
