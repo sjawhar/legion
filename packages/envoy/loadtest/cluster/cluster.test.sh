@@ -31,10 +31,12 @@
 # in no recorded file, and writes stored-order.txt and stored-order.json (a clean run's counts, a
 # mismatching run's, which is no step failure, and nulls for a missing summary line); a mismatching
 # run exports each mismatched or refused document's rows (one psql \copy to stdout per table in the
-# Postgres pod, which the fake kubectl records and answers) and mismatched versions' markdown into
-# stored-order-evidence/<artifact>/, a failed table reported and no step failure, stored-order.json
-# evidence naming them, and collect's tar parts leave it out; a clean run exports nothing; all
-# without the flag prints one skip line per step;
+# Postgres pod, from database dispatch, which the fake kubectl records and answers), its issue's
+# events since the window start, mismatched versions' markdown, and its start-* tables from the
+# template dispatch_seed into stored-order-evidence/<artifact>/, each psql call's statement_timeout
+# within the export's 600 s, a failed table reported and no step failure, stored-order.json
+# evidence naming each file's rows, and collect's tar parts leave it out; a clean run exports
+# nothing; all without the flag prints one skip line per step;
 # replay-prepare downloads and verifies the parts, streams the dump into the Postgres pod,
 # restores it and renames it to dispatch_replay, writing replay-prepared.json and keeping the
 # manifest as replay-manifest.json; a replay's loadgen run holds -source replay -replay-rate 1
@@ -60,7 +62,8 @@
 # holds a clean run's and a mismatching run's counts, and nulls (never 0) for a missing summary
 # line, a timeout (exit 124) and a check not run; (k) the evidence export takes each mismatched or
 # refused document once with its mismatched versions, never a clean or failed one, and counts CSV
-# records past quoted line breaks.
+# records past quoted line breaks; (l) a replay step's start-* tables come from dispatch_replay, and
+# a step whose reset.json names no template exports none, naming each.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -212,7 +215,10 @@ case $verb in
       *json_build_object*) echo '{"projects": 4, "issues": 1000}' ;;
       # The stored-order evidence export: each table's CSV (a quoted field holding a line break and
       # quotes, so a record is not a line), doc_checkpoints with no row and failing for
-      # 22222222-..., and version 7's markdown as base64.
+      # 22222222-..., the issue's events, version 7's markdown as base64, and from a template
+      # database (dispatch_seed or dispatch_replay) one doc_updates row and no row of the others.
+      *"-d dispatch_"*"\\copy (select * from doc_updates "*) printf 'artifact_id,version,update\nfake,1,\\x01\n' ;;
+      *"-d dispatch_"*"\\copy (select * from "*) printf 'artifact_id\n' ;;
       *"\\copy (select * from doc_checkpoints where artifact_id = '22222222-"*)
         echo 'ERROR:  canceling statement due to statement timeout' >&2
         exit 1
@@ -221,6 +227,8 @@ case $verb in
       *"\\copy (select * from artifacts "*) printf 'id,name\nfake,"a ""quoted""\nname"\n' ;;
       *"\\copy (select * from artifact_versions "*) printf 'number,markdown\n1,"# One\n\nbody"\n7,"# Seven ""x"""\n' ;;
       *"\\copy (select * from doc_updates "*) printf 'version,update\n1,\\x01\n2,\\x02\n3,\\x03\n' ;;
+      *"\\copy (select * from doc_snapshots "*) printf 'artifact_id,name,version,state\nfake,main,3,\\x03\n' ;;
+      *"\\copy (select e.* from events e "*) printf 'id,issue_key,seq,type,payload\n1,LGA-1,1,doc.updated,"{""a"":\n1}"\n2,LGA-1,2,doc.updated,{}\n' ;;
       *"encode(convert_to(markdown, 'UTF8'), 'base64')"*"number = 7 "*) printf '# Seven "x"\n\nbody\n' | base64 ;;
       psql*) ;;
       *cpuinfo*) printf 'model name\t: Fake CPU @ 2.00GHz\n' ;;
@@ -749,38 +757,62 @@ grep -qF 'step reads: stored-order (envoy-dispatch of eeeeeeeeeeee) since 2026-1
 [ ! -f "$run_dir/steps/reads/step-failed.json" ] || fail "a stored-order mismatch was recorded as a step failure: $(cat "$run_dir/steps/reads/step-failed.json")"
 grep -q "^cgroup-merge $run_dir/steps/reads " "$fake/loadgen.log" || fail "step reads did not go on to cgroup-merge after a stored-order mismatch"
 # The evidence of the mismatched document (11111111-...) and the refused one (22222222-...): each
-# table psql \copy'd to stdout in the Postgres pod, gzipped here, and version 7's markdown; none of
-# the clean 33333333-.... The fake's doc_checkpoints of 22222222-... fails: reported, no step failure.
+# table psql \copy'd to stdout from database dispatch in the Postgres pod, gzipped here, the
+# issue's events since the window start, version 7's markdown, and the start-* tables from the
+# template dispatch_seed the step was reset from; none of the clean 33333333-.... The fake's
+# doc_checkpoints of 22222222-... fails: reported, no step failure.
 so_mismatch=11111111-1111-4111-8111-111111111111 so_refused=22222222-2222-4222-8222-222222222222
 ev=$run_dir/steps/reads/stored-order-evidence
-psql_call="-n $ns exec postgres-0 -c postgres -- psql -X -q -U dispatch -d dispatch -v ON_ERROR_STOP=1 -c"
+# evidence_calls OUT: the evidence export's psql calls in the fake kubectl's log (those that set a
+# statement_timeout) into OUT, each statement_timeout written as N; fails when one is not 1-600 s.
+evidence_calls() {
+  grep -F -- "-c set statement_timeout = '" "$fake/kubectl.log" | sed -E "s/statement_timeout = '[0-9]+s'/statement_timeout = 'Ns'/" >"$1"
+  grep -oE "statement_timeout = '[0-9]+s'" "$fake/kubectl.log" | tr -dc '0-9\n' | awk '$1 < 1 || $1 > 600 { bad = 1 } END { exit bad }'
+}
+# psql_call DB: an evidence export's kubectl call up to its first SQL, on database DB.
+psql_call() { printf '%s' "-n $ns exec postgres-0 -c postgres -- psql -X -q -U dispatch -d $1 -v ON_ERROR_STOP=1 -c set statement_timeout = 'Ns' -c"; }
+evidence_calls "$tmp/evidence-calls" || fail "an evidence export's statement_timeout is not within its 600 s: $(grep -oE "statement_timeout = '[0-9]+s'" "$fake/kubectl.log")"
 for id in "$so_mismatch" "$so_refused"; do
-  for t in "artifacts where id = '$id'" "doc_checkpoints where artifact_id = '$id'" \
-    "artifact_versions where artifact_id = '$id' order by number" "doc_updates where artifact_id = '$id' order by version"; do
-    grep -qxF -- "$psql_call \\copy (select * from $t) to stdout with csv header" "$fake/kubectl.log" ||
-      fail "the evidence export did not \\copy $t to stdout in the Postgres pod: $(grep -F -- '\copy' "$fake/kubectl.log")"
+  for t in "artifacts where id = '$id'" "doc_checkpoints where artifact_id = '$id'" "artifact_versions where artifact_id = '$id' order by number" \
+    "doc_updates where artifact_id = '$id' order by version" "doc_snapshots where artifact_id = '$id' order by name"; do
+    grep -qxF -- "$(psql_call dispatch) \\copy (select * from $t) to stdout with csv header" "$tmp/evidence-calls" ||
+      fail "the evidence export did not \\copy $t to stdout from database dispatch in the Postgres pod: $(grep -F -- '\copy' "$tmp/evidence-calls")"
+    [ "${t%% *}" = artifacts ] && continue
+    grep -qxF -- "$(psql_call dispatch_seed) \\copy (select * from $t) to stdout with csv header" "$tmp/evidence-calls" ||
+      fail "the evidence export did not \\copy $t from the step's template dispatch_seed: $(grep -F -- '\copy' "$tmp/evidence-calls")"
   done
+  grep -qxF -- "$(psql_call dispatch) \\copy (select e.* from events e where (e.artifact_id = '$id' or e.issue_key = (select issue_key from artifacts where id = '$id')) and e.created_at >= '2026-10-28T10:00:00Z' order by e.seq) to stdout with csv header" "$tmp/evidence-calls" ||
+    fail "the evidence export did not \\copy $id's issue events since the window start from database dispatch: $(grep -F events "$tmp/evidence-calls")"
 done
-[ "$(grep -cF -- '\copy' "$fake/kubectl.log")" = 8 ] || fail "the evidence export ran other \\copy calls: $(grep -F -- '\copy' "$fake/kubectl.log")"
+[ "$(grep -cF -- '\copy' "$fake/kubectl.log")" = 20 ] || fail "the evidence export ran other \\copy calls: $(grep -F -- '\copy' "$fake/kubectl.log")"
 ! grep -qF 33333333 "$fake/kubectl.log" || fail "the evidence export took the clean document 33333333-..."
-grep -qxF -- "$psql_call \\pset tuples_only on -c \\pset format unaligned -c select encode(convert_to(markdown, 'UTF8'), 'base64') from artifact_versions where artifact_id = '$so_mismatch' and number = 7 and markdown is not null" \
-  "$fake/kubectl.log" || fail "the evidence export did not read version 7's markdown: $(grep -F markdown "$fake/kubectl.log")"
+grep -qxF -- "$(psql_call dispatch) \\pset tuples_only on -c \\pset format unaligned -c select encode(convert_to(markdown, 'UTF8'), 'base64') from artifact_versions where artifact_id = '$so_mismatch' and number = 7 and markdown is not null" \
+  "$tmp/evidence-calls" || fail "the evidence export did not read version 7's markdown: $(grep -F markdown "$fake/kubectl.log")"
 [ "$(grep -cF "encode(convert_to(markdown" "$fake/kubectl.log")" = 1 ] || fail "the evidence export read the markdown of a version that did not mismatch"
 # names DIR: the names in DIR, sorted, on one line.
 names() { find "$1" -mindepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' '; }
-[ "$(names "$ev/$so_mismatch")" = "artifact_versions.csv.gz artifacts.csv.gz doc_checkpoints.csv.gz doc_updates.csv.gz version-7.md " ] ||
-  fail "the mismatched document's evidence is not one gzipped CSV per table and version-7.md: $(names "$ev/$so_mismatch")"
-[ "$(names "$ev/$so_refused")" = "artifact_versions.csv.gz artifacts.csv.gz doc_updates.csv.gz " ] ||
+start_files="start-artifact_versions.csv.gz start-doc_checkpoints.csv.gz start-doc_snapshots.csv.gz start-doc_updates.csv.gz"
+[ "$(names "$ev/$so_mismatch")" = "artifact_versions.csv.gz artifacts.csv.gz doc_checkpoints.csv.gz doc_snapshots.csv.gz doc_updates.csv.gz issue-events-in-window.csv.gz $start_files version-7.md " ] ||
+  fail "the mismatched document's evidence is not one gzipped CSV per table, the events, the start-* tables and version-7.md: $(names "$ev/$so_mismatch")"
+[ "$(names "$ev/$so_refused")" = "artifact_versions.csv.gz artifacts.csv.gz doc_snapshots.csv.gz doc_updates.csv.gz issue-events-in-window.csv.gz $start_files " ] ||
   fail "the refused document's evidence is not the tables that exported: $(names "$ev/$so_refused")"
 printf 'number,markdown\n1,"# One\n\nbody"\n7,"# Seven ""x"""\n' | cmp -s - <(gzip -dc "$ev/$so_mismatch/artifact_versions.csv.gz") ||
   fail "artifact_versions.csv.gz is not psql's CSV: $(gzip -dc "$ev/$so_mismatch/artifact_versions.csv.gz")"
+printf 'id,issue_key,seq,type,payload\n1,LGA-1,1,doc.updated,"{""a"":\n1}"\n2,LGA-1,2,doc.updated,{}\n' | cmp -s - <(gzip -dc "$ev/$so_mismatch/issue-events-in-window.csv.gz") ||
+  fail "issue-events-in-window.csv.gz is not psql's CSV: $(gzip -dc "$ev/$so_mismatch/issue-events-in-window.csv.gz")"
+printf 'artifact_id,version,update\nfake,1,\\x01\n' | cmp -s - <(gzip -dc "$ev/$so_mismatch/start-doc_updates.csv.gz") ||
+  fail "start-doc_updates.csv.gz is not the template's CSV: $(gzip -dc "$ev/$so_mismatch/start-doc_updates.csv.gz")"
 printf '# Seven "x"\n\nbody\n' | cmp -s - "$ev/$so_mismatch/version-7.md" || fail "version-7.md is not the stored markdown: $(cat "$ev/$so_mismatch/version-7.md")"
-jq -e --arg m "$so_mismatch" --arg r "$so_refused" '.evidence == [
-    {artifact: $m, tables: {artifacts: 1, doc_checkpoints: 0, artifact_versions: 2, doc_updates: 3}, versions: [7]},
-    {artifact: $r, tables: {artifacts: 1, artifact_versions: 2, doc_updates: 3}, versions: [],
-     error: ["doc_checkpoints: exit 1: ERROR:  canceling statement due to statement timeout"]}]' \
+jq -e --arg m "$so_mismatch" --arg r "$so_refused" '
+  {"start-doc_checkpoints.csv.gz": 0, "start-artifact_versions.csv.gz": 0, "start-doc_updates.csv.gz": 1, "start-doc_snapshots.csv.gz": 0} as $start
+  | .evidence == [
+    {artifact: $m, files: ({"artifacts.csv.gz": 1, "doc_checkpoints.csv.gz": 0, "artifact_versions.csv.gz": 2, "doc_updates.csv.gz": 3,
+      "doc_snapshots.csv.gz": 1, "issue-events-in-window.csv.gz": 2} + $start), versions: [7]},
+    {artifact: $r, files: ({"artifacts.csv.gz": 1, "artifact_versions.csv.gz": 2, "doc_updates.csv.gz": 3, "doc_snapshots.csv.gz": 1,
+      "issue-events-in-window.csv.gz": 2} + $start), versions: [],
+     error: ["doc_checkpoints.csv.gz: exit 1: ERROR:  canceling statement due to statement timeout"]}]' \
   "$run_dir/steps/reads/stored-order.json" >/dev/null || fail "stored-order.json's evidence is wrong: $(jq -c .evidence "$run_dir/steps/reads/stored-order.json")"
-grep -qF "step reads: the stored-order evidence of $so_refused is incomplete: doc_checkpoints: exit 1: ERROR:  canceling statement due to statement timeout" "$tmp/out" ||
+grep -qF "step reads: the stored-order evidence of $so_refused is incomplete: doc_checkpoints.csv.gz: exit 1: ERROR:  canceling statement due to statement timeout" "$tmp/out" ||
   fail "step reads did not report the failed part of the evidence export"
 grep -qF "step reads: the stored-order evidence of 2 mismatched or refused documents is in $ev (kept on this pod, not uploaded)" "$tmp/out" ||
   fail "step reads did not name where the stored-order evidence is"
@@ -1269,3 +1301,42 @@ pass "stored-order.json holds a clean and a mismatching run's counts, and nulls,
   [ "$(csv_rows "$dir/header.csv")" = 0 ] || fail "csv_rows of a header alone is not 0"
 )
 pass "the stored-order evidence takes each mismatched or refused document once with its mismatched versions, never a clean or failed one, and counts CSV records past quoted line breaks"
+
+# ---- (l) the databases of the evidence export -----------------------------------------------------
+
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  dir=$tmp/stored-order-databases
+  mkdir -p "$dir/replay" "$dir/none"
+  id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa since=2026-10-28T09:30:00.5Z
+  printf 'stored-order: %s base=1 updates_checked=2 updates_skipped=0 versions_checked=2 versions_skipped=0 mismatches=1\n' "$id" >"$dir/out.txt"
+  ends='{"artifacts.csv.gz": 1, "doc_checkpoints.csv.gz": 0, "artifact_versions.csv.gz": 2, "doc_updates.csv.gz": 3, "doc_snapshots.csv.gz": 1, "issue-events-in-window.csv.gz": 2}'
+  # A replay's step: reset from dispatch_replay, so its start-* tables come from there.
+  echo '{"template": "dispatch_replay"}' >"$dir/replay/reset.json"
+  : >"$fake/kubectl.log"
+  stored_order_evidence r "$dir/out.txt" "$dir/replay" "$since" >"$dir/replay.json" 2>"$dir/replay.err" || fail "stored_order_evidence of a replay step failed: $(cat "$dir/replay.err")"
+  evidence_calls "$dir/replay-calls" || fail "a replay step's evidence export has a statement_timeout over its 600 s"
+  for t in "doc_checkpoints where artifact_id = '$id'" "artifact_versions where artifact_id = '$id' order by number" \
+    "doc_updates where artifact_id = '$id' order by version" "doc_snapshots where artifact_id = '$id' order by name"; do
+    grep -qxF -- "$(psql_call dispatch_replay) \\copy (select * from $t) to stdout with csv header" "$dir/replay-calls" ||
+      fail "a replay step's evidence export did not \\copy $t from its template dispatch_replay: $(cat "$dir/replay-calls")"
+  done
+  grep -qxF -- "$(psql_call dispatch) \\copy (select e.* from events e where (e.artifact_id = '$id' or e.issue_key = (select issue_key from artifacts where id = '$id')) and e.created_at >= '$since' order by e.seq) to stdout with csv header" "$dir/replay-calls" ||
+    fail "a replay step's evidence export did not \\copy the issue events since its window start from database dispatch: $(cat "$dir/replay-calls")"
+  [ "$(grep -cF -- ' -d dispatch_replay ' "$dir/replay-calls") $(grep -cF -- ' -d dispatch ' "$dir/replay-calls") $(wc -l <"$dir/replay-calls")" = "4 6 10" ] ||
+    fail "a replay step's evidence export is not 4 calls on dispatch_replay and 6 on dispatch: $(cat "$dir/replay-calls")"
+  jq -e --argjson ends "$ends" --arg a "$id" '. == [{artifact: $a, versions: [], files: ($ends + {"start-doc_checkpoints.csv.gz": 0,
+    "start-artifact_versions.csv.gz": 0, "start-doc_updates.csv.gz": 1, "start-doc_snapshots.csv.gz": 0})}]' "$dir/replay.json" >/dev/null ||
+    fail "a replay step's evidence is wrong: $(cat "$dir/replay.json")"
+  # A step whose reset.json names no template: no start-* export, each named in error.
+  : >"$fake/kubectl.log"
+  stored_order_evidence n "$dir/out.txt" "$dir/none" "$since" >"$dir/none.json" 2>"$dir/none.err" || fail "stored_order_evidence without a template failed: $(cat "$dir/none.err")"
+  ! grep -qF -- '-d dispatch_' "$fake/kubectl.log" || fail "the evidence export without a template read a template database: $(grep -F -- '-d dispatch_' "$fake/kubectl.log")"
+  jq -e --argjson ends "$ends" --arg a "$id" --arg why "not exported: the step's reset.json names no template database" \
+    '. == [{artifact: $a, versions: [], files: $ends,
+      error: ["doc_checkpoints", "artifact_versions", "doc_updates", "doc_snapshots" | "start-\(.).csv.gz: \($why)"]}]' "$dir/none.json" >/dev/null ||
+    fail "the evidence without a template does not name each start-* table as not exported: $(cat "$dir/none.json")"
+)
+pass "the evidence export reads the start-* tables from the template the step was reset from (dispatch_replay for a replay), the rest and the issue events since the window start from dispatch, and names each start-* table when reset.json names no template"

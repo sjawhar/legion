@@ -1596,19 +1596,32 @@ The next step's reset drops the database, and with it the rows behind a mismatch
 `stored-order.txt` names a document as mismatched or refused (its document line has
 `mismatches` above 0 or a `refused=`, or a `version number=`, `class update=` or `pending
 update=` line names it), the check exports that document's rows before the step ends, into
-`<step>/stored-order-evidence/<artifact uuid>/`: one gzipped CSV with a header line per table that
-`stored-order` reads for it, `artifacts.csv.gz` (`id`), `doc_checkpoints.csv.gz`,
-`artifact_versions.csv.gz` (by `number`) and `doc_updates.csv.gz` (by `version`, the `update`
-bytes as psql's hex), each the rows `artifact_id` names, and `version-<n>.md`, the stored markdown
-of each mismatched version, byte for byte, when it has one. Each table is one `psql -c '\copy
-(select * from <table> where ...) to stdout with csv header'` in the Postgres pod, streamed out
-through `kubectl exec`, so no file is left in the pod. A document that failed to read (`error`)
-is not exported. `stored-order.json` `evidence` lists each document as `{artifact, tables: {<table>:
-<rows>}, versions: [<n>], error}`, with `error` only when a part failed; a clean run's is `[]`. The
-export of one step stops after 600 s; a part that fails or runs out of time is printed and named
-in `error`, and is never a step failure. The evidence holds document text, which a replay recreates
-from a production bundle, so it stays in the run directory on the worker pod: `collect` leaves it
-out of the tar parts and uploads nothing of it.
+`<step>/stored-order-evidence/<artifact uuid>/`, as gzipped CSVs with a header line:
+
+- From database `dispatch` at the step's end: one file per table that `stored-order` reads for
+  it, `artifacts.csv.gz` (`id`), `doc_checkpoints.csv.gz`, `artifact_versions.csv.gz` (by
+  `number`) and `doc_updates.csv.gz` (by `version`, the `update` bytes as psql's hex), and
+  `doc_snapshots.csv.gz` (by `name`), each the rows `artifact_id` names.
+- `issue-events-in-window.csv.gz`: the events of the document or of its issue (`artifact_id` is
+  the document, or `issue_key` is the document's issue) created at or after the step's
+  `window_start`, by `seq`.
+- `version-<n>.md`: the stored markdown of each mismatched version, byte for byte, when it has one.
+- `start-doc_checkpoints.csv.gz`, `start-artifact_versions.csv.gz`, `start-doc_updates.csv.gz` and
+  `start-doc_snapshots.csv.gz`: the same tables from the template database the step was reset from
+  (`template` in `reset.json`: `dispatch_seed` for a step, `dispatch_replay` for a replay), the
+  document as it was before the step. Without a template in `reset.json`, they are not exported,
+  and `error` names each.
+
+Each file is one `psql -c "set statement_timeout = '<s>s'" -c '\copy (select ...) to stdout with
+csv header'` in the Postgres pod, streamed out through `kubectl exec`, so no file is left in the
+pod; the statement timeout is what is left of the export's time, so a psql that outlives its
+`kubectl exec` does not hold the template database that the next reset copies. A document that
+failed to read (`error`) is not exported. `stored-order.json` `evidence` lists each document as
+`{artifact, files: {<file>: <rows>}, versions: [<n>], error}`, with `error` only when a part
+failed; a clean run's is `[]`. The export of one step stops after 600 s; a part that fails or runs
+out of time is printed and named in `error`, and is never a step failure. The evidence holds
+document text, which a replay recreates from a production bundle, so it stays in the run directory
+on the worker pod: `collect` leaves it out of the tar parts and uploads nothing of it.
 
 ### Profiles and timings
 

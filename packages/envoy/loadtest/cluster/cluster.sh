@@ -78,12 +78,15 @@
 # on a command line), for at most 30 min. Its output goes into <step>/stored-order.txt, its summary
 # line into <step>/stored-order.json, and one line names the counts. A non-zero exit is a
 # correctness finding, not a step failure. Before the next reset drops the database, the rows of
-# each mismatched or refused document (artifacts, doc_checkpoints, artifact_versions, doc_updates)
-# go into <step>/stored-order-evidence/<artifact uuid>/ as gzipped CSVs, with version-<n>.md for
-# each mismatched version's stored markdown, through psql \copy to stdout in the Postgres pod,
-# within 600 s; stored-order.json evidence names them. A failed export is reported, never a step
-# failure, and the evidence is never uploaded. collect writes <run>/STORED-ORDER.md. Without
-# --stored-order-commit, each step prints one line saying that the check is skipped.
+# each mismatched or refused document (artifacts, doc_checkpoints, artifact_versions, doc_updates,
+# doc_snapshots), its issue's events since window_start (issue-events-in-window), and its
+# doc_checkpoints, artifact_versions, doc_updates and doc_snapshots in the template database the
+# step was reset from (start-<table>) go into <step>/stored-order-evidence/<artifact uuid>/ as
+# gzipped CSVs, with version-<n>.md for each mismatched version's stored markdown, through psql
+# \copy to stdout in the Postgres pod, within 600 s; stored-order.json evidence names them. A failed
+# export is reported, never a step failure, and the evidence is never uploaded. collect writes
+# <run>/STORED-ORDER.md. Without --stored-order-commit, each step prints one line saying that the
+# check is skipped.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
@@ -129,10 +132,13 @@ OUTAGE_MEMORY_GIB=13.8
 # The stored-order check's bound, in seconds (its timeout's exit status is 124).
 STORED_ORDER_SECONDS=1800
 # The stored-order evidence export's bound for all of one step's documents, in seconds, and the
-# tables it exports for each document, as table:key column[:order]: every table that `envoy-dispatch
-# stored-order` reads of a document (INFRA-707's internal/dispatch/docs/storedorder.go).
+# tables it exports for each document at the step's end, as table:key column[:order]: every table
+# that `envoy-dispatch stored-order` reads of a document (INFRA-707's
+# internal/dispatch/docs/storedorder.go), and doc_snapshots. STORED_ORDER_START_TABLES are the ones
+# it exports again from the template database the step was reset from, as start-<table>.csv.gz.
 STORED_ORDER_EVIDENCE_SECONDS=600
-STORED_ORDER_TABLES=(artifacts:id doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version)
+STORED_ORDER_TABLES=(artifacts:id doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version doc_snapshots:artifact_id:name)
+STORED_ORDER_START_TABLES=(doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version doc_snapshots:artifact_id:name)
 # What down deletes and then lists: the kinds of `kubectl get all` that the load-test Role may
 # read (it may not list replicationcontrollers, daemonsets, horizontalpodautoscalers or
 # cronjobs, so `get all` itself is refused), and the claims, ConfigMaps and Secrets.
@@ -1018,20 +1024,22 @@ stored_order_flagged() {
 # line where the count of quotes so far is even.
 csv_rows() { awk '{ q += gsub(/"/, "") } q % 2 == 0 { n++ } END { print (n > 0 ? n - 1 : 0) }' "$1"; }
 
-# stored_order_psql SECONDS OUT SQL...: psql in the Postgres pod on database dispatch, each SQL a
-# -c (a psql \copy runs there and writes to its standard output), that output streamed back through
-# kubectl exec into OUT, bounded at SECONDS. Nothing is written in the pod. psql's standard error
-# goes to OUT.err, removed when psql succeeds.
+# stored_order_psql SECONDS OUT DB SQL...: psql in the Postgres pod on database DB, each SQL a -c
+# (a psql \copy runs there and writes to its standard output) after one that sets the session's
+# statement_timeout to SECONDS, that output streamed back through kubectl exec into OUT, bounded at
+# SECONDS. The statement_timeout ends a psql that the bound's kill of kubectl leaves running in the
+# pod, so that none holds the template database the next reset copies. Nothing is written in the
+# pod. psql's standard error goes to OUT.err, removed when psql succeeds. Returns kubectl's exit
+# status (124 when the bound ran out).
 stored_order_psql() {
-  local seconds=$1 out=$2 sql args=()
-  shift 2
+  local seconds=$1 out=$2 db=$3 sql rc=0 args=()
+  shift 3
+  args=(-c "set statement_timeout = '${seconds}s'")
   for sql in "$@"; do args+=(-c "$sql"); done
-  if kube_for "$seconds" exec postgres-0 -c postgres -- psql -X -q -U dispatch -d dispatch -v ON_ERROR_STOP=1 "${args[@]}" \
-    </dev/null >"$out" 2>"$out.err"; then
-    rm -f -- "$out.err"
-  else
-    return 1
-  fi
+  kube_for "$seconds" exec postgres-0 -c postgres -- psql -X -q -U dispatch -d "$db" -v ON_ERROR_STOP=1 "${args[@]}" \
+    </dev/null >"$out" 2>"$out.err" || rc=$?
+  ((rc != 0)) || rm -f -- "$out.err"
+  return "$rc"
 }
 
 # stored_order_failure OUT EXIT: why stored_order_psql of OUT failed, on one line: the timeout, or
@@ -1047,36 +1055,48 @@ stored_order_failure() {
   printf '%s\n' "$why"
 }
 
-# stored_order_export ID OUT DEADLINE VERSION...: one document's rows from the copy's database, each
-# psql call bounded by what is left of DEADLINE (epoch seconds), into OUT: <table>.csv.gz (a header
-# line, then every row) for each table of STORED_ORDER_TABLES, and version-<n>.md, each mismatched
-# VERSION's stored markdown, byte for byte, when artifact_versions holds one. Prints one JSON
-# object: artifact, tables (each exported table's row count), versions (the version-<n>.md
-# written) and, when a part failed, error (each failed part, with why).
+# stored_order_csv FILE DB SQL: one CSV of stored_order_export, whose locals out, deadline, files
+# and errors it reads and sets: the \copy of SQL to stdout with a header line, on database DB,
+# bounded by what is left of deadline, into OUT/FILE gzipped as OUT/FILE.gz, and its row count into
+# files under FILE.gz; or, when it fails or no time is left, why into errors.
+stored_order_csv() {
+  local name=$1.gz file=$out/$1 db=$2 sql=$3 rows left rc=0
+  left=$((deadline - EPOCHSECONDS))
+  if ((left <= 0)); then
+    errors+=("$name: not exported: the export's $STORED_ORDER_EVIDENCE_SECONDS s ran out")
+    return 0
+  fi
+  stored_order_psql "$left" "$file" "$db" "\\copy ($sql) to stdout with csv header" || rc=$?
+  if ((rc != 0)); then
+    errors+=("$name: $(stored_order_failure "$file" "$rc")")
+  elif rows=$(csv_rows "$file") && gzip -f -- "$file"; then
+    files=$(jq -c --arg f "$name" --argjson n "$rows" '. + {($f): $n}' <<<"$files")
+  else
+    errors+=("$name: counting or compressing its rows failed")
+    rm -f -- "$file" "$file.gz"
+  fi
+}
+
+# stored_order_export ID OUT DEADLINE SINCE TEMPLATE VERSION...: one document's rows, each psql call
+# bounded by what is left of DEADLINE (epoch seconds), into OUT as gzipped CSVs (a header line,
+# then every row): from the copy's database dispatch, <table>.csv.gz for each table of
+# STORED_ORDER_TABLES and issue-events-in-window.csv.gz, the events of the document or of its
+# issue created since SINCE (the step's window_start), by seq; version-<n>.md, each mismatched
+# VERSION's stored markdown, byte for byte, when artifact_versions holds one; and from database
+# TEMPLATE, which the step was reset from and so holds the document as it was before the step,
+# start-<table>.csv.gz for each table of STORED_ORDER_START_TABLES (none without TEMPLATE). Prints
+# one JSON object: artifact, files (each exported CSV's row count, by file name), versions (the
+# version-<n>.md written) and, when a part failed, error (each failed part, with why).
 stored_order_export() {
-  local id=$1 out=$2 deadline=$3 spec table key order file rows left rc n tables='{}' errors=() written=()
-  shift 3
+  local id=$1 out=$2 deadline=$3 since=$4 template=$5 spec table key order file left rc n files='{}' errors=() written=()
+  shift 5
   mkdir -p -- "$out" || return 1
   for spec in "${STORED_ORDER_TABLES[@]}"; do
     IFS=: read -r table key order <<<"$spec"
-    file=$out/$table.csv
-    left=$((deadline - EPOCHSECONDS))
-    if ((left <= 0)); then
-      errors+=("$table: not exported: the export's $STORED_ORDER_EVIDENCE_SECONDS s ran out")
-      continue
-    fi
-    rc=0
-    stored_order_psql "$left" "$file" \
-      "\\copy (select * from $table where $key = '$id'${order:+ order by $order}) to stdout with csv header" || rc=$?
-    if ((rc != 0)); then
-      errors+=("$table: $(stored_order_failure "$file" "$rc")")
-    elif rows=$(csv_rows "$file") && gzip -f -- "$file"; then
-      tables=$(jq -c --arg t "$table" --argjson n "$rows" '. + {($t): $n}' <<<"$tables")
-    else
-      errors+=("$table: counting or compressing its rows failed")
-      rm -f -- "$file" "$file.gz"
-    fi
+    stored_order_csv "$table.csv" dispatch "select * from $table where $key = '$id'${order:+ order by $order}"
   done
+  stored_order_csv issue-events-in-window.csv dispatch \
+    "select e.* from events e where (e.artifact_id = '$id' or e.issue_key = (select issue_key from artifacts where id = '$id')) and e.created_at >= '$since' order by e.seq"
   for n in "$@"; do
     file=$out/.version-$n.base64
     left=$((deadline - EPOCHSECONDS))
@@ -1086,7 +1106,7 @@ stored_order_export() {
     fi
     rc=0
     # No row when the version holds no markdown; base64, so the markdown's bytes come back as stored.
-    stored_order_psql "$left" "$file" "\\pset tuples_only on" "\\pset format unaligned" \
+    stored_order_psql "$left" "$file" dispatch "\\pset tuples_only on" "\\pset format unaligned" \
       "select encode(convert_to(markdown, 'UTF8'), 'base64') from artifact_versions where artifact_id = '$id' and number = $n and markdown is not null" || rc=$?
     if ((rc != 0)); then
       errors+=("version $n: $(stored_order_failure "$file" "$rc")")
@@ -1100,31 +1120,46 @@ stored_order_export() {
     fi
     rm -f -- "$file"
   done
-  jq -nc --arg a "$id" --argjson t "$tables" \
+  for spec in "${STORED_ORDER_START_TABLES[@]}"; do
+    IFS=: read -r table key order <<<"$spec"
+    if [ -z "$template" ]; then
+      errors+=("start-$table.csv.gz: not exported: the step's reset.json names no template database")
+      continue
+    fi
+    stored_order_csv "start-$table.csv" "$template" "select * from $table where $key = '$id'${order:+ order by $order}"
+  done
+  jq -nc --arg a "$id" --argjson f "$files" \
     --argjson e "$(printf '%s\n' "${errors[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')" \
-    '{artifact: $a, tables: $t, versions: ($ARGS.positional | map(tonumber))} + (if $e == [] then {} else {error: $e} end)' \
+    '{artifact: $a, files: $f, versions: ($ARGS.positional | map(tonumber))} + (if $e == [] then {} else {error: $e} end)' \
     --args "${written[@]}"
 }
 
-# stored_order_evidence NAME TXT DIR: before the next reset drops the database, the rows of each
-# document that stored-order's output TXT names as mismatched or refused (stored_order_flagged),
-# exported into DIR/stored-order-evidence/<artifact>/ (stored_order_export), all within
-# STORED_ORDER_EVIDENCE_SECONDS. Prints the JSON array of what was exported (stored-order.json's
-# evidence) and one line naming the documents and each failure. A failure never fails the step.
-# Nothing is uploaded: pack_tar leaves stored-order-evidence out of the tar parts.
+# stored_order_evidence NAME TXT DIR SINCE: before the next reset drops the database, the rows of
+# each document that stored-order's output TXT names as mismatched or refused (stored_order_flagged),
+# with its issue's events since SINCE and its rows in the template database that DIR/reset.json
+# names (dispatch_seed or the replay's), exported into DIR/stored-order-evidence/<artifact>/
+# (stored_order_export), all within STORED_ORDER_EVIDENCE_SECONDS. Prints the JSON array of what
+# was exported (stored-order.json's evidence) and one line naming the documents and each failure. A
+# failure never fails the step. Nothing is uploaded: pack_tar leaves stored-order-evidence out of
+# the tar parts.
 stored_order_evidence() {
-  local name=$1 txt=$2 out=$3/stored-order-evidence deadline entry why entries=() flagged=() words=() line
+  local name=$1 txt=$2 out=$3/stored-order-evidence since=$4 template deadline entry why entries=() flagged=() words=() line
   rm -rf -- "$out"
   mapfile -t flagged < <(stored_order_flagged "$txt")
   if ((${#flagged[@]} == 0)); then
     echo '[]'
     return 0
   fi
+  template=$(jq -r '.template // empty' "$3/reset.json" 2>/dev/null || true)
+  case $template in
+    dispatch_seed | "$REPLAY_TEMPLATE") ;;
+    *) template="" ;;
+  esac
   deadline=$((EPOCHSECONDS + STORED_ORDER_EVIDENCE_SECONDS))
   for line in "${flagged[@]}"; do
     read -ra words <<<"$line"
-    entry=$(stored_order_export "${words[0]}" "$out/${words[0]}" "$deadline" "${words[@]:1}") ||
-      entry=$(jq -nc --arg a "${words[0]}" '{artifact: $a, tables: {}, versions: [], error: ["the export did not complete"]}')
+    entry=$(stored_order_export "${words[0]}" "$out/${words[0]}" "$deadline" "$since" "$template" "${words[@]:1}") ||
+      entry=$(jq -nc --arg a "${words[0]}" '{artifact: $a, files: {}, versions: [], error: ["the export did not complete"]}')
     entries+=("$entry")
     why=$(jq -r '(.error // []) | join("; ")' <<<"$entry")
     [ -z "$why" ] || note "step $name: the stored-order evidence of ${words[0]} is incomplete: $why"
@@ -1163,7 +1198,7 @@ stored_order_check() {
     + if .exit == null then "not run: meta.json holds no window_start"
       else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
         + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($name)/stored-order.txt" end) end' "$dir/stored-order.json")"
-  evidence=$(stored_order_evidence "$name" "$txt" "$dir") || {
+  evidence=$(stored_order_evidence "$name" "$txt" "$dir" "$since") || {
     note "step $name: the stored-order evidence export did not complete"
     evidence='[]'
   }
