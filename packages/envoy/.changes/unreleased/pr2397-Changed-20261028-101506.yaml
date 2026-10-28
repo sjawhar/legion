@@ -6,6 +6,8 @@ body: |-
     of time says it was not made instead of looking like one that found nothing. The
     route descriptions of `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and
     `POST /api/v1/artifacts/{id}/asks` say so.
+    A Dispatch server process now opens up to 85 database connections, one more for the
+    term-statistics refresh's lease, and envoy-infra's `gcp:Dispatch` sizes an app pod by that count.
 time: 2026-10-28T10:15:06.530832935Z
 custom:
     Issue: pr2397
