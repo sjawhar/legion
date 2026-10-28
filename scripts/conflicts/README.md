@@ -2,8 +2,8 @@
 
 `measure.ts` counts the merge conflicts Legion's pull request branches hit when they merge main,
 over a window of time, so a change meant to remove them can be measured before and after. It is the
-Bun port of the Python script that took the before measurement for INFRA-588
-(`dispatch://INFRA-588/artifact/conflict-baseline-py`).
+Bun port of the Python script that took the before measurement, `conflict-baseline.py`, kept on
+this pull request's issue in Dispatch.
 
 It needs git 2.38 or later (`git merge-tree --write-tree`) and a `gh` CLI signed in to GitHub with
 read access to the repository.
@@ -143,8 +143,8 @@ open; absent from the Python run's records and earlier runs of this script), `co
 `open_conflicts_now` and `open_behind_base`. `conflicts` is the sorted list of conflicted paths,
 `[]` for a clean merge and `null` when undeterminable. A run of this script adds `measured_at` (RFC
 3339) and `selection` (`"updated-since"`); a file without them is read as the Python run. The Python
-run's records for 2026-10-20 to 2026-10-27 are
-`dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json`. They carry no
+run's records for 2026-10-20 to 2026-10-27 are `conflict-baseline-2026-10-20-to-27-json`, kept on
+this pull request's issue in Dispatch. They carry no
 `measured_at`, so a comparison gives their window as running to `2026-10-27T23:59:59Z` (8 days),
 though that run was made at about 11:21Z that day; the comparison's shares, not its raw counts, are
 what compares windows of different lengths.
@@ -154,7 +154,7 @@ what compares windows of different lengths.
 Reproduce the before measurement from the Python run's raw records (no network but Dispatch's):
 
 ```bash
-dispatch doc-read --issue INFRA-588 --artifact conflict-baseline-2026-10-20-to-27-json \
+dispatch doc-read --issue <KEY> --artifact conflict-baseline-2026-10-20-to-27-json \
   | tail -n +3 > "$TMPDIR/before.json"
 bun scripts/conflicts/measure.ts --from-json "$TMPDIR/before.json" --branch-prefix legion/
 ```
