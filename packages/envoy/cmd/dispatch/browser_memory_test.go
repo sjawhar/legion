@@ -38,7 +38,7 @@ const (
 	podGoMemoryLimit = 3_865_470_566
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:508),
+	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:571),
 	// maxPeerInsertAtTheBound (peer_update.go:109), maxPeerByteCreep (:114) and maxMessageBytes
 	// (:226). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
@@ -76,9 +76,9 @@ const (
 	// bytesOfHeapAStructHeldForTest mirrors bytesOfHeapAStructHeld
 	// (internal/dispatch/docs/room_budget.go:80), the heap one copy of a room holds for each struct
 	// of its state, measured (TestAResidentRoomsHeapPerStructOfItsState); bytesOfHeapAStructForTest
-	// mirrors bytesOfHeapAStruct (:157), what the structure part charges each struct an update adds
+	// mirrors bytesOfHeapAStruct (:158), what the structure part charges each struct an update adds
 	// and each split it can cause, and splitsAStructCanCauseForTest splitsAStructCanCause
-	// (peer_update.go:633). TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's
+	// (peer_update.go:651). TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's
 	// growth against them; a wrong mirror moves only how much growth it asks for, and its log line
 	// prints each figure beside the server's own.
 	bytesOfHeapAStructHeldForTest = 170
@@ -799,7 +799,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:508), so the refusals begin within one room of
+// (roomCopies, internal/dispatch/docs/room_budget.go:571), so the refusals begin within one room of
 // the budget divided by what one such room reserves - its stored version's elements at the price of
 // one, at both copies - computed here from the server's constants and held to the numbers the server
 // logs, both when the browsers come one after another and when fifty open at once.
@@ -1974,7 +1974,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:574-611).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:637-674).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -2016,7 +2016,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1399-1432).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1462-1495).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

@@ -109,9 +109,10 @@ import (
 // that the document cannot apply yet, which ygo refuses once parking it would pass the same cap
 // (checkParkedDeletes, crdt/update.go:580-586 and :799-822): whether a range parks depends on the
 // document it reaches, not the frame, so the walk leaves it to ygo, and from a browser the struct
-// total refuses it first, at splitsAStructCanCause structs a range (peerWeighing.added). And every
-// update ygo applies without error that carries nothing the editor never sends, the walk accepts,
-// so a browser running the editor is never refused by it.
+// total refuses it first, at splitsAStructCanCause structs or more for each range that would park
+// as a parked range of its own (peerWeighing.added). And every update ygo applies without error
+// that carries nothing the editor never sends, the walk accepts, so a browser running the editor
+// is never refused by it.
 //
 // A walk of the room's own state (fromRoom: crdt.EncodeStateAsUpdateV1 of the live document,
 // which carries parked structs, the skips before them and parked delete ranges, crdt/update.go:

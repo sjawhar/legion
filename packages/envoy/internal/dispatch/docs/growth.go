@@ -431,10 +431,13 @@ func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, upda
 
 // updatesAdd is the most structs applying updates, a transaction's own writes, can add to a
 // document, and whether a walk of each bounds it: each struct an update carries, but a skip, with
-// the splits its integration can cause, and the splits each delete range can cause, the arithmetic
-// the peer update hook charges a browser's update (peerWeighing.added). Every struct of a
-// transaction's update is its own new item, which no room holds yet. An update the walk refuses
-// is bounded by nothing, and its document is counted.
+// the splits its integration can cause, and the two splits each delete range can cause. It counts
+// every range, the ones the room holds deleted already too, which the peer update hook charges
+// nothing (peerWeighing.added, deletedRuns.splitEnds): a transaction's update carries its
+// document's whole delete set (crdt/doc.go:597-612), so near the cap a write that deletes nothing
+// new still goes on to the room's exact count and then to a copy (leavesRoomPastDecodeCap), which
+// answer for what it adds. Every struct of a transaction's update is its own new item, which no
+// room holds yet. An update the walk refuses is bounded by nothing, and its document is counted.
 func updatesAdd(updates [][]byte) (uint64, bool) {
 	var adds uint64
 	for _, update := range updates {

@@ -39,11 +39,12 @@ func chargeParts(charge *roomCharge) (structure, content, measuredAt, weight int
 }
 
 // Each update the hook admits adds to its room's structure part every new struct with the two
-// splits its integration can cause, two splits for each delete range, all at bytesOfHeapAStruct,
-// and the content of its new structs no rendering prices at its kind's heap a byte, at both
-// copies. A whole-state handoff of the document the room holds adds nothing, nor does an update
-// the walk refuses, which is never applied. A count of the room's rendering re-bases its counted
-// part and leaves the structure part as it was.
+// splits its integration can cause, the splits its delete ranges can leave at their ends
+// (deletedRuns.splitEnds), all at bytesOfHeapAStruct, and the content of its new structs no
+// rendering prices at its kind's heap a byte, at both copies. A whole-state handoff of the
+// document the room holds adds nothing, nor does an update the walk refuses, which is never
+// applied. A count of the room's rendering re-bases its counted part and leaves the structure
+// part as it was.
 func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount(t *testing.T) {
 	service, room, replica, charge := chargedPeerRoom(t)
 	service.measurer.interval = noInterval
@@ -82,7 +83,9 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	if grew := admit("margin entries", entries); grew != want*roomCopies {
 		t.Fatalf("ten margin entries grew the structure part by %d bytes, want %d", grew, want*roomCopies)
 	}
-	if grew, want := admit("delete ranges", deleteRangesFrom(78, 5)), int64(5*splitsAStructCanCause*bytesOfHeapAStruct*roomCopies); grew != want {
+	// Five ranges of a client the room holds nothing of, none touching the next: each can split at
+	// both ends, but for the first's start, the client's first clock, where its first item starts.
+	if grew, want := admit("delete ranges", deleteRangesFrom(78, 5)), int64((5*splitsAStructCanCause-1)*bytesOfHeapAStruct*roomCopies); grew != want {
 		t.Fatalf("five delete ranges grew the structure part by %d bytes, want %d", grew, want)
 	}
 	if grew := admit("the same delete ranges again", deleteRangesFrom(78, 5)); grew != 0 {
@@ -119,8 +122,10 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 // range of every update the hook admits. So a browser's whole-state handoff of a document edited
 // into 2,000 deleted runs, and a keystroke from a client that encodes the whole delete set with
 // each transaction as ygo does (crdt/doc.go:597-612), are charged nothing for the runs: the
-// keystroke is charged its one struct alone. A new deletion is charged its range's two splits,
-// and the same update sent again nothing.
+// keystroke is charged its one struct alone. A new deletion in the middle of a run of text is
+// charged its range's two splits, and the same update sent again nothing; a new deletion of one
+// character between two the room holds deleted is charged nothing, since both its ends are clean
+// already (deletedRuns.splitEnds).
 func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, strings.Repeat("word ", 1_000)+"\n", 0)
 	service.budget.limit = roomBudgetBytes
@@ -158,12 +163,17 @@ func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 		t.Fatalf("a keystroke carrying %d delete ranges the room holds grew the structure part by %d bytes, want its one struct's %d", struck.deletes, grew, want)
 	}
 
-	deletion := peerDeleting(t, room, 1)
+	// The keystroke's character is at index 0, then the 2,000 characters left between the deleted
+	// ones; the paragraph's last 999 characters, none deleted, follow.
+	deletion := peerDeletingAt(t, room, 2_501, 1)
 	if grew, want := admit("a new deletion", deletion), int64(splitsAStructCanCause*bytesOfHeapAStruct*roomCopies); grew != want {
 		t.Fatalf("a deletion of one character grew the structure part by %d bytes, want one range's two splits, %d", grew, want)
 	}
 	if grew := admit("the same deletion again", deletion); grew != 0 {
 		t.Fatalf("a deletion the room has already taken grew the structure part by %d bytes, want nothing", grew)
+	}
+	if grew := admit("a new deletion between two deleted characters", peerDeletingAt(t, room, 1, 1)); grew != 0 {
+		t.Fatalf("a deletion of one character between two the room holds deleted grew the structure part by %d bytes, want nothing", grew)
 	}
 	runtime.KeepAlive(replica)
 }

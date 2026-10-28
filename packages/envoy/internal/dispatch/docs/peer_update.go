@@ -518,11 +518,17 @@ type peerWeighing struct {
 	// first sync and which measured literally would be the whole document.
 	inserted int64
 	// structs is the structs reaching past the room's state, each of which integration adds to the
-	// room's store; deletes is the update's delete ranges, and newDeletes those of them the room
-	// is not known to hold deleted already (known, deletedRuns), which alone can split an item
-	// for good. known is nil for a room no load charged, and every range is new to it.
-	structs, deletes, newDeletes uint64
-	known                        *deletedRuns
+	// room's store; deletes is the update's delete ranges, and splits the items at their two ends
+	// that their applies can leave split for good (deletedRuns.splitEnds): none for a range the
+	// room is known to hold deleted already (known), and for one that overlaps what it is known to
+	// hold, none at an end inside that. deleteStructs is what the ranges can add to the room's
+	// struct total: their splits, with the last end of a range that reaches past the room's clock
+	// for its client (held) counted splitsAStructCanCause rather than one, since the range's tail
+	// can park there as a parked range of its own, which the room's count holds
+	// splitsAStructCanCause structs for (structTotalOf). known is nil for a room no load charged,
+	// in which every end but a client's first clock can split.
+	structs, deletes, splits, deleteStructs uint64
+	known                                   *deletedRuns
 	// decoded is every walked struct's share of the apply's estimate, since ygo's apply decodes
 	// each before it asks whether the room holds it; integrated is the share of the structs past
 	// the room's state alone, which only they cost (structApplyHeap).
@@ -532,8 +538,8 @@ type peerWeighing struct {
 	content uint64
 	// unrendered is the unrendered bytes of the structs past the room's state (unrenderedBytes),
 	// what the update adds to the room's unrendered total, and frame the bytes its new structs and
-	// its new delete ranges can add to the room's whole-state frame (frameBytes,
-	// deleteFrameBytes), what it adds to the room's frame total.
+	// the delete ranges the room is not known to hold deleted can add to the room's whole-state
+	// frame (frameBytes, deleteFrameBytes), what it adds to the room's frame total.
 	unrendered, frame uint64
 	// born is whether any struct past the room's state integrates deleted (bornDeleted), whose
 	// clocks the room's delete set holds from then on (deletedRuns.record).
@@ -617,9 +623,21 @@ func (w *peerWeighing) walkedStruct(walked updateStruct) {
 
 func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 	w.deletes++
+	var splits uint64
+	start, end := w.known.splitEnds(client, clock, length)
+	if start {
+		splits++
+	}
+	if end {
+		splits++
+	}
+	w.splits += splits
+	w.deleteStructs += splits
+	if end && clock+length > w.held[crdt.ClientID(client)] {
+		w.deleteStructs += splitsAStructCanCause - 1
+	}
 	if !w.known.covers(client, clock, length) {
-		w.newDeletes++
-		w.frame += deleteFrameBytes(client, clock, length)
+		w.frame += deleteFrameBytes(client, clock, length, splits)
 	}
 	w.forged = w.forged || w.entries.overlap(client, clock, length)
 }
@@ -633,9 +651,13 @@ func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 const splitsAStructCanCause = 2
 
 // added is what the walked update can add to the room's struct total: each new struct with the
-// splits its integration can cause, and the splits each delete range can cause.
+// splits its integration can cause, and what its delete ranges can add (deleteStructs). A
+// whole-state handoff of the document the room holds adds nothing: it carries no struct past the
+// room's state, and every one of its delete ranges the room holds deleted already, whose splits
+// ygo merges back at commit (deletedRuns.splitEnds). So a browser reconnecting to a room at the
+// decode cap, which hands its whole state over on connecting as every browser does, is admitted.
 func (w *peerWeighing) added() uint64 {
-	return w.structs*(1+splitsAStructCanCause) + w.deletes*splitsAStructCanCause
+	return w.structs*(1+splitsAStructCanCause) + w.deleteStructs
 }
 
 // addition is what the walked update can add to the room's totals (structTotal): its structs
@@ -646,14 +668,13 @@ func (w *peerWeighing) addition() roomCount {
 
 // structureHeap is what the walked update adds to its room that a count of the rendering cannot
 // see, at both copies (roomCopies), which the room budget charges to the room's structure part
-// (roomCharge): each new struct with the splits its integration can cause, and the splits of each
-// delete range the room is not known to hold deleted already (newDeletes), at bytesOfHeapAStruct,
-// and the content of its new structs that no rendering prices (content). A whole-state handoff of
-// a document the room already holds adds no struct and carries no delete range the room does not
-// hold, and is charged nothing. The struct total counts every delete range (added): it bounds what
-// a decode of the room's state reads, which every range of its delete set is part of.
+// (roomCharge): each new struct with the splits its integration can cause, and the splits its
+// delete ranges can leave (splits), at bytesOfHeapAStruct, and the content of its new structs that
+// no rendering prices (content). A whole-state handoff of a document the room already holds adds
+// no struct and carries no delete range the room is not known to hold deleted, and is charged
+// nothing.
 func (w *peerWeighing) structureHeap() int64 {
-	structs := w.structs*(1+splitsAStructCanCause) + w.newDeletes*splitsAStructCanCause
+	structs := w.structs*(1+splitsAStructCanCause) + w.splits
 	return int64((structs*bytesOfHeapAStruct + w.content) * roomCopies)
 }
 
@@ -758,11 +779,16 @@ func frameBytes(walked updateStruct) uint64 {
 
 // deleteFrameBytes is what a delete range the room is not known to hold deleted (deletedRuns) can
 // add to the room's frame total: its range in the room's delete set, which a range of clocks the
-// room does not hold yet keeps there parked (deleteRangeBytes), and the splits it can cause in the
-// items at its two ends (splitFrameBytes). The items it deletes are already priced for their
-// deletion: by the count (deletionReserve) or by the update that brought them (frameBytes).
-func deleteFrameBytes(client, clock, length uint64) uint64 {
-	return deleteRangeBytes(client, clock, length) + splitsAStructCanCause*splitFrameBytes
+// room does not hold yet keeps there parked (deleteRangeBytes), and splitFrameBytes for each of
+// the splits its apply can leave for good in the items at its two ends, splits of them
+// (deletedRuns.splitEnds). The items it deletes are already priced for their deletion: by the
+// count (deletionReserve) or by the update that brought them (frameBytes). A range the room is
+// known to hold deleted adds nothing to the frame: ygo's encode writes the room's delete set from
+// its deleted items, merged where their clocks touch (buildDeleteSet, crdt/update.go:502-515), and
+// the room's parked ranges merged the same way (crdt/delete_set.go:65-104), so the clocks it names
+// are written as they were, and it leaves no split.
+func deleteFrameBytes(client, clock, length, splits uint64) uint64 {
+	return deleteRangeBytes(client, clock, length) + splits*splitFrameBytes
 }
 
 // maxVarintBytes is the most bytes a lib0 varint takes for any client or clock a room holds: the
@@ -887,9 +913,11 @@ const structTotalRecheck = maxUpdateItems / 64
 // the room's load, beside the load's rendering (keepReplica), with each count the service's
 // measurer makes of the room (elementMeasurer.count), and by the hook to confirm a total near or
 // past the cap. What the hook admits after it is each update's addition (peerWeighing.added): its
-// new structs, each with the two splits its integration can cause, and two for each delete range.
-// That is an upper bound, so the running total is never below what the room holds, short of a
-// write the hook does not see.
+// new structs, each with the two splits its integration can cause, and for its delete ranges the
+// splits each can leave at its two ends - none at an end either of whose two clocks the room is
+// known to hold deleted - with what a tail parked past the room's clock adds to the count
+// (peerWeighing.deleteStructs; deletedRuns.splitEnds gives why). That is an upper bound, so the
+// running total is never below what the room holds, short of a write the hook does not see.
 //
 // Beside it the total keeps the room's unrendered bytes (unrenderedBytes), against which the hook
 // refuses an update that adds any past maxUnrenderedBytes, the same way: exact at each count, the
@@ -903,9 +931,9 @@ const structTotalRecheck = maxUpdateItems / 64
 // anything past heaviestHandoffBound: the length of the same encode at each count with what
 // deleting what it holds can add (countRoom, deletionReserve), plus what each update admitted
 // since can add to it (peerWeighing.frame: frameBytes for each new struct, deleteFrameBytes for
-// each new delete range), so it is never below the frame. A delete adds to it what it can add to
-// the frame and takes nothing off it until the next count. Its stale margin and its recheck are
-// frameStaleMargin and frameRecheck.
+// each delete range the room is not known to hold deleted), so it is never below the frame. A
+// delete adds to it what it can add to the frame and takes nothing off it until the next count.
+// Its stale margin and its recheck are frameStaleMargin and frameRecheck.
 //
 // Those writes are every transaction on the room that is not a hook's apply: the server's own
 // writes (Server.Apply - an API write's publish, settlement and its repairs, the mark sweep, the
@@ -1514,12 +1542,12 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 //     :772), by walking the room's whole store and building the delete set of all of it, a range
 //     for every deleted item before it compacts them (encodeV1Locked and buildDeleteSet,
 //     crdt/update.go:231-271 and :502-515): a price for every deleted item of the room, of which
-//     it holds no more than its structs and the structs the update can add (peerWeighing.added).
+//     it holds no more than its structs and the structs the apply can hold (applyStructs).
 //     875,008 bytes measured for a one-character keystroke into a string of 10,000 deleted items
 //     among 10,000 live ones, against 2,328 into one of 20,000 live items and none deleted;
 //   - the marks its scans make, one for each distinct item they pass (crdt/item.go:126-158), at
-//     bytesOfAScanMark each: the items they can pass are the room's and those the update adds,
-//     no more than the room's structs and the structs the update can add, and never more than
+//     bytesOfAScanMark each: the items they can pass are the room's and those the apply makes,
+//     no more than the room's structs and the structs the apply can hold, and never more than
 //     the per-frame ceiling, the most any allowance gives an apply (roomScans). An update that
 //     integrates no struct scans nothing, its drain included, since no clock of its moves.
 //
@@ -1539,13 +1567,22 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 // can see: an item or a delete range splitting a room's Any or JSON item copies the values right of
 // the split (ContentAny.Splice, crdt/content.go:170-174).
 func (w *peerWeighing) applyHeap(frame int, roomStructs uint64) uint64 {
-	reachable := roomStructs + w.added()
+	reachable := roomStructs + w.applyStructs()
 	var marks uint64
 	if w.structs > 0 {
 		marks = bytesOfAScanMark * min(reachable, perFrameScanCeiling)
 	}
 	return w.ownApplyHeap(frame) + applyHeapPerRoomClient*uint64(len(w.held)) +
 		applyHeapPerRoomStruct*reachable + marks
+}
+
+// applyStructs is the most structs the walked update's apply can hold in the room's store before
+// its transaction ends: each new struct with the splits its integration can cause, and the two
+// splits of every delete range, one the room holds deleted already included, since ygo makes those
+// splits as it applies the range and merges them back only as the transaction ends
+// (deletedRuns.splitEnds).
+func (w *peerWeighing) applyStructs() uint64 {
+	return w.structs*(1+splitsAStructCanCause) + w.deletes*splitsAStructCanCause
 }
 
 // ownApplyHeap is the update's own share of applyHeap, what it costs whatever room it reaches:

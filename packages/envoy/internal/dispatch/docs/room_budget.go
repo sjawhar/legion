@@ -150,10 +150,11 @@ const bytesOfHeapAByteAtTheDensest = 1_058
 // fails once any kind keeps more than this, or once the largest falls under 0.8 of it.
 //
 // What integrating a struct splits is charged at the same price (splitsAStructCanCause, two for
-// each struct and two for each delete range the room did not already hold deleted, deletedRuns): a
-// split adds one item. Measured the same way (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), a
-// one-character insert splitting a run keeps 339 bytes with its split, and a delete range splitting
-// a run at both ends keeps 307, about 154 bytes a split.
+// each struct, and for each delete range one for each of its two ends its apply can leave split,
+// deletedRuns.splitEnds): a split adds one item. Measured the same way
+// (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), a one-character insert splitting a run keeps
+// 339 bytes with its split, and a delete range splitting a run at both ends keeps 307, about 154
+// bytes a split.
 const bytesOfHeapAStruct = 620
 
 // bytesOfHeapAByteOfText is the heap one copy of a document holds for each byte of text a
@@ -188,10 +189,10 @@ const earlyCountCharge = 16 << 20
 // pressureReserveBytes is how far past the budget's limit the charges of the delete-only updates
 // admitted while the budget is full may take it (refusedUnderPressure): 256 MiB. A delete that cuts
 // the middle of an item splits it and adds structs, so unbounded deletes would grow the heap while
-// nothing can be closed. A delete range the room does not already hold deleted is charged two
-// structs at both copies, 2,480 bytes, where its two splits keep 307 bytes in each copy
-// (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), so deletes that fill the reserve hold about
-// a quarter of it, 67 MB, in the heap.
+// nothing can be closed. A delete range is charged a struct at both copies, 1,240 bytes, for each
+// of its ends its apply can leave split (deletedRuns.splitEnds), two at most, where a split keeps
+// about 154 bytes in each copy (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), so deletes that
+// fill the reserve hold about a quarter of it, 67 MB, in the heap.
 //
 // It is set from what A4 (cmd/dispatch, TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks) asks a
 // full server to take, measured on its shapes
@@ -305,16 +306,17 @@ type budgetedRoom struct {
 //     added since. A whole-state handoff of a document the room already holds adds nothing here.
 //   - the structure part: what each update the room integrates adds that a count of the rendering
 //     cannot see (peerWeighing.structureHeap) - each new struct with the splits its integration
-//     can cause, two splits for each delete range the room did not already hold deleted
-//     (deletedRuns), all at bytesOfHeapAStruct, and the content no rendering prices at its kind's
-//     heap a byte - at both copies. A browser's update is charged it by the peer hook that
-//     admitted it (grew); every other transaction - an API write's publish, an injected update,
-//     settlement's repair, any of the server's own writes - by the update observer whose drain of
-//     the room's update log hands it over (wrote), at the same prices, as each of their scans
-//     counts toward the room's scan total (roomScans.observed). The server's writes are never
-//     refused for it: they only raise the charge, so the budget refuses browsers or closes unused
-//     rooms sooner. A count never clears it: one update of GC structs keeps tens of megabytes with
-//     the rendering unchanged. Only the room's retirement drops it, with the rest of the charge.
+//     can cause, the splits each delete range can leave at its ends, none at an end the room
+//     already held deleted (deletedRuns.splitEnds), all at bytesOfHeapAStruct, and the content no
+//     rendering prices at its kind's heap a byte - at both copies. A browser's update is charged
+//     it by the peer hook that admitted it (grew); every other transaction - an API write's
+//     publish, an injected update, settlement's repair, any of the server's own writes - by the
+//     update observer whose drain of the room's update log hands it over (wrote), at the same
+//     prices, as each of their scans counts toward the room's scan total (roomScans.observed). The
+//     server's writes are never refused for it: they only raise the charge, so the budget refuses
+//     browsers or closes unused rooms sooner. A count never clears it: one update of GC structs
+//     keeps tens of megabytes with the rendering unchanged. Only the room's retirement drops it,
+//     with the rest of the charge.
 //
 // Two parts can charge one struct: the structure part charges what each update adds, and a count
 // prices the struct total of the whole state once its structs outweigh its elements (copyHeap),
@@ -352,7 +354,8 @@ type roomCharge struct {
 	// (Service.closeIfOpenedOverBudget) unless a browser joins it first (join).
 	closeOnceUnused bool
 	// deleted is the delete ranges the room is known to hold deleted, which the structure part
-	// charges nothing for again (deletedRuns). It has its own lock, never the budget's.
+	// and the struct total charge nothing for again (deletedRuns). It has its own lock, never the
+	// budget's.
 	deleted deletedRuns
 }
 
@@ -360,15 +363,18 @@ type roomCharge struct {
 // merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), and every range of
 // every update the room has been charged the structure of since - a browser's update the peer hook
 // admitted, a transaction of the server's own (roomCharge.wrote) - with the GC runs and deleted
-// items it integrated (record). A delete range it covers whole is one the room holds deleted
-// already. ygo's apply still splits the items at the range's two ends (sjawhar/ygo
-// v1.51.3-sami.7, crdt/delete_set.go:170-172), but nothing comes between the halves, and the
-// commit merges them back (crdt/transaction.go:26-31, :374-402), so such a range adds no struct
-// and the structure part charges it nothing (peerWeighing.newDeletes). Without it the structure
-// part, which no count clears, would charge the room's whole delete set again on every browser's
-// sync, whose whole-state handoff carries it, and on every transaction, whose update ygo encodes
-// with the room's whole delete set (crdt/doc.go:597-612): an edited room held open across
-// reconnects would grow its charge with nothing added to its heap.
+// items it integrated (record). A clock it lists that the room holds is deleted; one the room does
+// not hold yet is in a range the room keeps parked, since ygo parks the part of a range past the
+// clocks it holds (sjawhar/ygo v1.51.3-sami.7, crdt/delete_set.go:209-215, crdt/update.go:580-585)
+// and an update is listed only once its apply has returned. A delete range it covers whole adds no
+// struct, and one that overlaps what it lists none at an end inside it (splitEnds), so neither the
+// structure part nor the struct total charges a browser's whole-state handoff for the delete set it
+// carries. Without it the structure part, which no count clears, would charge the room's whole
+// delete set again on every browser's sync, whose whole-state handoff carries it, and on every
+// transaction, whose update ygo encodes with the room's whole delete set (crdt/doc.go:597-612): an
+// edited room held open across reconnects would grow its charge with nothing added to its heap.
+// And the struct total would count two structs for every range of it on every connect, which
+// refused every browser reconnecting to a room at the decode cap before it had edited anything.
 //
 // A range of an update whose apply failed is neither listed nor charged, since the room's bounded
 // document took that update back out whole (newRoomScans). Two updates weighed at once - two
@@ -411,6 +417,63 @@ func (d *deletedRuns) covers(client, clock, length uint64) bool {
 	runs := d.clients[client]
 	at := sort.Search(len(runs), func(i int) bool { return runs[i].start > clock }) - 1
 	return at >= 0 && runs[at].end >= clock+length
+}
+
+// splitEnds reports whether applying a delete range of clocks [clock, clock+length) of client can
+// leave split for good the item holding its start and the item holding its end, the only items
+// ygo's apply splits for it: it cleans the range's two ends (getItemCleanStart at clock and at
+// clock+length, crdt/delete_set.go:170-172 and crdt/store.go:123-140), deletes whole each item
+// between them (:182-208) and parks the part of the range past the clocks the room holds
+// (:209-215). ygo sorts and merges each client's ranges as it decodes them (crdt/update.go:1324),
+// so every range it applies ends where a range of the update ends. A range of no clocks splits
+// nothing (crdt/delete_set.go:170).
+//
+// An end x can be left split only where the list holds neither clock x-1 nor clock x, and never at
+// clock 0, where a client's first item starts. ygo keeps an item deleted whole or not at all: a
+// delete cleans its ends first, and a merge joins only two items of one deleted state
+// (tryMergeWithLeft, crdt/transaction.go:480). So where x-1 and x are held, one deleted and the
+// other not, they lie in two items and x is clean already. Where both are held deleted, the split
+// at x cuts a deleted item into two deleted halves, which ygo merges back as the transaction ends:
+// splitItem records the right half (crdt/item.go:556-559) and tryMergeWithLefts merges it with its
+// left (crdt/transaction.go:374-402, run at commit, crdt/doc.go:820-824), since the halves share
+// client, parent, origins and deleted state, and an item that can split - a deleted run, or a run
+// of string, Any or JSON content - holds content that merges (crdt/transaction.go:513-544), every
+// other content being one clock long. Only an item integrated between the halves keeps them
+// apart, and ygo's integrate puts one there only when it names clock x-1 as its origin or clock x
+// as its right origin (crdt/item.go:104-106 and :152-191: past the left half, its scan always
+// passes the right half, whose origin is the left half's last clock), which its own integrate
+// cleans at x, a split its own count holds (splitsAStructCanCause).
+//
+// Where x is not held, no item holds it: a room holds each client's clocks from 0 up, and
+// integrates a struct reaching past them from the first clock it does not hold (crdt/item.go:
+// 83-91), so where x-1 is held the item that brings x starts at x. Where x-1 is not held either,
+// one item the same transaction integrates can hold both; what the list holds of them is then in
+// ranges the room keeps parked, which ygo deletes in that transaction once their clocks arrive
+// (drainParked, crdt/update.go:588). Where x-1 and x both end deleted, the halves at x merge back
+// as above; where only one does, x is where a parked run starts or ends, a split charged to the
+// range that first listed a clock beside x, which had its own end at x with neither clock listed -
+// and the room's count holds splitsAStructCanCause structs for each parked range besides
+// (structTotalOf). So each place a listed run starts or ends is split once at most, by a range
+// charged for it; and the list only grows, so a range weighed against the list before its apply is
+// charged no less than against the list its apply meets. Nil, a room no load charged, lists
+// nothing.
+func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) {
+	if length == 0 {
+		return false, false
+	}
+	if d == nil {
+		return clock > 0, true
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	runs := d.clients[client]
+	// beside is whether the list holds clock x-1 or clock x: a run starting at or before x that
+	// ends at or after it, of which only the last run starting at or before x can be one.
+	beside := func(x uint64) bool {
+		at := sort.Search(len(runs), func(i int) bool { return runs[i].start > x }) - 1
+		return at >= 0 && runs[at].end >= x
+	}
+	return clock > 0 && !beside(clock), !beside(clock + length)
 }
 
 // record lists every range of the delete set of update, which a walk found at deletesAt
@@ -742,7 +805,7 @@ func (c *roomCharge) grew(structure int64) {
 // (peerWeighing.structureHeap). Every struct the update carries is new to the room, since ygo
 // encodes a transaction's update from the state before it (sjawhar/ygo v1.51.3-sami.7,
 // buildPhase2, crdt/doc.go:597-612), so each is charged with the splits its integration can cause,
-// with two splits for each delete range the room did not already hold deleted (deletedRuns) and
+// with the splits each delete range can leave at its ends (deletedRuns.splitEnds) and
 // the content no rendering prices. It refuses nothing: the write has committed, and its charge only
 // raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner. The
 // update's delete ranges, and the structs it integrated deleted, are listed as the room's

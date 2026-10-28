@@ -755,6 +755,145 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBe
 	}
 }
 
+// A browser hands its whole state over whenever it connects - its structs and its whole delete
+// set, in its answer to the room's sync step 1 - so a document at the decode cap must take a
+// handoff of what it already holds, or no browser could reconnect to it. The room holds every
+// delete range of that state deleted already, and the struct total counts nothing for them
+// (deletedRuns.splitEnds), where two splits a range would take it past the cap. For each of the
+// two documents a room keeps at the cap, and for the long-edited one typed on to one keystroke
+// short of it, a browser that read the document hands its whole state back, and another
+// reconnects holding it: both are admitted and stay connected, the room's state as it was. A third
+// reconnects with an edit it typed offline, which deletes nothing and adds one struct with the two
+// splits it can cause: admitted and stored where the room's total leaves room for those, and
+// refused DOC_TOO_LARGE where it does not, the room as it was, so no handoff takes the room past
+// the cap. Measured on 2026-10-28, both documents at the cap load at 1,048,576 structs exactly,
+// the long-edited one's handoff carrying 1,345 delete ranges and the agent's 32,793; the
+// long-edited one took 33 s here, the one a keystroke short 30 s, and the agent's 229 s, which
+// runs with DISPATCH_REBUILD_AGENT_REWRITES=1, as its rebuild does.
+func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
+	const editAdds = 1 + splitsAStructCanCause
+	for _, row := range []struct {
+		name  string
+		gate  string
+		state func(t *testing.T) []byte
+		// edits is whether the room's total leaves room for the offline edit.
+		edits bool
+	}{
+		{"an agent's whole rewrites until the cap refused one", agentRewritesEnv, func(t *testing.T) []byte {
+			state, refusal := agentRewrittenState(t)
+			if !errors.Is(refusal, ErrDocumentTooLarge) {
+				t.Fatalf("the agent's last write was refused with %v, want ErrDocumentTooLarge", refusal)
+			}
+			return state
+		}, false},
+		{"a long-edited document typed on until the cap", "", longEditedAtCapState, false},
+		{"a long-edited document typed on until a keystroke short of the cap", "", func(t *testing.T) []byte {
+			return longEditedTypedTo(t, maxUpdateItems-editAdds)
+		}, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if row.gate != "" && os.Getenv(row.gate) == "" {
+				t.Skip("set " + row.gate + "=1 to run this document")
+			}
+			state := row.state(t)
+			service, artifactID := newTestService(t)
+			storeHistory(t, service, artifactID, state)
+			closeResidentRoom(t, service, artifactID)
+			server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+			t.Cleanup(server.Close)
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+			ctx := context.Background()
+
+			reader := connectPeer(t, server.URL, artifactID, "alice")
+			awaitAnswer(t, reader, "the document near the cap")
+			live := service.srv.GetDoc(artifactID)
+			replica := service.liveReplica(live)
+			if live == nil || replica == nil {
+				t.Fatal("the document's room is not resident with a browser connected")
+			}
+			before := crdt.EncodeStateAsUpdateV1(live, nil)
+			structs := countRoomStructs(live)
+			total, _ := replica.structs.running()
+			handoff := crdt.EncodeStateAsUpdateV1(reader.Doc, nil)
+			tally, err := walkUpdate(handoff, fromPeer, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("the room holds %d structs, a struct total of %d; a handoff carries %d structs and %d delete ranges",
+				structs, total, tally.structs, tally.deleteRanges)
+			if total < structs || total+splitsAStructCanCause*tally.deleteRanges <= maxUpdateItems || (total+editAdds <= maxUpdateItems) != row.edits {
+				t.Fatalf("the room's total is %d for %d structs, and a handoff carries %d delete ranges: want it no less than the count, two splits a range past the %d cap, and room for an edit %t",
+					total, structs, tally.deleteRanges, maxUpdateItems, row.edits)
+			}
+
+			// The room answers a request for the document once it has applied what the browser sent
+			// before it, since it reads one connection's messages in order.
+			confirmed := func(peer *docstest.Peer, what string) {
+				t.Helper()
+				if err := peer.AskForDocument(); err != nil {
+					t.Fatal(err)
+				}
+				awaitAnswer(t, peer, what)
+				select {
+				case <-peer.Ended:
+					t.Fatalf("the room ended %s with %v", what, peer.Closed())
+				default:
+				}
+			}
+			holding := func() *crdt.Doc {
+				doc := crdt.New()
+				if err := crdt.ApplyUpdateV1(doc, handoff, nil); err != nil {
+					t.Fatal(err)
+				}
+				return doc
+			}
+			unchanged := func(what string) {
+				t.Helper()
+				if after := crdt.EncodeStateAsUpdateV1(live, nil); !bytes.Equal(after, before) || countRoomStructs(live) != structs {
+					t.Fatalf("after %s the room's state is %d bytes in %d structs, want the %d bytes in %d structs it held", what, len(after), countRoomStructs(live), len(before), structs)
+				}
+			}
+			if err := reader.Write(ygsync.EncodeUpdate(handoff)); err != nil {
+				t.Fatal(err)
+			}
+			confirmed(reader, "the browser that handed its whole state back")
+			reconnected := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"bob"}}, artifactID, holding())
+			awaitAnswer(t, reconnected, "the document to a browser holding it")
+			confirmed(reconnected, "the browser that reconnected holding the document")
+			unchanged("the handoffs")
+			if after, _ := replica.structs.running(); after > total {
+				t.Fatalf("after the handoffs the room's struct total is %d, want no more than the %d it stood at", after, total)
+			}
+
+			editing := holding()
+			into := firstText(editing.GetXmlFragment(fragmentName))
+			docstest.Transact(editing, func(txn *crdt.Transaction) { into.Insert(txn, into.Len(), "offline", nil) })
+			edited := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"carol"}}, artifactID, editing)
+			if !row.edits {
+				select {
+				case <-edited.Ended:
+				case <-time.After(time.Minute):
+					t.Fatal("the room left connected a browser whose edit would take it past the cap")
+				}
+				if closed := edited.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentTooLargeCloseReason {
+					t.Fatalf("the room ended the browser whose edit would take it past the cap with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+				}
+				unchanged("the refused edit")
+				return
+			}
+			awaitAnswer(t, edited, "the document to a browser with an edit")
+			confirmed(edited, "the browser that reconnected with an edit")
+			waitFor(t, 30*time.Second, "the offline edit to reach the document", func() bool {
+				text, err := service.Text(ctx, artifactID)
+				return err == nil && strings.Contains(text, "offline")
+			})
+			if after := countRoomStructs(live); after > maxUpdateItems {
+				t.Fatalf("the edit left the room at %d structs, past the %d cap", after, maxUpdateItems)
+			}
+		})
+	}
+}
+
 // The hook reads a retired client's group by its header, so it closes a browser holding the
 // replaced history wherever the walk refuses that browser's message: at the header of the
 // history's group, past the cap, or in a struct of the group, after the browser's own group either

@@ -274,8 +274,15 @@ func peerTyping(t *testing.T, room *crdt.Doc, text string) []byte {
 // text, which inserts nothing.
 func peerDeleting(t *testing.T, room *crdt.Doc, characters int) []byte {
 	t.Helper()
+	return peerDeletingAt(t, room, 0, characters)
+}
+
+// peerDeletingAt is the update a browser sends that deletes characters of the room's first text
+// from index at, which inserts nothing.
+func peerDeletingAt(t *testing.T, room *crdt.Doc, at, characters int) []byte {
+	t.Helper()
 	browser, from := peerDocument(t, room)
-	browser.Transact(func(txn *crdt.Transaction) { from.Delete(txn, 0, characters) })
+	browser.Transact(func(txn *crdt.Transaction) { from.Delete(txn, at, characters) })
 	return crdt.EncodeStateAsUpdateV1(browser, room.StateVector())
 }
 
@@ -1025,6 +1032,84 @@ func TestTheStructTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) 
 	if total, stale := replica.structs.running(); total != want || stale {
 		t.Fatalf("the load counted a total of %d (stale %t), want the walk's %d structs and the splits of %d parked structs and %d parked ranges, %d",
 			total, stale, walked.structs, pending.Items, pending.DeleteRanges, want)
+	}
+}
+
+// A delete range the room already holds deleted adds nothing to its struct total or its frame
+// total: ygo's apply splits the deleted items at its ends and merges the halves back as the
+// transaction ends (deletedRuns.splitEnds). A new range in the middle of a run of text adds its
+// two splits; one that overlaps the range the room holds, or runs on from it, adds a split only at
+// an end outside it; and one of a client the room holds nothing of, which parks, counts its end
+// splitsAStructCanCause, the structs the room's count holds for the range it parks
+// (structTotalOf), and its start, a client's first clock, nothing. Each is weighed and applied
+// through the hook in a room of its own, which holds ten characters of a run deleted: the room's
+// exact count grows by no more than the addition, not at all for a range it holds, and its total
+// stays at or above the count.
+func TestADeleteRangeTheRoomHoldsAddsNothingToTheStructTotal(t *testing.T) {
+	const stranger = 11
+	for _, row := range []struct {
+		name string
+		// from and length are the range's clocks, from the run's first, or from a stranger's 0.
+		from, length uint64
+		// held is whether the room holds the range deleted, and stranger whether the range is of
+		// a client the room holds nothing of.
+		held, stranger bool
+		// splits is the ends the range can leave split, and added what it adds to the total.
+		splits, added uint64
+	}{
+		{name: "the range the room holds", from: 10, length: 10, held: true},
+		{name: "a range within the range the room holds", from: 12, length: 3, held: true},
+		{name: "a new range in the run", from: 40, length: 5, splits: 2, added: 2},
+		{name: "a range over the end of the range the room holds", from: 15, length: 10, splits: 1, added: 1},
+		{name: "a range over the start of the range the room holds", from: 5, length: 10, splits: 1, added: 1},
+		{name: "a range over the whole range the room holds", from: 5, length: 20, splits: 2, added: 2},
+		{name: "a range running on from the range the room holds", from: 20, length: 2, splits: 1, added: 1},
+		{name: "a range of a client the room holds nothing of", length: 4, stranger: true, splits: 1, added: splitsAStructCanCause},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, room, replica := peerUpdateRoom(t, strings.Repeat("word ", 20)+"\n", 0)
+			service.budget.limit = roomBudgetBytes
+			text := firstText(room.GetXmlFragment(fragmentName))
+			first := crdt.CreateRelativePositionFromIndex(text, 0, 0).Item
+			last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
+			if first == nil || last == nil || last.Client != first.Client || last.Clock != first.Clock+uint64(text.Len())-1 {
+				t.Fatalf("the paragraph's %d characters run from %v to %v, want one run of one client's clocks", text.Len(), first, last)
+			}
+			room.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 10, 10) })
+			charge := service.chargeLoadedRoom("room", room, replica)
+			replica.structs.recount(room)
+
+			client, from := uint64(first.Client), first.Clock+row.from
+			if row.stranger {
+				client, from = stranger, row.from
+			}
+			update := newV1Frame(0).uint(1).uint(client).uint(1).uint(from).uint(row.length).done()
+			weighed := peerWeighing{held: room.StateVector(), known: charge.deletes()}
+			if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
+				t.Fatal(err)
+			}
+			wantFrame := deleteFrameBytes(client, from, row.length, row.splits)
+			if row.held {
+				wantFrame = 0
+			}
+			if weighed.splits != row.splits || weighed.added() != row.added || weighed.frame != wantFrame {
+				t.Fatalf("the range adds %d structs with %d splits and %d frame bytes, want %d structs with %d splits and %d frame bytes",
+					weighed.added(), weighed.splits, weighed.frame, row.added, row.splits, wantFrame)
+			}
+
+			before := countRoomStructs(room)
+			if err, called := weighInto(service, room, update); err != nil || !called {
+				t.Fatalf("the range was answered %v (applied %t), want it admitted", err, called)
+			}
+			after := countRoomStructs(room)
+			if after-before > row.added || (row.added == 0 && after != before) {
+				t.Fatalf("the range took the room's count from %d to %d, want it to grow by no more than the %d it added", before, after, row.added)
+			}
+			if total, stale := replica.structs.running(); total < after || stale {
+				t.Fatalf("the room's total is %d (stale %t), want no less than its exact count %d", total, stale, after)
+			}
+			runtime.KeepAlive(replica)
+		})
 	}
 }
 
