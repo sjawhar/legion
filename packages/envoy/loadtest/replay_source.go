@@ -383,8 +383,10 @@ type replayPlanCounts struct {
 	// PatchUnchanged counts issue.updated writes no PATCH field changed in (a rank, claim or
 	// components change): sent as a PATCH of the unchanged status.
 	PatchUnchanged int `json:"patch_unchanged"`
-	// SpecSizes counts created issues' specs by where their size came from: the first logged
-	// version of the spec, or the median first version of the window's created documents.
+	// SpecSizes counts created issues' specs by where their text came from: version1_text is the
+	// spec's version 1 in created-docs/; otherwise a synthetic text of the first logged version's
+	// size (first_version) or of the window's created documents' median first version
+	// (created_docs_median).
 	SpecSizes map[string]int `json:"spec_sizes"`
 }
 
@@ -946,14 +948,29 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			return nil, "", fmt.Errorf("event %d: %w", ev.ID, err)
 		}
 		act.Kind = rkIssueCreate
-		size, ok := pl.firstSize[is.PrimaryArtifactID]
-		if ok {
-			pl.p.Counts.SpecSizes["first_version"]++
-		} else {
-			size = pl.specDefault
-			pl.p.Counts.SpecSizes["created_docs_median"]++
+		docID := is.PrimaryArtifactID
+		if docID == "" {
+			docID = pl.b.Meta.CreatedSpecs[key]
 		}
-		spec := replaySynthDoc(size, replayHash(pl.o.rngSeed, "spec", is.PrimaryArtifactID))
+		var spec string
+		var size int
+		if id, ok := pl.b.Meta.CreatedSpecs[key]; ok {
+			raw, err := pl.b.readFile(bundleCreatedDir + "/" + id + ".md")
+			if err != nil {
+				return nil, "", fmt.Errorf("bundle created spec %s: %w", key, err)
+			}
+			spec, size = string(raw), len(raw)
+			pl.p.Counts.SpecSizes["version1_text"]++
+		} else {
+			var ok bool
+			if size, ok = pl.firstSize[docID]; ok {
+				pl.p.Counts.SpecSizes["first_version"]++
+			} else {
+				size = pl.specDefault
+				pl.p.Counts.SpecSizes["created_docs_median"]++
+			}
+			spec = replaySynthDoc(size, replayHash(pl.o.rngSeed, "spec", docID))
+		}
 		body := withActorBody(map[string]any{"project": pl.p.Project, "title": is.Title, "spec": spec, "force": true}, actor)
 		if is.Parent != nil {
 			body["parent"] = replayRef{idIssue, *is.Parent}
@@ -961,13 +978,13 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		project := map[string]replayArg{"project": {Lit: url.PathEscape(pl.p.Project)}}
 		act.Stages = [][]*replayReq{
 			{{Method: "POST", Path: "/api/v1/issues", Body: body, Person: person, Produces: []replayProduce{
-				{Ref: issueRef(key), Field: "key"}, {Ref: replayRef{idArtifact, is.PrimaryArtifactID}, Field: "primary_artifact_id"}}}},
+				{Ref: issueRef(key), Field: "key"}, {Ref: replayRef{idArtifact, docID}, Field: "primary_artifact_id"}}}},
 			{{Method: "GET", Path: "/api/v1/projects/{project}/architecture-sources", Params: project, Tolerate: http.StatusNotFound}},
 			{{Method: "GET", Path: "/api/v1/projects/{project}/architecture-source", Params: project}},
 		}
 		pl.created[key] = true
-		pl.docs[is.PrimaryArtifactID] = &rpDoc{text: spec, size: size}
-		pl.issueDocs[key] = append(pl.issueDocs[key], is.PrimaryArtifactID)
+		pl.docs[docID] = &rpDoc{text: spec, size: size}
+		pl.issueDocs[key] = append(pl.issueDocs[key], docID)
 		var snap map[string]json.RawMessage
 		_ = json.Unmarshal(ev.Payload, &snap)
 		pl.snap[key] = snap

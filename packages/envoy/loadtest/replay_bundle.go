@@ -24,7 +24,8 @@ import (
 //	state.json                replayState: the project's issues at `at`, with artifacts, comments and asks
 //	docs/<artifact id>.md     each document's markdown at its version at `at` (replayArtifact.TextPath)
 //	window.jsonl              the window's events, one compact JSON event per line, as Dispatch served them
-//	created-docs/<id>.md      version 1 of each document an artifact.created window event made
+//	created-docs/<id>.md      version 1 of each document an artifact.created window event made, and
+//	                          of each spec an issue.created window event made (replayMeta.CreatedSpecs)
 //	roster.json               []replayRosterEntry: the sessions the replay acts as
 //	bundle.meta.json          replayMeta: counts and the sha256 of every other file
 //
@@ -253,6 +254,9 @@ type replayMeta struct {
 	Until     time.Time    `json:"until"`
 	FetchedAt time.Time    `json:"fetched_at"`
 	Counts    replayCounts `json:"counts"`
+	// CreatedSpecs maps each issue an issue.created window event made to its spec's id, whose
+	// version 1 is created-docs/<id>.md; an issue whose spec version 1 was unreadable is absent.
+	CreatedSpecs map[string]string `json:"created_specs,omitempty"`
 	// Files maps each other bundle file's slash path to its hex sha256.
 	Files map[string]string `json:"files"`
 }
@@ -276,7 +280,11 @@ type replayCounts struct {
 	WindowByType          map[string]int `json:"window_by_type"`
 	CreatedDocs           int            `json:"created_docs"`
 	CreatedDocsUnreadable int            `json:"created_docs_unreadable"`
-	Roster                int            `json:"roster"`
+	// CreatedSpecs counts the window's created issues with a readable spec version 1 in
+	// created-docs/; CreatedSpecsUnreadable those without.
+	CreatedSpecs           int `json:"created_specs"`
+	CreatedSpecsUnreadable int `json:"created_specs_unreadable"`
+	Roster                 int `json:"roster"`
 	// WrittenDocs are the documents in the state that a window event writes to (an anchored
 	// comment on it, or an artifact.version of it); the next two are over their open anchored
 	// root comments at At.

@@ -28,6 +28,8 @@ commands:
                    writes a replay bundle (DISPATCH_URL, DISPATCH_TOKEN_FILE)
   replay-pack      pack a replay bundle as deterministic zstd tar parts
   replay-unpack    unpack replay-pack's parts into a directory
+  replay-verify-bundle
+                   check every file of a bundle against bundle.meta.json's sha256; print counts
   replay-seed      recreate a replay bundle's state on the stack through Dispatch's API, resumably
                    (loadtest.replay_ids maps each logged id to the local one)
   replay-check-seed
@@ -64,6 +66,8 @@ func main() {
 		err = runReplayPack(os.Args[2:])
 	case "replay-unpack":
 		err = runReplayUnpack(os.Args[2:])
+	case "replay-verify-bundle":
+		err = runReplayVerifyBundle(os.Args[2:])
 	case "replay-seed":
 		err = runReplaySeed(os.Args[2:])
 	case "replay-check-seed":

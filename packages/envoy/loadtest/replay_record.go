@@ -88,6 +88,10 @@ type replayMetaRecord struct {
 	// DispatchBuild is $LOADTEST_ROOT/bin/envoy-dispatch.json (dispatch_commit, dispatch_tree,
 	// dispatch_pprof_overlay, dispatch_binary_sha256, go_version, ...).
 	DispatchBuild json.RawMessage `json:"dispatch_build,omitempty"`
+	// LastReset is $LOADTEST_ROOT/replay/last-reset.json, stack.sh reset --replay's record: the
+	// template, the build key, seed_dump_sha256, the checksum of database dispatch before Dispatch
+	// started, the migration and whether the block index owed nothing.
+	LastReset json.RawMessage `json:"last_reset,omitempty"`
 }
 
 // cpuReading is one read of Dispatch's utime+stime ticks.
@@ -114,7 +118,8 @@ const (
 // and build, the cgroup's CPU limit.
 func collectReplayMeta(in replayInputs, pid int, root string) replayMetaRecord {
 	m := replayMetaRecord{}
-	if b, err := os.ReadFile(filepath.Join(root, "replay", "last-reset.json")); err == nil {
+	if b, err := os.ReadFile(filepath.Join(root, "replay", "last-reset.json")); err == nil && json.Valid(b) {
+		m.LastReset = b
 		var r struct {
 			SeedDump string `json:"seed_dump_sha256"`
 			Dump     string `json:"dump_sha256"`

@@ -121,15 +121,15 @@ func TestCollectReplayMeta(t *testing.T) {
 	root := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(root, "replay"), 0o755)
 	_ = os.MkdirAll(filepath.Join(root, "bin"), 0o755)
-	_ = os.WriteFile(filepath.Join(root, "replay", "last-reset.json"), []byte(`{"seed_dump_sha256":"abc"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "replay", "last-reset.json"), []byte(`{"seed_dump_sha256":"abc","checksum":{"md5":"def"}}`), 0o644)
 	_ = os.WriteFile(filepath.Join(root, "bin", "envoy-dispatch.json"), []byte(`{"dispatch_commit":"35efd326","go_version":"go1.27.1"}`), 0o644)
 	t.Setenv("LOADTEST_GOMAXPROCS", "3")
 	m := collectReplayMeta(replayInputs{RateFactor: 0.1}, 0, root)
-	if m.Inputs.SeedDumpSHA256 != "abc" || m.Inputs.DispatchCommit != "35efd326" || m.Inputs.GOMAXPROCS != 3 || m.Inputs.RateFactor != 0.1 || len(m.DispatchBuild) == 0 {
+	if m.Inputs.SeedDumpSHA256 != "abc" || m.Inputs.DispatchCommit != "35efd326" || m.Inputs.GOMAXPROCS != 3 || m.Inputs.RateFactor != 0.1 || len(m.DispatchBuild) == 0 || !strings.Contains(string(m.LastReset), `"def"`) {
 		t.Fatalf("meta %+v", m)
 	}
 	m = collectReplayMeta(replayInputs{}, 0, t.TempDir())
-	if m.Inputs.SeedDumpSHA256 != "" || m.Inputs.DispatchCommit != "" {
+	if m.Inputs.SeedDumpSHA256 != "" || m.Inputs.DispatchCommit != "" || m.LastReset != nil {
 		t.Fatalf("meta without files %+v", m.Inputs)
 	}
 }

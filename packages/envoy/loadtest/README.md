@@ -17,7 +17,7 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload) |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
@@ -38,6 +38,8 @@ same step before and after its change, and compares the two rows.
 | `replay_bundle.go` | The replay bundle: a project's state at an instant plus its window of writes (`state.json`, `docs/`, `window.jsonl`, `created-docs/`, `roster.json`, `bundle.meta.json`), with each document's listed version sizes, the version each typed ask block's answer landed at, and the current blocks of every anchored document; `readBundle`, which verifies every file's sha256, and `keepIssue`, the per-issue sample |
 | `replay_fetch.go` | `loadgen replay-fetch`: reads a project's issues, event logs, artifact listings, document texts and anchored documents' blocks from a Dispatch, read-only (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`), caches every response under `<out>/raw/`, reconstructs the bundle and counts its anchors by the rule each takes |
 | `replay_pack.go` | `loadgen replay-pack` and `replay-unpack`: a bundle (not `raw/`) as deterministic zstd tar parts, and back |
+| `replay_get.go` | `loadgen replay-verify-bundle`: `readBundle` on an unpacked bundle (every file against `bundle.meta.json`'s sha256), then one line of counts; `stack.sh replay-get`'s last check |
+| `replay-2026-10-26.json` | The replay manifest (The replay, below): the bundle's and the seed dump's parts, each a file artifact on dispatch://INFRA-639 with its slug, version, bytes and sha256 |
 | `replay_seed_plan.go` | What the replay seed sends, decided from the bundle alone: issue numbers and placeholders (`-keys-file`), which comments are recreated and in what order, the sentences an anchor may fall back to, approval and issue-field mappings |
 | `replay_anchor.go` | The rest of the seed's pure decisions: `chooseAnchor`, where an anchor lands (its logged quote, else a sentence of its logged block or of the nearest surviving one), which the replay source calls as `substituteAnchor`; and `planHistory`, the size of every synthetic version so each changes as many bytes as production's, built from a padding paragraph and a removed run of sections |
 | `replay_seed.go` | `loadgen replay-seed`: recreates a bundle's state through Dispatch's API, mapping every logged id to its local one in `loadtest.replay_ids` and each anchor's rule in `loadtest.replay_anchors` as it goes, so a killed seed resumes; `-ops-log` writes one CSV row per write with Dispatch's CPU ticks around it |
@@ -46,7 +48,7 @@ same step before and after its change, and compares the two rows.
 | `replay_record.go` | The replay's per-run record: `summary.json` `replay` (Dispatch's CPU over the window from `/proc`, cores at the full rate, idle-corrected, drain, writes, saturation) and `meta.json` `replay` |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
 | `routes-2026-10-26-1719Z.txt` | The default route mix |
-| `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen`, `replay-seed-patch-check`, and `replay-seed`, which seeds the LINUX replay, runs `replay-check-seed` and dumps the database only when it passed |
+| `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset` (and `reset --replay`), `stop`, `status`, `build-info`, `loadgen`, `replay-seed-patch-check`, `replay-seed`, which seeds the LINUX replay, runs `replay-check-seed` and dumps the database only when it passed, and the replay's `replay-manifest`, `replay-get` and `replay-prepare` |
 | `run-step.sh` | The one command for a named step |
 | `run-series.sh` | The series of six steps, 0.25x to 10x |
 | `common.sh` | What the three scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step |
@@ -93,7 +95,10 @@ same step before and after its change, and compares the two rows.
 | `LOADTEST_DISPATCH_PORT` | `18777` | The Dispatch HTTP port. |
 | `LOADTEST_PPROF_PORT` | `16061` | The Dispatch pprof port (`DISPATCH_PPROF_PORT`). |
 | `LOADTEST_PROXY_RTT` | `1ms` | The round trip that the proxy adds, as a Go duration. Read when the proxy starts. |
-| `LOADTEST_PG_DIRECT` | unset | `1` connects Dispatch to Postgres directly, without the proxy. Read when Dispatch starts, so set it on `run-step.sh`. `stack.json` and `meta.json` record it as `pg_direct`. |
+| `LOADTEST_PG_DIRECT` | unset (`1` for a `--replay` step) | `1` connects Dispatch to Postgres directly, without the proxy. Read when Dispatch starts, so set it on `run-step.sh`. `stack.json` and `meta.json` record it as `pg_direct`. |
+| `LOADTEST_DISPATCH_COMMIT` | unset | `stack.sh setup` builds `envoy-dispatch` alone from that commit (`run-step.sh --replay --dispatch-commit`). |
+| `LOADTEST_GOMAXPROCS` | nproc | Dispatch's `GOMAXPROCS` (`run-step.sh --replay --gomaxprocs`). |
+| `DISPATCH_URL`, `DISPATCH_TOKEN_FILE` | unset | Read by `stack.sh replay-get` alone, in its own shell, to download the replay's parts. |
 
 Every process listens on `127.0.0.1`. `stack.sh setup` writes the ports into
 `$LOADTEST_ROOT/stack.json`. Each `setup` reads the port variables again, and `run-step.sh` and
@@ -114,6 +119,8 @@ packages/envoy/loadtest/run-step.sh <name> --events <per s> --sessions <n> --req
   [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>] \
   [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed 1] [--out <dir>]
 ```
+
+A replay step takes `--replay` and the replay's flags instead (The replay, below).
 
 Example, the 1x step of the root report:
 
@@ -248,13 +255,17 @@ series directory.
 | `stack.sh start` | Starts Postgres, the proxy, NATS and the listener. It keeps a process that already runs. It refuses a port that another process holds, and names it. Dispatch starts only in `seed` and `reset`. |
 | `stack.sh seed [--force]` | Makes the seed template `dispatch_seed` (The seed, below). It does nothing when `dispatch_seed` and `seed.meta.json` exist. `--force` drops the old seed and seeds again. |
 | `stack.sh reset [LOG]` | Resets the stack to the seed and starts Dispatch, with its log in `LOG` (default `$LOADTEST_ROOT/logs/dispatch.log`). `run-step.sh` does this before each step. |
+| `stack.sh reset --replay [LOG]` | The same from this build's prepared replay template (The replay, below), refused without one; before Dispatch starts, `loadgen replay-checksum -db dispatch` into `$LOADTEST_ROOT/replay/last-reset.json`. |
+| `stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR]` | Prints a replay manifest from `replay-pack`'s JSON, the bundle's `bundle.meta.json` and `replay-seed`'s `seed.meta.json` (`"seed": null` without `--seed-dir`). |
+| `stack.sh replay-get [--manifest FILE] [--from-dir DIR]` | Gets, verifies and unpacks the manifest's bundle, and restores its seed dump into the template `dispatch_replay_seed` (The replay, below). |
+| `stack.sh replay-prepare` | Makes this build's replay template `dispatch_replay_<key>` from `dispatch_replay_seed` (The replay, below). |
 | `stack.sh stop [NAME...]` | Stops `dispatch`, `listener`, `nats`, `proxy` and `postgres`, or only the named ones. |
 | `stack.sh status` | Prints each process's pid and ports, and the seed's migration, build commit and counts. |
 | `stack.sh build-info` | Prints the checkout's commit and `true` or `false` for uncommitted changes in its tree, as `<commit> <dirty>`. `run-step.sh` records them in `meta.json`. |
 | `stack.sh loadgen ARGS...` | Runs `$LOADTEST_ROOT/bin/loadgen` with the stack's environment, from the root. `run-step.sh` and `run-series.sh` call `loadgen` this way. |
 
-`setup`, `start`, `seed`, `reset` and `stop` take the run lock for their run, and are refused
-while another run holds it (One run at a time, above).
+`setup`, `start`, `seed`, `reset`, `stop`, `replay-seed`, `replay-get` and `replay-prepare` take the
+run lock for their run, and are refused while another run holds it (One run at a time, above).
 
 The processes:
 
@@ -476,12 +487,88 @@ every logged comment, artifact, ask and issue to its local id; `loadgen run` rea
 over the stack's Postgres URL, before the window.
 
 ```bash
+# One replay step (setup, start, replay-get, replay-prepare, reset --replay, loadgen run, tables):
+packages/envoy/loadtest/run-step.sh replay-f0.1 --replay --rate 0.1
+# The same on Dispatch at production's commit of 2026-10-26, Dispatch on one core:
+packages/envoy/loadtest/run-step.sh replay-f0.1-35ef --replay --rate 0.1 --dispatch-commit 35efd326 --gomaxprocs 1
 # What a run would send, without a stack (counts only):
-loadgen replay-plan -replay-inputs "$TMPDIR/i639/bundle" -replay-rate 0.1
-# A run (Dispatch on the restored seed):
-stack.sh loadgen run -source replay -events 0 -requests 0 -replay-inputs "$TMPDIR/i639/bundle" \
-  -replay-rate 0.1 -out "$LOADTEST_ROOT/runs/replay-f0.1" -name replay-f0.1
+loadgen replay-plan -replay-inputs "$LOADTEST_ROOT/replay/bundle" -replay-rate 0.1
 ```
+
+**Running a replay step.** `run-step.sh <name> --replay [--rate F] [--reads RHO] [--read-mix M]
+[--uploads U] [--rng-seed N] [--from D --to D] [--roster N] [--keys-file FILE] [--warmup D]
+[--gomaxprocs N] [--dispatch-commit REV] [--manifest FILE] [--out DIR]` runs, in order:
+
+1. `stack.sh setup` (incremental). `--dispatch-commit REV` builds `envoy-dispatch` alone from REV
+   (`LOADTEST_DISPATCH_COMMIT`); a REV that names no commit is refused before anything starts.
+2. `stack.sh start`. The synthetic seed (`dispatch_seed`) and its migration check are not used.
+3. `stack.sh replay-get --manifest FILE` (default `replay-2026-10-26.json`); once done, it only
+   checks the sha256 of the parts and the bundle's files.
+4. `stack.sh replay-prepare`: this build's template, made once per build.
+5. `stack.sh reset --replay`, whose `last-reset.json` it copies into the step directory.
+6. `loadgen run -source replay -events 0 -requests 0 -replay-inputs $LOADTEST_ROOT/replay/bundle`,
+   with `--rate`, `--reads`, `--read-mix`, `--uploads`, `--from`, `--to`, `--roster` and
+   `--keys-file` as `-replay-rate`, `-replay-reads`, `-replay-read-mix`, `-replay-uploads`,
+   `-replay-from`, `-replay-to`, `-replay-roster` and `-replay-keys-file`, then `loadgen tables`.
+
+`--events`, `--sessions`, `--requests`, `--duration`, `--grace`, `--event-mix`, `--route-mix`,
+`--human` and `--sse` are refused with `--replay`. Dispatch reaches Postgres directly
+(`LOADTEST_PG_DIRECT=1`) unless the environment sets `LOADTEST_PG_DIRECT`; `meta.json`'s `pg_direct`
+records it. `--gomaxprocs N` sets `LOADTEST_GOMAXPROCS`.
+
+**The manifest** (`replay-2026-10-26.json`, schema 1) names no URL or host. It holds `project`,
+`window` {`from`, `to`}, `issue` (`INFRA-639`), `bundle` {`tar_zst_sha256`, `bytes`, `fetched_at`,
+`counts` (`bundle.meta.json`'s), `parts`} and `seed`, null or {`dump_sha256`, `bytes`,
+`compression`, `migration`, `dispatch_commit`, `dispatch_tree`, `patch`, `patch_sha256`,
+`go_version`, `postgres_version`, `seed_seconds`, `keys_file`, `counts`, `check` (the seed check
+without its `*_list` fields), `parts`}. Each part is {`file`, `slug`, `ref`
+(`dispatch://INFRA-639/artifact/<slug>`), `version`, `bytes`, `sha256`}; the slug is the file name
+lower-cased with every character outside `[a-z0-9]` a `-`. `stack.sh replay-manifest` writes it:
+
+```bash
+loadgen replay-pack -in BUNDLE -out PARTS/linux-replay-2026-10-26.tar.zst >pack.json
+stack.sh replay-manifest --bundle-pack pack.json --bundle BUNDLE --seed-dir SEED_OUT >replay-2026-10-26.json
+```
+
+**`stack.sh replay-get`** keeps each part at `$LOADTEST_ROOT/replay/parts/<file>` when its sha256
+matches; else it copies it from `--from-dir DIR` or downloads `GET
+$DISPATCH_URL/api/v1/issues/<issue>/artifacts/<slug>/versions/<version>` with the bearer token in
+`DISPATCH_TOKEN_FILE`, from the caller's environment (curl reads the header on its standard input;
+the token is never printed). A part whose sha256 differs is deleted and refused, naming the part
+and both hashes. Then the joined bundle parts must match `tar_zst_sha256`; they are unpacked into
+`$LOADTEST_ROOT/replay/bundle` (not again while `replay/bundle.unpacked.json` names the same parts
+and the bundle's `bundle.meta.json`), and `loadgen replay-verify-bundle` checks every file. The
+joined seed parts must match `dump_sha256`; the dump is restored once (`pg_restore --no-owner
+--no-privileges -j 2` into a fresh database) into the template `dispatch_replay_seed`, recorded in
+`replay/seed-restored.json` {`seed_dump_sha256`, `migration`, `restore_seconds`,
+`postgres_version`, `restored_at`, `check_passed`, `dispatch_commit`}. The same dump is not restored
+again; another one drops `dispatch_replay_seed` and every prepared template first. A null seed
+restores nothing. The pilot's 11 MB dump restored in 3 s.
+
+**`stack.sh replay-prepare`** keys the template by the first 16 hex of `bin/envoy-dispatch.json`'s
+`dispatch_binary_sha256`. It refuses, before anything starts, a build whose `newest_migration` is
+older than the seed's migration (naming both) and a seed whose check did not pass. A template
+recorded complete for the same seed dump is reused. Otherwise it creates `dispatch_replay_<key>`
+from `dispatch_replay_seed`, restarts NATS on a fresh store and the listener, starts that build's
+Dispatch on it directly (it migrates the copy forward; `/healthz` within 1,800 s), waits for the
+block-index backfill (`document_block_versions` with a null version and `block_grammar_owed`
+empty, when they exist; at most 3,600 s, logged every 30 s), then `wait_quiet` (no owed work, then
+below 0.05 cores over 30 s), stops Dispatch and runs `vacuum analyze`. It installs no commit-time
+trigger. `replay/prepared/<key>.json` records `key`, `dispatch_commit`, `dispatch_binary_sha256`,
+`seed_dump_sha256`, `migration_before`, `migration_after`, `prepare_seconds`,
+`backfill_wait_seconds`, `quiet_wait_seconds`, `created_at` and `last_used_at`. The three most
+recently used templates are kept; older ones are dropped with their records. On the pilot seed
+(20 seeded issues), the checkout's build (migration 114 to 129) took 152 s, 117 s of it the
+backfill and 31 s the quiet wait; 35efd326 (114 to 114) took 34 s.
+
+**`stack.sh reset --replay`** recreates database `dispatch` from this build's prepared template
+(refused without one: run `replay-prepare`), then, before Dispatch starts, writes
+`replay/last-reset.json` {`template`, `key`, `seed_dump_sha256`, `checksum` (`loadgen
+replay-checksum -db dispatch`), `migration`, `prepared` (the template's record), `backfill_empty`
+(the block index owes nothing, or its tables are absent), `reset_at`}. Two resets from one template
+give one checksum.
+
+The flags of `loadgen run -source replay`:
 
 | Flag | Default | What it sets |
 | --- | --- | --- |
@@ -517,7 +604,7 @@ id at one `created_at`. Each becomes one action of one kind:
 | other issue update | `fields` | `GET /issues/{key}` -> `PATCH` with the fields that changed from the previous snapshot (title, status, labels, priority, route, assignee, parent, blocked_by, repo, external_links); a write that changed none of them (a rank, claim or components change) sends the unchanged status and is counted `patch_unchanged` |
 | message by the daemon | `daemon-message` | `GET /issues/{key}/events?order=desc&limit=200` -> `POST /issues/{key}/messages` |
 | message by a session | `message` | `POST /issues/{key}/messages` |
-| issue created | `issue-create` | `POST /issues {project, title, parent, spec, force}` -> `GET /projects/LINUX/architecture-sources` (404 at 35efd326, which does not fail the action) -> `GET /projects/LINUX/architecture-source`; the spec is synthetic, of its first logged version's size, else of the window's created documents' median first version |
+| issue created | `issue-create` | `POST /issues {project, title, parent, spec, force}` -> `GET /projects/LINUX/architecture-sources` (404 at 35efd326, which does not fail the action) -> `GET /projects/LINUX/architecture-source`; the spec is its `created-docs/` version 1 (`bundle.meta.json`'s `created_specs`), else synthetic, of its first logged version's size, else of the window's created documents' median first version (counted in `spec_sizes`) |
 | markdown artifact created | `doc-create` | `POST /issues/{key}/artifacts` with its `created-docs/` version 1 |
 | file artifact created, file version | `file-create`, `file-version` | multipart `POST /issues/{key}/artifacts` with deterministic bytes of the logged size |
 | comment resolved | `resolve` | `POST /comments/{id}/resolve` |
@@ -581,14 +668,16 @@ gives the bytes allocated in the window. `summary.json` `replay`:
 | `roster` | Sessions registered. |
 
 `meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max` (`/sys/fs/cgroup/cpu.max`, `""`
-when absent), `heap_start_at`, `heap_end_at` and `dispatch_build` (the build JSON:
+when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:
 `dispatch_commit`, `dispatch_tree`, `dispatch_pprof_overlay`, `dispatch_binary_sha256`,
-`go_version`); `nproc` and `build_commit` are `meta.json`'s own.
+`go_version`, `newest_migration`) and `last_reset` (`replay/last-reset.json`: the template,
+`seed_dump_sha256`, `checksum`, ...); `nproc`, `build_commit` and `pg_direct` are `meta.json`'s own.
 
 **Not reproduced**: reads (assumed, above); browser document edits and settlements (not sent);
-the text of created issues' specs (synthetic, of the logged size); the content of cut diffs and of
-versions without a diff (a substitute of the logged size change); anchors whose logged quote the
-client's text lacks (substituted); the time a CLI process takes to start between its requests.
+the text of a created issue's spec whose version 1 was unreadable (synthetic, of the logged size;
+counted in `spec_sizes`); the content of cut diffs and of versions without a diff (a substitute of
+the logged size change); anchors whose logged quote the client's text lacks (substituted); the time
+a CLI process takes to start between its requests.
 
 ## Delivery latency
 
@@ -654,6 +743,7 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
 | `heap-start.pprof`, `heap-end.pprof` | Under `-source replay`: Dispatch's heap profile at the window's start and end (The replay, above). |
+| `last-reset.json` | A `--replay` step's copy of `$LOADTEST_ROOT/replay/last-reset.json` (The replay, above). |
 | `heap.txt` | The same heap profile as text (`/debug/pprof/heap?debug=1`), with the runtime's memory statistics. |
 | `goroutines.txt` | Dispatch's goroutine dump (`debug=2`) at the end of the window, after the CPU profile. |
 | `goroutines.summary.txt` | The goroutines that wait for a pool connection, the goroutines in `events.(*Broker).Append`, other request and document goroutines, and the top states. |

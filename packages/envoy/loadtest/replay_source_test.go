@@ -318,6 +318,46 @@ func TestReplayIssueCreated(t *testing.T) {
 	}
 }
 
+func TestReplayIssueCreatedVersion1Spec(t *testing.T) {
+	text := "Created spec version one, for the test.\n"
+	lines := []string{
+		rpEvent(1, "issue.created", "LINUX-3", rpSession, time.Second, map[string]any{"key": "LINUX-3", "title": "new", "primary_artifact_id": "D3"}),
+		rpEvent(2, "artifact.version", "LINUX-3", rpSession, 2*time.Second, map[string]any{"artifact_id": "D3", "name": "spec",
+			"version": map[string]any{"number": 2, "named": false, "size": 777}}),
+		// No primary_artifact_id: the bundle's created_specs names the spec.
+		rpEvent(3, "issue.created", "LINUX-4", rpSession, 3*time.Second, map[string]any{"key": "LINUX-4", "title": "newer"}),
+		// No readable version 1: a synthetic spec of the created documents' median.
+		rpEvent(4, "issue.created", "LINUX-5", rpSession, 4*time.Second, map[string]any{"key": "LINUX-5", "title": "newest", "primary_artifact_id": "D5"}),
+	}
+	b := rpBundle(t, rpState(), lines, map[string]string{"created-docs/D3.md": text, "created-docs/D4.md": text + text})
+	b.Meta.CreatedSpecs = map[string]string{"LINUX-3": "D3", "LINUX-4": "D4"}
+	p, err := planReplay(b, rpOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	creates := map[string]*replayAction{}
+	for _, a := range p.Actions {
+		if a.Kind == rkIssueCreate {
+			creates[a.Issue] = a
+		}
+	}
+	if got := creates["LINUX-3"].Stages[0][0].Body["spec"]; got != text {
+		t.Fatalf("LINUX-3 spec %q, want its version 1", got)
+	}
+	if got := creates["LINUX-4"].Stages[0][0].Body["spec"]; got != text+text {
+		t.Fatalf("LINUX-4 spec %q, want its version 1", got)
+	}
+	if got := creates["LINUX-4"].Stages[0][0].Produces[1]; got.Ref != (replayRef{idArtifact, "D4"}) {
+		t.Fatalf("LINUX-4 produces %v, want the created_specs id", got)
+	}
+	if got := len(creates["LINUX-5"].Stages[0][0].Body["spec"].(string)); got != 4096 {
+		t.Fatalf("LINUX-5 spec %d bytes, want the 4096-byte default", got)
+	}
+	if want := map[string]int{"version1_text": 2, "created_docs_median": 1}; !reflect.DeepEqual(p.Counts.SpecSizes, want) {
+		t.Fatalf("spec sizes %v, want %v", p.Counts.SpecSizes, want)
+	}
+}
+
 func TestReplayDocCreated(t *testing.T) {
 	text := "Created document text for the test, one sentence.\n"
 	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "artifact.created", "LINUX-1", rpSession, time.Second,

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -410,22 +411,48 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 	f.lg.Printf("docs: %d texts", len(docs))
 
 	created := createdDocIDs(rec.Window)
-	createdOK := make([]bool, len(created))
+	specs, err := f.createdSpecs(ctx, rec.Window)
+	if err != nil {
+		return counts, err
+	}
+	fetchIDs := slices.Clone(created)
+	seenID := map[string]bool{}
+	for _, id := range created {
+		seenID[id] = true
+	}
+	for _, s := range specs {
+		if s.ID != "" && !seenID[s.ID] {
+			seenID[s.ID] = true
+			fetchIDs = append(fetchIDs, s.ID)
+		}
+	}
+	fetchedOK := make([]bool, len(fetchIDs))
 	g, gctx = errgroup.WithContext(ctx)
 	g.SetLimit(f.conc)
-	for i, id := range created {
+	for i, id := range fetchIDs {
 		g.Go(func() error {
 			text, ok, err := f.docText(gctx, id, 1)
 			if err != nil || !ok {
 				return err
 			}
-			createdOK[i] = true
+			fetchedOK[i] = true
 			return os.WriteFile(filepath.Join(out, bundleCreatedDir, id+".md"), text, 0o644)
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return counts, err
 	}
+	readable := map[string]bool{}
+	for i, id := range fetchIDs {
+		readable[id] = fetchedOK[i]
+	}
+	createdSpecs := map[string]string{}
+	for _, s := range specs {
+		if readable[s.ID] {
+			createdSpecs[s.Key] = s.ID
+		}
+	}
+	f.lg.Printf("created: %d documents, %d specs", len(created), len(specs))
 
 	mapsUnavailable, err := f.fetchBlockMaps(ctx, &rec.State, rec.Window, byID, out)
 	if err != nil {
@@ -450,13 +477,15 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 			counts.DocsFellBack++
 		}
 	}
-	for _, ok := range createdOK {
-		if ok {
+	for _, id := range created {
+		if readable[id] {
 			counts.CreatedDocs++
 		} else {
 			counts.CreatedDocsUnreadable++
 		}
 	}
+	counts.CreatedSpecs = len(createdSpecs)
+	counts.CreatedSpecsUnreadable = len(specs) - len(createdSpecs)
 	counts.VersionSizesMissing = versionSizesMissing(docs)
 	counts.BlockMaps, counts.BlockMapsUnavailable = len(rec.State.BlockMaps), mapsUnavailable
 	counts.AnchorRules = countAnchorRules(rec.State, rec.Window, docTexts)
@@ -488,7 +517,8 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 	if err != nil {
 		return counts, err
 	}
-	meta := replayMeta{Project: project, At: at, Until: until, FetchedAt: time.Now().UTC(), Counts: counts, Files: files}
+	meta := replayMeta{Project: project, At: at, Until: until, FetchedAt: time.Now().UTC(), Counts: counts,
+		CreatedSpecs: createdSpecs, Files: files}
 	metaJSON, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return counts, err
@@ -920,6 +950,65 @@ func createdDocIDs(window []replayEvent) []string {
 		ids = append(ids, p.Artifact.ID)
 	}
 	return ids
+}
+
+// createdSpec is an issue an issue.created window event made, with its primary (spec) document.
+type createdSpec struct {
+	Key string
+	ID  string // "" when neither the event nor the issue's artifact listing names it
+}
+
+// createdSpecs are the issues issue.created window events made, in window order, each with its
+// spec's id: the event's primary_artifact_id, else the primary document of the issue's listing.
+func (f *replayFetcher) createdSpecs(ctx context.Context, window []replayEvent) ([]createdSpec, error) {
+	var specs []createdSpec
+	seen := map[string]bool{}
+	for _, ev := range window {
+		if ev.Type != "issue.created" {
+			continue
+		}
+		var p struct {
+			Key               string `json:"key"`
+			PrimaryArtifactID string `json:"primary_artifact_id"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		key := p.Key
+		if ev.IssueKey != nil {
+			key = *ev.IssueKey
+		}
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		specs = append(specs, createdSpec{Key: key, ID: p.PrimaryArtifactID})
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(f.conc)
+	for i := range specs {
+		if specs[i].ID != "" {
+			continue
+		}
+		g.Go(func() error {
+			k := specs[i].Key
+			body, ok, err := f.cachedOrUnavailable(gctx, filepath.Join("artifacts", k+".json"), "/api/v1/issues/{key}/artifacts",
+				"/api/v1/issues/"+url.PathEscape(k)+"/artifacts")
+			if err != nil || !ok {
+				return err
+			}
+			var listing []listedArtifact
+			if err := json.Unmarshal(body, &listing); err != nil {
+				return fmt.Errorf("%s artifacts: %w", k, err)
+			}
+			for _, la := range listing {
+				if la.Primary {
+					specs[i].ID = la.ID
+					break
+				}
+			}
+			return nil
+		})
+	}
+	return specs, g.Wait()
 }
 
 // buildRoster lists the sessions the replay acts as: claim holders at at, routed sessions, then

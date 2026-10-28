@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "project": "LINUX",
+  "window": {
+    "from": "2026-10-26T22:55:00Z",
+    "to": "2026-10-26T23:34:00Z"
+  },
+  "issue": "INFRA-639",
+  "bundle": {
+    "tar_zst_sha256": "995082c90a40f11d796717c53eb94d9cefea15f57ede60e98987d3787d33893d",
+    "bytes": 61943024,
+    "fetched_at": "2026-10-28T11:44:01.035718339Z",
+    "counts": {
+      "issues": 1047,
+      "placeholders": 0,
+      "documents": 1760,
+      "doc_bytes": 80973836,
+      "docs_fell_back": 0,
+      "docs_unreadable": 0,
+      "files": 28,
+      "artifacts_unlisted": 0,
+      "comments_open": 18899,
+      "comments_resolved": 271,
+      "anchored_open": 10350,
+      "asks_open": 68,
+      "window_events": 5379,
+      "window_by_type": {
+        "artifact.created": 72,
+        "artifact.version": 1321,
+        "ask.answered": 2,
+        "ask.opened": 1,
+        "ask.resolved": 1,
+        "child.status": 208,
+        "comment.anchor_refreshed": 37,
+        "comment.created": 3224,
+        "comment.reopened": 5,
+        "comment.resolved": 56,
+        "issue.claimed": 1,
+        "issue.closed": 8,
+        "issue.created": 109,
+        "issue.updated": 301,
+        "message.created": 33
+      },
+      "created_docs": 65,
+      "created_docs_unreadable": 0,
+      "created_specs": 109,
+      "created_specs_unreadable": 0,
+      "roster": 452,
+      "written_docs": 425,
+      "written_docs_open_roots_median": 21,
+      "written_docs_open_roots_sum": 10264,
+      "version_sizes_missing": 0,
+      "block_maps": 385,
+      "block_maps_unavailable": 0,
+      "anchor_rules": {
+        "in_logged_block": 960,
+        "logged_quote": 4110,
+        "nearest_surviving_block": 7002,
+        "no_text": 4
+      }
+    },
+    "parts": [
+      {
+        "file": "linux-replay-2026-10-26.tar.zst.part00",
+        "slug": "linux-replay-2026-10-26-tar-zst-part00",
+        "ref": "dispatch://INFRA-639/artifact/linux-replay-2026-10-26-tar-zst-part00",
+        "version": 1,
+        "bytes": 25165824,
+        "sha256": "43cd24bdaf6525d2de8d48d4d1270d506cf1ba6889e06ed5ee5f1d9156dc8a28"
+      },
+      {
+        "file": "linux-replay-2026-10-26.tar.zst.part01",
+        "slug": "linux-replay-2026-10-26-tar-zst-part01",
+        "ref": "dispatch://INFRA-639/artifact/linux-replay-2026-10-26-tar-zst-part01",
+        "version": 1,
+        "bytes": 25165824,
+        "sha256": "824fb0ac8050e8893fc55fdff2ef3c6d6f846bf2a60373c1075ba4e76a1ab87b"
+      },
+      {
+        "file": "linux-replay-2026-10-26.tar.zst.part02",
+        "slug": "linux-replay-2026-10-26-tar-zst-part02",
+        "ref": "dispatch://INFRA-639/artifact/linux-replay-2026-10-26-tar-zst-part02",
+        "version": 1,
+        "bytes": 11611376,
+        "sha256": "d459a7c77629841a914b0cb7f957d50a8c1d9eec0e0872e41488bf5500777995"
+      }
+    ]
+  },
+  "seed": null
+}
