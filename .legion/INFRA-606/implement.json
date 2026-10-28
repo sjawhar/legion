@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T19:05:00Z",
+  "completed": "2026-10-28T19:55:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -140,6 +140,14 @@
       "observed": "The resend fails, the settle reopens comment.created, and the outbox publishes s1's copy: exactly one copy (rounds 3-5's tests also pass, 3 of 3). The claimant case reaches s1 by the claimant copy. A batch publishing the row while the reopen commits leaves it unpublished and the next scan sends only s1's copy. The fallback copy carries agent.<session>.<comment>:<target>:<mode>. Re-run at the forward merge of main (855a4bcb): outbox, store, events, contracts, the named api tests, cmd/dispatch and cmd/listener all ok.",
       "headSha": "855a4bcb54f0fb7536881718f305f4b2230386f2",
       "negativeControl": "At ab61c138 the red test failed (no copy) and the tester's crash.sh with the listener stopped left ses-a without c1; the claimant test fails with the reopen narrowed to suppressed_authors/route suppression; the claim test fails with recordBatch's guard removed."
+    },
+    {
+      "criterion": "The pull request breaks no repository live proof; every reader of a changed contract is in the census (entry 3: POST .../comments answers every mention attempt pending).",
+      "surface": "main's live proof scripts/e2e/dispatch-claimant-delivery.sh: the envoy-dispatch binary built from the head, a real Postgres, the run's own NATS and the e2e fake Envoy listener; Dispatch's browser suite (chromium)",
+      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:15432/claimant_e2e?sslmode=disable DISPATCH_BIN=<envoy-dispatch built from 3e96e81c> bash scripts/e2e/dispatch-claimant-delivery.sh; cd packages/dispatch && bun run e2e -- e2e/mention-composer.e2e.ts --project=chromium",
+      "observed": "summary: 9 ok, 0 FAIL; the mention cases read their rows sent / failed (no live session) after waiting for them to leave pending, within the 10 s bound. mention-composer: 16 passed.",
+      "headSha": "3e96e81cc3f753cae956957d9a29e32d51cc1aea",
+      "negativeControl": "The driver from 896d09b4 (reading the row right after the 201) against the same binary: 6 ok, 3 FAIL (mention-delivered-claimant, mention-failed-claimant, mention-failed-follower), each reading pending. Logs: dispatch://INFRA-606/artifact/infra606-round8-claimant-e2e-tar-gz."
     }
   ],
   "filesChanged": [
@@ -213,6 +221,7 @@
     "packages/envoy/internal/dispatch/store/migrations/0136_comment_deliveries_pending.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "scripts/e2e/README.md",
+    "scripts/e2e/dispatch-claimant-delivery.ts",
     "scripts/e2e/lib/operator-dispatch.sh",
     "scripts/e2e/stage3-4b13b-acceptance.sh",
     "scripts/e2e/stage3-devbox-workflow.sh"
@@ -252,6 +261,6 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 7,
-  "answersTest": "f0143601561128d6da3dcd70504c8fb5665d0bef"
+  "round": 8,
+  "answersTest": "896d09b4b50d9e93f28e4d71afd74b648fee346e"
 }
