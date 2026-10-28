@@ -2,17 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T19:55:00Z",
-  "headTested": "d9be59ee417006f2f9eec31cd4a686f9d37bbeb0",
-  "codeHead": "95336ce647ab",
-  "round": "7: the fix for round 6's 2b failure. 7fbf45cc changes useReferenceData in reference-target.ts: a block read that answers 404 NOT_FOUND reads as no block, while any other failure keeps the last data. It also adds a spec-block twin of my red row, and 95336ce6 adds a changelog fragment. My red row is unchanged. The code changed, so this was a full round on a fresh database.",
+  "completed": "2026-10-28T23:45:00Z",
+  "headTested": "944122cd95b66e5eabdfe2f55462b23fd936c1de",
+  "codeHead": "c4006b81b15e",
+  "round": "8: the conflict return after the reviewer's approval. The forward merge c4006b81 with main 0a1f1f90 renumbers this branch's migrations to 0137-0139, after main's 0136_dashboard_assets, and adds #2481's docstest→crafted import to pmdoc/reanchor_test.go. The fingerprint went from 0102908b to dbc2c851 (changed), as the posted comment says and as I recomputed. So this was a full round, with the upgrade and rollback check run again at the new numbers.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "On a harness built from 95336ce6 (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts e2e/deep-links.e2e.ts` gave 55 passed and 4 skipped. The passes include my round-6 red row 'a link to a block of a comment stops showing the block's text once its author deletes it, with no reload', unmodified; the implementer's spec-block twin; the 2b reword row; and the three passage rows."
+    "how": "On a harness built from c4006b81 (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts e2e/deep-links.e2e.ts` gave 55 passed and 4 skipped. The passes include my red rows from rounds 1 and 6, the 2b reword row, the spec-block deletion row and the three passage rows. My red Go test TestADirectMessagesBlockHasNoAddress passes."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Rollout at the new numbers: a database main migrated takes 0137-0139; the head indexes what main wrote; main runs on the migrated schema and its writes are left owed; rolling forward again indexes them",
+      "surface": "Two real Go servers on one Postgres 17 database (dispatch_upgrade, port 8977): main 0a1f1f90 (the merge's main parent, from git archive, GOWORK=off) and this head, both through run-server.sh",
+      "command": "1. main's server on a fresh database (migrations to 0136_dashboard_assets), then seed-old.sh: a two-paragraph comment citing UPG-2, a reply, an edited comment, an ask reply, an issue message with a reply, and a direct message. 2. The head on the same database. 3. main again: a new comment and a PATCH that moves C's paragraphs. 4. The head again. After steps 2 and 4: GET /api/v1/comments/{id}/blocks, ?to=, the thread, a new reply_to_block, and psql of the owed state",
+      "observed": "Step 2: schema_migrations 139, 138, 137, 136. The first tick logs item_blocks=7, with 0 left owed. C reads b1 'Old first.' and b2 'Old second cites dispatch://UPG-2 here.'. ?to=UPG-2 lists comment/C#b2. The old reply's reply_block is null, and a new reply naming b2 gets b2 with its text. The direct message's block on ?to= answers 404. Step 3: main serves ?to=UPG-2 with the comment node and no block row, and accepts the write and the PATCH. Two comments are left owed. Step 4: the block-index lease the stopped main still held was skipped once. The next tick logged item_blocks=2, with 0 left owed. C reads revision 2 with b2 kept by its text and b3 'Old first, moved.'. The reply still names b2. N gets b1 and b2",
+      "headSha": "c4006b81b15e",
+      "negativeControl": "At step 1, main answered GET /api/v1/comments/<C>/blocks with 404 and listed the mention from the comment node"
+    },
+    {
+      "criterion": "A7, A10 comment half, A11, A13, A15 comment half, R14, the round-1 and round-6 fixes, and the round-5 behaviours 2a, 2b and 2c, at this head",
+      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0139 on a fresh database, the real dispatch CLI, Chromium",
+      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; the five Playwright files above; go test ./internal/dispatch/api/ -run TestADirectMessagesBlockHasNoAddress; go vet ./internal/dispatch/pmdoc/",
+      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 55 passed, 4 skipped. Go: ok. pmdoc vets clean with the merged import. The round-1 HTTP probe: 42 of 43 checks hold. The one failure is the probe's own reply call, which omits attempt",
+      "headSha": "c4006b81b15e",
+      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
+    },
     {
       "criterion": "Round 6's 2b failure, and A13's deletion and restore: a link or card to a comment block shows no pre-edit text once its author deletes the cited paragraph, and cites it again once the text is restored, all without a reload",
       "surface": "The Conversation tab in Chromium on the local harness, with the events stream subscribed",
@@ -20,14 +36,6 @@
       "observed": "The red row passes. D1: after the deletion the open card reads 'CORE-1 comment block' within 5 s, as a fresh page reads it. After the restore, the link reads 'Beta the cited one.' again and its card reads 'CORE-1 · Comment · alice Beta the cited one.'. The main frame does not navigate at any point. D2: the pinned card goes from the revision-1 text to 'Revision 1 Removed in revision 2 Beta pinned text.' with no reload. That 200 answer keeps the pinned text, as the fix intends.",
       "headSha": "95336ce647ab",
       "negativeControl": "At 3c0071f3 the same red row failed: the card still contained 'CORE-1 · Comment · aliceBeta soon deleted.' after the deletion"
-    },
-    {
-      "criterion": "A7, A10 comment half, A11, A13, A15 comment half and R14 (the driver's sections), plus 2a, 2b and 2c, at this head",
-      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0138 on a fresh database, the real dispatch CLI, Chromium",
-      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; the five Playwright files above",
-      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 55 passed, 4 skipped. Round 6 found 2a and 2c holding at b2d4017a, and this round changes neither: it touches only reference-target.ts in the web app, its tests and a changelog fragment.",
-      "headSha": "95336ce647ab",
-      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
     }
   ],
   "heldUp": [
@@ -38,6 +46,6 @@
     "The migrations sit above main's highest: main@origin ends at 0135_server_processes, and this head adds 0136-0138. The fingerprint comment for a19325c4 → b2d4017a (fefd6bc7 → 04c51982, changed) is on the pull request.",
     "The round-1 HTTP probe at this head: 42 of 43 checks hold. The one failure is the probe's own reply call, which omits attempt."
   ],
-  "ci": "At head d9be59ee GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. 95336ce6 shows no runs. The pi-envoy run at b2d4017a, where the skills word guard runs, was cancelled when the next commit was pushed, so the guard (round-5 item 1) has no result yet. I did not wait for CI.",
-  "migrations": "main@origin ends at 0135_server_processes; this head adds 0136-0138."
+  "ci": "At code head c4006b81 GitHub shows build, changes, lint, test, typecheck, the daemon Postgres 16 suite and pr-title queued. 944122cd is a handoff-only commit carrying skip-checks. I did not wait for CI. The known reds on main as the architect listed them at 22:51Z: #2324 and #2473 are in this head through main 0a1f1f90, so a red on either is this branch's. #2481's fix is applied in the merge.",
+  "migrations": "main@origin ends at 0136_dashboard_assets; this head adds 0137-0139."
 }
