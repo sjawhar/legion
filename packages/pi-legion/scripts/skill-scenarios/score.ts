@@ -2353,13 +2353,8 @@ function median(values: number[]): number {
  *     or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
- *     rig.sh runs from;
- *   - it reached outside its own sandbox: a tool call, its own or a subagent's, names an absolute
- *     path (outsidePath) that is outside the work directory, its label's checkout and the usual
- *     system locations, such as the operator's home or another repository. Nothing stops an agent
- *     reading the operator's files (rig.sh runs it with no filesystem isolation), so a run that
- *     read them may have drawn on them. A path the call does not name, as a glob from `/` finds
- *     one, is not caught.
+ *     rig.sh runs from.
+ * A run whose tool calls name a path outside its sandbox is scored, and flagged (outsideReaches).
  * A record missing or malformed is a rig error too, thrown by the scenario's function. */
 function unscored(
   runDir: string,
@@ -2398,10 +2393,6 @@ function unscored(
       if (!allowed.some((dir) => skillPath.startsWith(dir)))
         return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
   }
-  const work = path.dirname(path.dirname(runDir));
-  const reached = outsidePath(runDir, [work, labels.get(label) ?? work]);
-  if (reached !== undefined)
-    return `a ${reached.tool} call names ${reached.path}, outside the run's work directory, its label's checkout and the system locations`;
   return undefined;
 }
 
@@ -2442,15 +2433,25 @@ function argumentStrings(value: unknown): string[] {
     FILE_CONTENT.has(key) ? [] : argumentStrings(field)
   );
 }
-/** The first absolute path a tool call of the run, its own or a subagent's (each transcript under
- * sessions/), names outside `allowed` and SYSTEM_DIRS, whose top-level directory exists on this
- * machine (so a route such as `/v1/messages` in a command is no path). A `task` call is skipped:
- * its assignment is text for the subagent ("do not read files under …"), and what the subagent
- * does reach is in its own transcript, which this reads. */
-function outsidePath(
-  runDir: string,
-  allowed: string[]
-): { tool: string; path: string } | undefined {
+/** Where a path a run named outside its sandbox sits in a tool call: a command or path the agent
+ * ran (`ran`), text it wrote into a file (`wrote`: FILE_CONTENT), or a subagent's assignment
+ * (`assigned`: a `task` call). Only `ran` comes close to a reach; the other two are prose. */
+type ReachKind = "ran" | "wrote" | "assigned";
+interface Reach {
+  kind: ReachKind;
+  tool: string;
+  path: string;
+  context: string;
+}
+/** Every absolute path the run's tool calls, its own and each subagent's (every transcript under
+ * sessions/), name outside `allowed` and SYSTEM_DIRS, whose top-level directory exists on this
+ * machine (so a route such as `/v1/messages` is no path), normalized (`/../tmp` is /tmp), with the
+ * call's text around it. Nothing isolates an agent from the operator's files (rig.sh runs it with
+ * no filesystem sandbox), so such a run may have drawn on them; but tool-call arguments carry the
+ * agent's prose as well as its reaches, and no rule over them can tell the two apart in every
+ * case. So a run is flagged, never unscored, and the flag prints enough to judge each hit. A path
+ * a call reaches without naming it, as a glob from `/` does, is not caught. */
+function outsideReaches(runDir: string, allowed: string[]): Reach[] {
   const inside = (target: string) =>
     [...allowed, ...SYSTEM_DIRS].some((dir) => target === dir || target.startsWith(`${dir}/`));
   const transcripts = (dir: string): string[] =>
@@ -2463,6 +2464,23 @@ function outsidePath(
               : []
         )
       : [];
+  const strings = (value: unknown): string[] =>
+    typeof value === "string"
+      ? [value]
+      : Array.isArray(value)
+        ? value.flatMap(strings)
+        : typeof value === "object" && value !== null
+          ? Object.values(value).flatMap(strings)
+          : [];
+  const contentStrings = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.flatMap(contentStrings)
+      : typeof value === "object" && value !== null
+        ? Object.entries(value).flatMap(([key, field]) =>
+            FILE_CONTENT.has(key) ? strings(field) : contentStrings(field)
+          )
+        : [];
+  const reaches: Reach[] = [];
   for (const file of transcripts(path.join(runDir, "sessions")))
     for (const line of lines(file)) {
       let entry: unknown;
@@ -2474,17 +2492,48 @@ function outsidePath(
       const parsed = SessionEntry.safeParse(entry);
       if (!parsed.success || parsed.data.message?.role !== "assistant") continue;
       for (const part of parsed.data.message.content ?? []) {
-        if (part.type !== "toolCall" || part.name === "task") continue;
-        for (const [named] of argumentStrings(part.arguments).join("\n").matchAll(ABSOLUTE_PATH)) {
-          // `/../tmp/x` is /tmp/x: judge the path a call reaches, not how it spells it.
-          const target = path.posix.normalize(named);
-          const top = `/${target.split("/")[1] ?? ""}`;
-          if (top !== "/" && existsSync(top) && !inside(target))
-            return { tool: part.name ?? "tool", path: target };
-        }
+        if (part.type !== "toolCall") continue;
+        const tool = part.name ?? "tool";
+        const texts: [ReachKind, string][] =
+          tool === "task"
+            ? [["assigned", strings(part.arguments).join("\n")]]
+            : [
+                ["ran", argumentStrings(part.arguments).join("\n")],
+                ["wrote", contentStrings(part.arguments).join("\n")],
+              ];
+        for (const [kind, text] of texts)
+          for (const hit of text.matchAll(ABSOLUTE_PATH)) {
+            const target = path.posix.normalize(hit[0]);
+            const top = `/${target.split("/")[1] ?? ""}`;
+            if (top === "/" || !existsSync(top) || inside(target)) continue;
+            const at = hit.index ?? 0;
+            const context = text.slice(Math.max(0, at - 80), at + hit[0].length + 60);
+            reaches.push({ kind, tool, path: target, context: context.replace(/\s+/g, " ") });
+          }
       }
     }
-  return undefined;
+  return reaches;
+}
+/** The flag for a run's outside reaches: a count of each kind on the row's first line, then up to
+ * three hits of each kind, each with its call's text, and what the flag does not establish. */
+function outsideFlag(reaches: Reach[]): { inline: string; lines: string[] } {
+  const kinds: ReachKind[] = ["ran", "wrote", "assigned"];
+  const count = (kind: ReachKind) => reaches.filter((reach) => reach.kind === kind).length;
+  return {
+    inline: ` outside=${kinds.map((kind) => `${kind}:${count(kind)}`).join(",")}`,
+    lines: [
+      ...kinds.flatMap((kind) =>
+        reaches
+          .filter((reach) => reach.kind === kind)
+          .slice(0, 3)
+          .map(
+            (reach) =>
+              `outside (${kind}): a ${reach.tool} call names ${reach.path}: …${reach.context}…`
+          )
+      ),
+      "outside: the run named a path outside its work directory, its label's checkout and the system locations. That does not show it read the path, nor that its result is wrong.",
+    ],
+  };
 }
 
 function scoreRuns(runsDir: string, only: string | undefined) {
@@ -2554,7 +2603,20 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       const dispatch = dispatchOf(dir);
       reason = unscored(dir, scenario, dispatch, label, labels, sharing);
       if (reason === undefined) {
-        const row = score(dir, run, label, askCase);
+        const scored = score(dir, run, label, askCase);
+        const work = path.dirname(runsDir);
+        const reaches = outsideReaches(dir, [work, labels.get(label) ?? work]);
+        const flag = reaches.length === 0 ? undefined : outsideFlag(reaches);
+        const [first = "", ...rest] = scored.notes.split("\n");
+        const row =
+          flag === undefined
+            ? scored
+            : {
+                ...scored,
+                notes: [`${first}${flag.inline}`, ...rest, ...flag.lines.map((l) => `  ${l}`)].join(
+                  "\n"
+                ),
+              };
         rows.push(
           dispatch === undefined ? { ...row, notes: `${row.notes}\n  ${BATCH_DISPATCH_NOTE}` } : row
         );

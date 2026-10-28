@@ -159,11 +159,12 @@
 #     session a work directory starts carries the directory's digest in its name.
 #   - Its agent can still read the whole filesystem, the operator's home included, and write the
 #     machine's /tmp, which nothing here cleans: a namespace sandbox needs user namespaces, which
-#     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run whose tool
-#     calls name a path outside its work directory, its label's checkout and the system
-#     locations, or a skill outside its own label, or whose PR body carries another run's line
-#     (unscored, testerProof). A path a call reaches without naming it, as a glob from `/` does,
-#     is not caught.
+#     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run that names
+#     a skill outside its own label, or whose PR body carries another run's line (unscored,
+#     testerProof). It flags, and still scores, a run whose tool calls name a path outside its
+#     work directory, its label's checkout and the system locations (outsideReaches): a flag shows
+#     the path was named, not that it was read. A path a call reaches without naming it, as a
+#     glob from `/` does, is not caught.
 #   - An exit stops what its command started (on_exit, stop_run, stop_batch).
 #
 # A spec run (run_spec) is a conversation of at most 8 turns. Turn 1 is the prompt. After each turn,

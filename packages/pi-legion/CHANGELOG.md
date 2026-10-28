@@ -22,11 +22,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   CLI's answer printed after the call's exit code. Such a spec write was invisible to `checked`:
   a run whose every write came from Python failed with "no spec write", and other runs had writes
   left out, which made `checked` easier to pass.
-- The skill-scenario scorer leaves unscored, as a rig error, a run whose tool calls (its own or a
-  subagent's) name an absolute path outside its work directory, its label's checkout and the
-  system locations, such as the operator's home or another repository: nothing isolates an agent
-  from the operator's files, so such a run may have drawn on them. A path a call reaches without
-  naming it, as a glob from `/` does, is not caught.
+- The skill-scenario scorer flags a run whose tool calls (its own or a subagent's) name an absolute
+  path outside its work directory, its label's checkout and the system locations, such as the
+  operator's home or another repository: nothing isolates an agent from the operator's files. The
+  run is still scored. Its row counts the hits by where they sit (`outside=ran:N,wrote:N,assigned:N`:
+  a command or path it ran, text it wrote into a file, a subagent's assignment) and prints up to
+  three of each with the call's text around them. A flag shows the run named the path, not that it
+  read it nor that its result is wrong; prose and reaches share the same arguments. A path a call
+  reaches without naming it, as a glob from `/` does, is not caught.
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at

@@ -1666,7 +1666,7 @@ specRun("spec-writing-head-94", {
     finish
   ),
 });
-// A subagent's assignment names a path to stay out of: text for the subagent, no reach.
+// A subagent's assignment names a path to stay out of: prose for the subagent, flagged as such.
 specRun("spec-writing-head-95", {
   transcript: conversation(
     routedRead,
@@ -2105,16 +2105,24 @@ test("a tool call naming the other label's checkout is a rig error wherever the 
   expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
 });
 
-test("a run whose tool call names a path outside its sandbox is a rig error; URLs and routes are not", () => {
-  expect(out).toContain(
-    `spec-writing-head-92\trig error: a read call names ${path.join(homedir(), "src", "other-repo", "README.md")}, outside the run's work directory, its label's checkout and the system locations`
-  );
-  expect(out).not.toContain("spec-writing-head-92\tpass=");
+test("a run whose tool call names a path outside its sandbox is scored and flagged, saying where", () => {
+  const outside = path.join(homedir(), "src", "other-repo", "README.md");
+  // Flagged, never unscored: the run keeps its scores, and its row says what it named and where.
+  expect(out).not.toContain("spec-writing-head-92\trig error");
+  expect(scoresOf("spec-writing-head-92")).toEqual(allPass);
+  const row = rowOf("spec-writing-head-92");
+  expect(row).toContain(" outside=ran:1,wrote:0,assigned:0");
+  expect(row).toContain(`  outside (ran): a read call names ${outside}: …`);
+  expect(row).toContain("That does not show it read the path, nor that its result is wrong.");
+  // A URL, an API route, /tmp and relative paths are no outside path.
   expect(scoresOf("spec-writing-head-93")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-93")).not.toContain(" outside=");
   // A skill path inside the text a write puts in a file is no read of that skill.
   expect(scoresOf("spec-writing-head-94")).toEqual(allPass);
-  // A path inside a subagent's assignment is text for the subagent, not a reach of the run.
+  // A path in a subagent's assignment is flagged as `assigned`, apart from a command it ran.
   expect(scoresOf("spec-writing-head-95")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-95")).toContain(" outside=ran:0,wrote:0,assigned:1");
+  expect(rowOf("spec-writing-head-95")).toContain("  outside (assigned): a task call names ");
 });
 
 test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {
