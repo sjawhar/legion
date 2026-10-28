@@ -186,7 +186,7 @@ func (s *server) writeAdvice(
 	// A human write has no advice query to run - every one of them is about the calling session,
 	// and the triage line this answers is about what a session is told - so it is answered here,
 	// outside the savepoint and the two statement_timeout statements that would otherwise run
-	// inside the write's own transaction while it holds the issue row. Such a write still gets
+	// inside the write's own transaction while it holds the issue's owner lock. Such a write still gets
 	// the triage advice, which is true for a reader who may move the status. A human is the only
 	// non-session actor that reaches a write: optionalActor returns an actor only for the cookie
 	// identity, which is always Kind "user", and every bearer goes through bearerSessionActor,
@@ -202,7 +202,7 @@ func (s *server) writeAdvice(
 		return nil
 	}
 	// Healthy advice queries complete in single-digit milliseconds. Bound them at 500 ms so a
-	// future plan regression cannot hold the issue row lock and a pool connection indefinitely.
+	// future plan regression cannot hold the issue's owner lock and a pool connection indefinitely.
 	if _, err := adviceTx.Exec(ctx, "set local statement_timeout = '500ms'"); err != nil {
 		_ = adviceTx.Rollback(ctx)
 		s.logAdviceError(route, issueKey, "statement_timeout", err)

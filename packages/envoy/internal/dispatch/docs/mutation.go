@@ -308,7 +308,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return "", err
 	}
 	// The live document's locks, in their order (see liveWrite), before the write reads the
-	// document: its owner row and writer slot, then its advisory lock. The upload's version clears
+	// document: its owner's lock and writer slot, then its advisory lock. The upload's version clears
 	// every pending author and each in-flight credit its read held (Ledger.WroteVersion), so no
 	// edit may land between that read and its commit. A document no room holds is read from the
 	// store under that lock (coldFork), which loads no room for the write.
@@ -793,7 +793,12 @@ func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string)
 	}
 }
 
-func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snapshots []tableAnchorSnapshot) error {
+// checkTableAnchorRows refuses a table edit that would remove a row or column holding an open
+// ask's or an unresolved comment's anchor, reading those rows as they stand. It takes no row
+// lock: the caller holds the document owner's lock (joinLiveWrite), and every writer of an
+// anchored ask or comment - its transitions, resolution, reopening, anchor refresh - takes that
+// lock first, so what this reads holds still until the edit commits.
+func checkTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snapshots []tableAnchorSnapshot) error {
 	byMark := make(map[string]tableAnchorSnapshot)
 	for _, snapshot := range snapshots {
 		for _, markID := range snapshot.markIDs {
@@ -814,10 +819,9 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 		select id::text, anchor->>'mark_id', state
 		from asks
 		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-		for share
 	`, artifactID, markIDs)
 	if err != nil {
-		return fmt.Errorf("lock table ask anchors: %w", err)
+		return fmt.Errorf("read table ask anchors: %w", err)
 	}
 	for rows.Next() {
 		var id, markID, state string
@@ -840,10 +844,9 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 		select id::text, anchor->>'mark_id', resolved
 		from comments
 		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-		for share
 	`, artifactID, markIDs)
 	if err != nil {
-		return fmt.Errorf("lock table comment anchors: %w", err)
+		return fmt.Errorf("read table comment anchors: %w", err)
 	}
 	for rows.Next() {
 		var id, markID string
@@ -906,7 +909,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if precondition == nil {
 		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
-	// The live document's locks, in their order (see liveWrite): its owner row and, unless the
+	// The live document's locks, in their order (see liveWrite): its owner's lock and, unless the
 	// room has failed, its writer slot; then its advisory lock, held from before the precondition
 	// is read. A document no room holds is forked from the store under that lock (coldFork), which
 	// loads no room while the lock is held.
@@ -943,7 +946,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			return EditOutcome{}, fmt.Errorf("prevalidate live document operations: %w", err)
 		}
 	}
-	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
+	if err := checkTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
 		return EditOutcome{}, err
 	}
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
@@ -1270,7 +1273,7 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 
 // captureLiveTextAndAuthors is the tree a version records and whom it lists, its authors taken
 // under the document's advisory lock and no later than it reads that tree. It takes the
-// document's locks in their order (see liveWrite) before anything else: the owner row and the
+// document's locks in their order (see liveWrite) before anything else: the owner's lock and the
 // writer slot, the room loaded - unless the calling transaction has a write of its own, whose fork
 // holds the document already - then the advisory lock, which every write to the pending authors
 // and every in-flight credit's landing hold, so the authors it reads stay where it read them until

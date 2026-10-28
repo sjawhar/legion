@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // An issue's claim is the session that intends to implement it, so two sessions never take
@@ -178,7 +179,7 @@ type judgement struct {
 	live   holderLiveness
 }
 
-// claimBlockedBy is the whole taking rule, and it runs under the issue's row lock: the caller
+// claimBlockedBy is the whole taking rule, and it runs under the issue's owner lock: the caller
 // brings what it judged before the lock, this decides against the row. It returns the conflict
 // that stops actor from taking or clearing current, nil when nothing does, or errHolderUnjudged
 // when the judgement cannot speak for the holder the row shows.
@@ -366,7 +367,7 @@ func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool 
 	}
 	// Healthy walks complete in single-digit milliseconds. Bound this one at 500 ms, as the
 	// advice path bounds the same predicate, so neither a future plan regression nor the
-	// detached context above can hold the issue row lock and a pool connection indefinitely.
+	// detached context above can hold the issue's owner lock and a pool connection indefinitely.
 	if _, err := walk.Exec(walkCtx, "set local statement_timeout = '500ms'"); err != nil {
 		_ = walk.Rollback(walkCtx)
 		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
@@ -410,7 +411,12 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+	// The issue's owner lock, then the existence check and the re-read in statements of their own,
+	// so they see whatever the lock's previous holder committed (store.LockOwner).
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
+		return claimApplied{}, err
+	}
+	if err := tx.QueryRow(ctx, `select key from issues where key = $1`, key).Scan(new(string)); err != nil {
 		return claimApplied{}, err
 	}
 	before, err := s.loadIssue(ctx, tx, key)
@@ -426,13 +432,14 @@ func (s *server) claimWrite(
 	}
 	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
 	// claim changed or not, and the same on either side of the write: one query, either way,
-	// under the issue's row lock this transaction already holds. It runs here, before the
-	// write, so that nothing at all sits between appendEvent and COMMIT. The row lock is not
-	// what makes the answer stable - it holds the issue's own row, not its ancestors' - so the
-	// chain is read as it stands, which is enough for a sentence of guidance. A statement that
-	// fails or times out costs the field alone: claimLegionManagedStatus runs it in a savepoint,
-	// on a context no cancellation reaches, bounded by its own statement timeout, and a claim is
-	// what stops two sessions working one issue.
+	// under the issue's owner lock this transaction already holds. It runs here, before the
+	// write, so that nothing at all sits between appendEvent and COMMIT, and so it holds no
+	// transaction id. The owner lock is not what makes the answer stable - it holds the issue,
+	// not its ancestors - so the chain is read as it stands, which is enough for a sentence of
+	// guidance. A statement that fails or times out costs the field alone:
+	// claimLegionManagedStatus runs it in a savepoint, on a context no cancellation reaches,
+	// bounded by its own statement timeout, and a claim is what stops two sessions working one
+	// issue.
 	managed := claimLegionManagedStatus(ctx, tx, key)
 	applied := claimApplied{issue: before, legionManagedStatus: managed}
 	if change.changed {
@@ -462,7 +469,7 @@ func (s *server) claimWrite(
 var errClaimContended = errors.New("the issue's claim changed under every attempt")
 
 // claimCycle is the whole of both claim routes past their own decision: resolve the holder
-// and its liveness with nothing held, decide under the issue's row lock, and answer. The
+// and its liveness with nothing held, decide under the issue's owner lock, and answer. The
 // cycle is bounded at one redo (resolutionAttempts) because a holder that changes twice means
 // a genuinely contended issue whose current holder the caller should simply be told about.
 func (s *server) claimCycle(

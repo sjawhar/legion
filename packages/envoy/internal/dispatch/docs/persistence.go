@@ -162,37 +162,41 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 // that need a check-then-write guarantee must hold it before reading live state. Every durable
 // writer that takes the room lock inside a transaction takes it here; withRoomLock takes the
 // session-level form on its own connection, and lockSettlementCursor try-locks it at shutdown.
-// The rule between this lock and a document's owner row has two halves, and both are
-// load-bearing.
+// The rule between this lock and a document's owner has two halves, and both are load-bearing.
 //
-// Level. No lock on issues, artifacts, projects or asks is `for update`. Weaker levels are
-// free - `for no key update` where a writer must serialise against other writers of the same
-// row, `for share` or `for key share` where it need not - and TestNoForUpdateOnOwnerTables
-// enforces the prohibition over the way these locks are written: a `for update` spelled in a
-// string literal, or in a chain of literals and package-level constants, `var`s included,
-// resolved to a fixpoint, which is every site here. An operand the check cannot resolve is
-// read through its own string literals alone, spliced in with a space at each end, so a clause
-// that forms across that splice is refused too, and only a clause the scanned text never
-// spells, including a keyword the splice splits mid-word, is outside its reach and is a review
-// matter. What `for update` costs is the `for key share` a foreign key takes: under it an
-// insert into doc_updates, doc_snapshots, doc_checkpoints, comments, or any child table added
-// later waits on the owner row, and a durable writer holding this lock then deadlocks against
-// whoever holds that row. `for no key update` conflicts with itself exactly as `for update`
-// did, so writers of one owner still serialise and the per-owner event sequence is unchanged.
+// Level. A writer serialises against the other writers of its document's owner on the owner's
+// advisory lock (store.LockOwner, taken by lockArtifactOwner and requireOpenOwner), not on the
+// owner's row: no transaction locks a row of issues, artifacts or projects before it writes, and
+// the only row lock on them is the write's own - the events' lockEventOwner, `for no key update`,
+// and an update of the row - taken under that advisory lock. No lock on issues, artifacts,
+// projects or asks is `for update`, and TestNoForUpdateOnOwnerTables enforces both over the way
+// these locks are written: a lock clause spelled in a string literal, or in a chain of literals
+// and package-level constants, `var`s included, resolved to a fixpoint, which is every site here.
+// An operand the check cannot resolve is read through its own string literals alone, spliced in
+// with a space at each end, so a clause that forms across that splice is refused too, and only a
+// clause the scanned text never spells, including a keyword the splice splits mid-word, is
+// outside its reach and is a review matter. What `for update` costs is the `for key share` a
+// foreign key takes: under it an insert into doc_updates, doc_snapshots, doc_checkpoints,
+// comments, or any child table added later waits on the owner row, and a durable writer holding
+// this lock then deadlocks against whoever holds that row. Neither the advisory lock nor `for no
+// key update` blocks that key share, and writers of one owner still serialise, so the per-owner
+// event sequence is unchanged.
 //
 // One transaction would still need `for update` on these tables: one that deletes such a row or
 // changes a key column, which is what the weaker level does not cover. Nothing here does either.
 // The check refuses it if something starts to, and that red is the prompt to revisit this rule,
 // not to reach for a weaker level that would not hold.
 //
-// Order. A transaction that takes both an owner row and this lock takes the owner row first.
-// The durable writers - appendUpdate, CaptureSnapshot, PruneAfter, and everything else reaching
-// this through withRoomLock - take no owner row at all, which is why order alone could never
-// have been the whole rule: withRoomLock holds a session-level pg_advisory_lock on its own
-// connection before it opens a transaction, so no row lock can precede it there. But a
-// transaction that does take both, such as an upload appending its event after writing the
-// document, still deadlocks against a settlement if it takes them the other way round: two
-// `for no key update` locks on the same row conflict with each other.
+// Order. A transaction that takes both the owner's lock and this lock takes the owner's lock
+// first: the owner's advisory lock (several sorted by lock key), the in-memory writer slot, the
+// copy lock, this lock, and then, with the transaction's writes, the owner row. The durable
+// writers - appendUpdate, CaptureSnapshot, PruneAfter, and everything else reaching this through
+// withRoomLock - take no owner lock and no owner row at all, only the key share their child
+// inserts take, which is why order alone could never have been the whole rule: withRoomLock holds
+// a session-level pg_advisory_lock on its own connection before it opens a transaction, so nothing
+// can precede it there. But a transaction that does take both, such as an upload appending its
+// event after writing the document, still deadlocks against a settlement if it takes them the
+// other way round: two exclusive holds of one owner's advisory lock conflict with each other.
 func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
 		return fmt.Errorf("lock document room: %w", err)
@@ -669,9 +673,14 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 	return persistence.Version(version), nil
 }
 
+// recoverPruneTx finishes a prune a crash interrupted: it deletes the updates past the checkpoint's
+// ceiling and the checkpoint. Its caller holds the room's document lock (lockDocumentRoom), which
+// every writer of a doc_checkpoints row holds too - PruneAfter and Delete through withRoomLock's
+// session lock on the same key, RebuildTx and this through the transaction lock - so the checkpoint
+// is read with no row lock and cannot move before the deletes.
 func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) error {
 	var ceiling int64
-	err := tx.QueryRow(ctx, `select ceiling from doc_checkpoints where artifact_id = $1 for update`, room).Scan(&ceiling)
+	err := tx.QueryRow(ctx, `select ceiling from doc_checkpoints where artifact_id = $1`, room).Scan(&ceiling)
 	if err == pgx.ErrNoRows {
 		return nil
 	}

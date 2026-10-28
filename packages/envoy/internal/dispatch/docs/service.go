@@ -277,10 +277,12 @@ type artifactOwner struct {
 	Name     string
 }
 
-// lockArtifactOwner loads an artifact's owner, then locks that owner row: the artifact itself
-// for a project document, its issue otherwise. The lock is `for no key update`, so it
-// serialises this writer against every other writer that takes it without blocking the
-// `for key share` a child insert takes - see lockDocumentRoom for why that is the rule.
+// lockArtifactOwner loads an artifact's owner, then takes that owner's lock (store.LockOwner): the
+// artifact itself for a project document, its issue otherwise. The lock is a transaction advisory
+// lock, so it serialises this writer against every other writer of the owner without taking a row
+// lock, and so without giving the transaction a transaction id or blocking the `for key share` a
+// child insert takes - see lockDocumentRoom for why that is the rule. Whether the issue is open is
+// read in the statement after the lock, so a close committed while this waited is seen.
 func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
 	var owner artifactOwner
 	if err := tx.QueryRow(ctx, `
@@ -290,19 +292,25 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 		return artifactOwner{}, false, fmt.Errorf("load document owner: %w", err)
 	}
 	if owner.IssueKey == nil {
+		if err := store.LockOwner(ctx, tx, store.ArtifactOwner(artifactID)); err != nil {
+			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
+		}
 		var exists bool
 		if err := tx.QueryRow(ctx, `
-			select true from artifacts where id = $1 and issue_key is null for no key update
+			select true from artifacts where id = $1 and issue_key is null
 		`, artifactID).Scan(&exists); err != nil {
-			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
+			return artifactOwner{}, false, fmt.Errorf("read document artifact: %w", err)
 		}
 		return owner, true, nil
 	}
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(*owner.IssueKey)); err != nil {
+		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
+	}
 	var open bool
 	if err := tx.QueryRow(ctx, `
-		select closed_at is null from issues where key = $1 for no key update
+		select closed_at is null from issues where key = $1
 	`, *owner.IssueKey).Scan(&open); err != nil {
-		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
+		return artifactOwner{}, false, fmt.Errorf("read document issue: %w", err)
 	}
 	return owner, open, nil
 }
@@ -729,7 +737,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				settles = true
 			} else {
 				// A document whose updates have all been settled would spend the budget
-				// repeating that work - a 1 MiB document's for seconds, holding the issue's row.
+				// repeating that work - a 1 MiB document's for seconds, holding the issue's lock.
 				mu.Lock()
 				owed[room.name] = owes
 				mu.Unlock()
@@ -1316,7 +1324,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if !open {
 		return
 	}
-	// The owner row is read and locked in this transaction, so the repairs settlement injects
+	// The owner is read under its lock in this transaction, so the repairs settlement injects
 	// below do not read it again: that read would be a second pooled connection taken while
 	// this transaction holds one, which is what deadlocks the pool.
 	ctx = withOwnerVerified(ctx)
@@ -1485,7 +1493,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.discardSuppressedPersistence(room, slots...)
 		return
 	}
-	// An open live write is not in the room yet, and since this settlement holds the owner row,
+	// An open live write is not in the room yet, and since this settlement holds the owner's lock,
 	// the write's transaction has already committed: the cursor this settlement versions against
 	// includes its row. Write no version; finishLiveWrite arms a settlement once it is published.
 	superseded := state.roomGeneration != generation

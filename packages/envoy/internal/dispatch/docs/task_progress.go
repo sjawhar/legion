@@ -20,7 +20,8 @@ import (
 // reconciliation (RunTaskProgressReconciliation) takes again (LEGION-542). It runs in the
 // transaction that writes the version, so the counts and the version commit together; a project
 // document or a non-primary artifact owns no issue row and records nothing. The caller holds the
-// issue's owner row already (lockArtifactOwner, requireOpenOwner), so this update waits on nothing.
+// issue's owner lock already (lockArtifactOwner, requireOpenOwner), and every writer of the row
+// takes that lock before the row, so this update waits on nothing.
 func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node) error {
 	return recordTaskProgress(ctx, tx, artifactID, pmdoc.CountTasks(tree))
 }
@@ -68,8 +69,8 @@ const latestPrimaryVersion = `(
 // taskProgressDrift is the issues whose stored task count is not the count of their primary
 // document's latest version: never counted (every row the migration that added these columns
 // found), versioned by a server that wrote no count (the task a deploy replaces, until it stops),
-// or whose latest version was written while the row was locked by another writer. The row's own
-// lock is taken only by the batch that writes it, so the predicate reads nothing it would wait on.
+// or whose latest version was written while another writer held the issue's owner lock. The
+// predicate is a plain read, so it waits on nothing.
 const taskProgressDrift = `i.tasks_version is distinct from ` + latestPrimaryVersion
 
 // taskProgressBatch is how many issues one reconciliation transaction counts; between batches the
@@ -78,9 +79,9 @@ const taskProgressBatch = 50
 
 // TaskProgressReconcileInterval is how often the server reconciles the task counts after the pass
 // it runs at start. One pass after start would miss what a deploy's overlap leaves: the task being
-// replaced still writes versions through code that records no count until it stops, and a row
-// another writer holds during the pass is skipped (skip locked), so the count a reader sees is
-// stale for at most this long.
+// replaced still writes versions through code that records no count until it stops, and an issue
+// another writer holds during the pass is skipped (its owner lock is tried, never waited for), so
+// the count a reader sees is stale for at most this long.
 const TaskProgressReconcileInterval = 5 * time.Minute
 
 // RunTaskProgressReconciliation counts the primary document of every issue whose stored task count
@@ -155,10 +156,14 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 }
 
 // reconcileTaskProgressBatch counts one batch of drifted issues in one transaction and returns how
-// many it counted and whether drift remained past them. Each issue row is locked `for no key
-// update skip locked` - the level every owner-row writer takes (lockArtifactOwner), enough for
-// three non-key columns - so a concurrent writer holding the row is left alone: a version write
-// records its own count, and any other writer leaves the row's drift to a later batch.
+// many it counted and whether drift remained past them. Each issue's owner lock is tried without
+// waiting (store.TryLockOwners, the advisory form of `for no key update skip locked`), so a
+// concurrent writer holding the issue is left alone: a version write records its own count, and any
+// other writer leaves the issue's drift to a later batch. The candidates are read in key order,
+// unlocked, and tried a page at a time until the batch is full or none are left, so issues another
+// writer holds give way to the next ones as skip locked did. What the batch counts is read in a
+// statement after the locks, which sees whatever their previous holders committed, and an issue
+// such a holder has counted meanwhile is no longer drift and is left out.
 func (s *Service) reconcileTaskProgressBatch(
 	ctx context.Context,
 ) (counted int, remaining bool, err error) {
@@ -167,6 +172,42 @@ func (s *Service) reconcileTaskProgressBatch(
 		return 0, false, fmt.Errorf("begin task progress reconciliation: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	var locked []string
+	after := ""
+	for len(locked) < taskProgressBatch {
+		want := taskProgressBatch - len(locked)
+		rows, err := tx.Query(ctx, `
+			select i.key from issues i
+			where `+taskProgressDrift+` and i.key > $2
+			order by i.key
+			limit $1
+		`, want, after)
+		if err != nil {
+			return 0, false, fmt.Errorf("list drifted issue task counts: %w", err)
+		}
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return 0, false, fmt.Errorf("list drifted issue task counts: %w", err)
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		owners := make([]store.Owner, len(candidates))
+		for index, key := range candidates {
+			owners[index] = store.IssueOwner(key)
+		}
+		taken, err := store.TryLockOwners(ctx, tx, owners...)
+		if err != nil {
+			return 0, false, fmt.Errorf("lock drifted issues: %w", err)
+		}
+		for _, owner := range taken {
+			locked = append(locked, owner.Key)
+		}
+		after = candidates[len(candidates)-1]
+		if len(candidates) < want {
+			break
+		}
+	}
 	rows, err := tx.Query(ctx, `
 		select i.key,
 		       coalesce((
@@ -176,13 +217,11 @@ func (s *Service) reconcileTaskProgressBatch(
 		       ), ''),
 		       `+latestPrimaryVersion+`
 		from issues i
-		where `+taskProgressDrift+`
+		where i.key = any($1::text[]) and `+taskProgressDrift+`
 		order by i.key
-		limit $1
-		for no key update of i skip locked
-	`, taskProgressBatch)
+	`, locked)
 	if err != nil {
-		return 0, false, fmt.Errorf("list drifted issue task counts: %w", err)
+		return 0, false, fmt.Errorf("read drifted issue task counts: %w", err)
 	}
 	type drifted struct {
 		key      string
@@ -200,7 +239,7 @@ func (s *Service) reconcileTaskProgressBatch(
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, false, fmt.Errorf("list drifted issue task counts: %w", err)
+		return 0, false, fmt.Errorf("read drifted issue task counts: %w", err)
 	}
 	for _, issue := range batch {
 		var progress pmdoc.TaskProgress

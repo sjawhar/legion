@@ -889,20 +889,24 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-// requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
-// after completion without a second issue query.
+// requireOpenIssue takes the issue's owner lock and returns its lifecycle status, rejecting
+// mutations after completion without a second issue query. The read is the statement after the
+// lock, so it sees a close the lock's previous holder committed while this one waited
+// (store.LockOwner).
 func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
-	return issueOpenStatus(ctx, tx, key, ownerRowLock)
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
+		return "", err
+	}
+	return issueOpenStatus(ctx, tx, key)
 }
 
-// issueOpenStatus is that same read and refusal made through q under lock, so the check a
-// comment makes from the pool before its transaction opens refuses exactly what the locked
-// check will.
-func issueOpenStatus(ctx context.Context, q queryer, key, lock string) (string, error) {
+// issueOpenStatus is that same read and refusal made through q, so the check a comment makes
+// from the pool before its transaction opens refuses exactly what the locked check will.
+func issueOpenStatus(ctx context.Context, q queryer, key string) (string, error) {
 	var status string
 	var open bool
 	if err := q.QueryRow(ctx, `
-		select status, closed_at is null from issues where key = $1`+lock, key).Scan(&status, &open); err != nil {
+		select status, closed_at is null from issues where key = $1`, key).Scan(&status, &open); err != nil {
 		return "", err
 	}
 	if !open {

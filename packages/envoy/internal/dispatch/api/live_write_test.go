@@ -569,7 +569,7 @@ func (f *heldWriteFixture) assertArtifactKeyShareLockAvailable(t *testing.T) {
 	if err := tx.QueryRow(context.Background(), `
 		select id::text from artifacts where id = $1 for key share nowait
 	`, f.issue.PrimaryArtifactID).Scan(&lockedID); err != nil {
-		t.Fatalf("settlement holds artifact lock while waiting for issue lock: %v", err)
+		t.Fatalf("settlement holds an artifact row lock while waiting for the issue's owner lock: %v", err)
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -14,13 +16,31 @@ import (
 // test can stop requests at a known point and let them through together.
 func holdLock(t *testing.T, database *store.Store, lock string, args ...any) (release func()) {
 	t.Helper()
+	return holdWith(t, database, lock, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), lock, args...)
+		return err
+	})
+}
+
+// holdOwner is holdLock for an owner's advisory lock (store.LockOwner), the lock every writer of
+// that owner takes first.
+func holdOwner(t *testing.T, database *store.Store, owner store.Owner) (release func()) {
+	t.Helper()
+	return holdWith(t, database, string(owner.Kind)+" "+owner.Key+"'s owner lock", func(tx pgx.Tx) error {
+		return store.LockOwner(context.Background(), tx, owner)
+	})
+}
+
+// holdWith opens a transaction that runs take and keeps it until the returned release runs.
+func holdWith(t *testing.T, database *store.Store, what string, take func(pgx.Tx) error) (release func()) {
+	t.Helper()
 	tx, err := database.Pool.Begin(context.Background())
 	if err != nil {
 		t.Fatalf("begin the holding transaction: %v", err)
 	}
-	if _, err := tx.Exec(context.Background(), lock, args...); err != nil {
+	if err := take(tx); err != nil {
 		_ = tx.Rollback(context.Background())
-		t.Fatalf("take %q: %v", lock, err)
+		t.Fatalf("take %q: %v", what, err)
 	}
 	released := false
 	release = func() {
@@ -97,7 +117,7 @@ func createProjects(t *testing.T, handler http.Handler, keys ...string) {
 func TestRepoProjectFirstMappingRacedToTwoProjectsTellsTheProjectItLeft(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createProjects(t, handler, "CORE", "OTHER")
-	release := holdLock(t, database, `select key from projects where key = 'CORE' for no key update`)
+	release := holdOwner(t, database, store.ProjectOwner("CORE"))
 	first := putMappingAsync(t, handler, "acme/new", map[string]any{"project": "CORE"})
 	awaitLockWaiters(t, database, 1)
 	second := putMappingAsync(t, handler, "acme/new", map[string]any{"project": "OTHER"})
@@ -128,7 +148,7 @@ func TestRepoProjectSimultaneousDefaultsBothSucceed(t *testing.T) {
 	for _, repo := range []string{"acme/widgets", "acme/gadgets"} {
 		dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/"+repo, map[string]any{"project": "CORE"}, "alice")
 	}
-	release := holdLock(t, database, `select key from projects where key = 'CORE' for no key update`)
+	release := holdOwner(t, database, store.ProjectOwner("CORE"))
 	first := putMappingAsync(t, handler, "acme/widgets", map[string]any{"project": "CORE", "default": true})
 	awaitLockWaiters(t, database, 1)
 	second := putMappingAsync(t, handler, "acme/gadgets", map[string]any{"project": "CORE", "default": true})
@@ -153,7 +173,7 @@ func TestRepoProjectOppositeMovesDoNotDeadlock(t *testing.T) {
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/from-core", map[string]any{"project": "CORE"}, "alice")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/from-other", map[string]any{"project": "OTHER"}, "alice")
 	// The event log's commit-order lock (events.commitOrderAdvisoryLock): every append takes it
-	// after its owner's row, so holding it stops the first move at its first event.
+	// after its owner's lock and row, so holding it stops the first move at its first event.
 	release := holdLock(t, database, `select pg_advisory_xact_lock($1)`, int64(0x4449535041544348))
 	first := putMappingAsync(t, handler, "acme/from-core", map[string]any{"project": "OTHER"})
 	awaitLockWaiters(t, database, 1)
@@ -167,14 +187,14 @@ func TestRepoProjectOppositeMovesDoNotDeadlock(t *testing.T) {
 	}
 }
 
-// An issue created naming a mapping while that mapping moves away never deadlocks: both lock the
-// project before the mapping, so the move either goes first (and the issue is refused,
-// REPO_NOT_MAPPED) or waits for the issue (and is refused, REPO_PROJECT_IN_USE).
+// An issue created naming a mapping while that mapping moves away never deadlocks: both take the
+// project's owner lock before the mapping, so the move either goes first (and the issue is
+// refused, REPO_NOT_MAPPED) or waits for the issue (and is refused, REPO_PROJECT_IN_USE).
 func TestIssueCreateNamingAMappingWhileItMovesDoesNotDeadlock(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createProjects(t, handler, "CORE", "OTHER")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE"}, "alice")
-	release := holdLock(t, database, `select key from projects where key = 'CORE' for no key update`)
+	release := holdOwner(t, database, store.ProjectOwner("CORE"))
 	moved := putMappingAsync(t, handler, "acme/widgets", map[string]any{"project": "OTHER"})
 	awaitLockWaiters(t, database, 1)
 	created := make(chan *httptest.ResponseRecorder, 1)

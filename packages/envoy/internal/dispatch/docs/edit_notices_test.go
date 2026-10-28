@@ -659,7 +659,7 @@ func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 		}()
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			waiting, err := storetest.CountLockWaits(context.Background(), service.store, "%from issues where key = $1 for no key update%")
+			waiting, err := storetest.CountLockWaits(context.Background(), service.store, "%as owner_lock%")
 			if err != nil {
 				t.Errorf("count the sweep's lock waits: %v", err)
 				return nil

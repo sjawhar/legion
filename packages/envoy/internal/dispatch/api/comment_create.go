@@ -112,7 +112,7 @@ func (t commentThreadTarget) replyTurn(actor model.Actor, requested *string) *st
 
 // waitingOnAfter is whom the thread's open ask waits on once a reply recording turn (replyTurn's)
 // is its newest comment; "" when the thread is not an open ask's. It is waitingOnExpression for that
-// row. The comment write holds the owner row that every version write, hand-back and comment insert
+// row. The comment write holds the owner lock that every version write, hand-back and comment insert
 // takes first, so the ask describeAsk read is the one the reply commits beside, and the reply is the
 // thread's newest (migration 0065): a moved approval request waits on its agent, and otherwise the
 // reply's own turn decides, since a hand-back can only have recorded an older reply.
@@ -163,7 +163,7 @@ func (s *server) normalizeCommentThreadTarget(
 		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
 			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
 		}
-		parent, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, *input.ReplyTo)
+		parent, err := s.loadOwnedComment(ctx, tx, owner, *input.ReplyTo)
 		if err != nil {
 			return commentThreadTarget{}, err
 		}
@@ -181,11 +181,11 @@ func (s *server) normalizeCommentThreadTarget(
 	return s.describeAsk(ctx, tx, owner, input.AskID)
 }
 
-// threadHeadOf climbs reply_to from an already-locked comment to the head of its thread: the
-// ask the thread hangs under, or the thread's root comment when it hangs under no ask. The
-// walk is bounded like every other parent walk (the outbox's thread walk, the issue ancestor
-// walk): comments.reply_to has no acyclicity constraint, so a cyclic chain answers 400
-// instead of holding the transaction open.
+// threadHeadOf climbs reply_to from a comment read under the owner's lock to the head of its
+// thread: the ask the thread hangs under, or the thread's root comment when it hangs under no ask.
+// The walk is bounded like every other parent walk (the outbox's thread walk, the issue ancestor
+// walk): comments.reply_to has no acyclicity constraint, so a cyclic chain answers 400 instead of
+// holding the transaction open.
 func (s *server) threadHeadOf(
 	ctx context.Context, tx pgx.Tx, owner owner, from model.Comment,
 ) (commentThreadTarget, error) {
@@ -200,7 +200,7 @@ func (s *server) threadHeadOf(
 		if depth >= parentDepthCap {
 			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
 		}
-		next, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, *root.ReplyTo)
+		next, err := s.loadOwnedComment(ctx, tx, owner, *root.ReplyTo)
 		if err != nil {
 			return commentThreadTarget{}, err
 		}

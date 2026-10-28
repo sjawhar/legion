@@ -375,11 +375,11 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 
 			hold, err := database.Pool.Begin(ctx)
 			if err != nil {
-				t.Fatalf("begin the owner row hold: %v", err)
+				t.Fatalf("begin the owner lock hold: %v", err)
 			}
 			defer hold.Rollback(ctx)
-			if _, err := hold.Exec(ctx, `select 1 from issues where key = $1 for no key update`, issue.Key); err != nil {
-				t.Fatalf("hold the owner row: %v", err)
+			if err := store.LockOwner(ctx, hold, store.IssueOwner(issue.Key)); err != nil {
+				t.Fatalf("hold the owner lock: %v", err)
 			}
 			replied := make(chan *httptest.ResponseRecorder, 1)
 			go func() { replied <- agentReply() }()
@@ -399,7 +399,7 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 				t.Fatalf("reply on the other ask: status=%d body=%s", response.Code, response.Body.String())
 			}
 			if err := hold.Rollback(ctx); err != nil {
-				t.Fatalf("release the owner row: %v", err)
+				t.Fatalf("release the owner lock: %v", err)
 			}
 			response := awaitResponse(t, replied)
 			if response.Code != http.StatusCreated {

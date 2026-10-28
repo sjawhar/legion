@@ -359,7 +359,7 @@ func TestListIssueAsksFiltersByState(t *testing.T) {
 }
 
 func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
-	// The seeded spec's settlement would lock the issue row this test holds; keep it
+	// The seeded spec's settlement would take the issue's owner lock this test holds; keep it
 	// out of the lock queue so the counted waiter is the answer handler.
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")
@@ -378,9 +378,8 @@ func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
 	defer func() { _ = edit.Rollback(context.Background()) }()
-	var lockedKey string
-	if err := edit.QueryRow(context.Background(), `select key from issues where key = $1 for update`, issue.Key).Scan(&lockedKey); err != nil {
-		t.Fatalf("lock issue for edit: %v", err)
+	if err := store.LockOwner(context.Background(), edit, store.IssueOwner(issue.Key)); err != nil {
+		t.Fatalf("take the issue's owner lock for edit: %v", err)
 	}
 	responses := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -1567,8 +1566,9 @@ func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
 		t.Fatalf("begin issue blocker: %v", err)
 	}
 	defer blocker.Rollback(context.Background())
-	if _, err := blocker.Exec(context.Background(), `select 1 from issues where key = $1 for update`, issue.Key); err != nil {
-		t.Fatalf("lock issue: %v", err)
+	// The blocker closes the issue as a PATCH does, under the issue's owner lock.
+	if err := store.LockOwner(context.Background(), blocker, store.IssueOwner(issue.Key)); err != nil {
+		t.Fatalf("take the issue's owner lock: %v", err)
 	}
 	responses := make(chan *httptest.ResponseRecorder, 1)
 	go func() {

@@ -16,8 +16,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// lockedComment is the prologue of every comment mutation: read the comment, refuse a closed
-// owner, then re-read it `for update` so the mutation holds its row lock.
+// lockedComment is the prologue of every comment mutation: read the comment, take its owner's lock
+// and refuse a closed owner, then read it again in a statement after that lock, so the mutation
+// decides on the comment as the lock's previous holder left it. It takes no row lock: every writer
+// of a comment holds its owner's lock, so the comment holds still until this transaction ends.
 func (s *server) lockedComment(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
 	unlockedComment, err := s.loadComment(ctx, tx, id)
 	if err != nil {
@@ -26,7 +28,7 @@ func (s *server) lockedComment(ctx context.Context, tx pgx.Tx, id string) (model
 	if err := s.requireOpenOwner(ctx, tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
 		return model.Comment{}, err
 	}
-	return s.loadCommentForUpdate(ctx, tx, id)
+	return s.loadComment(ctx, tx, id)
 }
 
 func (s *server) resolveComment(w http.ResponseWriter, r *http.Request) {
@@ -326,12 +328,13 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 					return
 				}
 				comment.Anchor.Orphaned = true
-				anchor, err := encodeJSON(comment.Anchor)
-				if err != nil {
-					s.writeHandlerError(w, err)
-					return
-				}
-				if _, err := tx.Exec(r.Context(), `update comments set anchor = $2 where id = $1`, comment.ID, anchor); err != nil {
+				// Only the orphaned key is written, as the anchor refresh writes its keys: the
+				// anchor was read with no row lock, and a whole-anchor write would drop a block_id
+				// the anchor-block backfill pinned since (docs.BackfillAnchorBlocks), which takes
+				// no owner lock.
+				if _, err := tx.Exec(r.Context(), `
+					update comments set anchor = jsonb_set(anchor, '{orphaned}', to_jsonb(true)) where id = $1
+				`, comment.ID); err != nil {
 					s.writeHandlerError(w, err)
 					return
 				}

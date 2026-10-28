@@ -43,7 +43,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 }
 
 // indexDocument indexes one document version, written at versionAt, in its writer's transaction,
-// which holds the document's owner row, from the render the version's markdown came from:
+// which holds the document owner's lock, from the render the version's markdown came from:
 // indexRenderedVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists
 // one block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
 // version with no rendering - an upload whose replacement changed nothing, which writes no tree -
@@ -62,7 +62,7 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 }
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
-// holding the document's owner row: its references, the excerpt of each mention, and its blocks
+// holding the document owner's lock: its references, the excerpt of each mention, and its blocks
 // with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
 // index into markdown, the render they came from. The event the caller appends names the counted
 // targets both the document's references and its blocks' mentions moved, since a node is counted
@@ -84,7 +84,7 @@ func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactI
 }
 
 // indexUnrenderedVersion indexes one document version with no rendering, written at versionAt, in
-// a transaction holding the document's owner row: its references alone. It indexes no blocks and
+// a transaction holding the document owner's lock: its references alone. It indexes no blocks and
 // marks the document's mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
 // reconciliation, which reads the document itself.
 func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {

@@ -251,9 +251,8 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 }
 
 // An upload writes its object before its transaction opens, so while the store takes the bytes
-// the issue's row is free: the transaction locks it for no key update, and every other writer
-// of the issue (a comment, an ask, a status change) would queue behind a store write nothing
-// bounds.
+// the issue's owner lock is free: the transaction takes it, and every other writer of the issue
+// (a comment, an ask, a status change) would queue behind a store write nothing bounds.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
@@ -302,8 +301,10 @@ func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	case response := <-uploaded:
 		t.Fatalf("the upload answered without writing to the store: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue); err != nil {
-		t.Fatalf("lock the issue while its upload's bytes are in flight: %v", err)
+	// The probe tries the issue's owner lock without waiting, in a statement of its own.
+	taken, err := store.TryLockOwners(context.Background(), database.Pool, store.IssueOwner(issue))
+	if err != nil || len(taken) != 1 {
+		t.Fatalf("take the issue's owner lock while its upload's bytes are in flight: taken %v (%v)", taken, err)
 	}
 	release()
 	if response := <-uploaded; response.Code != http.StatusCreated {

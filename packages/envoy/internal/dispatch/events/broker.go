@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // commitOrderAdvisoryLock serializes event inserts until their transaction commits.
@@ -35,37 +35,26 @@ func NewBroker() *Broker {
 	return &Broker{stream: NewStream()}
 }
 
-// LockOwners locks all event owners in a deterministic order. A transaction
-// that appends events for more than one owner must call this before its first
-// Append, so no owner lock can be acquired after the global commit-order lock.
+// LockOwners takes the owner locks of every event owner (store.LockOwners), sorted by lock key. A
+// transaction that appends events for more than one owner must call this before its first Append,
+// so no owner lock is waited for after the global commit-order lock: each Append then takes its
+// owner's lock again, which returns at once, and its owner's row, which no other writer holds
+// without that lock. An ownerless event addressed to a session has no owner lock and adds none.
+// It locks no row, so the transaction holds no transaction id on its account.
 func (b *Broker) LockOwners(ctx context.Context, tx pgx.Tx, owners ...model.Event) error {
 	if b == nil {
 		return fmt.Errorf("event broker required")
 	}
-	type sortableOwner struct {
-		key   string
-		event model.Event
-	}
-	sorted := make([]sortableOwner, 0, len(owners))
+	locks := make([]store.Owner, 0, len(owners))
 	for _, owner := range owners {
-		key, err := eventOwnerKey(owner)
-		if err != nil {
+		if _, err := eventOwnerKey(owner); err != nil {
 			return err
 		}
-		sorted = append(sorted, sortableOwner{key: key, event: owner})
-	}
-	sort.Slice(sorted, func(left, right int) bool {
-		return sorted[left].key < sorted[right].key
-	})
-	for index, owner := range sorted {
-		if index > 0 && owner.key == sorted[index-1].key {
-			continue
-		}
-		if _, err := lockEventOwner(ctx, tx, &owner.event); err != nil {
-			return err
+		if lock, ok := eventOwnerLock(owner); ok {
+			locks = append(locks, lock)
 		}
 	}
-	return nil
+	return store.LockOwners(ctx, tx, locks...)
 }
 
 // Append assigns the next sequence of the event's owner, writes e in tx, and
@@ -207,35 +196,72 @@ func agentEventSessionID(e model.Event) (string, error) {
 	return route.ID, nil
 }
 
-func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error) {
-	var lastSeq int
-	var err error
+// eventOwnerLock is the owner lock of e's owner, false for an ownerless event (a session-addressed
+// message), which has no owner row and no lock.
+func eventOwnerLock(e model.Event) (store.Owner, bool) {
 	switch {
 	case e.IssueKey != nil:
-		err = tx.QueryRow(ctx, `
-			select last_seq, project_key from issues where key = $1 for no key update
-		`, *e.IssueKey).Scan(&lastSeq, &e.Project)
-		if err != nil {
-			return 0, fmt.Errorf("lock issue for event: %w", err)
-		}
+		return store.IssueOwner(*e.IssueKey), true
 	case e.ArtifactID != nil:
-		err = tx.QueryRow(ctx, `
+		return store.ArtifactOwner(*e.ArtifactID), true
+	case e.ProjectKey != nil:
+		return store.ProjectOwner(*e.ProjectKey), true
+	}
+	return store.Owner{}, false
+}
+
+// lockEventOwner takes e's owner lock (store.LockOwner), which returns at once when the
+// transaction took it in its read phase, as every writer does, and then its owner's row `for no
+// key update`, which reads the sequence the append continues. The row lock is a write-phase lock:
+// it is the statement that gives a transaction appending its first event its transaction id, and
+// every Dispatch writer of an owner row takes the owner lock first, so the row is never contended
+// among them. The lock and the row read go in one batch, one round trip, as two statements: the
+// read's snapshot is taken after the lock is granted.
+func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error) {
+	owner, ok := eventOwnerLock(*e)
+	if !ok {
+		return 0, nil
+	}
+	var lastSeq int
+	var row string
+	var scan []any
+	switch owner.Kind {
+	case store.OwnerIssue:
+		row = `select last_seq, project_key from issues where key = $1 for no key update`
+		scan = []any{&lastSeq, &e.Project}
+	case store.OwnerArtifact:
+		row = `
 			select last_seq, project_key
 			from artifacts
 			where id = $1 and issue_key is null
 			for no key update
-		`, *e.ArtifactID).Scan(&lastSeq, &e.Project)
-		if err != nil {
+		`
+		scan = []any{&lastSeq, &e.Project}
+	default:
+		row = `select last_seq from projects where key = $1 for no key update`
+		scan = []any{&lastSeq}
+		e.Project = owner.Key
+	}
+	batch := &pgx.Batch{}
+	store.QueueLockOwner(batch, owner)
+	batch.Queue(row, owner.Key)
+	results := tx.SendBatch(ctx, batch)
+	_, err := results.Exec()
+	if err == nil {
+		err = results.QueryRow().Scan(scan...)
+	}
+	if closeErr := results.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		switch owner.Kind {
+		case store.OwnerIssue:
+			return 0, fmt.Errorf("lock issue for event: %w", err)
+		case store.OwnerArtifact:
 			return 0, fmt.Errorf("lock unlinked artifact for event: %w", err)
-		}
-	case e.ProjectKey != nil:
-		err = tx.QueryRow(ctx, `select last_seq from projects where key = $1 for no key update`, *e.ProjectKey).Scan(&lastSeq)
-		if err != nil {
+		default:
 			return 0, fmt.Errorf("lock project for event: %w", err)
 		}
-		e.Project = *e.ProjectKey
-	default:
-		return 0, nil
 	}
 	return lastSeq, nil
 }

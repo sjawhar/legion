@@ -20,8 +20,8 @@ import (
 // a document, it writes nothing. It reports whether the upload may go on.
 //
 // The object goes first: the bytes (up to maxArtifactBlobSize) cross the network to a store whose
-// wait nothing here bounds, and the transaction takes a pooled connection and the owner's row
-// lock, which every other writer of that issue queues behind. A store that refuses leaves no row
+// wait nothing here bounds, and the transaction takes a pooled connection and the owner's lock,
+// which every other writer of that issue queues behind. A store that refuses leaves no row
 // behind; anything that refuses after it (a closed issue, a kind mismatch, a new name past its
 // bound, a failed insert) leaves an object no row names, which a later upload of the same bytes
 // reuses. The row records the hash the object is keyed by and no bytes.

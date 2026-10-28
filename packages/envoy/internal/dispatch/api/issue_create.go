@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // parseIssuePriority decodes the tri-state `priority` field of an issue write. Absent →
@@ -238,6 +239,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	var number int
 	var projectDefaultAssignee *string
+	// The project's owner lock comes before its row's update: every writer of a projects row
+	// takes it first (an event append, a mapping write, the default assignee's PUT), so none of
+	// them holds the row while it waits on the lock this create holds, and none closes a cycle
+	// with the mapping check below.
+	if err := store.LockOwner(r.Context(), tx, store.ProjectOwner(input.Project)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := tx.QueryRow(r.Context(), `
 		update projects
 		set next_number = next_number + 1
@@ -428,8 +437,13 @@ func (s *server) respondWithExistingExternalIssue(
 	}
 	defer adviceReadTx.Rollback(r.Context())
 	var existingStatus string
+	// The owner lock, then the read in a statement of its own (store.LockOwner).
+	if err := store.LockOwner(r.Context(), adviceReadTx, store.IssueOwner(existingKey)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := adviceReadTx.QueryRow(r.Context(), `
-		select status from issues where key = $1 for no key update
+		select status from issues where key = $1
 	`, existingKey).Scan(&existingStatus); err != nil {
 		s.writeHandlerError(w, err)
 		return

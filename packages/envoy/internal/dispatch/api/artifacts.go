@@ -403,9 +403,9 @@ func (s *server) storeArtifact(
 		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
 		return
 	}
-	// A project document's owner row is the artifact itself, and until here this transaction
-	// has not locked it: the issue branch above locks its issue, but this one only read its
-	// project. Every writer that takes the owner row at all takes it before the room lock -
+	// A project document's owner is the artifact itself, and until here this transaction has
+	// not taken its lock: the issue branch above locks its issue, but this one only read its
+	// project. Every writer that takes the owner's lock at all takes it before the room lock -
 	// the durable writers never take it - and the event this upload appends takes it after the
 	// document write has taken the room. Without this line the upload would run room -> owner
 	// against a settlement's owner -> room, and Postgres would break the cycle with a 500.

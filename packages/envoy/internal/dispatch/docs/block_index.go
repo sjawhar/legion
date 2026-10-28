@@ -263,7 +263,7 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 // indexOwedDocument indexes one owed document at its latest version with the full version index
 // (indexRenderedVersion): references, excerpts, blocks, block texts and the indexed version. It
 // reads the document the server serves (TextWithBlocks) with no transaction held, then, under the
-// document's owner row, which every version write holds first, re-checks that the latest version
+// document owner's lock, which every version write holds first, re-checks that the latest version
 // is still the one listed and the document still owed; otherwise another writer has indexed it or
 // will, and it does nothing.
 //

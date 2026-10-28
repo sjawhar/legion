@@ -154,11 +154,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A PATCH locks every issue row it names in one key order before it reads any of them: the
-	// issue, its current parent when a status change or a reparent appends to it, the proposed
-	// parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never holds one
-	// of those rows while waiting for another that a second write holds. Validation, the
-	// dependency walk and the rank reads below are plain reads of rows already held.
+	// A PATCH takes the owner lock of every issue it names in one lock order before it reads any
+	// of them: the issue, its current parent when a status change or a reparent appends to it, the
+	// proposed parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never
+	// holds one of those locks while waiting for another that a second write holds. Validation, the
+	// dependency walk and the rank reads below are plain reads of issues whose locks it holds.
 	named := make([]string, 0, 3)
 	if parent != nil {
 		named = append(named, *parent)
@@ -385,7 +385,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
-	// lockPatchRowsAndParent already holds each of those rows, so LockOwners re-locks them in that order.
+	// lockPatchRowsAndParent already holds each of those owner locks, so LockOwners returns at once.
 	owners := []model.Event{issueOwner(key).event("", actor, nil)}
 	ownerKeys := map[string]bool{key: true}
 	addOwner := func(parentKey *string) {

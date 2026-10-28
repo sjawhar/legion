@@ -100,6 +100,13 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// The project's owner lock before its row's update, as every projects writer takes them
+	// (createIssue, lockEventOwner): taking the row first and the lock at the append below would
+	// wait, holding the row, on a create that holds the lock and waits for the row.
+	if err := lockOwner(r.Context(), tx, projectOwner(key)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if _, err := tx.Exec(r.Context(), `update projects set default_assignee = $2 where key = $1`, key, assignee); err != nil {
 		s.writeHandlerError(w, err)
 		return

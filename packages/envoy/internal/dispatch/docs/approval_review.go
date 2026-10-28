@@ -56,7 +56,7 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
-// events. Every caller already holds the owner's row (and, when it appends `ask.answered` first,
+// events. Every caller already holds the owner's lock (and, when it appends `ask.answered` first,
 // the commit-order lock) before it calls this; inside WriteReview the row is inserted before the
 // event is appended and its sequence written after. The update that writes the sequence runs the
 // foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so asks
