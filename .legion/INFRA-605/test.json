@@ -2,42 +2,61 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-605",
-  "round": 3,
-  "completed": "2026-10-28T18:20:00Z",
-  "headTested": "c43622a914883bf462246487f7a8d9e858b6c807 (Go code of 218146f09296; real-surface runs used an export of 218146f0 built as dispatch-after3)",
+  "round": 4,
+  "completed": "2026-10-28T20:36:00Z",
+  "headTested": "14fb375ec2016c79854cd8957cb33e794b82624f (Go code of 5e119d381598; real-surface runs used an export of 5e119d38 built as dispatch-after4)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "My red tests from rounds 1 and 2 are unchanged at the head (jj diff 87a5d9e5..218146f0 adds only the implementer's TestFourServicesHoldingSomethingSendAboutOnePingASecondBetweenThem to head_tracker_test.go, no line removed) and pass against a real Postgres 16.2 here: caps, half-open, no-ping-with-nothing; the implementer's four-service test passes (11 pings in 12 s from 3 of the 4). Re-measured idle as the architect asked ($TMPDIR/t605/idle.sh, 60 s windows through the latency proxy, base numbers from round 2): holding nothing, 2 processes 0 pings/min, round trips 223/min (base 223), commits 225 (base 225); 4 processes 0 pings/min, round trips 375/min (base 392), commits 375 (base 388), Postgres CPU 0.19 s/min (base 0.22). Each process holding one cached cold read: 2 processes 46 pings/min, 4 processes 52 pings/min (round 2: 118 and 240), every tracker trusted:true. Real stack again: caps under 2/3 - upgraded 2, 503:8, no 401; half-open reader fresh after 0.1 s."
+    "how": "The implementer changed one line of my round-3 red test TestHearingAnotherProcesssWriteAloneStartsNoPing (491aa41d), as it told me over Envoy: the sync that waited for a tracker entry, which this round's rule forbids, now waits on probe.awaitDecided; jj diff 008a8f42..5e119d38 of head_tracker_test.go shows only that sync in my test (plus tracker.hold in its own unit test and two new tests of its own), the 5 s window and the 'want none' assertion untouched. I re-ran the re-synced test on an export of the round-3 head 008a8f42: FAIL, 'sent 3 pings on dispatch_doc_ping in 5s, want none'; at the head it passes 2 of 2. All my red tests of rounds 1-3 and the implementer's new ones pass 2 of 2 against a real Postgres 16.2 here (caps, half-open, no ping with nothing held, no ping from a heard write, four services about one ping a second, entry-goes-with-its-last-holder, notice-during-fold, and the cached-cold-read, cross-service and own-write read-cache tests)."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "No ping while a process holds nothing the head tracker protects (round 2's defect; the INFRA-514 architect, 16:26Z)",
-      "evidence": "Service.holdsWhatTheTrackerProtects (stale_room.go:357) counts s.heads.figures().Entries > 0 as holding something, and headTracker.observe (head_tracker.go:237, entryLocked) makes an entry for every document whose dispatch_doc_head notice this process hears, read or not; entries leave only at a LISTEN reconnect. So after any write anywhere in the deployment, every process pings for good. Real surface (PRE=edit SETTLE=110 idle.sh after3 t605i3e 2 60): one REST edit on process 1, then 110 s for its room to leave; in the next 60 s both processes reported {resident_rooms 0, read_cache.entries 0, head_tracker {trusted:true, entries:1}} and a psql LISTEN heard 47 pings, Postgres CPU 0.45 s/min against 0.14 holding nothing. Red test (commit 491aa41d6862): cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<postgres> go test -count=1 -run TestHearingAnotherProcesssWriteAloneStartsNoPing ./internal/dispatch/docs/ fails: 'a service that only heard another service's write - no room, no cached read, no preload - sent 2 pings on dispatch_doc_ping in 5s, want none'. My round-2 test passes only because nothing writes in it."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "openByDecision": [
-    "CI: gh pr view 2445 at c43622a9 - mergeable CONFLICTING, 0 checks; #2369 still OPEN. The forward merge of main, the stack on #2369 and the 8-connection count in store.ConnectionsPerProcess / infra/gcp dispatchConnectionsPerPod wait for #2369, as the INFRA-514 architect decided."
+    "CI: gh pr view 2445 at 14fb375e - mergeable CONFLICTING, 0 checks; #2369 still OPEN, so no CI lane has run on any head of this branch and none was read. The forward merge of main, the stack on #2369 and the 8-connection count in store.ConnectionsPerProcess / infra/gcp dispatchConnectionsPerPod wait for #2369, as the INFRA-514 architect decided; that merge changes the code, so it is a new test round in which CI is read at its head."
   ],
   "notMine": [
     "Main's own reds (INFRA controller via the INFRA-514 architect): packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers (fixed by #2464), packages/dispatch/e2e/recipients-claim.e2e.ts route-close (fixed by #2324), packages/dispatch/e2e/mermaid.e2e.ts:194 (INFRA-138's tree)."
   ],
   "proof": [
     {
-      "criterion": "One ping per quiet second per deployment, with jitter, on 2 and 4 processes holding something",
-      "surface": "dispatch-after3 processes on one database through the latency proxy, each after one REST cold read (GET /api/v1/artifacts/<id>/text), a psql LISTEN dispatch_doc_ping counting pings",
-      "command": "PRE=read SETTLE=5 $TMPDIR/t605/idle.sh after3 <db> <2|4> 60",
-      "observed": "2 processes: 46 pings/min, round trips 303/min; 4 processes: 52 pings/min, round trips 487/min, Postgres CPU 0.30 s/min; every tracker trusted:true, one cache entry each",
-      "headSha": "218146f09296",
-      "negativeControl": "round 2's head 2fdeabab under the same idle shape: 118 pings/min with 2 processes and 240 with 4, one per process per second"
+      "criterion": "Hearing another process's write alone starts no ping, and a process that holds nothing pings nothing (rounds 2-3 defects)",
+      "surface": "two and four dispatch-after4 processes on one database through the latency proxy, a REST edit through POST /api/v1/artifacts/<id>/edits, a psql LISTEN dispatch_doc_ping, /debug/vars dispatch_rooms",
+      "command": "PRE=edit SETTLE=110 $TMPDIR/t605/idle.sh after4 t605i4e 2 60; $TMPDIR/t605/idle.sh after4 t605i4n 4 60",
+      "observed": "after one REST edit on process 1 and its room's departure: 0 pings in 60 s, both processes {rooms 0, cache 0, head_tracker entries 0}, round trips 217/min; four processes holding nothing: 0 pings, round trips 378/min (base 392)",
+      "headSha": "5e119d381598",
+      "negativeControl": "the round-3 head 218146f0 under the same edit shape: 47 pings/min with head_tracker entries 1 on each process and no room or cached read"
     },
     {
-      "criterion": "No ping from processes that hold nothing and have heard nothing",
-      "surface": "dispatch-after3 processes on one database, idle, /debug/vars dispatch_rooms",
-      "command": "$TMPDIR/t605/idle.sh after3 <db> <2|4> 60",
-      "observed": "0 pings/min on 2 and on 4 processes; round trips 223 and 375/min against the base's 223 and 392",
-      "headSha": "218146f09296",
-      "negativeControl": "round 2's head 2fdeabab: 118 and 240 pings/min with nothing held"
+      "criterion": "About one ping per quiet window per deployment while processes hold something, and tracker entries follow exactly what is held",
+      "surface": "dispatch-after4 processes on one database; real document websockets typing (throwaway Hocuspocus probe), REST cold reads and REST edits; /debug/vars dispatch_rooms",
+      "command": "PRE=read SETTLE=5 $TMPDIR/t605/idle.sh after4 t605i4r 4 60; $TMPDIR/t605/leak.sh after4 t605lk",
+      "observed": "four processes each holding one cached read: 50 pings/min, every tracker trusted:true; after three typed documents, five cold reads and three REST edits on process 1 and two cold reads on process 2: process 1 {rooms 6, cache 5, entries 11}, process 2 {rooms 0, cache 2, entries 2}; 130 s later, rooms gone: {rooms 0, cache 5, entries 5} and {rooms 0, cache 2, entries 2} - process 2 made no entry for process 1's writes",
+      "headSha": "5e119d381598",
+      "negativeControl": "round 2's head 2fdeabab: 240 pings/min from four processes, one per process per second"
+    },
+    {
+      "criterion": "DR-16 and DR-08 fixes still hold: caps answer 503 only for sockets opening together; a half-open LISTEN's reader is fresh within the bound",
+      "surface": "dispatch-after4 on the tester stack; real document websockets; two processes with the reader's document LISTEN backend stopped by SIGSTOP after its tracker trusted itself",
+      "command": "WAITS=0 $TMPDIR/t605/caps2.sh after4 <db> 2 3 and 1000 3; TRUSTWAIT=6 $TMPDIR/t605/halfopen.sh after4 t605r4h",
+      "observed": "2/3: upgraded 2, 503:8; 1000/3: upgraded 3, 503:7; no 401. Half-open: B trusted:true before the stall, A's edit read fresh by B after 0.1 s, B trusted:false 4 s after the stall",
+      "headSha": "5e119d381598",
+      "negativeControl": "the round-1 head 59a3aeae, same TRUSTWAIT=6 half-open run: B served the old text for 25.5 s while trusted:true"
+    },
+    {
+      "criterion": "Browser updates batched on the rooms' own connections, unchanged by rounds 2-4",
+      "surface": "INFRA-589's load reproduction on the tester's stack and seed, Dispatch built from an export of 5e119d38",
+      "command": "LOADTEST_SRC=$TMPDIR/t605/after4-src packages/envoy/loadtest/run-step.sh tester-r4-editors-1x-over-0.25x-after --events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10",
+      "observed": "2.96 room round trips per editor update, shared-pool share 32%, rooms' connections p50/p99/max 1/5/8, 5,869 batches of 7,188 updates in 17,604 round trips, 7,193/7,193 acknowledged, relay 5/113 ms, durable 75/273 ms (one run; the round-1 head read 73/145 and the base 62/284), REST 100% 2xx p50 29 ms",
+      "headSha": "5e119d381598",
+      "negativeControl": "the base 9692d2fd in round 1 on the same stack and seed: 9.53 round trips per update, 100% shared-pool share, /debug/vars 404"
+    },
+    {
+      "criterion": "A cached cold read costs no database read for the document while the tracker trusts itself",
+      "surface": "REST GET /api/v1/artifacts/<id>/text on one of two processes, round trips counted by the latency proxy",
+      "command": "$TMPDIR/t605/cachehit.sh <before|after|after3|after4> t605ch",
+      "observed": "100 cached reads: 629 round trips at 5e119d38 (round 1 head 616, round 3 head 629), the REST route's own queries; the base 717, one more per read",
+      "headSha": "5e119d381598",
+      "negativeControl": "the base build 9692d2fd: 717 round trips for the same 100 reads, the document stamp read on every one"
     }
   ]
 }
