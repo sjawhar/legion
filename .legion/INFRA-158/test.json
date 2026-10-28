@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-158",
+  "completed": "2026-10-28T09:16:00Z",
+  "round": 20,
+  "generation": 4,
+  "head": "7975b8c31ad7",
+  "handoffHead": "a2f6b8c5ac11",
+  "verdictProvider": "No subagent judged anything in this re-check; the tester's own session ran every check, so no provider or model needs naming.",
+  "recheck": "rebase re-check ec86df97ac82 → 7975b8c31ad7: fingerprint unchanged outside the three regenerated packages/claude-envoy/dist bundles, bare gates only. The full fingerprint moved from 1281f2e2… to 475d2094…. With packages/claude-envoy/dist left out it is a4123d695cb8aa3669b248affbe5ec1c8e3cb16490fdf3bb1065a6753c19cf9f at both heads. In the branch diff, only dist/dispatch.js, dist/envoy-channel.js and dist/session-hook.js differ, each as exports_external.enum([…, \"withdrawn\"]) → _enum2([…, \"withdrawn\"]): bundler renumbering under main's pinned Bun 1.4.4.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Checked the implementer's claim that only the regenerated bundles changed. The fingerprint without packages/claude-envoy/dist is equal at both heads, the per-file comparison shows only bundler names renumbered, and bun run check-dist under Bun 1.4.4 prints 'dist/ and legion/ match a fresh build'."
+  },
+  "failed": 0,
+  "failures": [],
+  "knownLimits": [
+    "A person's edit inside the edit-notice window before a close gets no notice: main's #2137 rule, ruled main's accepted behaviour (Envoy d37afb29).",
+    "In the deploy order, an original copy of a repeated paragraph left unmatched is dated to the reopen's version (architect's accepted limit, Envoy 3d1ba166)."
+  ],
+  "proof": [
+    {
+      "criterion": "Bare gates for the merged head: a smoke close on the real surface, and the claude-envoy bundle built at the head still reads 'Kind: withdrawn'",
+      "surface": "dispatch:local with the head's server on a fresh Postgres 17 (port 5434, database smoke_r23); the committed packages/claude-envoy/dist/dispatch.js, equal to a fresh build",
+      "command": "run-server.sh at the head; create project SM and issue SM-1 with a decision block d1, plus two plain asks; alice PATCH SM-1 status done; GET SM-1; select the asks; bun packages/claude-envoy/dist/dispatch.js read --ref dispatch://SM-1/ask/<id> for a plain ask and for d1",
+      "observed": "open_asks 3 before the close; close 200; status done, open_asks 0; all three asks resolved, withdrawn, actor alice. The bundle printed 'Resolution: - By: alice - Kind: withdrawn - Reason: Withdrawn by the close of SM-1.' for both asks.",
+      "headSha": "7975b8c31ad7",
+      "negativeControl": "Main b69f636f leaves open_asks 5 after the same closes (round 10)"
+    }
+  ],
+  "ci": "At 7975b8c3: Tests 40661127649, Docs 40661127614, Worker Image 40661127686 and Legion Envoy and Contracts 40661127609 are queued.",
+  "evidenceComments": [
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6465068012",
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6446773966"
+  ]
+}
