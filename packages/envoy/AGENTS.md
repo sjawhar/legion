@@ -313,7 +313,12 @@ rendered markdown, the only document content a version stores (`pmdoc.Render` of
 after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live
 write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all apply) - and
 settlement writes a version only when a content-class row lies past the latest version's
-`doc_update_version` cursor and the settled document renders differently from that version.
+`doc_update_version` cursor and the settled document renders differently from that version. It
+stays one measure where a rendering is reused rather than made again: a write takes the rendering
+of its fork before the operation from the room's replica or from its own previous operation, and
+the observer takes a published write's own rendering, only where each is the rendering of the very
+state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is
+deterministic over one state.
 Indexing an ask block fails the second half: it writes an `asks` row and an `ask.opened` event
 over words the edit that wrote the block already versioned, and a settlement that versioned the
 document for that event alone would write a byte-identical version credited to nobody, staling an
@@ -775,9 +780,20 @@ can be integrating meanwhile (`renderedReplica`). The replica moves only through
 one at a time and in commit order: ygo appends each committed transaction's update to the room's
 update log under the document's lock, before any observer of that transaction runs
 (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains
-the log, applying and rendering each update in turn and comparing each rendering with the one
-before it (`updateChangesMarkdown`). So every committed update is classified, and its authors
-credited, exactly once, by whichever observer reaches the log first, against the room as the
+the log, applying each update in turn and comparing the rendering it leaves with the one before it
+(`renderedReplica.changedBy`). It renders the replica for that only when it cannot know the
+rendering otherwise, and two cases it knows exactly. A published live write's update carries its
+operation's rendering, taken when the replica still stands at the epoch and foreign-commit count
+the operation's fork read found before it encoded the room: the replica has then consumed nothing
+since that read but published writes' commits, which under the writer slot are this write's own
+earlier updates, so after the update it is the fork the write rendered. ygo encodes the room's
+whole delete set in every update, so that holds only on the room instance the fork was read from:
+a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch. And an update
+whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`)
+is already in the replica, which starts from the room as of its first commit, so applying it
+changes nothing: a cold write's publish into the room its own publish loaded is never rendered.
+So every committed update is classified, and its authors credited, exactly once, by whichever
+observer reaches the log first, against the room as the
 commit before it left it. Catching the replica up to the room instead took in every commit since
 the last one rendered: when a published write's observer ran first, it counted a browser's edit in
 its own change, which credits no one, and the browser's own observer then found nothing changed,
