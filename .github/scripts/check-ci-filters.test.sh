@@ -433,4 +433,42 @@ check "names the script's command and its line" \
   "$(contains "$out" 'build.sh, which job app runs, runs `go build ./cmd/app`, which this check does not reduce (its line is `go build ./cmd/app ./other`, not the text alone), so it counts as reading every Go file of module mod')"
 check "and the file the module adds" "$(contains "$out" '::error file=mod/other/other.go::')"
 
+echo "case: a claimed simple go command whose step runs it in another directory"
+root=$(fixture moved-working-directory)
+mkdir -p "$root/alt/cmd/app" "$root/alt/lib"
+printf 'package main\n\nfunc main() {}\n' > "$root/alt/cmd/app/main.go"
+printf 'package lib\n' > "$root/alt/lib/lib.go"
+replace "$root/.github/workflows/ci.yaml" "        working-directory: mod" "        working-directory: alt"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the directory the step runs in" "$(contains "$out" 'alt')"
+
+echo "case: an earlier step writes GOFLAGS to GITHUB_ENV before a claimed simple go command"
+root=$(fixture github-env-goflags)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "      - name: Test the app" $'      - name: Set the Go flags\n        run: echo "GOFLAGS=-tags=probe" >> "$GITHUB_ENV"\n      - name: Test the app'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the file that closure reads outside the filter, or the GITHUB_ENV write" "$(contains "$out" 'other\|GITHUB_ENV')"
+
+echo "case: go env -w sets GOFLAGS before a claimed simple go command"
+root=$(fixture go-env-w-goflags)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" $'        run: |\n          go env -w GOFLAGS=-tags=probe\n          go test ./cmd/app ./lib'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the file that closure reads outside the filter, or the go env write" "$(contains "$out" 'other\|go env')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
