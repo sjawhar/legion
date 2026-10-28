@@ -361,3 +361,16 @@ test("--write re-lays out the block after the one that closes a <pre>", async ()
   expect(result.text).toBe("Use <pre>a\nb</pre> here.\n\nNext one.\nThen two.\n");
   expect(result.exitCode).toBe(0);
 });
+
+test("a <code> named inside a code span opens no element, so later blocks are still checked", async () => {
+  // docs/kubernetes.md and packages/pi-envoy/AGENTS.md name `(<code>)` in a code span.
+  const path = await markdownFile("Use `<code>` for code.\n\nLater one. Later two.\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toContain(`${path}:3: R1:`);
+  expect(exitCode).toBe(1);
+});
+
+test("a <code> named inside a code span opens no element, so --write re-lays out later blocks", async () => {
+  const result = await written("Use `<code>` for code.\n\nLater one. Later two.\n");
+  expect(result.text).toBe("Use `<code>` for code.\n\nLater one.\nLater two.\n");
+});
