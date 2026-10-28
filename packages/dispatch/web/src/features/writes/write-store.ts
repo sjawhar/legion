@@ -267,6 +267,10 @@ export function signedInLogin(client: QueryClient): string | undefined {
   return client.getQueryData<AuthenticatedUser>(["whoami"])?.login;
 }
 
+/** Every store made since the last `resetWriteStores`, the app's (`writesOf`) and each one a test
+ *  makes itself. */
+const made = new Set<Writes>();
+
 /**
  * Every write the page makes, one per press, beside the app's `QueryClient` (`writesOf`), above
  * the router, so leaving the page that made one never drops it: a composer's send, a broadcast, a
@@ -326,6 +330,7 @@ export class Writes {
     this.#client = client;
     this.#kept = kept;
     this.#files = files;
+    made.add(this);
   }
 
   /** Every write held, in press order: one array until a write changes. */
@@ -1049,6 +1054,16 @@ export function writesOf(client: QueryClient): Writes {
     stores.set(client, store);
   }
   return store;
+}
+
+/** Lets every write of every store go, its trying stopped (`Writes.clear`), for the unit tests'
+ *  preload. A store outlives the test that made it, and a write it left out goes on retrying on
+ *  its backoff once the test's spies are restored, so against the real client: into the tests
+ *  after it, and into the next file's when `bun test` runs every file in one process, where the
+ *  network guard fails whichever test is running when the retry reaches the network. */
+export function resetWriteStores(): void {
+  for (const store of made) store.clear();
+  made.clear();
 }
 
 export function useWrites(): Writes {
