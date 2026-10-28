@@ -2,22 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T23:33:01Z",
+  "completed": "2026-10-28T08:34:45Z",
   "generation": 3,
-  "round": 5,
-  "reviewedCodeHead": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
-  "scope": "Per the architect: only review 5659622475's items and the folded Fast-follow, plus defects in code they change. Commits c897583f, 2324017e, bc62db61, c0701b8e, and merge 73874ccb (resolution touches only packages/pi-envoy/CHANGELOG.md, both entries kept).",
+  "round": 6,
+  "reviewedCodeHead": "970b120978cebe49b893e9fa4c35cee35af3808b",
+  "scope": "Per the architect: the forward merge b31c73a4 (reviewed in advance, findings sent by Envoy 4fec5a6d) and the four items it raised, fixed in 6ff13d39, d56b0642, 970b1209.",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "ci": "CI head 73874ccb (compare to the handoff head touches only .legion/): required lint, typecheck, test (Tests run 40412726624) and pr-title (run 40412884285) completed success.",
-  "thermo": "Not run this round: the change is the skill line, changelog and AGENTS.md text and a pure extraction of one marker span into RouteReachUnknownMarker with unchanged text, title, classes and test id; the thermonuclear pair ran at 17dd17ec for the rest of this head. Provider: none (no subagent this round).",
+  "ci": "CI head 970b1209 (compare to the handoff head touches only .legion/): required lint, typecheck, test and pr-title completed success.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at b31c73a4 (the merge): deep APPROVE, quality CHANGES; both ran the outbox Go suite on real Postgres, all pass, none skipped. Providers from each run's transcript: deep 61/61 turns anthropic/claude-opus-5-5; quality 42/42 turns anthropic/claude-opus-5-5. Not re-run at 970b1209: the fixes are one switch in settle, one test, one e2e wait and two text lines.",
   "verified": [
-    "skills/dispatch/SKILL.md:48: a claim or a session: route brings a person's answers, comments and messages; a subscription brings agents' activity. True against outbox/publisher.go:480 (route copy only for Notify && !targeted) and events/broker.go Notify (false for agent actors). Tester reports both skill guards pass.",
-    "Changelogs (claude-envoy :35-37, pi-envoy :142-144, envoy :18-21 and :798-800) and packages/envoy/AGENTS.md:2319-2321 state the same split; no 'or the route' for agents' events remains.",
-    "RouteReachUnknownMarker (features/issue/RouteReach.tsx): same text and title; IssueHeader keeps shrink-0 and data-testid issue-route-unknown; AskRecipients renders it bare.",
-    "Threads PRRT_kwDORFy7ds6weGXu and PRRT_kwDORFy7ds6weGXy replied (fixed) and resolved by the author; all 14 threads carry my answer."
+    "settle (publisher.go:331-356) defers only when a.err() == errMentionPending exactly; a denial or failure joined with it is backed off with its attempt counted, a lost connection or stopping process releases it.",
+    "TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere: denied role route -> backed_off, attempt_count 1, next_attempt_at retry.Delay(1), reached recorded; unavailable author route -> released, 0 attempts, no next_attempt_at. Ran it with the claimant suite on real Postgres at 970b1209: PASS.",
+    "recipients-claim.e2e.ts 'a follower that holds the claim': polls a probe issue routed to role:reviewer until route_holder is the reviewer before the route change, so the card's one refresh cannot read a roster cached before the reviewer went live.",
+    "packages/envoy/AGENTS.md:2632-2635 now says a deferral meeting a lost connection or a stopping process is released; skills/dispatch/SKILL.md:46 reads 'taking it removes the tree from the workflow'."
   ],
+  "mergeable": "GitHub reports #2225 CONFLICTING with main (it must absorb #2228); the architect sends it back for the final forward merge after this approval.",
   "keyFindings": []
 }
