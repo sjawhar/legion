@@ -316,10 +316,11 @@ type queryer interface {
 // test. Every server holds the event stream relay (INFRA-66), which every open SSE connection and
 // the hub read, and which runs its own listening connection while any of them subscribes, also on
 // Lifetime, and the comment mention sender, which sends on Lifetime and drains for at most
-// mentionDrainTimeout once it ends; a server with a Lifetime and a store also starts the
-// sender's recovery pass for the attempts a stopped process left pending. The returned wait
-// blocks until the hub, every delivery socket, the relay and the mention sends in flight have
-// ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+// mentionDrainTimeout once it ends; a server with a Lifetime and a store also runs the sender's
+// stranded pass, at start and every strandedPassInterval, for the attempts any process left
+// pending. The returned wait blocks until the hub, every delivery socket, the relay, the mention
+// sends in flight and a stranded pass that is running have ended. Call it only after Lifetime has
+// been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
@@ -347,16 +348,16 @@ func (s *server) waitBackground() {
 // and mention sender a test waits out before its database closes. It is also called with a zero
 // Deps, as TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap
 // and must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler, the relay's first subscriber, or the mention sender's recovery pass,
+// later, from a handler, the relay's first subscriber, or the mention sender's stranded pass,
 // which starts only with a Lifetime and a store.
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
-	s.mentions = newMentionSender(s.lifetime(), s.sendCommentMention, s.strandedCommentMentions)
+	s.mentions = newMentionSender(s.lifetime(), strandedPassInterval, s.sendCommentMention, s.strandedCommentMentions)
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
 		if deps.Store != nil && deps.Store.Pool != nil {
-			s.mentions.recoverStranded()
+			s.mentions.start()
 		}
 	}
 	routes := s.routes()

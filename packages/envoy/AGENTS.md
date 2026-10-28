@@ -1289,18 +1289,27 @@ is keyed by its string, so two comments to one recipient can then arrive in eith
 recipient gets the comments this process accepted, on one lane, in the order it accepted them, at
 most 8 lanes send at once, and at most 4,096 sends wait. A send
 past that bound is not queued and stays `pending` and unclaimed. Once the server's lifetime ends
-no queued send starts, and the sends in flight get 10 s (`mentionDrainTimeout`) before their
-context is cancelled. A recovery pass at startup, and again once an overflowed queue drains,
-resumes the attempts that are `pending`, unclaimed or with a lapsed claim, and created in the last
-hour, through the same claim, so an attempt a live sender holds is not sent twice. A process
-killed with sends in flight leaves their attempts `pending` under a claim that is still live when
-the next process starts; a pass that finds one held by a claim taken before the sender's first
-pass runs once more when the newest such claim lapses (a minute after it was taken, plus a
-second), and that pass repeats the rule, so the passes end about a minute after startup and a busy
-sender's own claims schedule none. Such a resend repeats the attempt's idempotency key, so a send
-the killed process had already handed over is dropped as a repeat (`DELIVERY_DUPLICATE_WINDOW_MS`
-says by whom, and where that fails). Order holds within one process only: a resumed attempt can
-reach its recipient after comments accepted later. A targeted
+nothing more is queued - a comment that commits during the HTTP drain is answered, its refused
+send logged at WARN - no queued send starts, and the sends in flight get 10 s
+(`mentionDrainTimeout`) before their context is cancelled. Every process runs a stranded pass at
+startup and every 30 s after (`strandedPassInterval`, half the claim lease): it resumes the
+attempts that are `pending`, unclaimed or with a lapsed claim, and created between a claim lease
+(one minute) and an hour ago, whichever process left them, through the same claim, so an attempt a
+live sender holds is not sent twice, and it skips the attempts its own sender has queued and not
+finished, so a busy sender does not queue its own unstarted sends twice. An attempt younger than
+the lease is left to the process that queued it, so a pass never takes a live process's queue out
+of order. So a process that stops leaves its refused and queued sends, and one past the queue's
+bound, to a later pass once they have waited a lease - in a rolling update
+(`gcp:Dispatch` above one replica) the successor is up before the old process is stopped - and a
+process killed with sends in flight leaves their attempts `pending` under a claim that the first
+pass after it lapses resumes, within a minute and 30 s of its taking. Such a resend repeats the
+attempt's idempotency key, so a send the killed process had already handed over is dropped as a
+repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says by whom, and where that fails). Each pass costs one
+read of the pending `comment_deliveries` rows per process every 30 s; `comment_deliveries` has
+no index on `state`, so that read scans the table, a cost taken in place of a migration that adds
+one. Order holds within one process only: an attempt resumed after a crash or a handoff can reach
+its recipient after comments accepted later.
+A targeted
 message is the same shape on `message_deliveries`, resolved before the claim rather than after it:
 `recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that
 resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery`

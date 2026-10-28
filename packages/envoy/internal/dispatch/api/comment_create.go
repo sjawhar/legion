@@ -641,8 +641,9 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			resolveError = &mention.ResolveError
 		}
 		// The attempt commits with its comment, pending and unclaimed: the mention sender claims
-		// it when its send starts, and an attempt no sender reaches - one queued at shutdown, or
-		// past the queue's bound - is still there for the recovery pass to find.
+		// it when its send starts, and an attempt no sender reaches - one queued at shutdown,
+		// refused once the sender stopped, or past the queue's bound - is still there for a
+		// stranded pass to find.
 		attempt, err := scanCommentDelivery(tx.QueryRow(r.Context(), `
 			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
 			values ($1, $2, 1, $3, $4, $5, 'pending')
@@ -723,7 +724,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	s.publish(events...)
 	for _, mention := range resolvedMentions {
-		s.mentions.enqueue(mentionSend{comment: comment, created: event, mention: mention, actor: actor})
+		s.mentions.enqueue(mentionSend{comment: comment, created: event, mention: mention, actor: actor, attempt: 1})
 	}
 	// The answer carries each attempt as it committed, pending: the mention sender settles it
 	// after this response, and its comment.delivery receipt says how it ended.

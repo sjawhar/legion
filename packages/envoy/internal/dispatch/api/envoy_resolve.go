@@ -153,8 +153,8 @@ func deliveryErrorText(err error) string {
 // behind could never resume a stranded attempt.
 const claimLapsed = `(claimed_at is null or claimed_at < now() - interval '` + claimLease + `')`
 
-// claimLease is how long a claim outlives its sender, as the Postgres interval claimLapsed and
-// the mention sender's recovery pass (strandedCommentMentions) both read.
+// claimLease is how long a claim outlives its sender, as the Postgres interval claimLapsed reads;
+// the mention sender's stranded pass runs every half of it (strandedPassInterval).
 const claimLease = "1 minute"
 
 // attemptClaim is the attempt one sender owns and the claim it holds on it. The two travel

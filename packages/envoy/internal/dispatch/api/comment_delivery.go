@@ -269,7 +269,7 @@ func (s *server) claimCommentDeliveryAttempt(
 		claimed.pending = &pending
 	case err == nil && initial:
 		// Another sender holds the pending attempt: a retry took it between the creating
-		// transaction's commit and this send, or another process's recovery pass resumed it.
+		// transaction's commit and this send, or another process's stranded pass resumed it.
 		// That sender owns the outcome.
 		claimed.settled = &pending
 	case err == nil:
