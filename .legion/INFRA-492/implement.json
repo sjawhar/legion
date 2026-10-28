@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-492",
+  "completed": "2026-10-28T10:04:09Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
+  "round": "conflict return after retro: forward merge of main 4e55b2e0 (08fcdf72), then INFRA-492's changelog entries moved into fragments (3c78e853), each required by a rule main added (#2313, #2419); retro's docs/solutions notes and the .legion removal kept",
+  "proof": [
+    {
+      "criterion": "The head that merges carries the same product change as the tested and approved head 5d84d077: rebase re-check a2f22048 -> 3c78e853",
+      "surface": "the branch's diff against its fork point, by path set",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <sha>)' --to <sha> --git --context 0 '~(.legion | docs/solutions | glob:\"**/CHANGELOG.md\" | glob:\"**/.changes/**\" | glob:\"packages/dispatch/e2e/*.e2e.ts\")' | sed -e '/^@@/d' -e '/^index /d' | sha256sum at a2f22048 and 3c78e853; the same over packages/dispatch/e2e/*.e2e.ts, then diff the two",
+      "observed": "aa9502ba40c8789bd1f4c427d0b6b6c6051a071a466da2f433a245e61575d8c1 at both heads. The e2e interdiff is only ' @phone' appended to nine test titles (two from main's own tag, seven by main's R1 rule). The full fingerprint moved 7ca432c7 -> af2b5ad4 by exactly those titles and the changelog move.",
+      "headSha": "3c78e8539ba7eed8ab60bc60680496b32e395506",
+      "negativeControl": "The check prints nothing and fails when the diff fails (pipefail), so an unresolvable head reads as changed. The full fingerprint, which includes the changelogs and the e2e titles, did change: the check is not blind to them."
+    },
+    {
+      "criterion": "Main's #2313 (the iphone project runs only @phone tests) keeps running this branch's phone-path tests on iphone",
+      "surface": "Dispatch's Playwright configuration, listing what the iphone project selects",
+      "command": "cd packages/dispatch && bun x playwright test --config e2e/playwright.config.ts --project=iphone --list e2e/refetch-budget.e2e.ts e2e/refresh-freshness.e2e.ts e2e/live.e2e.ts e2e/inbox.e2e.ts e2e/phone-landing.e2e.ts",
+      "observed": "The iphone project lists the sidebar, pin and replies tests (refetch-budget), the reference and inbox-closed tests (refresh-freshness), the project-list first-load and message tests (live), the later-response test (inbox) and main's phone-landing test, each with @phone. 23 tests in 5 files in all.",
+      "headSha": "3c78e8539ba7eed8ab60bc60680496b32e395506",
+      "negativeControl": "Untagged, under main's grep: phoneTagged, the same seven tests would not be listed for iphone (main's playwright.config.ts grep), so their phone runs would silently stop."
+    },
+    {
+      "criterion": "The merged head passes the checks the conflict touched, and claude-envoy's bundle stays fresh",
+      "surface": "local fast checks with the pinned Bun 1.4.4",
+      "command": "cd packages/claude-envoy && bun scripts/build.ts --check; cd packages/contracts && bun test; cd packages/dispatch && bun x tsc --noEmit; bun x biome check .; cd packages/envoy && go build ./... && go vet ./internal/dispatch/...; parse each packages/*/.changes/unreleased/INFRA-492-*.yaml with Bun.YAML",
+      "observed": "'dist/ and legion/ match a fresh build'; contracts 297 pass, 0 fail; tsc clean; biome exit 0; Go build and vet clean; five fragments parse with exactly kind (Added or Changed) and body.",
+      "headSha": "3c78e8539ba7eed8ab60bc60680496b32e395506",
+      "negativeControl": "Before the merge, the PR was CONFLICTING (GitHub mergeable false, dirty); after the push GitHub reports mergeable true."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api: issue_summary.go (new, two summary routes), issue_event_fields.go (new: changed incl. closed_at, ancestors), thread_logins.go (new), routes_table.go, events.go (replay header), state.go (user_state changed), issue_patch.go, issue_create.go, comment_create.go, comment_delivery.go, messages.go, message_delivery.go, asks.go, reviews.go, ask_transitions.go, comment_actions.go, references.go, artifacts.go, and tests",
+    "packages/envoy/internal/dispatch/{events/thread_logins.go (new: ThreadLogins, IssueThreadLogins, AskEventPayload), refs/refs.go, refs/excerpts.go, docs/*.go, model/model.go}",
+    "packages/contracts/src/dispatch-api.ts (+ test): optional payload fields, summary types",
+    "packages/dispatch/web/src/api: event-refresh.ts (new rules), query-refresh.ts (rewritten scheduler), query-client.ts (new DispatchQueryClient), sse.ts, live.ts, client.ts, types.ts; main.tsx; features/refs/* (summary reads); features/issue/IssueHeader.tsx (pin refresh); unit tests",
+    "packages/dispatch/e2e: refetch-budget.e2e.ts (new), live.e2e.ts, deep-links.e2e.ts, inbox.e2e.ts; comment-only edits in artifacts.e2e.ts, phone-landing.e2e.ts",
+    "docs: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md",
+    "round 2 server: api/ask_snooze.go (person-scoped user_state.updated), refs/refs.go and refs/blocks.go (artifact and block entries in references_changed), api/issue_summary.go (primary), model/model.go, contracts dispatch-api.ts and tests",
+    "round 2 web: api/event-refresh.ts (document and block panels, snooze, Replies retitle, Architecture listing, every ancestor), api/query-refresh.ts (deferred tests on any fetch out, debt kept for a left query), api/client.ts (ApiError.retryAfterMs), api/query-client.ts (queryRetryDelay), main.tsx, features/refs/* (block reads merged with the summary reads), unit tests",
+    "round 2 docs: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/{README.md,AGENTS.md}, packages/envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md",
+    "round 3: refs/refs.go and model/model.go (per-kind cap of 100, references_changed_truncated_kinds), api/ask_snooze.go (login-only payload), contracts dispatch-api.ts (truncated kinds, optional state, no ask_id), web api/event-refresh.ts (edited comments and asks on a document's panel, per-kind truncation fallback, whole-Inbox snooze refresh, artifact.human_edited), api/query-client.ts (60 s ceiling), tests and docs",
+    "conflict round: packages/dispatch/e2e/{live,phone-landing,inbox,refetch-budget,refresh-freshness}.e2e.ts (test titles only: @phone); packages/contracts/.changes/unreleased/INFRA-492-reference-summary-types-and-event-fields.yaml and packages/envoy/.changes/unreleased/INFRA-492-{summary-routes,event-fields,tab-refresh-rules,references-changed-documents-and-blockers}.yaml (the branch's changelog entries, verbatim); packages/{contracts,envoy}/CHANGELOG.md back to main's text"
+  ],
+  "trickyParts": [
+    "A reopen cannot be told from another status move by status alone, so issue events now name closed_at in changed on a close or reopen; the client refreshes the whole Inbox and the project badges only then.",
+    "thread_logins on a status move names only logins with a Replies row on the issue's open asks (what myRepliesUnread can move), read through asks_open and user_threads_thread, so no scan of user_threads.",
+    "The scheduler counts a refresh as paid by any fetch that starts after it was asked for; a first-loading query's predicate runs on the landed body; nothing is ever cancelled (DispatchQueryClient covers mutation invalidations too).",
+    "The budget test's barrier renames the open issue until its detail is read again and the header shows the new title, so it works at both commits and under INFRA-258's transport.",
+    "A `when` test decided while any fetch is out waits for the landed response; a refetch that fails is judged on the data it leaves on screen, so a refresh is never dropped for good.",
+    "A query left while it owes a refresh is marked stale again after the in-flight fetch settles, since that fetch cleared the stale flag; the summary reads are staleTime Infinity, so without this they stayed wrong until the next event.",
+    "#2210's block links read the block's graph read (blockQuery) and the issue summary for a pinned spec block's path; references_changed names cited blocks only when some source cites them, so a large spec rewrite does not hit the cap of 20."
+  ],
+  "deviations": [
+    "Plan departure kept: acceptance 1's 50 links are in the spec and in one message; the test opens the Conversation tab (the live spec editor makes no per-reference read).",
+    "['artifact-ref'] is not dead (useProjectArtifact reads ['artifact-ref','P/slug']): narrowed to a data test on the artifact id instead of removed.",
+    "Added beyond the plan: closed_at in issue events' changed; references_changed names targets whose kept edge's excerpt moved and, on a retitle, the parent and blockers; the Inbox refreshes on block.* like the projects badge.",
+    "The contracts zod schemas list the new fields, so agents' parsed issue, message and ask notifications carry changed, ancestors and thread_logins (comment payloads already passed them through).",
+    "inbox.e2e.ts 'a later Inbox response clears a hidden ask's pending refresh' changed its ordering signal to a pinned-list read, because the held Inbox first load is no longer cancelled (spec item 5); its assertions are unchanged.",
+    "webkit and firefox projects of deep-links/delivery-live cannot launch in this pod (no browser binary); chromium and iphone are 169 passed, 0 failed.",
+    "Conflict round: forward-merged main c3d09eec924c as 6436d90fc925 (the only conflicts were the contracts and envoy changelog lists; both sides kept), then main baadccdc6a9a as 0df2c9e6a3ed at the architect's request so the head carries main's daemon test fix #2317 (no conflicts, no Dispatch files). Fingerprint 4cbe4bb0... unchanged at both. Comments: https://github.com/sjawhar/legion/pull/2324#issuecomment-6433492071 and the one that follows it. The full Go api/docs suites were not re-run locally this round, because the fingerprint is unchanged and only the bare gates are required; CI runs them.",
+    "Architect's ruling (a): creating or revoking a personal agent token sends no event (a token has no event owner); a second Settings tab is refreshed by the focus refetch, as on main. Stated in the PR body.",
+    "Main merged three times for conflicts in total; the round-2 merges (4609a99b, d649b640) changed the fingerprint because #2210 needed integration; recorded at https://github.com/sjawhar/legion/pull/2324#issuecomment-6437731054.",
+    "Not run: main's e2e/acceptance/*.sh scripts (they need a running server with an agent bearer and the dispatch client; not part of this change's surface).",
+    "Round 3 scope was set by the architect at the review-round cap: the Children-tab active time for a child's comment or claim and the tester's suspected edges are not changed (main behaves the same).",
+    "Main merged a fourth time (fe1e97d2, main c892b97df887) for a conflict in sse.ts/sse.test.ts and the changelogs; main's artifact.human_edited got an explicit rule (the issue's log only) instead of the catch-all broad refresh. Record: https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664.",
+    "Conflict return: merged main 1b859ea3 as 5873436a; the only conflict was MarkdownBody.test.tsx's import list (both sides kept). Record: the PR comment after https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664.",
+    "Review round: PR body gained the Contract change census and corrected two claims (optimistic mutations still cancel on purpose; focus still refetches stale reads, only the reconnect's whole-cache refresh is gone); structural cleanup stays on Fast-follow as the architect ruled.",
+    "Merged main ae36683e as 9e4bb204 (conflicts: one packages/dispatch/AGENTS.md paragraph and packages/envoy/CHANGELOG.md, both sides kept). Main's e2e harness now starts through e2e/run.ts.",
+    "Merged main 452e46479082 as 27152a78 (#2389): AGENTS.md bullet conflict and a test-helper name collision (branch's createChildIssue renamed createTitledChild). Observed, not a defect: the room-under-writes test's write count runs about 15% lower than main (median 37 vs 44 in 5 runs), still well above its floor of 20.",
+    "Merged main b295a3fb as ee6e83db (only conflicts: two additive spots in packages/envoy/CHANGELOG.md, both kept; fingerprint 48597817 unchanged). The pod has Bun 1.3.14; the pinned 1.4.4 (non-baseline bun-linux-x64, as setup-bun installs on an AVX2 runner) was downloaded under $TMPDIR for the build and the checks.",
+    "Conflict round beyond the two conflicting titles, each required by main's own new rule on the merged tree: seven phone-path tests tagged @phone (packages/dispatch/AGENTS.md 'Phone acceptance' R1), and the changelog entries moved to fragments (root AGENTS.md: an open pull request with entries under the old heading moves them into fragments when it next merges main). No test body or product file changed. Record: https://github.com/sjawhar/legion/pull/2324#issuecomment-6466073672."
+  ],
+  "openQuestions": [
+    "Memory with kubectl top (dispatch://INFRA-492/comment/8d3d6ac7-d9a7-4187-a9bb-348c88cac96e) is not in the approved acceptance and not done; the architect decides (comment 32 says not added).",
+    "Spec acceptance 3 and 4 (production check and the 10-minute request-log rate) run after the merge and the deploy; acceptance 4 also needs dispatch://INFRA-507 applied."
+  ],
+  "discoveredComplexity": [
+    "A block created by a later version that a link already showed as missing is refreshed only when the link was opened on the exact ref the server names."
+  ]
+}
