@@ -2177,7 +2177,11 @@ carried as a hard break; surrounding whitespace is trimmed, as the parser trims 
 An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`) is refused
 `400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever else it names,
 unless it sends `options`, which rebuilds the options as one list and so repairs the ask; the
-reason is the content rule's text plus "send options to rebuild the options as one list". Before,
+reason is the content rule's text plus "send options to rebuild the options as one list". The
+options sent must include every option label the block's lists hold that the ask row does not
+(the row keeps its options from before the break; `SetAskBlockText` reads them first), else the
+edit is refused quoting those labels, so an edit built from the row never deletes the other
+collaborator's list; the reason for an edit with no options names them too. Before,
 an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
 An ask holding a non-list block after its first list (a paragraph after its options) is refused
 whatever the edit sends, `options` included (`refuseAskContentEdit` in `docs/ask_block_text.go`):
