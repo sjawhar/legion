@@ -577,7 +577,7 @@ the first, since every pod reads the one `DISPATCH_SIGNING_KEY` in the Secret
 runs the new image's migrations while the previous build is still serving: "Database migrations"
 in the same README holds the rule. The events outbox publishes from one process at a time, under
 a hold another process takes over when its holder stops or loses it (the same README's "Running
-more than one process"). A build from before that hold (INFRA-590) takes none and publishes
+more than one process"). A build from before that hold (#2395) takes none and publishes
 beside the holder, so the roll that first brings the hold, at more than one replica, runs both
 publishers until the last old pod stops; deploy that release at one replica, which recreates the
 pod, and raise the count afterwards. Each process closes a client connection after its next

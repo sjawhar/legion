@@ -1,6 +1,6 @@
--- INFRA-590: one holder per name, a lease a process keeps by renewing it (duty.Hold). The events
--- outbox's single publisher holds "dispatch-outbox" here, and INFRA-558's delivery intakes hold one
--- name per durable. The loop leases (duty.Exclusive, migration 0115) are session advisory locks,
+-- One holder per name, a lease a process keeps by renewing it (duty.Hold). The events outbox's
+-- single publisher holds "dispatch-outbox" here, and other singleton duties can hold one name each.
+-- The loop leases (duty.Exclusive, migration 0115) are session advisory locks,
 -- which a process holds only while one connection stays open; a publisher holds its role for as
 -- long as it runs, across every connection its pool replaces, so the lease is a row instead.
 --

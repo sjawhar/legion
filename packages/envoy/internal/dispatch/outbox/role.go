@@ -161,7 +161,7 @@ func forwardOf(item contracts.Envelope, resolution roles.Resolution, err error, 
 // neither a port nor a subscription of its own, which nothing answers, so it stays pending). For a
 // holder with a serving port it is the stream's acknowledgement of the stored copy, since a holder
 // delivered by its listener from the stream never answers the request itself; that is true once
-// dispatch://INFRA-594 makes the listener deliver to such holders from the stream.
+// the listener delivers to such holders from the stream and acknowledges each stored copy.
 func (f *roleForward) send(sender bus.Sender, item contracts.Envelope) <-chan error {
 	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
 	subject := contracts.AgentSubject(f.holder)

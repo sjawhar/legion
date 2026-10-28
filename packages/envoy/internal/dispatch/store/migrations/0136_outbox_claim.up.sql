@@ -1,4 +1,4 @@
--- INFRA-590: the outbox reads its batch through three partial indexes and writes an event once,
+-- The outbox reads its batch through three partial indexes and writes an event once,
 -- when it records what the event came to (outbox.readBatch, outbox.recordBatch). One process
 -- publishes at a time (the dispatch-outbox hold, migration 0135), so no row is claimed any more:
 -- next_attempt_at is only a back-off, or the back-off of the earlier event a later one waits on.

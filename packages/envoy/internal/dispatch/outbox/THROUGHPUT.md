@@ -15,7 +15,7 @@ Treat the numbers as order-of-magnitude figures.
   self-subscribed session that answers every forward with its receipt. Half are human replies to a
   session's message, which take an author lookup and a third destination. That is 500
   destinations in all: 200 issue topics, 200 role forwards to the holder and 100 session topics.
-  Before the role forward (INFRA-590, `role.go`) the 200 role routes were core publishes to
+  Before the role forward (#2395, `role.go`) the 200 role routes were core publishes to
   `notifications.role.reviewer`, confirmed by a flush.
 - The "busy pool" case keeps a full shared pool busy. The table's first two rows ran 32
   goroutines of `select pg_sleep(0.01)` back to back on the 16-connection shared pool production
@@ -33,10 +33,10 @@ Treat the numbers as order-of-magnitude figures.
 |---|---|---|---|---|---|---|
 | Old (`origin/main` at 1357b95c2, one synchronous publish and one write per destination) | 2.7 ev/s (5.3 run alone) | 3.0 ev/s | 1.7 ev/s | 1.9 ev/s | | |
 | One window per batch, every send before any answer, one outcome write, outbox pool of its own | 1,100-1,340 ev/s | 1,100-1,230 ev/s | 540-570 ev/s | 480-540 ev/s | | |
-| The same one-window design, the INFRA-590 harness commit `bed0fdc4` (`main` at `c3d09eec` plus the burst cases), 2 cores, 2026-10-27 | 749.1 ev/s | 219.0 ev/s | 443.7 ev/s | 357.9 ev/s | 725.9 ev/s (100 in 138 ms) | 251.4 ev/s (100 in 398 ms) |
-| Chains: each issue's sends to each destination one at a time, issues and destinations side by side (INFRA-590, two runs on 2026-10-27) | 321-323 ev/s | 169-277 ev/s | 122-124 ev/s | 113-117 ev/s | 18.6 ev/s | 6.5 ev/s |
-| Chains, role routes forwarded to the holder with a receipt (INFRA-590, two runs on 2026-10-27) | 196-199 ev/s | 171-188 ev/s | 73-74 ev/s | 71-72 ev/s | 17.3-17.6 ev/s | 6.2 ev/s |
-| The same, the INFRA-590 head `891e854b`, same machine as the harness-commit row | 175.5 ev/s | 183.9 ev/s | 71.3 ev/s | 70.5 ev/s | 16.7 ev/s (100 in 5.99 s) | 6.2 ev/s (100 in 16.2 s) |
+| The same one-window design, the #2395 harness commit `bed0fdc4` (`main` at `c3d09eec` plus the burst cases), 2 cores, 2026-10-27 | 749.1 ev/s | 219.0 ev/s | 443.7 ev/s | 357.9 ev/s | 725.9 ev/s (100 in 138 ms) | 251.4 ev/s (100 in 398 ms) |
+| Chains: each issue's sends to each destination one at a time, issues and destinations side by side (#2395, two runs on 2026-10-27) | 321-323 ev/s | 169-277 ev/s | 122-124 ev/s | 113-117 ev/s | 18.6 ev/s | 6.5 ev/s |
+| Chains, role routes forwarded to the holder with a receipt (#2395, two runs on 2026-10-27) | 196-199 ev/s | 171-188 ev/s | 73-74 ev/s | 71-72 ev/s | 17.3-17.6 ev/s | 6.2 ev/s |
+| The same, the #2395 head `891e854b`, same machine as the harness-commit row | 175.5 ev/s | 183.9 ev/s | 71.3 ev/s | 70.5 ev/s | 16.7 ev/s (100 in 5.99 s) | 6.2 ev/s (100 in 16.2 s) |
 
 The test requires 25 ev/s of the backlog cases and holds the burst cases to no rate. The old
 design fails it in every case. Chains cost one round trip per event per destination of one issue:

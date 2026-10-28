@@ -220,7 +220,7 @@ jobs:
             # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
             # #2229 (cmd/dispatch, cmd/listener, internal/config and infra/host/heldportwrapper
             # import it). internal/roles and, through it, internal/store, internal/session and
-            # internal/kvwatch: added by INFRA-590 (the outbox's role forward resolves the holder
+            # internal/kvwatch: added by #2395 (the outbox's role forward resolves the holder
             # with roles.ResolveHolder); internal/redact: cmd/dispatch/main.go imports it.
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
@@ -270,7 +270,7 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy
-            # (packages/envoy/listenfd: added by #2229; internal/roles: added by INFRA-590, the
+            # (packages/envoy/listenfd: added by #2229; internal/roles: added by #2395, the
             # role lane's holder resolution).
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
