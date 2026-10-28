@@ -1,0 +1,19 @@
+-- 0137_asks_anchor_artifact_id.up.sql
+--
+-- Settlement's sweep reads the marks a document's asks record by the anchor's artifact alone,
+-- whatever block_artifact_id holds (docs/marks.go recordedMarkRefs), and no existing index reaches
+-- that read: asks_anchor_artifact (0032) indexes coalesce(block_artifact_id, ...), and
+-- asks_anchor_block_id_idx (0023, rebuilt by 0127) is partial on anchor->>'block_id'. The
+-- expression is comments_anchor_artifact's (0032) character for character, so the read's
+-- predicate, the same for both tables, matches it. Partial on anchor is not null, since most asks
+-- carry no anchor. The index is additive and rewrites no row; building it takes SHARE on asks, so
+-- ask writes wait for the build. The release before this one never reads the index, so that
+-- release serves beside it unchanged.
+--
+-- The cast cannot fail on a stored row: asks_anchor_artifact already evaluates
+-- (anchor->>'artifact_id')::uuid on every row whose block_artifact_id is null, and the only writer
+-- of block_artifact_id, the ask-block insert (docs/ask_blocks.go), writes no anchor. If a row did
+-- not cast, the migration would fail the boot naming the error before the schema change is
+-- recorded. Migrations run in one transaction, so the build is a plain create index, not
+-- concurrently.
+create index asks_anchor_artifact_id on asks (((anchor->>'artifact_id')::uuid)) where anchor is not null;

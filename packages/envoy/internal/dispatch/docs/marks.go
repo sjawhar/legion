@@ -753,41 +753,43 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
-// recordedMarkRefs is every mark an ask or comment row anchored on artifactID records. Each
-// predicate compares the expression of the table's index, asks_anchor_artifact or
-// comments_anchor_artifact (migration 0032), so the read is an index scan, and keeps the text
-// comparison so it returns exactly the rows that comparison alone would. Only the ask-block insert
-// sets block_artifact_id, and it writes no anchor, so an anchored ask's coalesce is its anchor's
-// artifact_id. The uuid casts cannot fail: both indexes evaluate the same casts on every row, so
-// a row whose artifact_id does not cast could not have been written.
+// recordedMarksQuery is the statement that lists the anchor and mark type of every row of table, asks
+// or comments, whose anchor names the artifact $1. Both tables share the predicate, which matches
+// the expression of asks_anchor_artifact_id (migration 0137) and comments_anchor_artifact (0032).
+func recordedMarksQuery(table string) string {
+	return fmt.Sprintf(`
+		select anchor, %s
+		from %s
+		where anchor is not null and anchor->>'artifact_id' = $1 and (anchor->>'artifact_id')::uuid = $1::uuid
+	`, commentMarkType(table), table)
+}
+
+// recordedMarkRefs is every mark an ask or comment row anchored on artifactID records, read by the
+// anchor's artifact alone whatever an ask's block_artifact_id holds: an ask that also names an ask
+// block on another document keeps its mark on its anchor's document, as refreshAnchors and the
+// other anchor readers read it. Each read compares the expression of an index,
+// asks_anchor_artifact_id (migration 0137) or comments_anchor_artifact (0032), so it is an index
+// scan, and keeps the text comparison so it returns exactly the rows that comparison alone would.
+// The uuid casts cannot fail: each index evaluates the same cast on every row it holds (for asks,
+// every anchored row), so a row whose artifact_id does not cast could not have been written.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
-	for _, target := range []struct {
-		table   string
-		indexed string
-	}{
-		{table: "asks", indexed: `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)`},
-		{table: "comments", indexed: `(anchor->>'artifact_id')::uuid`},
-	} {
-		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
-			select anchor, %s
-			from %s
-			where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
-		`, commentMarkType(target.table), target.table, target.indexed), artifactID)
+	for _, table := range []string{"asks", "comments"} {
+		rows, err := s.queryFrom(ctx).Query(ctx, recordedMarksQuery(table), artifactID)
 		if err != nil {
-			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
+			return nil, fmt.Errorf("list recorded %s marks: %w", table, err)
 		}
 		for rows.Next() {
 			var encoded []byte
 			var markType string
 			if err := rows.Scan(&encoded, &markType); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("scan recorded %s mark: %w", target.table, err)
+				return nil, fmt.Errorf("scan recorded %s mark: %w", table, err)
 			}
 			var anchor model.Anchor
 			if err := json.Unmarshal(encoded, &anchor); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("decode recorded %s mark: %w", target.table, err)
+				return nil, fmt.Errorf("decode recorded %s mark: %w", table, err)
 			}
 			if anchor.MarkID != "" {
 				recorded[pmdoc.MarkRef{Type: markType, ID: anchor.MarkID}] = struct{}{}
@@ -795,7 +797,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
+			return nil, fmt.Errorf("list recorded %s marks: %w", table, err)
 		}
 		rows.Close()
 	}
