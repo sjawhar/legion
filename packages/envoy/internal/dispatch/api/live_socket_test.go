@@ -919,7 +919,7 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 // A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
 // stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
 // browser report as 1006, and the page reconnects with backoff, as after every close but 1012
-// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
+// (packages/dispatch/web/src/api/live-socket.ts, lost). 1008 would say its caller no longer
 // resolves.
 func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
 	const heartbeat = 200 * time.Millisecond

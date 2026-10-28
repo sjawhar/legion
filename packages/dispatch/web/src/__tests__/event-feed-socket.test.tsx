@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, QueryObserver, useQuery } from "@tanstack/react-query";
-import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  type RenderResult,
+  render,
+  renderHook,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { api } from "../api/client";
 import { useEventFeed, WHOLE_CACHE_REFRESH_MS } from "../api/event-feed";
 import { liveSocketFor } from "../api/live-socket";
+import { DispatchQueryClient } from "../api/query-client";
 import type { AuthenticatedUser, Event, LiveServerFrame } from "../api/types";
 import { credentialPendingQuery } from "../features/credentials/pending";
 import {
@@ -29,9 +37,13 @@ afterEach(() => {
   sockets.restore();
 });
 
-/** A query client whose live socket this file's teardown closes. */
-function newClient(queries: { staleTime?: number } = {}): QueryClient {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, ...queries } } });
+/** A query client whose live socket this file's teardown closes: TanStack's, or the production
+ *  `DispatchQueryClient` where a test reads the never-cancel refetch it adds. */
+function newClient(
+  queries: { staleTime?: number } = {},
+  Client: typeof QueryClient = QueryClient
+): QueryClient {
+  const client = new Client({ defaultOptions: { queries: { retry: false, ...queries } } });
   clients.push(client);
   return client;
 }
@@ -42,26 +54,34 @@ function wrapperFor(client: QueryClient) {
   };
 }
 
+const WHOLE_CACHE_PROBE = ["whole-cache-refresh-probe"] as const;
+
 /**
- * Counts whole-cache refreshes: `refreshQueries` is the only caller that invalidates with no key,
- * so an invalidation naming none is exactly one of them. Returns the count and a restore.
+ * Counts whole-cache refreshes: a refresh that names no target marks every query the app holds
+ * stale, and no event names this probe's key, so each time the probe goes stale is one of them.
+ * The probe is made fresh again at once, ready for the next. Returns the count and a restore.
  */
 function countWholeCacheRefreshes(queryClient: QueryClient): {
   count: () => number;
   restore: () => void;
 } {
-  const invalidate = queryClient.invalidateQueries.bind(queryClient);
   let refreshes = 0;
-  queryClient.invalidateQueries = ((filters?: { queryKey?: readonly unknown[] }) => {
-    if (filters?.queryKey === undefined) {
+  queryClient.setQueryData(WHOLE_CACHE_PROBE, refreshes);
+  const unsubscribe = queryClient.getQueryCache().subscribe((change) => {
+    if (
+      change.type === "updated" &&
+      change.action.type === "invalidate" &&
+      change.query.queryKey[0] === WHOLE_CACHE_PROBE[0]
+    ) {
       refreshes += 1;
+      queryClient.setQueryData(WHOLE_CACHE_PROBE, refreshes);
     }
-    return invalidate(filters);
-  }) as typeof queryClient.invalidateQueries;
+  });
   return {
     count: () => refreshes,
     restore: () => {
-      queryClient.invalidateQueries = invalidate;
+      unsubscribe();
+      queryClient.removeQueries({ exact: true, queryKey: WHOLE_CACHE_PROBE });
     },
   };
 }
@@ -112,12 +132,14 @@ function receive(socket: FakeLiveSocket, ...frames: LiveServerFrame[]): void {
   });
 }
 
-/** Opens the socket the feed subscribed on, and Dispatch starts the feed after `since`. */
-function openFeed(since = "0"): { socket: FakeLiveSocket; sub: string } {
+/** Opens the socket the feed subscribed on, and Dispatch starts the feed after `since`, saying its
+ *  replay covers the gap only with `replayComplete`. Without it, a start after a gap is one whose
+ *  replay may have missed events - a resume above a reset log's head, or none at all. */
+function openFeed(since = "0", replayComplete = false): { socket: FakeLiveSocket; sub: string } {
   const socket = sockets.latest();
   act(() => socket.open());
   const { sub } = socket.subscribed("events");
-  receive(socket, { type: "events_start", sub, since });
+  receive(socket, { type: "events_start", sub, since, replay_complete: replayComplete });
   return { socket, sub };
 }
 
@@ -136,7 +158,7 @@ function signIn(queryClient: QueryClient, eventHead = "0"): void {
   queryClient.setQueryData(["whoami"], user);
 }
 
-test("a drop resumes from the cursor and refreshes everything", async () => {
+test("a drop resumes from the cursor and, when the replay misses the gap, refreshes everything", async () => {
   // No jitter below the base: the first retry waits 750 ms.
   const random = spyOn(Math, "random").mockReturnValue(0);
   const queryClient = newClient();
@@ -190,11 +212,12 @@ test("a drop resumes from the cursor and refreshes everything", async () => {
       view: { kind: "events" },
       resume: { since: "7" },
     });
-    // While no socket carried the feed, events may have committed that its resume does not
-    // replay, so once it starts again every query the app holds refreshes - not only the ones
-    // some list names.
-    receive(again, { type: "events_start", sub, since: "7" });
-    await waitFor(() => expect(fetches).toEqual({ checks: 2, issues: 2 }));
+    // While no socket carried the feed, Dispatch's log was reset: the resume is above its head, so
+    // Dispatch starts at the head and replays nothing the page missed. Once the feed starts again
+    // every query the app holds refreshes - not only the ones some list names - each within a
+    // second of its own last fetch.
+    receive(again, { type: "events_start", sub, since: "3", replay_complete: false });
+    await waitFor(() => expect(fetches).toEqual({ checks: 2, issues: 2 }), { timeout: 2_000 });
     expect(wholeCache.count()).toBe(1);
   } finally {
     view.unmount();
@@ -239,7 +262,7 @@ test("a page that has applied no event resumes from events_start after a rotatio
       sub,
       view: { kind: "events" },
     });
-    receive(socket, { type: "events_start", sub, since: "120" });
+    receive(socket, { type: "events_start", sub, since: "120", replay_complete: false });
 
     expect(rotate().subscribed("events")).toEqual({
       type: "subscribe",
@@ -265,7 +288,7 @@ test("an out-of-order lower id never lowers the cursor", () => {
 
     // A held cursor does not follow events_start either: a start Dispatch clamped to a lower
     // head leaves it where it was.
-    receive(again, { type: "events_start", sub, since: "100" });
+    receive(again, { type: "events_start", sub, since: "100", replay_complete: false });
     expect(rotate().subscribed("events").resume).toEqual({ since: "101" });
   } finally {
     hook.unmount();
@@ -367,8 +390,8 @@ test("repeated gaps cost one refresh plus a trailing one", async () => {
   try {
     openFeed();
     // Dispatch restarting node by node closes the socket again and again (1012), and every
-    // socket after it reports a gap; each gap's refresh is unfiltered and reaches the GitHub
-    // proxy queries.
+    // socket after it reports a gap whose replay Dispatch does not say is complete (`openFeed`);
+    // each gap's refresh is unfiltered and reaches the GitHub proxy queries.
     for (let index = 0; index < 6; index += 1) {
       act(() => sockets.latest().drop(1012));
       openFeed();
@@ -407,9 +430,10 @@ test("the credential list held null is asked again after a gap", async () => {
     await sleep(150);
     expect(getCredentialPending).toHaveBeenCalledTimes(1);
 
-    // A gap is the one moment the server may have restarted, perhaps with a broker configured.
+    // A gap is the one moment the server may have restarted, perhaps with a broker configured. A
+    // replay that covers the gap says nothing of that, so the list is asked again even then.
     act(() => sockets.latest().drop(1012));
-    openFeed();
+    openFeed("0", true);
     await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
   } finally {
     hook?.unmount();
@@ -419,7 +443,8 @@ test("the credential list held null is asked again after a gap", async () => {
 
 // While Dispatch cannot start the feed - its database does not answer - it ends each subscription
 // a second after it is sent. A refresh at each send would refetch every query of every tab for as
-// long as the outage lasts; the page refreshes once, when the feed starts again.
+// long as the outage lasts; the page refreshes once, when the feed starts again with a replay that
+// does not cover the gap (one that does refreshes nothing, as any complete resume does).
 test("ended frames with no events_start back off and cost one refresh once the feed starts", () => {
   jest.useFakeTimers();
   const random = spyOn(Math, "random").mockReturnValue(0.5);
@@ -444,7 +469,7 @@ test("ended frames with no events_start back off and cost one refresh once the f
     act(() => jest.advanceTimersByTime(1_000));
     expect(wholeCache.count()).toBe(0);
 
-    receive(socket, { type: "events_start", sub, since: "30" });
+    receive(socket, { type: "events_start", sub, since: "30", replay_complete: false });
     act(() => jest.advanceTimersByTime(1_000));
     expect(wholeCache.count()).toBe(1);
   } finally {
@@ -509,7 +534,7 @@ test("the first subscription resumes from the sign-in check's event head", async
     // holds; each replayed event refreshes its own keys, and nothing else is read again.
     receive(
       socket,
-      { type: "events_start", sub, since: "41" },
+      { type: "events_start", sub, since: "41", replay_complete: true },
       eventFrame(sub, issueUpdated(42)),
       eventFrame(sub, issueUpdated(43))
     );
@@ -559,106 +584,12 @@ test("an empty log's head is resumed from like any other", () => {
       resume: { since: "0" },
     });
     // A start Dispatch clamped to its own head leaves the cursor where the page put it.
-    receive(socket, { type: "events_start", sub, since: "0" });
+    receive(socket, { type: "events_start", sub, since: "0", replay_complete: true });
     expect(rotate().subscribed("events").resume).toEqual({ since: "0" });
   } finally {
     hook.unmount();
   }
 });
-
-test("an event during a list's first load beats the response that predates it", async () => {
-  // The production client's staleTime: a body that lands marked fresh stays on screen for half
-  // a minute, which is what makes losing this race a stale screen rather than a blink.
-  const queryClient = newClient({ staleTime: 30_000 });
-  const titles = ["OLDTITLE", "NEWTITLE"];
-  const { promise: held, resolve: release } = Promise.withResolvers<void>();
-  let listCalls = 0;
-
-  function Probe(): ReactNode {
-    useEventFeed();
-    const { data } = useQuery({
-      queryFn: async () => {
-        const attempt = listCalls++;
-        if (attempt === 0) {
-          await held;
-        }
-        return titles[attempt] ?? titles[titles.length - 1];
-      },
-      queryKey: ["issues", "project", "CORE"],
-    });
-    return <p>{data ?? "loading"}</p>;
-  }
-
-  const view = render(
-    <QueryClientProvider client={queryClient}>
-      <Probe />
-    </QueryClientProvider>
-  );
-  try {
-    // The list's first request is in flight and its response is held open.
-    await waitFor(() => expect(listCalls).toBe(1));
-    const { socket, sub } = openFeed();
-
-    // The issue is renamed while that request is still out.
-    receive(socket, eventFrame(sub, issueUpdated(1, "NEWTITLE")));
-
-    // The invalidation issues a request of its own instead of waiting on the one already out.
-    await waitFor(() => expect(listCalls).toBe(2));
-
-    // Releasing the pre-event body must not put it back on screen, nor mark it fresh.
-    release();
-    await waitFor(() => expect(screen.getByText("NEWTITLE")).toBeTruthy());
-    await sleep(200);
-    expect(screen.getByText("NEWTITLE")).toBeTruthy();
-  } finally {
-    view.unmount();
-  }
-}, 10_000);
-
-test("a queued prefix key replaces the narrower key instead of refetching it twice", async () => {
-  const queryClient = newClient();
-  // A `child.status` event queues both `["issue"]` and `["issue", "CORE-1"]`. React Query
-  // matches by prefix and `invalidateQueries` defaults to `cancelRefetch: true`, so sending
-  // both cancels this query's in-flight refetch and starts a second request for it.
-  let issueFetches = 0;
-  const observer = new QueryObserver(queryClient, {
-    queryKey: ["issue", "CORE-1"],
-    queryFn: async () => {
-      issueFetches += 1;
-      return { key: "CORE-1" };
-    },
-  });
-  const unsubscribe = observer.subscribe(() => {});
-  let hook: { unmount: () => void } | undefined;
-
-  try {
-    await waitFor(() => expect(issueFetches).toBe(1));
-    hook = renderHook(() => useEventFeed(), { wrapper: wrapperFor(queryClient) });
-    const { socket, sub } = openFeed();
-    receive(
-      socket,
-      eventFrame(sub, {
-        actor: { id: "s", kind: "session" },
-        created_at: "2026-01-01T00:00:00Z",
-        id: 1,
-        issue_key: "CORE-1",
-        notify: false,
-        payload: { child_key: "CORE-2" },
-        project: "CORE",
-        seq: 4,
-        type: "child.status",
-      } as unknown as Event)
-    );
-
-    await waitFor(() => expect(issueFetches).toBe(2));
-    // Without the prefix drop the cancelled refetch starts again and the count reaches 3.
-    await sleep(400);
-    expect(issueFetches).toBe(2);
-  } finally {
-    hook?.unmount();
-    unsubscribe();
-  }
-}, 10_000);
 
 interface DeferredListQuery {
   key: readonly unknown[];
@@ -701,8 +632,88 @@ function ListProbe({ list }: { list: DeferredListQuery }): ReactNode {
   return <p>{data ?? "loading"}</p>;
 }
 
-test("a steady event trickle never starves a slow first load", async () => {
-  const queryClient = newClient({ staleTime: 30_000 });
+test("an event during a list's first load keeps that load and fetches the list once more after it lands", async () => {
+  // The production client's staleTime: a body that lands marked fresh would stay on screen for
+  // half a minute, which is what makes skipping the second load a stale screen.
+  const queryClient = newClient({ staleTime: 30_000 }, DispatchQueryClient);
+  const list = deferredListQuery();
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <ListProbe list={list} />
+    </QueryClientProvider>
+  );
+  try {
+    const page = within(view.container);
+    await waitFor(() => expect(list.starts()).toBe(1));
+    const { socket, sub } = openFeed();
+
+    // The issue is renamed while the list's first request is still out. That request is the one
+    // the page is waiting for: nothing cancels it, and no second request goes out beside it.
+    receive(socket, eventFrame(sub, issueUpdated(1, "NEWTITLE")));
+    await sleep(300);
+    expect(list.starts()).toBe(1);
+
+    list.release(1);
+    await waitFor(() => expect(page.getByText("list-1")).toBeTruthy());
+    // Its body may predate the rename, so exactly one more load follows, and the page ends on it.
+    await waitFor(() => expect(list.starts()).toBe(2), { timeout: 2_000 });
+    list.release(2);
+    await waitFor(() => expect(page.getByText("list-2")).toBeTruthy());
+    await sleep(1_200);
+    expect(list.starts()).toBe(2);
+  } finally {
+    view.unmount();
+    list.releaseAll();
+  }
+}, 10_000);
+
+test("a child's status move refreshes its parent's detail and no other issue's", async () => {
+  const queryClient = newClient();
+  const fetches: Record<string, number> = { "CORE-1": 0, "CORE-2": 0, "CORE-3": 0 };
+  const unsubscribes = Object.keys(fetches).map((key) =>
+    new QueryObserver(queryClient, {
+      queryFn: async () => {
+        fetches[key] += 1;
+        return { key };
+      },
+      queryKey: ["issue", key],
+    }).subscribe(() => {})
+  );
+  let hook: { unmount: () => void } | undefined;
+
+  try {
+    await waitFor(() => expect(fetches).toEqual({ "CORE-1": 1, "CORE-2": 1, "CORE-3": 1 }));
+    hook = renderHook(() => useEventFeed(), { wrapper: wrapperFor(queryClient) });
+    const { socket, sub } = openFeed();
+    // CORE-2 is CORE-1's child; its own `issue.updated` names the ancestors further up.
+    receive(
+      socket,
+      eventFrame(sub, {
+        actor: { id: "s", kind: "session" },
+        created_at: "2026-01-01T00:00:00Z",
+        id: 1,
+        issue_key: "CORE-1",
+        notify: false,
+        payload: { child_key: "CORE-2", from: "todo", to: "in_progress" },
+        project: "CORE",
+        seq: 4,
+        type: "child.status",
+      } as unknown as Event)
+    );
+
+    await waitFor(() => expect(fetches["CORE-1"]).toBe(2), { timeout: 2_000 });
+    await sleep(1_200);
+    expect(fetches).toEqual({ "CORE-1": 2, "CORE-2": 1, "CORE-3": 1 });
+  } finally {
+    hook?.unmount();
+    for (const unsubscribe of unsubscribes) {
+      unsubscribe();
+    }
+  }
+}, 10_000);
+
+test("a steady event trickle on a slow first load gives that load and one more after it settles", async () => {
+  const queryClient = newClient({ staleTime: 30_000 }, DispatchQueryClient);
   const list = deferredListQuery();
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -711,39 +722,34 @@ test("a steady event trickle never starves a slow first load", async () => {
   );
 
   try {
+    const page = within(view.container);
     await waitFor(() => expect(list.starts()).toBe(1));
     const { socket, sub } = openFeed();
 
-    // The one cancel this query is allowed: load 1 is reverted and load 2 takes its place.
-    receive(socket, eventFrame(sub, issueUpdated(1)));
-    await waitFor(() => expect(list.starts()).toBe(2));
-
-    // Every later event arrives while load 2 is still in flight. Cancelling on each of them is
-    // what starved the reader; they register a settle refresh instead, and load 2 survives.
-    for (let index = 2; index <= 5; index += 1) {
+    // Events keep arriving, past the one-second mark, while the first load is still out: none of
+    // them restarts it or sends a second request beside it.
+    for (let index = 1; index <= 8; index += 1) {
       receive(socket, eventFrame(sub, issueUpdated(index)));
       await sleep(150);
     }
-    expect(list.starts()).toBe(2);
+    expect(list.starts()).toBe(1);
 
-    // (a) The starvation fix: the held load lands and the reader leaves the skeleton.
+    // The held load lands and the reader leaves the skeleton.
+    list.release(1);
+    await waitFor(() => expect(page.getByText("list-1")).toBeTruthy());
+    // It predates the later events, so exactly one more load starts, and the reader ends on it.
+    await waitFor(() => expect(list.starts()).toBe(2), { timeout: 2_000 });
     list.release(2);
-    await waitFor(() => expect(screen.getByText("list-2")).toBeTruthy());
-
-    // (b) Load 2's body predates the last event, so its settling owes a refresh: exactly one
-    // more load starts, and its body is what the reader ends on.
-    await waitFor(() => expect(list.starts()).toBe(3));
-    list.release(3);
-    await waitFor(() => expect(screen.getByText("list-3")).toBeTruthy());
-    await sleep(400);
-    expect(list.starts()).toBe(3);
+    await waitFor(() => expect(page.getByText("list-2")).toBeTruthy());
+    await sleep(1_200);
+    expect(list.starts()).toBe(2);
   } finally {
     view.unmount();
     list.releaseAll();
   }
 }, 20_000);
 
-test("a query removed and recreated between flushes still has its first load cancelled", async () => {
+test("a refresh owed to a list removed mid-load is not paid by its replacement, whose own events still refresh it", async () => {
   const queryClient = newClient({ staleTime: 30_000 });
   const list = deferredListQuery();
   const renderProbe = () =>
@@ -752,97 +758,82 @@ test("a query removed and recreated between flushes still has its first load can
         <ListProbe list={list} />
       </QueryClientProvider>
     );
-  const signedIn = renderProbe();
-  let unmount = signedIn.unmount;
+  let view: RenderResult = renderProbe();
 
   try {
     await waitFor(() => expect(list.starts()).toBe(1));
     const { socket, sub } = openFeed();
 
-    // Load 1 is cancelled, so this query's hash is recorded as already cancelled.
+    // Load 1 owes a refresh once it settles; then the whole cache is dropped while it is still in
+    // flight, which is what signing out does.
     receive(socket, eventFrame(sub, issueUpdated(1)));
-    await waitFor(() => expect(list.starts()).toBe(2));
-
-    // Sign out and straight back in, with no flush in between: the recreated query is a fresh
-    // first load, and a stale hash would have it skip its cancel. The feed leaves with the first
-    // render and subscribes again with the second, on a socket of its own.
-    signedIn.unmount();
+    await sleep(150);
+    view.unmount();
     queryClient.removeQueries({ queryKey: ["issues"] });
+    list.release(1);
+    await sleep(150);
+
+    // Signing back in: the recreated list's first load owes nothing for the event before it. The
+    // feed left with the first render and subscribes again with the second, on a socket of its
+    // own.
     const signedInAgain = renderProbe();
-    unmount = signedInAgain.unmount;
-    await waitFor(() => expect(list.starts()).toBe(3));
+    view = signedInAgain;
+    await waitFor(() => expect(list.starts()).toBe(2));
     await act(async () => {
       await Promise.resolve();
     });
     const again = openFeed();
-
-    // An event during that load must restart it, so the body composed before the event never
-    // reaches the screen.
-    receive(again.socket, eventFrame(again.sub, issueUpdated(2)));
-    await waitFor(() => expect(list.starts()).toBe(4));
-    // Load 3 was reverted, so its body can no longer reach the screen at all; the reader ends
-    // on load 4, the one started after the event.
-    list.release(3);
-    list.release(4);
-    await waitFor(() => expect(screen.getByText("list-4")).toBeTruthy());
-    await sleep(300);
-    expect(screen.queryByText("list-3")).toBeNull();
-  } finally {
-    unmount();
-    list.releaseAll();
-  }
-}, 20_000);
-
-test("a settle refresh still fires for a key that was removed mid-load", async () => {
-  const queryClient = newClient({ staleTime: 30_000 });
-  const list = deferredListQuery();
-  const renderProbe = () =>
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ListProbe list={list} />
-      </QueryClientProvider>
-    );
-  const signedIn = renderProbe();
-  let unmount = signedIn.unmount;
-
-  try {
-    await waitFor(() => expect(list.starts()).toBe(1));
-    const { socket, sub } = openFeed();
-
-    // Load 1 is cancelled; load 2 is left to land and is owed a refresh when it settles. Then
-    // the whole cache is dropped while load 2 is still in flight, which is what signing out
-    // does - and `QueryCache.remove` cancels silently, so load 2 never reaches `"idle"`.
-    receive(socket, eventFrame(sub, issueUpdated(1)));
-    await waitFor(() => expect(list.starts()).toBe(2));
-    receive(socket, eventFrame(sub, issueUpdated(2)));
-    await sleep(150);
-    signedIn.unmount();
-    queryClient.removeQueries({ queryKey: ["issues"] });
     list.release(2);
-    await sleep(150);
+    await waitFor(() => expect(within(signedInAgain.container).getByText("list-2")).toBeTruthy());
+    await sleep(1_200);
+    expect(list.starts()).toBe(2);
 
-    // Signing back in. The refresh owed to the removed load must not be owed forever: this
-    // key's next starved load still gets a settle refresh of its own.
-    const signedInAgain = renderProbe();
-    unmount = signedInAgain.unmount;
-    await waitFor(() => expect(list.starts()).toBe(3));
-    await act(async () => {
-      await Promise.resolve();
-    });
-    const again = openFeed();
-    receive(again.socket, eventFrame(again.sub, issueUpdated(3)));
-    await waitFor(() => expect(list.starts()).toBe(4));
-    receive(again.socket, eventFrame(again.sub, issueUpdated(4)));
-    await sleep(150);
-    expect(list.starts()).toBe(4);
-
-    list.release(4);
-    await waitFor(() => expect(list.starts()).toBe(5));
+    // Its own next event refreshes it.
+    receive(again.socket, eventFrame(again.sub, issueUpdated(2)));
+    await waitFor(() => expect(list.starts()).toBe(3), { timeout: 2_000 });
   } finally {
-    unmount();
+    view.unmount();
     list.releaseAll();
   }
 }, 20_000);
+
+// A resume Dispatch replays in full (`replay_complete`: the resume is at or below its head) missed
+// nothing, so the start refreshes nothing; each replayed event refreshes what it changed. A start
+// whose replay does not cover the gap refreshes everything, as before.
+test("a resume whose replay Dispatch says is complete refreshes nothing, and one that is not refreshes everything", async () => {
+  const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
+  const wholeCache = countWholeCacheRefreshes(queryClient);
+  const hook = renderHook(() => useEventFeed({ wholeCacheRefreshMs: 100 }), {
+    wrapper: wrapperFor(queryClient),
+  });
+  try {
+    const { socket, sub } = openFeed("4");
+    receive(socket, eventFrame(sub, issueUpdated(5)));
+    await sleep(150);
+
+    // The socket is lost, and the page resumes after the event it applied: Dispatch's log still
+    // holds it, so every event after it is replayed.
+    act(() => socket.drop(1012));
+    const again = sockets.latest();
+    expect(again).not.toBe(socket);
+    act(() => again.open());
+    expect(again.subscribed("events").resume).toEqual({ since: "5" });
+    receive(again, { type: "events_start", sub, since: "5", replay_complete: true });
+    await sleep(400);
+    expect(wholeCache.count()).toBe(0);
+
+    // Lost again, and the log was reset under the cursor: Dispatch starts at its new head and
+    // says the replay does not cover the gap.
+    act(() => again.drop(1012));
+    const third = sockets.latest();
+    act(() => third.open());
+    receive(third, { type: "events_start", sub, since: "2", replay_complete: false });
+    await waitFor(() => expect(wholeCache.count()).toBe(1));
+  } finally {
+    hook.unmount();
+    wholeCache.restore();
+  }
+}, 10_000);
 
 test("a backwards system-clock step does not park the whole-cache throttle", async () => {
   const originalNow = Date.now;

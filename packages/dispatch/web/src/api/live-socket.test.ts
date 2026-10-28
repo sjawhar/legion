@@ -569,8 +569,9 @@ test("refreshQueries neither cancels nor invalidates a live query on its first l
     expect(queryClient.getQueryState(key)?.fetchStatus).toBe("fetching");
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
     expect(subscribed).toHaveLength(1);
-    // The ordinary one is cancelled and fetched again, as before.
-    expect(ordinaryCalls).toBe(2);
+    // The ordinary one is marked stale and its first load is left to land, not cancelled.
+    expect(queryClient.getQueryState(["issues"])?.isInvalidated).toBe(true);
+    expect(ordinaryCalls).toBe(1);
 
     const { socket, sub } = await opened();
     socket.receive(snapshot(sub));
@@ -596,17 +597,19 @@ test("reconnectDelayMs doubles from a 1s base and caps at 30s", () => {
 
 /** An event feed as the page keeps one: it adopts `events_start`'s id while it holds no cursor and
  *  each event's id after that, and records every call the socket makes - each start's `afterGap`
- *  in `gaps`. */
+ *  in `gaps` and its `replayComplete` in `replays`. */
 function eventFeed() {
   let cursor: string | null = null;
   const starts: string[] = [];
   const gaps: boolean[] = [];
+  const replays: boolean[] = [];
   const events: { id: string; event: unknown }[] = [];
   const handlers: EventsHandlers = {
     since: () => cursor,
-    onStart: (since, afterGap) => {
+    onStart: (since, afterGap, replayComplete) => {
       starts.push(since);
       gaps.push(afterGap);
+      replays.push(replayComplete);
       cursor ??= since;
     },
     onEvent: (id, event) => {
@@ -614,12 +617,18 @@ function eventFeed() {
       cursor = id;
     },
   };
-  return { handlers, starts, gaps, events };
+  return { handlers, starts, gaps, replays, events };
 }
 
-/** Dispatch starts the event feed `socket` carries after `since`. */
-function startFeed(socket: FakeLiveSocket, since = "0") {
-  socket.receive({ type: "events_start", sub: socket.subscribed("events").sub, since });
+/** Dispatch starts the event feed `socket` carries after `since`, saying whether its replay covers
+ *  the gap. */
+function startFeed(socket: FakeLiveSocket, since = "0", replayComplete = false) {
+  socket.receive({
+    type: "events_start",
+    sub: socket.subscribed("events").sub,
+    since,
+    replay_complete: replayComplete,
+  });
 }
 
 /** An agent live view's handlers, recording every call in order. */
@@ -696,7 +705,7 @@ test("a 4001 reopens at once, keeps state open and resubscribes every kind", asy
     socket.receive(snapshot(sub));
     const events = socket.subscribed("events").sub;
     const agentSub = agentSubscription(socket, SESSION_A).sub;
-    socket.receive({ type: "events_start", sub: events, since: "7" });
+    socket.receive({ type: "events_start", sub: events, since: "7", replay_complete: false });
 
     socket.drop(LIVE_SOCKET_MAX_AGE_CLOSE);
     // No backoff, and nothing for a pill or the freshness row to show.
@@ -800,6 +809,29 @@ test("a 1012 reopens at once and reports a gap to the event feed", () => {
   }
 });
 
+// The feed decides what a gap costs from what Dispatch says of its replay, so the socket hands each
+// start's `replay_complete` over beside the gap it reports.
+test("each events_start hands the event feed whether its replay covers the gap", () => {
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    sockets.latest().open();
+    startFeed(sockets.latest(), "4", false);
+
+    sockets.latest().drop(1012);
+    sockets.latest().open();
+    startFeed(sockets.latest(), "4", true);
+
+    sockets.latest().drop(1012);
+    sockets.latest().open();
+    startFeed(sockets.latest(), "2", false);
+    expect(feed.gaps).toEqual([false, true, true]);
+    expect(feed.replays).toEqual([false, true, false]);
+  } finally {
+    stop();
+  }
+});
+
 test("a resubscribe after a rotation sends the since the event feed adopted from events_start", () => {
   const feed = eventFeed();
   const stop = live.subscribeEvents(feed.handlers);
@@ -813,7 +845,7 @@ test("a resubscribe after a rotation sends the since the event feed adopted from
       sub,
       view: { kind: "events" },
     });
-    socket.receive({ type: "events_start", sub, since: "120" });
+    socket.receive({ type: "events_start", sub, since: "120", replay_complete: false });
     expect(feed.starts).toEqual(["120"]);
 
     socket.drop(4001);
@@ -841,7 +873,7 @@ test("an ended frame resubscribes only its subscription", async () => {
     socket.receive(snapshot(sub));
     const events = socket.subscribed("events").sub;
     const agentSub = agentSubscription(socket, SESSION_A).sub;
-    socket.receive({ type: "events_start", sub: events, since: "9" });
+    socket.receive({ type: "events_start", sub: events, since: "9", replay_complete: false });
     const before = socket.subscribes().length;
 
     socket.receive({ type: "ended", sub: events, reason: "behind" });
@@ -1002,7 +1034,7 @@ test("one socket carries a delivery view, the event feed and two agent views", a
     const event = { id: 11, type: "issue.updated" } as unknown as LiveEventFrame["event"];
     const frame = { commands: [], kind: "commands", seq: 1, v: 1 } satisfies AgentStreamFrame;
     socket.receive(snapshot(sub));
-    socket.receive({ type: "events_start", sub: events, since: "10" });
+    socket.receive({ type: "events_start", sub: events, since: "10", replay_complete: false });
     socket.receive({ type: "event", sub: events, id: "11", event });
     socket.receive({
       type: "agent",
@@ -1115,7 +1147,12 @@ test("going offline closes the socket and shows reconnecting", () => {
     expect(socket.closedWith).toBe(4000);
     expect(live.state()).toMatchObject({ state: "reconnecting", since: lostAt, stuck: false });
     // A frame still in flight on the socket the page let go writes nothing.
-    socket.receive({ type: "events_start", sub: socket.subscribed("events").sub, since: "3" });
+    socket.receive({
+      type: "events_start",
+      sub: socket.subscribed("events").sub,
+      since: "3",
+      replay_complete: false,
+    });
     expect(feed.starts).toEqual([]);
     // Nothing reopens at once: the page waits out its backoff, or for the network to come back.
     expect(sockets.sockets).toHaveLength(1);
@@ -1252,7 +1289,7 @@ test("an error frame for the event feed resubscribes it after the socket's backo
     const socket = sockets.latest();
     socket.open();
     const { sub } = socket.subscribed("events");
-    socket.receive({ type: "events_start", sub, since: "30" });
+    socket.receive({ type: "events_start", sub, since: "30", replay_complete: false });
     socket.receive(refusal(sub));
     expect(socket.subscribes()).toHaveLength(1);
     jest.advanceTimersByTime(999);
@@ -1276,7 +1313,7 @@ test("an error frame for the event feed resubscribes it after the socket's backo
     expect(socket.subscribes()).toHaveLength(3);
 
     // A subscription that starts again reports the gap, once, and resets the wait.
-    socket.receive({ type: "events_start", sub, since: "30" });
+    socket.receive({ type: "events_start", sub, since: "30", replay_complete: false });
     expect(feed.gaps).toEqual([false, true]);
     socket.receive(refusal(sub));
     jest.advanceTimersByTime(1_000);
@@ -1322,7 +1359,7 @@ test("ended frames with no events_start back off 1 s, 2 s, 4 s and the next star
     const socket = sockets.latest();
     socket.open();
     const { sub } = socket.subscribed("events");
-    socket.receive({ type: "events_start", sub, since: "30" });
+    socket.receive({ type: "events_start", sub, since: "30", replay_complete: false });
     expect(feed.gaps).toEqual([false]);
 
     // The feed had started, so its end is sent again at once.
@@ -1346,7 +1383,7 @@ test("ended frames with no events_start back off 1 s, 2 s, 4 s and the next star
     expect(feed.gaps).toEqual([false]);
 
     // The start reports it, once, and resets the wait: the next end is sent again at once.
-    socket.receive({ type: "events_start", sub, since: "30" });
+    socket.receive({ type: "events_start", sub, since: "30", replay_complete: false });
     expect(feed.gaps).toEqual([false, true]);
     socket.receive(ended(sub));
     expect(socket.subscribes()).toHaveLength(6);

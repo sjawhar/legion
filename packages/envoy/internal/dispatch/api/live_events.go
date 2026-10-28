@@ -77,11 +77,17 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
 		return
 	}
+	// A resuming subscription whose since is at or below the head is replayed every event after it
+	// below, so it missed nothing while it was away, and says so in its events_start: a page may
+	// then skip the whole refresh it owes a gap. A subscription that names no since asked for no
+	// backlog, and a since above the head can only be an id of a log this one replaced; neither was
+	// replayed what it missed, so neither says it was, and both start at the head just read.
+	replayComplete := since != nil && *since <= head
 	from := head
-	if since != nil && *since <= head {
+	if replayComplete {
 		from = *since
 	}
-	if stream.SendWait(ctx, liveEventsStart(sub, from)) != nil {
+	if stream.SendWait(ctx, liveEventsStart(sub, from, replayComplete)) != nil {
 		return
 	}
 	send := func(event model.Event) bool {
@@ -182,9 +188,10 @@ func endEventsAfterFailure(ctx context.Context, stream liveStreamer, sub, what s
 	_ = stream.SendWait(ctx, liveEnded(sub, liveEndedBehind))
 }
 
-// liveEventsStart is the frame opening sub, a subscription that starts after the event since.
-func liveEventsStart(sub string, since int64) LiveEventsStart {
-	return LiveEventsStart{Type: "events_start", Sub: sub, Since: strconv.FormatInt(since, 10)}
+// liveEventsStart is the frame opening sub, a subscription that starts after the event since;
+// replayComplete says its catch-up replays every event the page missed.
+func liveEventsStart(sub string, since int64, replayComplete bool) LiveEventsStart {
+	return LiveEventsStart{Type: "events_start", Sub: sub, Since: strconv.FormatInt(since, 10), ReplayComplete: replayComplete}
 }
 
 // liveEventFrame is event's frame on sub: its decimal id and its own JSON encoding, byte for byte,

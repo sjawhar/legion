@@ -12,13 +12,12 @@ import {
   isRetryableQueryError,
   isUnauthorized,
   NetworkError,
-  QUERY_RETRY_DELAY_MS,
-  queryRetryDelay,
   REQUEST_DEADLINE_MS,
   RequestTimeoutError,
   UnreadableAnswerError,
   type UploadImplementation,
 } from "../api/client";
+import { QUERY_RETRY_DELAY_MS, queryRetryDelay } from "../api/query-client";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -784,6 +783,8 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     keyed("upload-1")
   );
   await api.getProjectArtifact("CORE", "design-notes");
+  await api.getProjectDocumentSummary("CORE", "design notes.md");
+  await api.getIssueSummary("CORE-1");
   await api.listArtifactAsks("artifact-1", "open");
   await api.createArtifactAsk("artifact-1", { question: "Ship?" }, keyed("write-1"));
   await api.listArtifactComments("artifact-1");
@@ -796,6 +797,8 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     ["GET", "/api/v1/projects/CORE/artifacts?unlinked=true"],
     ["POST", "/api/v1/projects/CORE/artifacts"],
     ["GET", "/api/v1/projects/CORE/artifacts/design-notes"],
+    ["GET", "/api/v1/projects/CORE/artifacts/design%20notes.md/summary"],
+    ["GET", "/api/v1/issues/CORE-1/summary"],
     ["GET", "/api/v1/artifacts/artifact-1/asks?state=open"],
     ["POST", "/api/v1/artifacts/artifact-1/asks"],
     ["GET", "/api/v1/artifacts/artifact-1/comments"],
@@ -853,9 +856,10 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
 
 // INFRA-592. Dispatch answers `503 DATABASE_BUSY` and `503 REQUEST_TIMEOUT` with a `Retry-After`
 // it means: a read so answered is asked again once that wait is out (the query client's
-// `retryDelay`), rather than after the page's own 500 ms, which would ask a busy Dispatch again
-// while it is still busy. Any other `503` - a gateway's, or one of Dispatch's without those codes
-// - names no wait the page can trust and keeps the 500 ms.
+// `retryDelay`, which adds a random share of the wait again, here drawn at none), rather than
+// after the page's own 500 ms, which would ask a busy Dispatch again while it is still busy. Any
+// other `503` - a gateway's, or one of Dispatch's without those codes - names no wait the page
+// can trust and keeps the 500 ms.
 test("a read Dispatch answered too-busy waits out its Retry-After, and any other failure does not", async () => {
   const answered = async (status: number, code: string | undefined, retryAfter?: string) => {
     const client = createApiClient(
@@ -869,9 +873,10 @@ test("a read Dispatch answered too-busy waits out its Retry-After, and any other
     );
     return client.whoAmI().catch((error: unknown) => error);
   };
+  const none = () => 0;
 
-  expect(queryRetryDelay(0, await answered(503, "DATABASE_BUSY", "7"))).toBe(7_000);
-  expect(queryRetryDelay(1, await answered(503, "REQUEST_TIMEOUT", "2"))).toBe(2_000);
+  expect(queryRetryDelay(0, await answered(503, "DATABASE_BUSY", "7"), none)).toBe(7_000);
+  expect(queryRetryDelay(1, await answered(503, "REQUEST_TIMEOUT", "2"), none)).toBe(2_000);
   // Dispatch's own code without a `Retry-After`, another service's 503, a 500 and a failed
   // connection each keep the page's own wait.
   expect(queryRetryDelay(0, await answered(503, "DATABASE_BUSY"))).toBe(QUERY_RETRY_DELAY_MS);
@@ -942,6 +947,30 @@ test(
   }
 );
 
+test("a refusal keeps the server's Retry-After in delta-seconds, and no delay for a date or junk", async () => {
+  const refusal = (headers: Record<string, string>) =>
+    createApiClient(
+      stubFetch(() =>
+        Response.json({ code: "OVERLOADED", error: "busy" }, { headers, status: 503 })
+      ).fetch
+    )
+      .whoAmI()
+      .catch((error: unknown) => error);
+
+  const [seconds, date, junk, none] = await Promise.all([
+    refusal({ "Retry-After": "2" }),
+    refusal({ "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" }),
+    refusal({ "Retry-After": "-1" }),
+    refusal({}),
+  ]);
+
+  expect(seconds).toMatchObject({ code: "OVERLOADED", retryAfterMs: 2_000, status: 503 });
+  expect(date).toMatchObject({ retryAfterMs: undefined, status: 503 });
+  expect(junk).toMatchObject({ retryAfterMs: undefined, status: 503 });
+  expect(none).toMatchObject({ retryAfterMs: undefined, status: 503 });
+  expect(isRetryableQueryError(seconds)).toBe(true);
+});
+
 test(
   "the production retry policy issues one credential request when the broker is unconfigured, " +
     "not three (every query shares this policy from main.tsx)",
@@ -950,13 +979,12 @@ test(
       Response.json({ error: "not configured", code: "FEATURE_OFF" }, { status: 404 })
     );
     const client = createApiClient(stub.fetch);
-    // Mirrors main.tsx's shared QueryClient retry option exactly, with retryDelay shortened
-    // so the test does not wait on the production 500ms backoff.
+    // Mirrors main.tsx's shared QueryClient retry options exactly.
     const queryClient = new QueryClient({
       defaultOptions: {
         queries: {
           retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
-          retryDelay: 0,
+          retryDelay: queryRetryDelay,
         },
       },
     });

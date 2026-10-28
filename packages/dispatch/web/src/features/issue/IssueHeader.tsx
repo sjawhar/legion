@@ -300,6 +300,8 @@ export function IssueHeader({
         ...current,
         [issue.key]: next,
       }));
+      // The sidebar lists the pinned issues from their own read.
+      void queryClient.invalidateQueries({ exact: true, queryKey: ["issues", "pinned"] });
     },
   });
   const saveTitleOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {

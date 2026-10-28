@@ -968,7 +968,7 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 			Type: "error", Sub: "timeline-1", Code: "DELIVERY_NOT_CONFIGURED",
 			Message: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 		},
-		"events_start.json": liveEventsStart("events-1", 41),
+		"events_start.json": liveEventsStart("events-1", 41, true),
 		"event.json":        event,
 		"ended.json":        liveEnded("events-1", liveEndedBehind),
 		"agent.json":        liveAgentFrame("agent-1", agentEventResponder, responderEvent(true)),

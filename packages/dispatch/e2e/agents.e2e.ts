@@ -498,9 +498,10 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     await expect(conversation).toContainText("Can this ship?");
 
-    // Another of alice's devices clears the conversation. No event describes her own per-agent
-    // state, so this tab learns it only when the stream reopens - and a reconnect has to
-    // refresh every query the app holds, not the ones some hand-written list remembered.
+    // Another of alice's devices clears the conversation. The Clear appends her
+    // `user_agent_state.updated`, which refreshes her per-agent state in this tab
+    // (`api/event-refresh.ts`), whether the feed carries it live or replays it after the socket
+    // drops: a resume Dispatch replays in full refreshes nothing else.
     await putAgentState(planner.session_id, { cleared_before: new Date().toISOString() });
     await disconnectLiveSockets();
     await expect(plannerCard.getByRole("button", { name: "Show anyway" })).toBeVisible();

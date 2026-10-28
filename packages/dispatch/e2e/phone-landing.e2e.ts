@@ -7,14 +7,7 @@ import {
   test,
 } from "@playwright/test";
 
-import {
-  createAsk,
-  createComment,
-  createIssue,
-  createMessage,
-  createProject,
-  disconnectLiveSockets,
-} from "./api";
+import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
 import { type Box, boxesApart } from "./layout";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -215,13 +208,13 @@ test("on a phone, the Conversation opens with its newest message in view whichev
 // INFRA-303's second path: a read that fails shows "Could not load the conversation." in the
 // list's place, and the first placement must not be spent on that text either. When a later
 // refetch brings the list without changing which conversation is newest, nothing else would
-// bring the reader to it. The refetch here is the live socket's gap refresh, not TanStack Query's
-// own refetch on focus: `POST /api/v1/live/_test/disconnect` closes the tab's socket with 1012, the
-// page reopens it at once after marking a gap, and the events feed's next `events_start` refreshes
-// every query (`api/event-feed.ts`), the errored asks read among them. The row depends on that
-// path: if a 1012 stops marking a gap, or the whole-cache refresh throttle
-// (`WHOLE_CACHE_REFRESH_MS`) stops letting a gap's first refresh through at once, this row stops
-// seeing a refetch.
+// bring the reader to it. The refetch here is TanStack Query's own refetch on focus: the
+// `visibilitychange` this row dispatches on `document` bubbles to `window`, where its focusManager
+// listens, and a read in error holds no data, so it is stale and is fetched again (`main.tsx` sets
+// `refetchOnWindowFocus`). The live socket's gap no longer brings it: a drop of the tab's socket
+// resumes the event feed, which Dispatch replays in full (`replay_complete` on `events_start`), so
+// the page refreshes nothing for that gap (`api/event-feed.ts`). The row depends on the focus
+// path: if a focus stops refetching a read in error, this row stops seeing a refetch.
 test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list @phone", async ({
   browser,
 }) => {
@@ -256,7 +249,9 @@ test("on a phone, a Conversation whose read failed opens on its newest message o
     const answered = page.waitForResponse(
       (response) => asksRead(new URL(response.url())) && response.status() === 200
     );
-    await disconnectLiveSockets();
+    await page.evaluate(() =>
+      document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
+    );
     await answered;
     const newestCard = newestTurn(page, newest.id);
     await settle(newestCard, "after the refetch");

@@ -87,7 +87,7 @@ const SERVER_FRAME_KEYS = {
   snapshot: SNAPSHOT_KEYS,
   delta: DELTA_KEYS,
   freshness: allOf<keyof DeliveryLiveFreshness>()(["type", "freshness", "stale"]),
-  events_start: allOf<keyof LiveEventsStart>()(["type", "sub", "since"]),
+  events_start: allOf<keyof LiveEventsStart>()(["type", "sub", "since", "replay_complete"]),
   event: allOf<keyof LiveEventFrame>()(["type", "sub", "id", "event"]),
   agent: allOf<keyof LiveAgentFrame>()(["type", "sub", "event", "data"]),
   ended: allOf<keyof LiveEnded>()(["type", "sub", "reason"]),
@@ -267,10 +267,11 @@ test("a freshness frame carries the freshness object a delivery body carries, an
   for (const source of freshness.stale) expect(typeof source).toBe("string");
 });
 
-test("an events_start frame names the decimal id its subscription starts after", () => {
+test("an events_start frame names the decimal id its subscription starts after and whether its replay covers the gap", () => {
   expect(keysOf(eventsStart)).toEqual(sorted(SERVER_FRAME_KEYS.events_start));
   expect(eventsStart.type).toBe("events_start");
   expect(eventsStart.since).toMatch(/^\d+$/);
+  expect(typeof eventsStart.replay_complete).toBe("boolean");
 });
 
 test("an event frame carries the event's decimal id and the event itself", () => {

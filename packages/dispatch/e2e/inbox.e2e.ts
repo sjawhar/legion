@@ -14,6 +14,7 @@ import {
   getIssue,
   getIssueEvents,
   patchIssue,
+  putIssueState,
   putProjectDefaultAssignee,
   replyToCommentDelivery,
 } from "./api";
@@ -268,7 +269,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   }
 });
 
-test("a later Inbox response clears a hidden ask's pending refresh", async ({ browser }) => {
+test("a later Inbox response clears a hidden ask's pending refresh @phone", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
   const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
@@ -322,23 +325,34 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
     // held Inbox read is out, is replayed to the page whenever its live socket opens: no wait for
     // the socket.
     await listRequested.promise;
+    const pinnedRead = (request: { method(): string; url(): string }) =>
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === "/api/v1/issues" &&
+      new URL(request.url()).searchParams.get("pinned") === "true";
+    const isPhone = testInfo.project.name === "iphone";
+    if (isPhone) {
+      // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
+      const firstPinnedRead = page.waitForRequest(pinnedRead);
+      await page.getByRole("button", { name: "Open navigation" }).click();
+      await firstPinnedRead;
+    }
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
     // The held Inbox response must not land until the browser has handled the hidden ask's
-    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
-    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
-    // the marker appearing proves the frame before it was processed.
-    await createComment(
-      visibleIssue.key,
-      { ask_id: visibleAsk.id, body: "Ordering marker." },
-      session
-    );
-    await expect(
-      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
-    ).toBeVisible();
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on.
+    // Nor can an Inbox card or the sidebar's rows, which wait for the held first load: it is
+    // never cancelled. alice's own pin, written after the reply, makes the page read the pinned
+    // list again, which the sidebar reads beside the held Inbox. Event ids are delivered in
+    // order, so that read proves the frame before it was processed.
+    const pinnedReadAgain = page.waitForRequest(pinnedRead);
+    await putIssueState(visibleIssue.key, { pinned: true });
+    await pinnedReadAgain;
+    if (isPhone) {
+      await page.getByRole("button", { name: "Close navigation" }).click();
+    }
     // So the hidden reply reached the page before the held response lands: what follows tests its
     // pending refresh rather than passing without one.
     expect(hiddenFrames).toBeGreaterThan(0);
@@ -1077,13 +1091,15 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
 });
 
 // With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale, through a dropped live socket, whose reconnect refreshes every query once the
-// event feed starts again, and through leaving the Inbox and coming back. Every credential-list call
-// after the page's first is held, so a refetch of that list, had one put it back to loading, would
-// take the empty state off the screen for as long as the hold lasts. A Dispatch with no secrets
-// broker answers the list `null` and is asked again only after a gap in the socket, over the held
-// answer, so the held second call leaves the empty state on screen; with the fake broker the list
-// keeps its empty answer on screen while a refetch runs. Neither page may log a failed request.
+// what has gone stale (the clock moves past the 30 s `staleTime` first, and the credential list's
+// own poll comes due on the way), through a dropped live socket, whose resume Dispatch replays in
+// full (`replay_complete`), so it refreshes nothing, and through leaving the Inbox and coming back.
+// Every credential-list call after the page's first is held, so a refetch of that list, had one put
+// it back to loading, would take the empty state off the screen for as long as the hold lasts. A
+// Dispatch with no secrets broker answers the list `null` and is asked again only after a gap in
+// the socket, over the held answer, so the held second call leaves the empty state on screen; with
+// the fake broker the list keeps its empty answer on screen while a refetch runs. Neither page may
+// log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {
@@ -1104,6 +1120,7 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       await route.continue();
     });
     const empty = page.getByText("Nothing needs you");
+    await page.clock.install();
     await page.goto("/");
     await expect(empty).toBeVisible();
     expect(credentialCalls).toBe(1);
@@ -1117,16 +1134,24 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       }).observe(document.body, { characterData: true, childList: true, subtree: true });
     });
 
-    // The reconnect's whole-cache refresh refetches the inbox list; once that has answered, every
-    // refetch the focus and the reconnect started is on the wire.
+    // The focus refetches the inbox list once it has gone stale; once that has answered, every
+    // refetch the focus started is on the wire.
     const refreshed = page.waitForResponse(
       (response) => new URL(response.url()).pathname === "/api/v1/inbox"
     );
+    await page.clock.fastForward(31_000);
     await page.evaluate(() =>
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
     );
-    await disconnectLiveSockets();
     await refreshed;
+    // Dispatch restarting drops the socket (1012); the page reopens it at once and resumes the
+    // event feed, which Dispatch replays in full.
+    const resumed = page.waitForEvent(
+      "websocket",
+      (socket) => new URL(socket.url()).pathname === "/ws/live"
+    );
+    await disconnectLiveSockets();
+    await resumed;
     await page.evaluate(() => {
       const frames = Promise.withResolvers<void>();
       requestAnimationFrame(() => requestAnimationFrame(() => frames.resolve()));
@@ -1538,10 +1563,10 @@ test("a mentioned session's callback reply reaches the open ask card", async ({ 
 });
 
 // The window #1207's freshness marker covers: a pre-event Inbox body that lands inside the
-// 100 ms debounce is committed and stamped fresh, so there is no request left for
-// `cancelRefetch` to restart, the flush's `["ask-thread", id]` invalidation matches a query that
-// does not exist yet, and a card mounting in the gap seeds its thread from the pre-event row
-// under `staleTime: Infinity` and never refetches.
+// 100 ms batch is committed and stamped fresh before the flush, the flush's
+// `["ask-thread", id]` refresh matches a query that does not exist yet, the Inbox's own fetch
+// after the flush is held here as a slow server's would be, and a card mounting in the gap seeds
+// its thread from the pre-event row under `staleTime: Infinity` and never refetches.
 test("a stale Inbox body landing inside the debounce seeds a later card's thread", async ({
   browser,
 }) => {
@@ -1593,8 +1618,8 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    // ... and the pre-event body lands before the 100ms flush, so cancelRefetch never restarts
-    // it. This hold is shorter than INVALIDATION_DEBOUNCE_MS by design and has no client-visible
+    // ... and the pre-event body lands before the 100 ms flush. This hold is shorter than the
+    // batch window (`BATCH_WINDOW_MS` in `web/src/api/event-feed.ts`) by design and has no client-visible
     // signal to wait on: a failure here means the window slipped, not that the marker regressed.
     await page.waitForTimeout(30);
     releaseSecond.resolve();

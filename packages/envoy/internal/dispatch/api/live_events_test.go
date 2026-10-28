@@ -37,6 +37,18 @@ func eventHead(t *testing.T, database *store.Store) int64 {
 // not nil, and answers the id the subscription's events_start names: the one it starts after.
 func subscribeEvents(t *testing.T, client *socketClient, sub string, since *int64) int64 {
 	t.Helper()
+	start := subscribeEventsStart(t, client, sub, since)
+	id, err := strconv.ParseInt(start.Since, 10, 64)
+	if err != nil {
+		t.Fatalf("events_start.since = %q, not a decimal event id: %v", start.Since, err)
+	}
+	return id
+}
+
+// subscribeEventsStart subscribes client to the event feed under sub, resuming after since when it
+// is not nil, and answers the subscription's events_start frame.
+func subscribeEventsStart(t *testing.T, client *socketClient, sub string, since *int64) LiveEventsStart {
+	t.Helper()
 	resume := ""
 	if since != nil {
 		resume = `{"since":"` + strconv.FormatInt(*since, 10) + `"}`
@@ -47,11 +59,7 @@ func subscribeEvents(t *testing.T, client *socketClient, sub string, since *int6
 	if !ok || start.Sub != sub {
 		t.Fatalf("the first frame of %s = %+v, want its events_start", sub, frame)
 	}
-	id, err := strconv.ParseInt(start.Since, 10, 64)
-	if err != nil {
-		t.Fatalf("events_start.since = %q, not a decimal event id: %v", start.Since, err)
-	}
-	return id
+	return start
 }
 
 // feedEvent is what a test reads of the event an event frame carries.
@@ -190,6 +198,34 @@ func TestTheEventFeedServesAPersonAndABearer(t *testing.T) {
 		if _, event := eventOfType(t, client, "feed", "issue.updated"); !strings.Contains(string(event.Payload), "Seen by both") {
 			t.Errorf("%s was sent %+v, want the rename", name, event)
 		}
+	}
+}
+
+// A resuming subscription whose since is at or below the log's head is replayed everything after
+// it, and its events_start says so (replay_complete), so a page owes no refresh for the gap; a
+// subscription with no resume (nothing replayed) and a since above the head (an id of a log since
+// replaced) say it is not.
+func TestTheEventFeedSaysWhenItsReplayCoversTheGap(t *testing.T) {
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	createInteractionIssue(t, rig.handler, "TEST", "Replayed", "A spec")
+	head := eventHead(t, rig.database)
+
+	for _, subscription := range []struct {
+		name  string
+		since *int64
+		want  LiveEventsStart
+	}{
+		{name: "cold", since: nil, want: liveEventsStart("feed", head, false)},
+		{name: "resuming below the head", since: new(head - 1), want: liveEventsStart("feed", head-1, true)},
+		{name: "resuming at the head", since: new(head), want: liveEventsStart("feed", head, true)},
+		{name: "since above the head", since: new(head + 100), want: liveEventsStart("feed", head, false)},
+	} {
+		t.Run(subscription.name, func(t *testing.T) {
+			client := rig.dial(t, withBearer("agent-token"))
+			if start := subscribeEventsStart(t, client, "feed", subscription.since); start != subscription.want {
+				t.Fatalf("events_start = %+v, want %+v", start, subscription.want)
+			}
+		})
 	}
 }
 

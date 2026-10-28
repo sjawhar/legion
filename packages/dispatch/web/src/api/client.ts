@@ -58,6 +58,7 @@ import type {
   DeliverySettings,
   DeliverySettingsInput,
   DispatchUser,
+  DocumentReferenceSummary,
   EditCommentInput,
   Event,
   GraphReferences,
@@ -66,6 +67,7 @@ import type {
   IssueAskRow,
   IssueAskThreadRow,
   IssueDetails,
+  IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
   ListUsersResponse,
@@ -130,7 +132,9 @@ export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
-  /** How long Dispatch asked the client to wait before it asks again (`Retry-After`), if it said. */
+  /** How long the server asked the caller to wait before trying again (`Retry-After` in
+   *  delta-seconds, as Dispatch sends with a 503 refusing excess load), in milliseconds;
+   *  undefined when the response carried none. */
   readonly retryAfterMs: number | undefined;
 
   constructor(status: number, payload: ErrorPayload, retryAfterMs?: number) {
@@ -342,28 +346,21 @@ export function isRetryableQueryError(error: unknown): boolean {
   );
 }
 
-/** The codes of the two `503`s Dispatch answers with a `Retry-After` it means: its database is
- *  too busy to take the request now (`DATABASE_BUSY`), or the request ran past the time Dispatch
- *  gives one (`REQUEST_TIMEOUT`). Any other `503` - a gateway's, or Dispatch's own without one of
- *  these codes - names no wait the page can trust, and keeps the page's own backoff. */
-const BUSY_CODES: ReadonlySet<string> = new Set(["DATABASE_BUSY", "REQUEST_TIMEOUT"]);
+/** The codes of the `503`s Dispatch answers with a `Retry-After` it means: it is refusing excess
+ *  load (`OVERLOADED`), its database is too busy to take the request now (`DATABASE_BUSY`), or the
+ *  request ran past the time Dispatch gives one (`REQUEST_TIMEOUT`). Any other `503` - a
+ *  gateway's, or Dispatch's own without one of these codes - names no wait the page can trust,
+ *  and keeps the page's own backoff. */
+const BUSY_CODES: ReadonlySet<string> = new Set(["OVERLOADED", "DATABASE_BUSY", "REQUEST_TIMEOUT"]);
 
 /** How long Dispatch asked to be left before this request is asked again, when it was too busy
- *  for it (`BUSY_CODES`) and said so with a `Retry-After`; `undefined` for anything else. */
+ *  for it (`BUSY_CODES`) and said so with a `Retry-After`; `undefined` for anything else. A read's
+ *  retry waits it out (`queryRetryDelay` in `api/query-client.ts`), as a write's does
+ *  (`features/writes/keyed-write.ts`). */
 export function busyRetryAfterMs(error: unknown): number | undefined {
   if (!(error instanceof ApiError) || error.status !== 503) return undefined;
   return error.code !== undefined && BUSY_CODES.has(error.code) ? error.retryAfterMs : undefined;
 }
-
-/** How long a read waits before the query client asks it again: the wait Dispatch asked for when
- *  it was too busy for it (`busyRetryAfterMs`), and otherwise `QUERY_RETRY_DELAY_MS`. The query
- *  client's `retryDelay`, beside `isRetryableQueryError` (`main.tsx`). */
-export function queryRetryDelay(_failureCount: number, error: unknown): number {
-  return busyRetryAfterMs(error) ?? QUERY_RETRY_DELAY_MS;
-}
-
-/** How long a read that failed for any other retryable reason waits before it is asked again. */
-export const QUERY_RETRY_DELAY_MS = 500;
 
 // The reason to show a reader for a failed write: the server's own message when it answered
 // with one, that it did not answer in time when it did not, otherwise the caller's fallback line
@@ -507,11 +504,13 @@ function pathWithQuery(path: string, values: object): string {
   return search ? `${path}?${search}` : path;
 }
 
-/** The wait `Retry-After` names, in milliseconds: its delay-seconds form, which is the one
- *  Dispatch sends. */
+/** The wait `Retry-After` names, in milliseconds: its delta-seconds form, which is the one
+ *  Dispatch sends. An HTTP-date (Dispatch never sends one) or any other value is no delay. */
 function retryAfterMs(response: Response): number | undefined {
-  const seconds = Number(response.headers.get("Retry-After") ?? Number.NaN);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
+  const retryAfter = response.headers.get("Retry-After")?.trim();
+  return retryAfter !== undefined && /^\d+$/.test(retryAfter)
+    ? Number(retryAfter) * 1_000
+    : undefined;
 }
 
 async function errorFrom(response: Response): Promise<ApiError> {
@@ -930,6 +929,12 @@ export class DispatchApiClient {
     return this.json<IssueDetails>(`/api/v1/issues/${pathSegment(key)}`);
   }
 
+  /** What a reference to the issue or one of its documents shows: title, status and each
+   *  document's name, kind and latest version, without the full issue read. */
+  getIssueSummary(key: string): Promise<IssueReferenceSummary> {
+    return this.json<IssueReferenceSummary>(`/api/v1/issues/${pathSegment(key)}/summary`);
+  }
+
   patchIssue(key: string, input: UpdateIssueInput, bounds: WriteBounds): Promise<Issue> {
     return this.send<Issue>(issuePatchRequest(key, input), bounds);
   }
@@ -1175,6 +1180,14 @@ export class DispatchApiClient {
   getProjectArtifact(key: string, slug: string): Promise<Artifact> {
     return this.json<Artifact>(
       `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
+    );
+  }
+
+  /** What a reference to a project document shows: name, kind and latest version, without its
+   *  versions. */
+  getProjectDocumentSummary(key: string, slug: string): Promise<DocumentReferenceSummary> {
+    return this.json<DocumentReferenceSummary>(
+      `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}/summary`
     );
   }
 

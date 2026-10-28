@@ -103,8 +103,10 @@ export interface EventsHandlers {
    *  cursor when it holds none. `afterGap` is false on its first start and after a 4001; true when
    *  events may have been missed since it last started - its socket was lost, a failed attempt
    *  before the first open included, or Dispatch ended or refused it - however many sends it took
-   *  to start again, so a gap is reported once. */
-  onStart(since: string, afterGap: boolean): void;
+   *  to start again, so a gap is reported once. `replayComplete` is the start's `replay_complete`:
+   *  Dispatch replays every event after the resume it was sent, so the gap, if any, lost nothing
+   *  that the replay does not carry. */
+  onStart(since: string, afterGap: boolean, replayComplete: boolean): void;
   onEvent(id: string, event: unknown): void;
 }
 
@@ -441,7 +443,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
         sub.started = true;
         const afterGap = sub.gap;
         sub.gap = false;
-        return sub.handlers.onStart(frame.since, afterGap);
+        return sub.handlers.onStart(frame.since, afterGap, frame.replay_complete);
       }
       case "event":
         return held(frame.sub, "events")?.handlers.onEvent(frame.id, frame.event);

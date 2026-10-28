@@ -150,11 +150,16 @@ type DeliveryLiveFreshness struct {
 
 // LiveEventsStart opens every events subscription, before any LiveEventFrame: Since is the decimal
 // id the subscription starts after, the page's resume clamped to the feed's head, or the head when
-// the page sent none.
+// the page sent none. ReplayComplete is true when the page resumed from an id at or below the
+// head: the subscription replays every event after it before it goes live, so the page missed
+// nothing and owes no refresh for the gap. A subscription that names no resume, and one whose
+// resume is above the head (an id of a log this one replaced), was replayed nothing it missed and
+// says false.
 type LiveEventsStart struct {
-	Type  string `json:"type"`
-	Sub   string `json:"sub"`
-	Since string `json:"since"`
+	Type           string `json:"type"`
+	Sub            string `json:"sub"`
+	Since          string `json:"since"`
+	ReplayComplete bool   `json:"replay_complete"`
 }
 
 // LiveEventFrame is one event of the feed: its decimal id and the event's own JSON encoding, byte

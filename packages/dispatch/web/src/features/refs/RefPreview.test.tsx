@@ -12,6 +12,7 @@ import type {
   CommentRead,
   GraphReferences,
   IssueDetails,
+  IssueReferenceSummary,
 } from "../../api/types";
 import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
@@ -608,25 +609,74 @@ test("an ask's card heads with its question formatted, not its source", async ()
   }
 });
 
-/** CORE-1 with its spec, `design-md`, the document a block reference to `dispatch://CORE-1/spec`
- *  names. */
-function issueWithSpec(): IssueDetails {
+test("a document's card shows its owner, name, latest version and text from its summary and text reads", async () => {
+  const getIssue = mockIssues();
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    id: "doc-9",
+    kind: "doc",
+    latest_version: 4,
+    name: "Runbook.md",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "Restart the **pod** first.",
+    token: "sha256:runbook",
+    version: null,
+  });
+  const getProjectArtifact = spyOn(api, "getProjectArtifact");
+  jest.useFakeTimers();
+  const view = render(
+    <Harness>
+      <Link
+        to="/projects/CORE/documents/runbook-md"
+        {...referenceTriggerProps({ kind: "document", project: "CORE", slug: "runbook-md" })}
+      >
+        the runbook
+      </Link>
+    </Harness>
+  );
+  try {
+    fireEvent.pointerOver(screen.getByRole("link", { name: "the runbook" }), {
+      pointerType: "mouse",
+    });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    jest.useRealTimers();
+    await waitFor(() => expect(card.querySelector("strong")?.textContent).toBe("pod"));
+    expect(card.textContent).toContain("CORE · Runbook.md");
+    expect(card.textContent).toContain("v4");
+    expect(getArtifactText).toHaveBeenCalledWith("doc-9");
+    expect(getProjectArtifact).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getProjectArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getProjectDocumentSummary.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+/** CORE-1's summary with its spec, `design-md`, the document a block reference to
+ *  `dispatch://CORE-1/spec` names. */
+function summaryWithSpec(): IssueReferenceSummary {
   return {
-    ...issue("CORE-1", "Design decision"),
-    artifacts: [
+    documents: [
       {
-        created_at: "2026-09-09T00:00:00Z",
-        created_by: { id: "alice", kind: "user" },
         id: "spec",
-        issue_key: "CORE-1",
         kind: "doc",
+        latest_version: 3,
         name: "Design.md",
         primary: true,
-        project: "CORE",
         slug: "design-md",
-        versions: [],
       },
     ],
+    key: "CORE-1",
+    project: "CORE",
+    status: "in_progress",
+    title: "Design decision",
   };
 }
 
@@ -661,7 +711,8 @@ test.each([
     "Removed in version 4",
   ],
 ] as const)("a pinned block's card names its document, the version it pins, how it stands since (%s), and that version's text", async (_state, read, standing) => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issueWithSpec());
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(summaryWithSpec());
+  const getIssue = spyOn(api, "getIssue");
   const getReferences = spyOn(api, "getReferences").mockResolvedValue(read);
   const route = { block: { id: "p1", pin: "2" }, key: "CORE-1", kind: "spec" as const };
   const view = render(
@@ -683,6 +734,9 @@ test.each([
     expect(card.textContent).toContain(standing);
     await waitFor(() => expect(card.textContent).toContain("Ship it on Friday."));
     expect(card.textContent).not.toContain("Monday");
+    // The card names the document from the issue's summary, never the full issue read.
+    expect(getIssueSummary).toHaveBeenCalledWith("CORE-1");
+    expect(getIssue).not.toHaveBeenCalled();
     // The card opens the version it pins, under the spec's own slug.
     expect(card.querySelector("a")?.getAttribute("href")).toBe(
       "/issues/CORE-1/artifacts/design-md?v=2"
@@ -691,11 +745,12 @@ test.each([
     view.unmount();
     getReferences.mockRestore();
     getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
 test("an unpinned block's card shows its current text, and a block that cannot be read its short form", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issueWithSpec());
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(summaryWithSpec());
   const current = pinnedRead({ state: "changed", text: "unused" });
   const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
     reference === "dispatch://CORE-1/spec#b-p1"
@@ -736,7 +791,7 @@ test("an unpinned block's card shows its current text, and a block that cannot b
   } finally {
     view.unmount();
     getReferences.mockRestore();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 

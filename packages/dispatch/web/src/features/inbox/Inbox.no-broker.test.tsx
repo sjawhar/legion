@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, type QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -8,15 +8,16 @@ import { installFakeLiveSockets } from "../../__tests__/live-socket-harness";
 import { api, isRetryableQueryError } from "../../api/client";
 import { useEventFeed } from "../../api/event-feed";
 import { liveSocketFor } from "../../api/live-socket";
+import { DispatchQueryClient, queryRetryDelay } from "../../api/query-client";
 import { refreshQueries } from "../../api/query-refresh";
 import type { CredentialPendingResponse } from "../../api/types";
 import { Inbox } from "./Inbox";
 
 // A Dispatch with no secrets broker answers the credential-request list with `null`, an answer that
 // holds until the page reloads or the event feed has a gap (the server reads its broker setting at
-// boot). The QueryClient here is main.tsx's own, with no retry delay. Every credential-list call
-// after the first is held open, so a refetch, had one started, would leave the list loading and the
-// empty state off the screen.
+// boot). The QueryClient here is main.tsx's own. Every credential-list call after the first is held
+// open, so a refetch, had one started, would leave the list loading and the empty state off the
+// screen.
 const never = () => Promise.withResolvers<never>().promise;
 
 let whoAmI: Mock<typeof api.whoAmI>;
@@ -42,12 +43,12 @@ afterEach(() => {
 });
 
 function productionQueryClient(): QueryClient {
-  return new QueryClient({
+  return new DispatchQueryClient({
     defaultOptions: {
       queries: {
         refetchOnWindowFocus: true,
         retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
-        retryDelay: 0,
+        retryDelay: queryRetryDelay,
         staleTime: 30_000,
       },
     },
@@ -164,13 +165,19 @@ test("with no broker, a gap in the event feed asks the list again once, and a fo
 
     const watch = watchEmptyState();
     // Dispatch restarted: the socket closes (1012), the page's next one opens at once, and once
-    // Dispatch starts the feed on it the page refreshes for the gap.
+    // Dispatch starts the feed on it, saying its replay does not cover the gap, the page refreshes
+    // for the gap.
     act(() => sockets.latest().drop(1012));
     act(() => sockets.latest().open());
     expect(sockets.sockets).toHaveLength(2);
     act(() => {
       const socket = sockets.latest();
-      socket.receive({ type: "events_start", sub: socket.subscribed("events").sub, since: "0" });
+      socket.receive({
+        type: "events_start",
+        sub: socket.subscribed("events").sub,
+        since: "0",
+        replay_complete: false,
+      });
     });
     await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
     // The gap's whole-cache refresh refetches the inbox list; the held answer is not asked a

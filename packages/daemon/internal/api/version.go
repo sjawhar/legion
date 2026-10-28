@@ -372,4 +372,17 @@ package api
 // and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is INFRA-208,
 // on main before this change, so this change takes the number above it, as the collision note
 // says.)
-const DaemonAPIVersion = 40
+//
+// 41: `legion controller start` passes `/legion-controller-start`
+// (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
+// controller's start message from that extension command rather than from session_start: Oh My Pi
+// drains every session_start send at the end of its startup, so the start turn ran inside the
+// startup wait, with no TUI and no input, while a command-line word runs as a prompt after startup
+// and once the TUI listens. Under this CLI a pi-legion before 41 sends from session_start and then
+// gets the word as a prompt, and a pi-legion at 41 under an older CLI never sends the start, so the
+// controller probe refuses either pair before the mint. The daemon-launched controller is unchanged
+// on the wire. (This branch took 40; main then landed the awaiting_person change at 40 and released
+// pi-legion v11.1.0 declaring it, without these shapes, so this branch takes the number above it,
+// as the collision note says. Other open branches may declare 41 too: whichever merges after
+// another takes the next free number, as the collision note says.)
+const DaemonAPIVersion = 41
