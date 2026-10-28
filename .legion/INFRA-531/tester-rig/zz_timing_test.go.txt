@@ -1,0 +1,38 @@
+package pmdoc
+
+// Throwaway INFRA-531 tester timing; never committed.
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestZZTiming(t *testing.T) {
+	if os.Getenv("ZZ_TIMING") == "" {
+		t.Skip()
+	}
+	units := map[string]string{
+		"review-unit": "ax@y.zz</b>#!<b>_.~~a_**]-**@*&#x40;* **Which here?**Careful. http: www.q z@ http://a.bc ~x *a _b **a.**&#98; awww.q *a **b*** ",
+		"tester-unit": "x &lt;a:b;https://y.test> [x](a&#10;b) a@b.cc &lt;javascript:void(0);www.a.b> \\*https://s.test &amp;www.t.test x;a@b.test ",
+		"typical":     "See https://x.test/a, x;https://y.test/b and www.z.test/c; mail a@b.test or \"https://q.test\". ",
+	}
+	for _, name := range []string{"review-unit", "tester-unit", "typical"} {
+		for _, size := range []int{64 << 10, 256 << 10} {
+			md := strings.Repeat(units[name], size/len(units[name])+1)[:size]
+			md = strings.TrimRight(md, " ") + "\n"
+			best := time.Duration(1 << 62)
+			var err error
+			for range 3 {
+				start := time.Now()
+				_, err = ParseForWrite(md, nil)
+				if d := time.Since(start); d < best {
+					best = d
+				}
+			}
+			fmt.Printf("TIMING %s %dKiB %.3fs refused=%v\n", name, size>>10, best.Seconds(), err != nil)
+		}
+	}
+}

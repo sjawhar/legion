@@ -1,0 +1,54 @@
+// Throwaway (INFRA-531 tester, round 2): adversarial address and link-destination shapes.
+import { writeFileSync } from "node:fs";
+
+const out = process.argv[2] as string;
+const count = Number(process.argv[3] ?? 8000);
+let state = 5312028;
+const rnd = (n: number) => {
+  state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+  return (state >>> 8) % n;
+};
+const pick = <T>(xs: readonly T[]): T => xs[rnd(xs.length)] as T;
+
+const befores = ["", "x", "x;", ";", "#", "&", "&amp;", "&#59;", "\\*", "\\(", "\\[", "\\_", "\\~", "\\\\",
+  "é", "—", "]", "|", "!", "[", "(", '"', "'", "*", "**", "_", "~", "~~", "`c`", "1", "x_", "x.", "x/", "x:",
+  "<span>s</span>", "[l](u)", "x\\"];
+const schemes = ["https://", "http://", "HTTPS://", "www.", "WWW.", "http\\://", "www\\.", "mailto:", ""];
+const hosts = ["x.test", "a.b.test", "x", "x_y.test", "a-b.test", "localhost", "a@b.test", "a.b@c.test",
+  "a'b@c.test", "a@b.test1", "a\\@b.test", "x.tést", "x&amp;y.test", "x&copy;y.test"];
+const paths = ["", "/", "/a", "/a_", "/a*b*", "/(a)", "/(a", "/a)", "/a<b", "/a>b", "/(a)>", "/a\\_b", "/a\\",
+  "/a\\\\", "/a&amp;b", "/a&amp", "/a&copy;b", "/a&copy=2", "/?a=1&amp;b=2", "/?a=1&amp=2", "/?a=1&b=2",
+  "/?a=1\\&amp;b=2", "/a&lt;b", "/a&#38;b", "/a&#x26;b", "/one&amp;amp;two", "/a.", "/a;", "/a]", "/a`b`",
+  "/a\\&", "/a\\>"];
+const afters = ["", " b", ".", ")", "_", "*", "~~", "`c`", "](u)", "\\", "\\_", ";", "<b", ">", "'", "!",
+  " https://y.test", " a@b.test", "\nb", "  \nb"];
+const wraps: ((s: string) => string)[] = [
+  (s) => s, (s) => s, (s) => `a ${s}`, (s) => `*${s}*`, (s) => `**${s}**`, (s) => `~~${s}~~`,
+  (s) => `> ${s}`, (s) => `- ${s}`, (s) => `# ${s}`, (s) => `| ${s} | c |\n| --- | --- |\n| d | e |`,
+  (s) => `[${s}](https://z.test)`,
+];
+// An explicit link or image whose destination is the generated address.
+const dests: ((h: string, p: string) => string)[] = [
+  (h, p) => `[a](https://${h}${p}) b`,
+  (h, p) => `[a](<https://${h}${p}>) b`,
+  (h, p) => `[a](https://${h}${p} "t&amp;u") b`,
+  (h, p) => `![i](https://${h}${p}) b`,
+  (h, p) => `<https://${h}${p}> b`,
+  (h, p) => `[https://${h}${p}](https://${h}${p}) b`,
+  (h, p) => `| [a](https://${h}${p}) | c |\n| --- | --- |`,
+];
+
+const seen = new Set<string>();
+const lines: string[] = [];
+const add = (md: string) => {
+  if (seen.has(md)) return;
+  seen.add(md);
+  lines.push(JSON.stringify({ id: lines.length, md: `${md}\n` }));
+};
+let tries = 0;
+while (lines.length < count && tries++ < count * 20) {
+  if (rnd(3) === 0) add(pick(dests)(pick(hosts), pick(paths)) + pick(afters));
+  else add(pick(wraps)(pick(befores) + pick(schemes) + pick(hosts) + pick(paths) + pick(afters)));
+}
+writeFileSync(out, `${lines.join("\n")}\n`);
+console.error(`${lines.length} documents`);

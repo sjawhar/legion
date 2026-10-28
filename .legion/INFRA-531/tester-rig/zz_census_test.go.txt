@@ -1,0 +1,176 @@
+package pmdoc
+
+// Throwaway INFRA-531 tester census; never committed. TestZZCensusDump runs in main's tree and
+// writes each document's tree as main's reader leaves it (the live tree main's server keeps) and
+// main's render of it. TestZZCensusCompare runs at the head and classifies each document.
+
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+)
+
+type censusIn struct {
+	ID       string `json:"id"`
+	MD       string `json:"md"`
+	Latest   bool   `json:"latest"`
+	Approved bool   `json:"approved"`
+}
+
+type censusDump struct {
+	ID     string          `json:"id"`
+	Tree   json.RawMessage `json:"tree"`
+	Render string          `json:"render"`
+	Err    string          `json:"err"`
+}
+
+func censusScanner(t *testing.T, path string) *bufio.Scanner {
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 1<<20), 1<<28)
+	return s
+}
+
+func TestZZCensusDump(t *testing.T) {
+	if os.Getenv("CENSUS_IN") == "" {
+		t.Skip()
+	}
+	in := censusScanner(t, os.Getenv("CENSUS_IN"))
+	out, _ := os.Create(os.Getenv("CENSUS_OUT"))
+	defer out.Close()
+	w := bufio.NewWriter(out)
+	defer w.Flush()
+	for in.Scan() {
+		var rec censusIn
+		json.Unmarshal(in.Bytes(), &rec)
+		dump := censusDump{ID: rec.ID}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dump.Err = "panic"
+				}
+			}()
+			doc, err := Parse(rec.MD)
+			if err != nil {
+				dump.Err = err.Error()
+				return
+			}
+			tree, _ := doc.JSON()
+			dump.Tree = tree
+			dump.Render, _ = Render(doc)
+		}()
+		line, _ := json.Marshal(dump)
+		w.Write(append(line, '\n'))
+	}
+}
+
+// censusLinks is doc's link hrefs in order, a run of text under one link counted once.
+func censusLinks(doc *Node) []string {
+	var hrefs []string
+	last := ""
+	Walk(doc, func(node *Node) bool {
+		href := ""
+		for _, mark := range node.Marks {
+			if h, ok := mark.Attrs["href"].(string); ok && mark.Type == "link" {
+				href = h
+			}
+		}
+		if node.Type == "text" || len(node.Children) == 0 {
+			if href != "" && href != last {
+				hrefs = append(hrefs, href)
+			}
+			last = href
+		}
+		return true
+	})
+	return hrefs
+}
+
+func TestZZCensusCompare(t *testing.T) {
+	if os.Getenv("CENSUS_IN") == "" {
+		t.Skip()
+	}
+	in := censusScanner(t, os.Getenv("CENSUS_IN"))
+	base := censusScanner(t, os.Getenv("CENSUS_BASE"))
+	out, _ := os.Create(os.Getenv("CENSUS_OUT"))
+	defer out.Close()
+	w := bufio.NewWriter(out)
+	defer w.Flush()
+	for in.Scan() && base.Scan() {
+		var rec censusIn
+		json.Unmarshal(in.Bytes(), &rec)
+		var dump censusDump
+		json.Unmarshal(base.Bytes(), &dump)
+		if dump.ID != rec.ID {
+			t.Fatalf("out of step at %s / %s", rec.ID, dump.ID)
+		}
+		result := map[string]any{"id": rec.ID, "latest": rec.Latest, "approved": rec.Approved}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					result["panic"] = true
+				}
+			}()
+			if dump.Err != "" || dump.Tree == nil {
+				result["baseErr"] = dump.Err
+				return
+			}
+			mainTree, err := FromJSON(dump.Tree)
+			if err != nil {
+				result["treeErr"] = err.Error()
+				return
+			}
+			headDoc, err := Parse(rec.MD)
+			if err != nil {
+				result["headErr"] = err.Error()
+				return
+			}
+			mainLinks, headLinks := censusLinks(mainTree), censusLinks(headDoc)
+			rendered, rerr := Render(mainTree)
+			if rerr != nil {
+				result["renderErr"] = rerr.Error()
+				return
+			}
+			back, perr := Parse(rendered)
+			if perr != nil {
+				result["backErr"] = perr.Error()
+				return
+			}
+			afterLinks := censusLinks(back)
+			result["nMain"], result["nHead"], result["nAfter"] = len(mainLinks), len(headLinks), len(afterLinks)
+			result["readingChanges"] = strings.Join(mainLinks, "\x00") != strings.Join(headLinks, "\x00")
+			result["firstWriteChangesLinks"] = strings.Join(afterLinks, "\x00") != strings.Join(headLinks, "\x00")
+			result["bytesChange"] = rendered != dump.Render
+			var diffs [][2]string
+			if len(afterLinks) == len(headLinks) {
+				for i := range headLinks {
+					if afterLinks[i] != headLinks[i] {
+						diffs = append(diffs, [2]string{headLinks[i], afterLinks[i]})
+					}
+				}
+			} else {
+				diffs = append(diffs, [2]string{"count", ""})
+			}
+			if len(diffs) > 5 {
+				diffs = diffs[:5]
+			}
+			result["diffs"] = diffs
+			var rdiffs [][2]string
+			if len(mainLinks) == len(headLinks) {
+				for i := range headLinks {
+					if mainLinks[i] != headLinks[i] && len(rdiffs) < 5 {
+						rdiffs = append(rdiffs, [2]string{mainLinks[i], headLinks[i]})
+					}
+				}
+			}
+			result["readDiffs"] = rdiffs
+		}()
+		line, _ := json.Marshal(result)
+		w.Write(append(line, '\n'))
+	}
+}

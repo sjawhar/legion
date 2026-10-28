@@ -1,0 +1,89 @@
+#!/usr/bin/env bun
+// Throwaway INFRA-531 tester census crawler, after INFRA-172's escaped-pipe-census.ts: reads every
+// stored version of every document through GET /api/v1/artifacts/{id}/versions/{n} (the stored
+// artifact_versions.markdown, never /text) and writes {"id","md","latest","approved"} lines,
+// one per distinct markdown of a document.
+//   bun crawl.ts <out.jsonl> [--projects KEY,KEY]
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+
+const [out, ...rest] = process.argv.slice(2);
+const pIdx = rest.indexOf("--projects");
+const only = pIdx >= 0 ? (rest[pIdx + 1] ?? "").split(",").filter(Boolean) : [];
+const base = process.env.DISPATCH_URL!;
+const token = readFileSync(process.env.DISPATCH_TOKEN_FILE!, "utf8").trim();
+writeFileSync(out, "");
+writeFileSync(`${out}.failures`, "");
+
+let last = 0;
+let requests = 0;
+async function get<T>(path: string): Promise<T | null> {
+  let failure = "";
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (attempt > 0) await Bun.sleep(1000 * 2 ** attempt);
+    const now = Date.now();
+    const at = Math.max(now, last + 100);
+    last = at;
+    if (at > now) await Bun.sleep(at - now);
+    requests++;
+    try {
+      const res = await fetch(base + path, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) return (await res.json()) as T;
+      failure = `${res.status} ${(await res.text()).slice(0, 200)}`;
+      if (res.status < 500 && res.status !== 429) break;
+    } catch (err) {
+      failure = String(err);
+    }
+  }
+  appendFileSync(`${out}.failures`, `${JSON.stringify({ path, failure })}\n`);
+  return null;
+}
+
+interface Artifact {
+  id: string;
+  kind: string;
+  issue_key: string | null;
+  slug: string;
+  versions: { number: number }[];
+}
+
+const seen = new Set<string>();
+let documents = 0;
+let versions = 0;
+const projects = ((await get<{ key: string }[]>("/api/v1/projects")) ?? []).filter(
+  (p) => only.length === 0 || only.includes(p.key)
+);
+for (const { key: project } of projects) {
+  const issues = (await get<{ key: string }[]>(`/api/v1/issues?project=${project}`)) ?? [];
+  const owners = [`/api/v1/projects/${project}/artifacts`, ...issues.map((i) => `/api/v1/issues/${i.key}/artifacts`)];
+  // A small pool of owners at once; get() keeps the global rate at ten requests a second.
+  const queue = [...owners];
+  const worker = async () => {
+    for (let owner = queue.shift(); owner; owner = queue.shift()) {
+      for (const a of (await get<Artifact[]>(owner)) ?? []) {
+        if (a.kind !== "doc" || a.versions.length === 0 || seen.has(a.id)) continue;
+        seen.add(a.id);
+        documents++;
+        const reviews = (await get<{ version: number; state: string }[]>(`/api/v1/artifacts/${a.id}/reviews`)) ?? [];
+        const approved = new Set(reviews.filter((r) => r.state === "approved").map((r) => r.version));
+        const numbers = a.versions.map((v) => v.number).sort((x, y) => x - y);
+        const latest = numbers[numbers.length - 1];
+        const mds = new Set<string>();
+        for (const n of numbers) {
+          const v = await get<{ markdown: string | null }>(`/api/v1/artifacts/${a.id}/versions/${n}`);
+          if (!v) continue;
+          versions++;
+          const md = v.markdown ?? "";
+          if (mds.has(md) && n !== latest && !approved.has(n)) continue;
+          mds.add(md);
+          appendFileSync(
+            out,
+            `${JSON.stringify({ id: `${project}/${a.issue_key ?? project}/${a.slug}@v${n}`, artifact: a.id, version: n, md, latest: n === latest, approved: approved.has(n) })}\n`
+          );
+        }
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  console.log(`${new Date().toISOString()} project=${project} requests=${requests} documents=${documents} versions=${versions}`);
+}
+console.log(`done ${new Date().toISOString()} documents=${documents} versions=${versions} requests=${requests}`);

@@ -1,0 +1,67 @@
+diff --git a/packages/envoy/internal/dispatch/docs/marks_test.go b/packages/envoy/internal/dispatch/docs/marks_test.go
+index d5d7310d59..fd2da0d37a 100644
+--- a/packages/envoy/internal/dispatch/docs/marks_test.go
++++ b/packages/envoy/internal/dispatch/docs/marks_test.go
+@@ -205,6 +205,62 @@
+ 	}
+ }
+ 
++// A link whose destination holds a character reference or a backslash escape was read by the
++// build before INFRA-531 as the markdown spells it, and its live tree keeps that href. An edit
++// elsewhere in the document, the first write by the new build, keeps the link the stored markdown
++// read in the browser engine (the version view, a comment of it): the engine read
++// `[amp](https://x.test/?a=1&amp;b=2)` as `https://x.test/?a=1&b=2`, and so must the markdown
++// stored after the edit (INFRA-531 testing).
++func TestAnEditKeepsTheLinkALiveTreeFromTheBuildBeforeHeld(t *testing.T) {
++	links := []struct{ text, storedHref, readHref string }{
++		// storedHref is the href the earlier build kept for `[text](<storedHref>)`; readHref is the
++		// engine's reading of that markdown.
++		{"amp", "https://x.test/?a=1&amp;b=2", "https://x.test/?a=1&b=2"},
++		{"copy", "https://x.test/?a=1&copy;b=2", "https://x.test/?a=1©b=2"},
++		{"escaped", `https://x.test/?a=1\&amp;b=2`, "https://x.test/?a=1&amp;b=2"},
++		{"slash", `https://x.test/a\\`, `https://x.test/a\`},
++	}
++	service, artifactID := newTestService(t)
++	service.settle = time.Hour
++	seedServiceText(t, service, artifactID, "Placeholder.\n\nClosing words.\n")
++	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
++		var inline []*pmdoc.Node
++		for _, link := range links {
++			inline = append(inline,
++				&pmdoc.Node{Type: "text", Text: link.text, Marks: []pmdoc.Mark{{Type: "link", Attrs: pmdoc.Attrs{"href": link.storedHref, "title": nil}}}},
++				&pmdoc.Node{Type: "text", Text: " "})
++		}
++		tree.Children[0].Children = inline
++		return tree
++	})
++	alice := model.Actor{Kind: "user", ID: "alice"}
++	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "Closing words.", With: "Closing words, edited."}}, alice, nil); err != nil {
++		t.Fatalf("edit beside the links: %v", err)
++	}
++	text, err := service.Text(context.Background(), artifactID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	doc, err := pmdoc.Parse(text)
++	if err != nil {
++		t.Fatalf("Parse(%q) = %v", text, err)
++	}
++	read := map[string]string{}
++	pmdoc.Walk(doc, func(node *pmdoc.Node) bool {
++		for _, mark := range node.Marks {
++			if href, ok := mark.Attrs["href"].(string); ok && mark.Type == "link" {
++				read[node.Text] = href
++			}
++		}
++		return true
++	})
++	for _, link := range links {
++		if read[link.text] != link.readHref {
++			t.Errorf("after the edit the document is stored as %q, whose link %q opens %q, want %q as before the edit", text, link.text, read[link.text], link.readHref)
++		}
++	}
++}
++
+ // Rejecting a browser insert in code gives back the code the insert started from, in a typed block
+ // as anywhere: a reject is not read back.
+ func TestRejectSuggestionInCodeGivesBackTheCode(t *testing.T) {
