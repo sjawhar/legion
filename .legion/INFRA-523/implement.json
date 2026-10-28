@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-523",
-  "completed": "2026-10-27T17:51:04Z",
+  "completed": "2026-10-28T10:26:19Z",
   "proof": [
     {
       "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
@@ -21,12 +21,28 @@
       "negativeControl": "the old two-statement eventCursorCheck restored: the new test failed 3 of 3 with 'a reset during the check answered newest id 3 ..., cursor's row no row; want the old log's answer ... or the new log's ..., not two logs in one answer'"
     },
     {
-      "criterion": "A2 T2: a leased loop's late tick is counted in the period it was due in (product)",
-      "surface": "packages/envoy go test against Postgres 17 in the issue pod",
-      "command": "go test -race -count=30 -run '^TestALoneRunnerMakesAPassOnEveryTick$' ./internal/dispatch/api/ and go test -count=30 -run '^TestExclusiveCountsALateTickInThePeriodItWasDueIn$' ./internal/dispatch/duty/, both with two busy loops",
-      "observed": "ok 30 of 30 (every run 'ran 10, skipped 0' at the worker's run) and ok 30 of 30",
-      "headSha": "72b51120bf4d2cb225febecb7c1b80cf153f5ea8",
-      "negativeControl": "the subtraction of the time since due removed (main's bucketing): the boundary test failed 3 of 3 with 'the tick due one period after a late one was refused ... a lone loop lost that period'"
+      "criterion": "A2 T2 (round 2, tester's finding): a leased loop's tick is counted in the period it was due in whatever delays it, a stall after any measure included (product)",
+      "surface": "packages/envoy go test against Postgres 17 + pgvector in the issue pod",
+      "command": "go test -count=30 -run '^(TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn|TestExclusiveCountsALateTickInThePeriodItWasDueIn)$' ./internal/dispatch/duty/ and go test -race -count=30 -run '^TestALoneRunnerMakesAPassOnEveryTick$' ./internal/dispatch/api/, both under two busy loops, at 6a9c3cc6 (Exclusive unchanged by the merge); both boundary tests again -count=3 at f26dca26",
+      "observed": "ok 60 of 60 boundary runs (the tester's red test unmodified); ok 30 of 30 lone-runner runs under -race; the duty package ok 3 of 3; 3 of 3 again at f26dca26",
+      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
+      "negativeControl": "the gate bucketing the moment it runs (periodBoundary(time.Now(), ...)) instead of the tick's due time, by overlay: both tests fail, 'the tick due one period after a stalled one was refused (first due 50ms before a boundary, its writes stalled 100ms each)' and 'the tick due one period after a late one was refused ... its lease 400ms late'"
+    },
+    {
+      "criterion": "A2 T12 (round 2, tester's finding): the launcher test fails a refusal that reaches the daemon after it stopped waiting",
+      "surface": "packages/daemon go test in the issue pod",
+      "command": "CGO_ENABLED=1 go test -race -test.cpu=1 -count=300 -run '^TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits$' ./internal/launcher/ under six busy loops at 6a9c3cc6; -race -count=3 at f26dca26",
+      "observed": "ok 300 of 300 (386 s); ok 3 of 3",
+      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
+      "negativeControl": "the tester's mutant, time.Sleep(StopGrace) before startSession returns the proxy's error, by overlay: 2 of 2 fail 'generation 1's refusal arrived 2.002155108s after its proof dial gave up, past the other half of the 2s stop grace'; proofTimeout = StopGrace still fails the dial-deadline check"
+    },
+    {
+      "criterion": "A1/A3 measurement (round 2, tester's finding): rerun-measure.py counts each run once",
+      "surface": "GitHub Actions API; dispatch://INFRA-523/artifact/rerun-measure-py version 2 and the catalog's header (version 3)",
+      "command": "python3 rerun-measure.py --from 2026-10-19T23:50:00Z --to 2026-10-26T23:50:00Z --cache <fresh dir> [--list]",
+      "observed": "runs 13112, re-run runs 177, test-or-code 1630 min; --list prints 109 job ids, each once, equal to the catalog's 109",
+      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
+      "negativeControl": "version 1 (no de-duplication) on the same cache: runs 13117, re-run runs 178, test-or-code 1676 min, and job 120771000438 printed twice"
     },
     {
       "criterion": "A2 T3, T4: broadcast deliveries are awaited; hub tests run at noon UTC",
@@ -139,15 +155,16 @@
     "packages/daemon/docker/worker.Dockerfile, packages/daemon/docker/omp-plugins/{package.json,bun.lock}, docs/kubernetes.md, one docs/solutions note"
   ],
   "trickyParts": [
-    "Rig for the tester: Postgres 17 + pgvector on 127.0.0.1:55499 (`. /legion/scratch/tmp/infra523-docsmp/env.sh`; template1 recreated UTF8/ICU as CI's); daemon tests use LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55499/daemon_t6t9?sslmode=disable (the shared postgres database holds Dispatch tables), LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 and LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:18222 (nats-server -js running); tmux 3.5a wrapper at /legion/scratch/tmp/infra523-daemonb/tmuxdeb/bin; WebKit rig /legion/scratch/tmp/infra523-impl/webkit-rig/env.sh; e2e env /legion/scratch/tmp/infra523-impl/webtests-env.sh",
+    "Rig for the tester (round 2; the pod was recreated, so round 1's rig is gone): the tester's own rig, `. /legion/scratch/tmp/infra523-tester/env.sh` (Postgres 17 + pgvector on 127.0.0.1:55599, started with `pg_ctl -D pgdata -o \"-p 55599 -k $PWD/sock\"` from that directory); a tmux wrapper that sets the extracted root's LD_LIBRARY_PATH is /legion/scratch/tmp/infra523-impl2/tmuxbin (the claude-envoy tab test passes PATH alone to tmux); main now pins Bun 1.4.4 while the image carries 1.3.14, so claude-envoy's build and check-dist ran with /legion/scratch/tmp/bun144/bun-linux-x64/bun",
     "Pod-only failures on the unchanged base (gVisor, not this change): Envoy agent-secrets/broker helper tests (SO_PEERPIDFD), cmdtest port range, seaweedfs S3 test, broker/store IAM test (trust-auth rig); daemon tmux TestNewRefusesLaunchersItCannotRun and TestNewRefusesAnOperatorPaneVariableTheRuntimeOwns (tmux not in /usr/bin); three daemon tests needing Docker",
-    "Every code push cancels the previous push's CI runs (concurrency); read CI at the head d022f396"
+    "GitHub reported the pull request CONFLICTING after round 1, so it ran no checks at 6a9c3cc6; f26dca26 merges main forward (fingerprint comment on the pull request). Read CI at f26dca26"
   ],
   "deviations": [
     "T17's target test never failed in 3,000 loaded runs plus 200 full suites: its cause is not found; the permanent instrumentation names the step if CI hits it (architect agreed, 2026-10-27).",
-    "T12: the test's stop grace is 2 s instead of 400 ms: generation 1's bound is read from its dial's deadline (no race), and generation 2's real local dial failed once in 300 runs under six busy loops at 200 ms.",
+    "T12: the test's stop grace is 2 s instead of 400 ms: generation 1's dial bound is read from its deadline (no race), and its answer is timed only from the dial's return against the other half of the grace (round 2); generation 2's real local dial failed once in 300 runs under six busy loops at 200 ms.",
+    "T2 (round 2): a leased loop's period is now floor(due / period) on the ticking process's own clock, not the database's clock less the time since due, which the tester showed still lets a stall after the measure move a tick into the next period. The cost, written in exclusive.go's readPeriod comment: hosts whose clocks differ by an offset can skip, or add, one pass inside that offset of a boundary, and after the process ahead stops the other's ticks are skipped for at most that offset.",
     "T20: `omp plugin link` does not run omp's own extension load check that `omp plugin install <npm spec>` ran; `legion probe-image` still certifies the codegraph capability as before.",
-    "T25's text left this pull request at 5bcf850e and came back at d022f396 (the review rule was withdrawn); it now says --failed takes the failed and cancelled jobs' dependents and drops `--job <id>` alone, per INFRA-657's planner.",
+    "T25's text left this pull request at 5bcf850e and came back at d022f396 (the review rule was withdrawn); it says --failed takes the failed and cancelled jobs' dependents and drops `--job <id>` alone, per INFRA-657's planner; round 2 (6a9c3cc6) makes its opening say it re-runs the run's failed and cancelled jobs, not 'that job alone'.",
     "T26's background clone of the next test's database was removed (29bfc579): it saved about 75 s but loaded Postgres during every test and made TestAHealthyRoomUnderWritesIsNeverRefused fail 4 of 6.",
     "Added beyond the plan: the claude-envoy reconciliation flake (product: a missing handoff file triggered a second heartbeat), the queryTmux test workaround for Bun under gVisor (with dispatch://INFRA-523/artifact/bun-spawnsync-timeout-issue-md), the deep-links WebKit flake (run 40463123196), and TestRunRecordsAnOperatorSuspension (covered by T8)."
   ],
