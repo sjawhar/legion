@@ -439,7 +439,7 @@ func TestAVersionOfAnotherDocumentLeavesTheIssuesTextAlone(t *testing.T) {
 	}
 }
 
-// An issue whose row a release before 0136 embedded at its title alone is queued again by the
+// An issue whose row a release before 0137 embedded at its title alone is queued again by the
 // coverage pass at its title and spec, and then embedded at that text.
 func TestCoverRequeuesAnIssueEmbeddedWithItsTitleAlone(t *testing.T) {
 	database := storetest.Open(t)

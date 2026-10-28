@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -208,13 +209,20 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 }
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A caller that does not
+// resolve is refused 401, except a person whose lapsed confirmation the sign-in issuer could not
+// renew (identity.ErrSignInUnavailable), who is still signed in and is refused 503
+// SIGNIN_UNAVAILABLE as every other route refuses them (identity.WriteError).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
 	if _, err := s.requestActor(r); err != nil {
+		if errors.Is(err, identity.ErrSignInUnavailable) {
+			identity.WriteError(w, err)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

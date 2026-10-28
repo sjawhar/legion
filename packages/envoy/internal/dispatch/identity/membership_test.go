@@ -3,11 +3,12 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -36,8 +37,8 @@ type membershipRig struct {
 	now        time.Time
 }
 
-// newMembershipRig signs memberEmail in through a fake pool at rig.now, as the sign-in callback
-// does, and returns the membership that renews it.
+// newMembershipRig signs memberEmail in through a fake pool at rig.now, the people store's clock,
+// as the sign-in callback does, and returns the membership that renews it.
 func newMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
 	return newMembershipRigFor(t, GroupRule{Group: memberGroup}, "", memberClaims(memberGroup), "")
@@ -57,9 +58,9 @@ func googleMemberClaims() map[string]any {
 	}
 }
 
-// newDomainMembershipRig signs memberEmail in with Google for memberDomain at rig.now, as the
-// sign-in callback does, recording the account's subject, and returns the membership that renews
-// it.
+// newDomainMembershipRig signs memberEmail in with Google for memberDomain at rig.now, the people
+// store's clock, as the sign-in callback does, recording the account's subject, and returns the
+// membership that renews it.
 func newDomainMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
 	return newMembershipRigFor(t, DomainRule{Domain: memberDomain}, memberDomain, googleMemberClaims(), "google-subject")
@@ -69,12 +70,13 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret", hostedDomain)
-	if err != nil {
-		t.Fatalf("NewCodeFlow: %v", err)
-	}
+	flow := oidc.NewCodeFlow(issuer.URL(), "dispatch-client", "dispatch-secret", hostedDomain)
 	issuer.SignInAs(claims)
-	code, _ := issuer.Authorize(t, flow.AuthURL(memberRedirect, "state", "nonce"))
+	authURL, err := flow.AuthURL(context.Background(), memberRedirect, "state", "nonce")
+	if err != nil {
+		t.Fatalf("AuthURL: %v", err)
+	}
+	code, _ := issuer.Authorize(t, authURL)
 	session, err := flow.Exchange(context.Background(), memberRedirect, code, "nonce")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
@@ -86,7 +88,10 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 		sessions: sessions,
 		now:      time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
 	}
-	if err := rule.WriteSignIn(context.Background(), rig.people, memberEmail, subject, session.RefreshToken, rig.now); err != nil {
+	// rig.now is the people store's clock, which stands in for the database's: it dates each
+	// confirmation and measures its age, and Membership reads no clock of its own.
+	rig.people.now = func() time.Time { return rig.now }
+	if err := rule.WriteSignIn(context.Background(), rig.people, memberEmail, subject, session.RefreshToken); err != nil {
 		t.Fatalf("record sign-in: %v", err)
 	}
 	rig.membership = &Membership{
@@ -94,7 +99,6 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 		Sessions: rig.sessions,
 		SignIn:   flow,
 		Rule:     rule,
-		Now:      func() time.Time { return rig.now },
 	}
 	return rig
 }
@@ -160,7 +164,7 @@ func TestDomainMembershipEndsTheSessionOfARowWithNoSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	rig.people.mu.Lock()
-	rig.people.people[memberEmail] = auth.PersonMembership{RefreshToken: membership.RefreshToken, ConfirmedAt: membership.ConfirmedAt}
+	rig.people.people[memberEmail] = testPerson{RefreshToken: membership.RefreshToken, ConfirmedAt: membership.ConfirmedAt}
 	rig.people.mu.Unlock()
 	rig.now = rig.now.Add(2 * time.Hour)
 	refreshes := rig.issuer.Refreshes()
@@ -215,6 +219,67 @@ func TestMembershipEndsTheSessionWhenTheRefreshFails(t *testing.T) {
 		t.Fatalf("Confirm with a revoked refresh token: err = %v, want ErrNoIdentity", err)
 	}
 	assertSessionEnded(t, rig)
+}
+
+// A refresh the issuer cannot answer now (an outage, a 5xx, a 429, the client refused, a broken
+// connection) ends nothing: Confirm refuses the request with ErrSignInUnavailable, the issuer's
+// oidc.ErrIssuerUnavailable kept in its chain, which every caller answers 503, and leaves the
+// session generation, the refresh token and the lapsed confirmation as they were, so the first
+// request after the issuer answers again refreshes and is served. Only the issuer's invalid_grant
+// ends the sign-in.
+func TestMembershipKeepsTheSignInWhenTheIssuerCannotAnswerTheRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(issuer *oidctest.Issuer)
+	}{
+		{"503", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusServiceUnavailable, "") }},
+		{"500", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusInternalServerError, "") }},
+		{"429", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusTooManyRequests, "") }},
+		{"401 invalid_client", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusUnauthorized, "invalid_client") }},
+		{"a broken connection", func(issuer *oidctest.Issuer) { issuer.DropToken() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newMembershipRig(t)
+			signedIn, _ := rig.people.get(memberEmail)
+			tc.fail(rig.issuer)
+			rig.now = rig.now.Add(2 * time.Hour)
+			for range 2 {
+				if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrSignInUnavailable) || !errors.Is(err, oidc.ErrIssuerUnavailable) || errors.Is(err, ErrNoIdentity) {
+					t.Fatalf("Confirm while the issuer answers %s: err = %v, want ErrSignInUnavailable carrying oidc.ErrIssuerUnavailable and not ErrNoIdentity", tc.name, err)
+				}
+			}
+			if generation := rig.sessions.generation(memberEmail); generation != 0 {
+				t.Fatalf("session generation after the failed refresh = %d, want 0 (no cookie revoked)", generation)
+			}
+			if kept, _ := rig.people.get(memberEmail); kept.RefreshToken != signedIn.RefreshToken || !kept.ConfirmedAt.Equal(signedIn.ConfirmedAt) {
+				t.Fatalf("membership after the failed refresh = %#v, want the sign-in's %#v unchanged", kept, signedIn)
+			}
+			login := CookieIdentity{SigningKey: testSigningKey, Sessions: rig.sessions, Membership: rig.membership}
+			if _, err := login.Login(cookieRequest(t, memberEmail, 0)); !errors.Is(err, ErrSignInUnavailable) {
+				t.Fatalf("Login while the issuer answers %s: err = %v, want ErrSignInUnavailable", tc.name, err)
+			}
+
+			rig.issuer.FailToken(0, "")
+			if err := rig.membership.Confirm(context.Background(), memberEmail); err != nil {
+				t.Fatalf("Confirm once the issuer answers again: %v", err)
+			}
+			if membership, _ := rig.people.get(memberEmail); !membership.ConfirmedAt.Equal(rig.now) {
+				t.Fatalf("membership after the issuer answered = %#v, want confirmed at %s", membership, rig.now)
+			}
+			if generation := rig.sessions.generation(memberEmail); generation != 0 {
+				t.Fatalf("session generation after the issuer answered = %d, want 0", generation)
+			}
+		})
+	}
+	t.Run("400 invalid_grant", func(t *testing.T) {
+		rig := newMembershipRig(t)
+		rig.issuer.FailToken(http.StatusBadRequest, "invalid_grant")
+		rig.now = rig.now.Add(2 * time.Hour)
+		if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
+			t.Fatalf("Confirm when the issuer refuses the refresh token: err = %v, want ErrNoIdentity", err)
+		}
+		assertSessionEnded(t, rig)
+	})
 }
 
 func TestMembershipEndsTheSessionWhenThePersonLeavesTheGroup(t *testing.T) {
@@ -325,7 +390,7 @@ func TestDomainMembershipWhoseRefreshFailsAfterAnotherAccountSignedInLeavesThatA
 	rig.now = rig.now.Add(2 * time.Hour)
 	var newGeneration int64
 	rig.membership.SignIn = refresherFunc(func(ctx context.Context, _ string) (oidc.Session, error) {
-		if err := rig.people.SignInSubject(ctx, memberEmail, "google-subject-B", "refresh-B", rig.now); err != nil {
+		if err := rig.people.SignInSubject(ctx, memberEmail, "google-subject-B", "refresh-B"); err != nil {
 			t.Errorf("the new account's sign-in: %v", err)
 		}
 		generation, err := rig.sessions.EnsureSession(ctx, memberEmail)
@@ -333,12 +398,12 @@ func TestDomainMembershipWhoseRefreshFailsAfterAnotherAccountSignedInLeavesThatA
 			t.Errorf("the new account's session: %v", err)
 		}
 		newGeneration = generation
-		return oidc.Session{}, errors.New(`oauth2: "invalid_grant"`)
+		return oidc.Session{}, fmt.Errorf(`oidc: refresh: %w: oauth2: "invalid_grant"`, oidc.ErrGrantRefused)
 	})
 	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("the old account's failed confirmation: err = %v, want ErrNoIdentity", err)
 	}
-	login := CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: rig.membership}
+	login := CookieIdentity{SigningKey: testSigningKey, Sessions: rig.sessions, Membership: rig.membership}
 	if email, err := login.Login(cookieRequest(t, memberEmail, newGeneration)); err != nil || email != memberEmail {
 		t.Fatalf("the new account's cookie: login %q, %v; want %s still signed in", email, err, memberEmail)
 	}
