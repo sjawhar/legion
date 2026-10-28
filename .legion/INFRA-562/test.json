@@ -2,44 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-28T16:19:30Z",
-  "round": 7,
-  "testedHead": "cc977ce5876d8f91ef54ee2a710f27eaa3a028c6",
-  "codeHead": "f10b3d868f03",
+  "completed": "2026-10-28T17:49:22Z",
+  "round": 8,
+  "testedHead": "fd34f26db1b01028bc519a06d2e08061b62882d7",
+  "codeHead": "f43f33d1ce23",
+  "fingerprint": {
+    "previousVerifiedHead": "cc977ce5876d8f91ef54ee2a710f27eaa3a028c6",
+    "previous": "84c6cb970dcc60097f38a29ff3fb598dc457af6f1ab7152bc8b507e6ec658006",
+    "current": "1102103bc6a454f541a5cef74ac2243fac1ddb6a90fcdc881ee62579dde22504",
+    "verdict": "changed (the conflict-return merge f43f33d1 resolved ask_snooze.go and comment_create.go against main's e82b013b), so a full test round is owed at the head that merges"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at cc977ce5 (code f10b3d86, merged with main through d47dbf05 #2390; GitHub MERGEABLE at 16:19Z against main 8b4a862b): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 961.385s, 120 top-level PASS, 0 FAIL, 0 '--- SKIP' (killed process 28.00s, cancelled request 16.58s, take-over 59.62s with the never-known session waiting the real window 24.03s, redelivery 8.82s, rate limit 12.76s, roster 29.46s, test hooks 18.61s); `go test -count=1 ./internal/dispatch/redeliver/ ./internal/dispatch/githubapp/... ./internal/dispatch/architecture/ ./internal/dispatch/store/` -> all ok; `cd infra && go test -count=1 -run TestDispatchConnectionsPerPodIsTheServers -v ./gcp/...` -> PASS (dispatchConnectionsPerPod 87 = store.ConnectionsPerProcess). Not re-run: the whole api package (1335 s per the implementer). Logs: $TMPDIR/mp-cc977ce5.log, pk-cc977ce5.log."
+    "how": "Re-ran the issue's key two-process rows and the comment take-over tests at fd34f26d (code f43f33d1): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestADeliveryAKilledProcess|TestASendWhoseRequest|TestASendDuringAListenerTakeOver|TestBothProcessesJudge|TestClaimAndAnswerTimes' ./cmd/dispatch` -> all PASS, ok 157.114s, 0 SKIP (the never-known session waits the real window, 24.76 s); `go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce|TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce|TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow|Snooze' ./internal/dispatch/api/` -> ok 19.962s. Not re-run here: the whole two-process suite (the implementer's 120/0/0) and the api package, owed at the merging head."
   },
-  "failed": 0,
-  "failures": [],
-  "mergeChecks": [
-    "Migrations 0136-0139 above main's 0135_server_processes (#2390); no shared version.",
-    "leasePoolSize 13 against main's 12: the duty.Exclusive call sites at the head are 12 (delivery reconcile, delivery intake per durable x2, server-processes prune, reference excerpts, block index, edit notices, webhook redelivery, document compaction, suggestion outcomes, issue-ask repair, delivery resume, architecture import = 13 callers); pool.go's comment lists the same thirteen.",
-    "infra/gcp dispatchConnectionsPerPod 87 matches ConnectionsPerProcess (TestDispatchConnectionsPerPodIsTheServers PASS)."
-  ],
-  "breakAttempts": [
-    "#2429 interaction (main's agents list now reads this branch's shared route_roster): two real envoy-dispatch processes built at the head (own database, DISPATCH_TEST_ROUTE_ROSTER_TTL=1m) against a fake listener serving /v1/sessions. GET /api/v1/agents on A -> 200 [session ...0001, host host-a, roles [sre]], listener calls 1; the listener's list emptied, GET /api/v1/agents on B -> 200 the same stored session, listener calls still 1; route_roster.sessions holds the full listener record (dir, host, title, machine_id, capabilities). A row with only session_id, roles and last_seen -> both processes 200 with that session (host empty). Negative control: the row expired and the listener answering undecodable JSON -> B 503 ENVOY_UNAVAILABLE 'decode GET /v1/sessions response …', then A 503 'the listener did not answer Dispatch's last read of its sessions' with no second listener call (calls 2), route_roster answered=false. Scratch database dropped and processes stopped."
-  ],
-  "ci": "Read on GitHub at 16:19Z at code head f10b3d86: changes, build, typecheck, lint, test, the daemon Postgres 16 suite success; envoy-go, dispatch-multiprocess, dispatch and the other envoy lanes queued. Not waited for. Main's known reds named by the architect (recipients-claim.e2e.ts fixed by #2324, TestDispatchConnectionsPerPodIsTheServers fixed by #2464, mermaid.e2e.ts:194) are main's; the connections test passes at this head.",
-  "observations": [
-    "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY."
-  ],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Items 1, 2 and 8: a cancelled or killed sender's attempt reaches its recipient; a send during a listener take-over reaches its session",
-      "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch",
-      "observed": "ok 961.385s, 120 PASS, 0 FAIL, 0 SKIP; TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 28.00s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 16.58s, TestASendDuringAListenerTakeOverReachesItsSession 59.62s",
-      "headSha": "cc977ce5876d8f91ef54ee2a710f27eaa3a028c6",
-      "negativeControl": "sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window (24.03 s)"
-    },
-    {
-      "criterion": "Item 5 after the merge with #2429: route status and the agents list agree across processes from one stored listener answer",
-      "surface": "GET /api/v1/agents on two real envoy-dispatch processes built at the head, one database, a fake listener",
-      "command": "curl http://127.0.0.1:18191/api/v1/agents (A), empty the listener's list, curl http://127.0.0.1:18192/api/v1/agents (B), with DISPATCH_TEST_ROUTE_ROSTER_TTL=1m",
-      "observed": "A and B both 200 with the same session (host host-a, roles [sre]) and the listener called once",
-      "headSha": "cc977ce5876d8f91ef54ee2a710f27eaa3a028c6",
-      "negativeControl": "stored row expired and the listener answering undecodable JSON -> B 503 ENVOY_UNAVAILABLE, A 503 from the stored silence with no listener call of its own"
+      "criterion": "The head merges with main, so the merged tree is what CI and the merge judge",
+      "evidence": "`gh pr view 2387 --json mergeable` -> CONFLICTING at 17:49Z; every check at f43f33d1 queued. main@origin moved past the merge's base 53f39ba0 to 20ba65a6 'fix(dispatch): a person's comment reaches the issue's claimant and every agent in its thread, doc-read shows open threads' text, and October's undelivered comments are counted (#2366)'. Files both sides changed: packages/envoy-client/src/dispatch-execute.ts, packages/envoy/AGENTS.md, internal/dispatch/api/comment_create.go, internal/dispatch/model/model.go. A trial merge (`jj new fd34f26db1b0 main@origin`, abandoned, nothing pushed) reports one 2-sided conflict, model/model.go (CommentEventPayload: #2366 drops SuppressedAuthors and has the outbox's session routes read the comment's own mentions from comment_deliveries; this branch adds mentions_decide_routes beside it). comment_create.go merges cleanly as text but not as behaviour: #2366 adds the claimant and the thread's agents as session routes that the outbox dedupes against comment_deliveries, while this branch decides whether a comment waits out a take-over before its commit (resolveCommentDeliveries' wait: issue route, thread reply, anchor or document) and whether a resumed attempt keeps its resolution from that set. The merge needs that predicate to cover #2366's new routes (a claimed issue with no route, a comment in a thread with agents), else a mention resolved only after the commit by the take-over retry can reach a session the claimant or thread route already reached: the round-1 double delivery (TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce) through a route that test does not set. Pin it at the merge with the same test shape on a claimed, unrouted issue and on a reply in an agent's thread."
     }
+  ],
+  "ci": "Read on GitHub at 17:49Z at code head f43f33d1: build, changes, typecheck, lint, test, pr-title, the daemon Postgres 16 suite queued. Not waited for.",
+  "observations": [
+    "The review's two fast-follows (AGENTS.md naming the #2225 crash duplicate path; infra/go.work.sum restored to main's) are the reviewer's, recorded in review.json round 4.",
+    "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY."
   ]
 }
