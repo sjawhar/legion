@@ -408,22 +408,58 @@ func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
 
 func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
 	g := newProbeRig(t, nil).waits("ErrImagePull")
+	phases := make(chan string, 1)
 	probe := probeOptions(t)
 	probe.Budget = 100 * time.Millisecond
 	probe.startupBudget = 100 * time.Millisecond
 	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) { phases <- phase }
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
 
-	err := g.probe(probe)
-	wantContains(t, err, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before the startup bound", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending && probeWaiting(pod) != nil
+	})
+	wantContains(t, <-result, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
 }
 
 func TestProbeImageCollectsAProbeDeadlineAfterStartup(t *testing.T) {
-	g := newProbeRig(t, nil).fails("worker TLS probe failed: curl cannot verify refusal of the AAA chain: unavailable (probe deadline)")
+	g := newProbeRig(t, nil)
+	g.with(func() {
+		g.log = "worker TLS probe failed: curl cannot verify refusal of the AAA chain: unavailable (probe deadline)"
+	})
+	phases := make(chan string, 2)
 	probe := probeOptions(t)
 	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) { phases <- phase }
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
 
-	err := g.probe(probe)
-	wantContains(t, err, "curl cannot verify refusal of the AAA chain", "probe deadline")
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before startup completes", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending
+	})
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}}
+	})
+	if phase := <-phases; phase != "command" {
+		t.Fatalf("second phase = %q, want command", phase)
+	}
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+		}}}
+	})
+	wantContains(t, <-result, "curl cannot verify refusal of the AAA chain", "probe deadline")
 }
 
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the

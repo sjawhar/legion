@@ -181,6 +181,7 @@ type ImageProbe struct {
 	CommandBudget  time.Duration
 	commandReserve time.Duration
 	startupBudget  time.Duration
+	onPhase        func(string)
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
 	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
@@ -385,6 +386,9 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		mountRead time.Time
 	)
 	startupBudget := p.startupBudgetDuration()
+	if p.onPhase != nil {
+		p.onPhase("startup")
+	}
 	err := r.await(ctx, startupBudget, "probe pod "+name+" to start", func(context.Context) (bool, error) {
 		s, err := r.storedSandbox(name)
 		if err != nil {
@@ -429,6 +433,9 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		return *verdict
 	}
 	if finished == nil {
+		if p.onPhase != nil {
+			p.onPhase("command")
+		}
 		err = r.await(ctx, p.Budget, "probe pod "+name+" to finish", func(context.Context) (bool, error) {
 			s, err := r.storedSandbox(name)
 			if err != nil {
