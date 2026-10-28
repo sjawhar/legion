@@ -409,11 +409,17 @@ func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
 func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
 	g := newProbeRig(t, nil).waits("ErrImagePull")
 	phases := make(chan string, 1)
+	releaseStartup := make(chan struct{})
 	probe := probeOptions(t)
 	probe.Budget = 100 * time.Millisecond
 	probe.startupBudget = 100 * time.Millisecond
 	probe.Retry.Attempts = 1
-	probe.onPhase = func(phase string) { phases <- phase }
+	probe.onPhase = func(phase string) {
+		phases <- phase
+		if phase == "startup" {
+			<-releaseStartup
+		}
+	}
 	result := make(chan error, 1)
 	go func() { result <- g.probe(probe) }()
 
@@ -424,6 +430,7 @@ func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
 		pod := g.pod(probeSandboxName)
 		return pod != nil && pod.Status.Phase == corev1.PodPending && probeWaiting(pod) != nil
 	})
+	close(releaseStartup)
 	wantContains(t, <-result, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
 }
 
