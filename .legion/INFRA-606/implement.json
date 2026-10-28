@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T16:05:00Z",
+  "completed": "2026-10-28T16:25:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -124,6 +124,14 @@
       "observed": "All three api tests pass 3 of 3: the in-flight case ends with one copy (no route copy published; the resend repeats the landed text, which the listener counts once). Outbox: a lapsed-claim attempt stays pending with no receipt, no settle, no copy and no deferral; an unclaimed abandoned attempt is still settled by the outbox (or left to a claim that commits first).",
       "headSha": "50e5026d374ea87f1f7cbf203b32bdbaa6cbdbd5",
       "negativeControl": "At 95df9815 the tester's crash.sh stored c1 twice in ses-a's subject (mention handed over before the kill, and route copy dispatch-13001), and the red test failed with 2 copies."
+    },
+    {
+      "criterion": "The web app shows the outbox's (and the API's) failed comment.delivery receipt sensibly: the Activity feed no longer says a failed mention was delivered (architect's ruling 2026-10-28T15:49Z).",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e, chromium) against the e2e harness: a person's comment mentioning session:ghost, which the fake listener does not hold, then the issue's Activity tab",
+      "command": "cd packages/dispatch && bun run e2e -- -g 'an Activity row says a mention that could not be delivered was not delivered' --project chromium; raw output dispatch://INFRA-606/artifact/infra606-round6-activity-e2e-tar-gz",
+      "observed": "After the failed comment.delivery is recorded, exactly one Activity row reads 'could not deliver a comment mention to session:ghost' and none reads 'delivered a comment mention': 1 passed (4.9s).",
+      "headSha": "ab61c138f1b9866a31c485860126d7317b6cc296",
+      "negativeControl": "The same test with activity-model.ts at 50e5026d (before the fix): 1 failed, Expected 1, Received 0 for the 'could not deliver' row."
     }
   ],
   "filesChanged": [
@@ -131,7 +139,10 @@
     ".dispatch/architecture/dispatch-api.md",
     ".dispatch/architecture/dispatch-events.md",
     "packages/dispatch/AGENTS.md",
+    "packages/dispatch/e2e/activity.e2e.ts",
     "packages/dispatch/e2e/api.ts",
+    "packages/dispatch/web/src/features/activity/activity-model.test.ts",
+    "packages/dispatch/web/src/features/activity/activity-model.ts",
     "packages/envoy/.changes/unreleased/pr2406-Added-20261028-113257.yaml",
     "packages/envoy/.changes/unreleased/pr2406-Added-20261028-113259.yaml",
     "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113301.yaml",
@@ -219,9 +230,7 @@
     "The outbox settles an abandoned mention attempt only for a session or target a held-back copy asks about, so a mention no copy covers is still left to the stranded pass; settling also appends the comment.delivery receipt through the broker.",
     "The outbox counts an attempt a sender claimed as abandoned only past model.StrandedMentionWindow (one hour, moved from the API to model so both read one value); within it a lapsed claim leaves the copy to the stranded pass without deferring. A resend that then fails for good leaves the session with whatever the first send delivered."
   ],
-  "openQuestions": [
-    "The activity feed renders every comment.delivery as 'delivered a comment mention to <target>', failed receipts included (activity-model.ts:112, as on base); reported to the architect under the review-round cap."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves cannot run on this pod's Postgres (byte-order collation only; the pgserver build has no ICU); CI runs it.",
     "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change.",
