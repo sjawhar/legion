@@ -2,12 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-532",
-  "completed": "2026-10-28T22:50:00Z",
+  "completed": "2026-10-29T00:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2472",
   "redCommit": "349f14eb48a3",
-  "round": 3,
-  "roundRedCommit": "c7ed921aa5aa (rows run against the round-1 code ef163c71)",
+  "round": 4,
+  "mergedBase": "main@origin 571f729be5e1 (forward merge 712490058484)",
+  "fingerprint": "7a5b2956 45610620caf8100552e72d76eb1caa338c42782847984ab58a9a53c04b0e57fc -> ffb93ba0 7befb1e427decb1da5c16781f68a30c9dbde93593c0c59957a186e4ba71c2808 (changed: INFRA-713 cleanup, the #2481 pmdoc fix, the VersionView unit lock)",
   "proof": [
+    {
+      "criterion": "Round 3: the merged head (main@origin with #2470) keeps every mermaid row green; both time-limit rows hold the worker; the VersionView remount fix has a unit lock",
+      "surface": "Dispatch comment thread, document editor and past version, chromium/iphone/webkit/firefox, real Go server and Postgres; Dispatch unit suite",
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 (each project), plus --repeat-each 20 -g \"past version's\" in chromium; bun test web/src/features/doc/VersionView.test.tsx",
+      "observed": "21 passed in each of the four projects at ffb93ba0 (comment and document time-limit rows on holdWorkerSource with a 2-node flowchart); past-version rows 40/40; unit suite 2684 pass, proof-editor 173 pass; VersionView 5 pass.",
+      "headSha": "ffb93ba0",
+      "negativeControl": "VersionView's memo keyed on the highlight object again (as at round 2): the unit lock fails with 'Expected length: 1, Received length: 2'"
+    },
     {
       "criterion": "Review round 2 finding (architect's request): a past version's comment link lands on its quote the first time, with and without a diagram, and never throws the reader back to the top",
       "surface": "Dispatch past version /issues/<KEY>/artifact/spec?v=1&comment=<id>, chromium (full spec also in iphone, webkit, firefox)",
