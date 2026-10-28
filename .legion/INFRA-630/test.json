@@ -2,61 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T10:03:00Z",
-  "round": 5,
-  "headTested": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-  "note": "A full round: the forward merge f428381d resolved conflicts in release-push.sh (land_on_main is now main's copy, shared with push-fold) and was followed by a code change (4360b7a2), so the fingerprint shortcut does not apply. Every check ran at 4360b7a2 on Bun 1.4.4 ($TMPDIR/bun-1.4.4 first on PATH).",
+  "completed": "2026-10-28T10:28:00Z",
+  "round": 6,
+  "headTested": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+  "note": "No merge this round; c3a63d7e changes verify-build.sh's failed-listing branch, the credential check's test, comments, the changelog fragment's name and body, and ten docs/solutions status lines. release-push.sh, build.ts, the workflows' steps and every build input are unchanged since 4360b7a2, so criterion 1 and push-built's crafted-tar and race checks are carried from round 5; everything the round touches ran again at c3a63d7e on Bun 1.4.4.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran $TMPDIR/infra630/pushbuilt-proof.sh from the workspace at 53128881 (code head 4360b7a2): verify-build left the build clone clean; extract-built showed M dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js; push-built exit 0, one github-actions[bot] commit over base 79b2bf9d touching only those three files, no gh call; check-dist at it passes. Main moved: exit 0, origin unchanged at 3051529d, stub gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'. GITHUB_OUTPUT is now empty on a push, as round 4 intends (pushed=true dropped). Then drove the round-5 surfaces independently (below)."
+    "how": "Re-ran $TMPDIR/infra630/pushbuilt-proof.sh from the workspace at 410b2179 (code head c3a63d7e): verify-build left the build clone clean; push-built exit 0, one github-actions[bot] commit over base af119fd1 touching only dist/, no gh call; check-dist at it passes. Main moved: exit 0, origin unchanged at 121bfdaa, stub gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-4 findings 1-2: verify-build applies every .gitignore git add -A would (the checkout's and one a skill ships) and stops on a failed listing, with the checkout untouched",
-      "surface": "bun run verify-build <tar> from packages/claude-envoy on pull-request-like trees in a scratch clone of 4360b7a2 (each case one committed change); and the push side's ground truth through release-push.sh push-built against a local bare origin",
-      "command": "bash $TMPDIR/infra630-t4/vb-neg.sh (16 cases, git status --porcelain after each); verify-build with a git stub first on PATH that fails `ls-files`; bash $TMPDIR/infra630-t4/pb5.sh (the real build tar with a skill .gitignore naming notes.md and notes.md added, pushed by push-built directly)",
-      "observed": "clean head, a skills edit, a contracts edit and a skill .gitignore matching nothing: exit 0; checkout changes 0 after all 16 cases. Ground truth: push-built exit 0 and the landed commit holds legion/skills/legion-worker/.gitignore but not notes.md, which the tar holds — the loss the ignore check now stops before merge",
-      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-      "negativeControl": "each exit 1, checkout unchanged: skills/legion-worker/.gitignore naming notes.md ('packages/claude-envoy/legion/skills/legion-worker/notes.md is a generated file git ignores'); references/.gitignore '*.txt' with references/sub/a.txt ('…/references/sub/a.txt is a generated file git ignores'); packages/claude-envoy/.gitignore naming legion/skills/legion-worker/references/ (refused for each built file there); force-added *.log and logs/; an executable skill script; a symlink; a name with a space; a renamed bundle source; a syntax error; a Tailscale MagicDNS host in a bundled string and in a skill. The failing `git ls-files`: 'stub: ls-files fails', exit 128, no tar written"
+      "criterion": "Round-5 minor: a failed git ls-files in verify-build is a named ::error:: refusal, with no tar written and the checkout untouched; the rest of verify-build unchanged in behaviour",
+      "surface": "bun run verify-build <tar> from packages/claude-envoy in a scratch clone of c3a63d7e",
+      "command": "verify-build with a git stub first on PATH that fails `ls-files`; bash $TMPDIR/infra630-t4/vb-neg.sh (16 pull-request-like cases)",
+      "observed": "the stub: 'stub: ls-files fails' then '::error::verify-build.sh: git ls-files could not list the ignored files of the build, so the build is not checked', exit 1, no tar, checkout unchanged; the clean head, a skills edit, a contracts edit and a non-matching skill .gitignore: exit 0; checkout changes 0 after every case",
+      "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+      "negativeControl": "each exit 1: a skill .gitignore naming notes.md and a nested references/.gitignore '*.txt' ('… is a generated file git ignores'); force-added *.log and logs/; an executable skill script; a symlink; a name with a space; a renamed bundle source; a syntax error; a Tailscale MagicDNS host in a bundled string and in a skill; a packages/claude-envoy/.gitignore matching built files"
     },
     {
-      "criterion": "Round-4 fast-follow: one release-push.sh extract-built for every tar extraction; the rebuild's build job and the claude-envoy job use it",
-      "surface": "release-push.sh extract-built in a scratch checkout; the rebuild build job's verify-build, extract-built and state steps and the claude-envoy job's verify-build, extract-built, bun run test, run verbatim",
-      "command": "extract-built ../../../rel.tar from packages/claude-envoy; extract-built of a crafted tar; extract-built with no argument, a missing tar, and outside a git repository; bash $TMPDIR/infra630-t4/rebuild-job.sh on head5, head5 plus a skills edit, head5 plus a stale tracked dist/old-bundle.js; claude-envoy job steps",
-      "observed": "extract-built from the package directory with a relative path: exit 0, M on the three changed bundles; rebuild job: clean changed=false, skills edit changed=true (M legion/skills/legion-worker/SKILL.md), stale bundle changed=true (D dist/old-bundle.js), verify-build leaving 0 changes each time; claude-envoy tests on the extracted build 220 pass, 2 skip, 0 fail",
-      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-      "negativeControl": "extract-built of a tar with an executable dist/dispatch.js: '::error::release-push.sh extract-built: member dist/dispatch.js … has the mode -rwxr-xr-x', exit 1, both directories' sha256 unchanged; no argument: usage error; a missing tar: 'listing … failed'; outside a repository: 'fatal: not a git repository', refused"
-    },
-    {
-      "criterion": "4 (before the merge) on the merged land_on_main: push-built refuses a tar it must not land and never lands over a main that moved",
-      "surface": "release-push.sh push-built against a local bare origin through the deploy-key URL, with the real build tar of a simulated contracts merge",
-      "command": "bash $TMPDIR/infra630-t4/pb5.sh (8 crafted variants, and a git wrapper that lands a commit on origin main between push-built's fetch and its push)",
-      "observed": "race: push rejected, '::notice title=Nothing pushed; a fresh run started::main moved from 79b2bf9d… to d3963d00…', exit 0, origin main is the racer's commit, gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'",
-      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-      "negativeControl": "each crafted tar exit 1 naming the member, origin unchanged, checkout clean: a symlink, a '..' path, +x, a missing dist/session-title-hook.js, empty legion/agents, a space in a name, a top-level other/, a hard link"
-    },
-    {
-      "criterion": "3. The credential check covers the merged five workflows and refuses the deploy key or dependency code in the wrong place",
-      "surface": ".github/scripts/check-release-credentials.sh, PyYAML from $TMPDIR/pyyaml-venv",
-      "command": "bash .github/scripts/check-release-credentials.sh; python $TMPDIR/infra630-t4/mut.py (6 mutations of claude-envoy-rebuild.yaml, each in a copy of .github)",
+      "criterion": "Round-5 minor: each workflow's deploy-key step may run only its own push command, the fold's included",
+      "surface": ".github/scripts/check-release-credentials.sh over copies of .github with one run line changed, PyYAML from $TMPDIR/pyyaml-venv",
+      "command": "bash .github/scripts/check-release-credentials.sh; python $TMPDIR/infra630-t4/mut6.py",
       "observed": "'10 credentialed job(s) and 10 build job(s) across 5 workflows keep credentials out of jobs that run dependency code', exit 0",
-      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-      "negativeControl": "each exit 1 naming the job: the deploy key on the build job's extract-built step; build with contents: write; the rebuild's push step running push-main, or push-fold (changelog-fold.yaml's command); the push job running verify-build.sh; the build job without its tripwire"
+      "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+      "negativeControl": "each exit 1 naming the step and the workflow's allowed command: changelog-fold.yaml's 'Fold and push' running push-built or push-main ('… a step whose run calls release-push.sh push-fold, which changelog-fold.yaml allows'); release.yaml's 'Tag release' running push-fold ('… push-tag or release-push.sh push-main, which release.yaml allows'); the rebuild's 'Land the build on main' running push-fold ('… push-built, which claude-envoy-rebuild.yaml allows')"
     },
     {
-      "criterion": "1. Source-only branch pairs merge in either order; the same with rebuilt files conflict",
-      "surface": "git merge-tree --write-tree in the scratch clone, the rebuilt files made with build.ts --out and copied in",
-      "command": "bash $TMPDIR/infra630-t4/crit1.sh (base 4360b7a2); gh pr diff 2423 --name-only | grep -cE '^packages/claude-envoy/(dist|legion)/'",
-      "observed": "contracts pair, skills pair and contracts/envoy-client pair: exit 0 both orders; the PR diff has 0 files under dist/ or legion/",
+      "criterion": "Round-5 important: no new Dispatch key in a public file; the changelog entry still folds",
+      "surface": "the pull request's diff on GitHub; changie v1.26.0 (the version .github/actions/install-changie installs) on packages/claude-envoy",
+      "command": "gh pr diff 2423 | awk over added lines outside .legion/ for INFRA-588/629/630/633; git grep '^status: superseded' -- docs/solutions; cd packages/claude-envoy && changie batch 0.0.0-tester --dry-run",
+      "observed": "no added line outside .legion/ names INFRA-588, 629, 630 or 633; 10 superseded status lines name sjawhar/legion#2423 and 0 name INFRA-630; the fragment is pr-2423-built-plugin-rebuilt-on-main.yaml and changie folds it under '### Changed' with no key in its text, writing nothing",
+      "headSha": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+      "negativeControl": "a fragment with kind: Nonsense beside it: changie refuses, 'kind not found but configuration expects one: 'Nonsense'' (removed after)"
+    },
+    {
+      "criterion": "Carried from round 5 (inputs unchanged in 4360b7a2..c3a63d7e): criterion 1 merge-tree pairs; extract-built and the rebuild/claude-envoy job emulations; push-built's crafted tars and the fetch/push race on the merged land_on_main",
+      "surface": "git merge-tree; release-push.sh against a local bare origin",
+      "command": "bash $TMPDIR/infra630-t4/crit1.sh; bash $TMPDIR/infra630-t4/pb5.sh; bash $TMPDIR/infra630-t4/rebuild-job.sh (round 5, at 4360b7a2)",
+      "observed": "source-only pairs exit 0 both orders; the race pushes nothing and starts a fresh run; extract-built and the job emulations as recorded in round 5; gh pr diff at 410b2179 lists nothing under dist/ or legion/",
       "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
-      "negativeControl": "the contracts pair with rebuilt files committed: exit 1 both orders, CONFLICT in dist/dispatch.js, envoy-channel.js, session-hook.js"
+      "negativeControl": "the contracts pair with rebuilt files committed: exit 1 both orders; eight crafted tars refused with origin unchanged"
     }
   ],
-  "ci": "Read on GitHub for 4360b7a2 (code head; 53128881 is handoff-only) at 09:59Z: lint, typecheck, test (run 40667360075), changes, three build jobs (one the rebuild workflow's own pull_request run), fold_build and two pr-title runs queued; one pr-title cancelled by a newer event. Not waited for.",
+  "ci": "Read on GitHub for c3a63d7e (code head; 410b2179 is handoff-only) at 10:25Z: lint, typecheck, test (run 40671221103), changes, three build jobs (one the rebuild workflow's own pull_request run), fold_build and two pr-title runs queued; one pr-title cancelled by a newer event. Not waited for.",
   "observations": [
-    "verify-build refuses a pull request whose .gitignore matches already-tracked built files (the packages/claude-envoy/.gitignore case), which push-built would still stage as modifications; stricter than push-built, and the right side to err on.",
     "build.ts --out on a dangling symlink still fails with a raw EEXIST from mkdir and writes nothing (unchanged since round 1)."
   ]
 }
