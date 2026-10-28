@@ -763,6 +763,111 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 	}
 }
 
+// TestAResumedMentionsHeldCopyFollowsItsResend: a comment.created whose mention the stranded pass
+// resends is published without that session's copy and marked published like any other event.
+// When the resend fails, the event's own publish still never sends the copy, and the fallback
+// pass publishes it once, to the session's own topic only, under the mention's dedupe key,
+// changing nothing of the event's row; a second pass sends nothing. When the resend is sent
+// instead, the pass publishes no copy and settles what it held.
+func TestAResumedMentionsHeldCopyFollowsItsResend(t *testing.T) {
+	const (
+		issueTopic   = "notifications.dispatch.issue.T-1.comment.created"
+		sessionTopic = "notifications.agent.s1"
+	)
+	for _, tc := range []struct {
+		name     string
+		resend   string
+		wantCopy bool
+	}{
+		{name: "the resend fails", resend: "failed", wantCopy: true},
+		{name: "the resend is sent", resend: "sent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := store.WithTransactionTracking(context.Background())
+			database := storetest.Open(t)
+			broker := events.NewBroker()
+			route := "session:s1"
+			seedIssue(t, database, "T-1", &route)
+			alice := model.Actor{Kind: "user", ID: "alice"}
+			commentID := seedComment(t, database, "T-1", alice, "@s1 are you there?", nil)
+			event := appendEvent(t, database, broker, model.Event{
+				IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+				Payload: model.CommentEventPayload{
+					Comment: model.Comment{
+						ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf("s1"),
+					},
+					SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new("s1"),
+				},
+			})
+			seedMentionDelivery(t, database, commentID, "s1", "resumed")
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher, Broker: broker}
+
+			scan(ctx, deps)
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, []string{issueTopic}) {
+				t.Fatalf("the scan published %#v, want the issue topic alone: s1's copy is the resend's", got)
+			}
+			publishedBefore := publishedAt(t, database, event.ID)
+			if publishedBefore == nil {
+				t.Fatal("published_at is null after the scan left s1's copy to the resend")
+			}
+			destinationsBefore, attemptsBefore := publishedDestinations(t, database, event.ID)
+
+			if _, err := database.Pool.Exec(ctx, `update comment_deliveries set state = $2 where comment_id = $1`,
+				commentID, tc.resend); err != nil {
+				t.Fatalf("settle the resend %s: %v", tc.resend, err)
+			}
+			// The event's own publish, as a retry of it runs, reads the resend's outcome now and
+			// still leaves s1's topic to what the outbox held for it.
+			var decoded model.Event
+			raw, err := json.Marshal(event)
+			if err != nil {
+				t.Fatalf("encode the event: %v", err)
+			}
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatalf("decode the event: %v", err)
+			}
+			if err := publish(ctx, deps, decoded, "", routing{route: &route}, publishedDestinationSet(destinationsBefore)); err != nil {
+				t.Fatalf("publish the event again: %v", err)
+			}
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, []string{issueTopic}) {
+				t.Fatalf("published %#v in all, want the issue topic alone: the event's publish never sends a held copy", got)
+			}
+
+			publishFallbackCopies(ctx, deps)
+			publishFallbackCopies(ctx, deps)
+			copies := publisher.all()[1:]
+			if tc.wantCopy {
+				wantKey := contracts.AgentSendDedupeKey("s1", model.CommentMentionIdempotencyKey(commentID, "session:s1", "steer"))
+				if len(copies) != 1 || copies[0].Topic != sessionTopic || copies[0].DedupeKey != wantKey ||
+					copies[0].EventID != fmt.Sprintf("dispatch-%d", event.ID) {
+					t.Fatalf("the fallback passes published %#v, want one copy to %s keyed %q", copies, sessionTopic, wantKey)
+				}
+			} else if len(copies) != 0 {
+				t.Fatalf("the fallback passes published %#v, want nothing: the resend delivered the comment", copies)
+			}
+
+			if at := publishedAt(t, database, event.ID); at == nil || !at.Equal(*publishedBefore) {
+				t.Fatalf("published_at = %v after the fallback pass, want it as the scan left it: %v", at, *publishedBefore)
+			}
+			destinations, attempts := publishedDestinations(t, database, event.ID)
+			if !reflect.DeepEqual(destinations, destinationsBefore) || attempts != attemptsBefore {
+				t.Fatalf("published_destinations = %#v and attempt_count = %d after the fallback pass, want %#v and %d",
+					destinations, attempts, destinationsBefore, attemptsBefore)
+			}
+			var settled, published bool
+			if err := database.Pool.QueryRow(ctx, `
+				select settled_at is not null, published from comment_fallback_copies where comment_id = $1 and destination = $2
+			`, commentID, sessionTopic).Scan(&settled, &published); err != nil {
+				t.Fatalf("read the held copy: %v", err)
+			}
+			if !settled || published != tc.wantCopy {
+				t.Fatalf("held copy settled=%v published=%v, want settled and published=%v", settled, published, tc.wantCopy)
+			}
+		})
+	}
+}
+
 // TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey: the copy of a new comment on the own
 // topic of a session whose mention failed carries the dedupe key that mention's send went under
 // (agent.<session>.<comment>:<target>:<mode>), so a host the send reached before its attempt

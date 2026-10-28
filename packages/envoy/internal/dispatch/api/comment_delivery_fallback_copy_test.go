@@ -2,13 +2,20 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -120,7 +127,7 @@ func commentCreatedRow(t *testing.T, database *store.Store, commentID string) co
 // here on a reply in a thread no session wrote in. A process killed after it claimed that
 // mention's attempt, before its send reached the listener, leaves the attempt to the stranded
 // pass; when that resend fails too, the claimant still hears the comment, from the claimant copy
-// the failure reopens.
+// the outbox held for it.
 func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 	listener, state := newMentionListener(t)
 	stopping, stop := context.WithCancel(t.Context())
@@ -167,11 +174,163 @@ func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 		t.Fatalf("the resend to a listener that answers nothing = %#v, want it failed", settled)
 	}
 
-	again := eventDeliveries(t, database, deps.Docs, "comment.created", claimed.ID)
-	if len(again) != 1 || !slices.Contains(again[0].Destinations, contracts.AgentSubject("s1")) {
-		t.Fatalf("comment.created deliveries after the resend failed = %#v, want s1's topic among them", again)
+	if copies := publishedFallbackCopies(t, deps, issue.Key, claimed.ID); !slices.Contains(copies, contracts.AgentSubject("s1")) {
+		t.Fatalf("fallback copies published after the resend failed = %#v, want s1's topic among them", copies)
 	}
 	if sends := state.sent(); len(sends) != 0 {
 		t.Fatalf("the listener took sends %#v, want none", sends)
+	}
+}
+
+// publishedFallbackCopies runs the outbox until every event of issueKey is published and every
+// copy of commentID it held back for a resent mention is settled, and returns the destinations of
+// the held copies it published.
+func publishedFallbackCopies(t *testing.T, deps Deps, issueKey, commentID string) []string {
+	t.Helper()
+	runOutboxUntilSettled(t, deps, acceptingPublisher{}, issueKey, commentID)
+	rows, err := deps.Store.Pool.Query(context.Background(), `
+		select destination from comment_fallback_copies where comment_id = $1 and published order by destination
+	`, commentID)
+	if err != nil {
+		t.Fatalf("read the published fallback copies of %s: %v", commentID, err)
+	}
+	copies, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("decode the published fallback copies of %s: %v", commentID, err)
+	}
+	return copies
+}
+
+// runOutboxUntilSettled runs the outbox through publisher until every event of issueKey is
+// published and every copy of commentID it held back for a resent mention is settled, for at most
+// 10 s.
+func runOutboxUntilSettled(t *testing.T, deps Deps, publisher outbox.Publisher, issueKey, commentID string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		outbox.Run(ctx, outbox.Deps{Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(), Docs: deps.Docs})
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var unpublished, unsettled int
+		if err := deps.Store.Pool.QueryRow(context.Background(), `
+			select (select count(*) from events where issue_key = $1 and published_at is null),
+			       (select count(*) from comment_fallback_copies where comment_id = $2 and settled_at is null)
+		`, issueKey, commentID).Scan(&unpublished, &unsettled); err != nil {
+			t.Fatalf("count the outbox's work on %s: %v", issueKey, err)
+		}
+		if unpublished == 0 && unsettled == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the outbox left %d events of %s unpublished and %d copies of %s unsettled", unpublished, issueKey, unsettled, commentID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// recordingOutboxPublisher takes every envelope the outbox publishes and records it.
+type recordingOutboxPublisher struct {
+	mu    sync.Mutex
+	items []contracts.Envelope
+}
+
+func (p *recordingOutboxPublisher) Window() bus.Sender { return p }
+
+func (p *recordingOutboxPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	p.mu.Lock()
+	p.items = append(p.items, item)
+	p.mu.Unlock()
+	accepted := make(chan error, 1)
+	accepted <- nil
+	return accepted
+}
+
+// topicsAbout returns, in the order they were published, the topics of the envelopes whose event
+// is about commentID (its comment.created, a comment.delivery, any other).
+func (p *recordingOutboxPublisher) topicsAbout(t *testing.T, commentID string) []string {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var topics []string
+	for _, item := range p.items {
+		var event struct {
+			Payload struct {
+				ID        string `json:"id"`
+				CommentID string `json:"comment_id"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(item.Payload), &event); err != nil {
+			t.Fatalf("decode the envelope published to %s: %v", item.Topic, err)
+		}
+		if event.Payload.ID == commentID || event.Payload.CommentID == commentID {
+			topics = append(topics, item.Topic)
+		}
+	}
+	return topics
+}
+
+// A mentioned session whose mention failed was left by the outbox's publish of the comment to the
+// route it read then. Once the issue's route has moved, a person's Retry of that mention that
+// fails too reaches no new destination: the outbox publishes nothing of the comment to the new
+// route, and the comment.created row keeps the publication its first publish recorded.
+func TestAFailedRetryOfAMentionSendsTheCommentToNoNewDestination(t *testing.T) {
+	listener, state := newMentionListener(t)
+	// Never released: every send to s2 waits until its caller gives up, and its attempt fails.
+	_ = state.hold("s2")
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Second})
+	issue := createInteractionIssue(t, handler, "TEST", "A moved route", "before")
+	route := func(to string) {
+		t.Helper()
+		if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+			"route": to,
+		}, "alice"); patched.Code != http.StatusOK {
+			t.Fatalf("route the issue to %s: status=%d body=%s", to, patched.Code, patched.Body.String())
+		}
+	}
+	route("role:planner")
+	// A reply in a thread a person started: no route but the issue's reaches s2.
+	root := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{"body": "Where should this go?"}))
+	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Are you there?", "reply_to": root.ID, "mentions": []map[string]any{{"target": "session:s2"}},
+	}))
+	if settled := settledCommentDeliveries(t, database, created.ID); len(settled) != 1 || settled[0].State != "failed" {
+		t.Fatalf("the mention whose send never answered = %#v, want its one attempt failed", settled)
+	}
+	published := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	if len(published) != 1 || !slices.Contains(published[0].Destinations, contracts.RoleTopicPrefix+"planner") {
+		t.Fatalf("comment.created deliveries = %#v, want the one event's, the planner route among them", published)
+	}
+	before := commentCreatedRow(t, database, created.ID)
+
+	route("role:implementer")
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+created.ID+"/deliveries", map[string]any{
+		"delivery": "steer",
+	}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry the mention: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	if attempt := decodeBody[commentDeliveryRead](t, retry); attempt.State != "failed" {
+		t.Fatalf("the retried mention = %#v, want it failed", attempt)
+	}
+
+	publisher := &recordingOutboxPublisher{}
+	runOutboxUntilSettled(t, deps, publisher, issue.Key, created.ID)
+	if topics := publisher.topicsAbout(t, created.ID); slices.Contains(topics, contracts.RoleTopicPrefix+"implementer") {
+		t.Fatalf("the outbox published %#v about the comment once its retry failed, want nothing to the new route", topics)
+	}
+	after := commentCreatedRow(t, database, created.ID)
+	if after.publishedAt == nil || !after.publishedAt.Equal(*before.publishedAt) || after.payload != before.payload {
+		t.Fatalf("comment.created after the failed retry = %+v, want it as its first publish left it: %+v", after, before)
+	}
+	again := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	if len(again) != 1 || !slices.Equal(again[0].Destinations, published[0].Destinations) {
+		t.Fatalf("comment.created deliveries after the failed retry = %#v, want them as they were: %#v", again, published)
 	}
 }

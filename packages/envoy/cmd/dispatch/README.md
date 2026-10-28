@@ -1070,6 +1070,24 @@ server processes, and `server_build_announcements`, each build the fleet has ann
 exists, and the release before it neither reads nor writes either table, so that release runs
 over the new schema unchanged and the census answers `0`.
 
+Migration `0136_comment_deliveries_pending` creates the partial index `comment_deliveries_pending`
+on `comment_deliveries (created_at) where state = 'pending'`, which every process's stranded
+mention pass reads every 30 s (Running more than one process, above). A plain `create index` in
+the runner's transaction holds `comment_deliveries` `SHARE` until it commits, so every mention
+attempt's insert, claim and settle waits for the build, which reads the whole table once; reads go
+on. It refuses and rewrites no row, so its census answers `0`; what bounds that wait is the
+census's reading of `comment_deliveries` itself, which refuses the migration when the table is past
+`pgmigrate.CensusTableLimit` (1 GiB) or a session holds it in a way that would outlast
+`pgmigrate.LockTimeout`.
+
+Migration `0137_comment_fallback_copies` creates `comment_fallback_copies`, the copies of a new
+comment the outbox held back for a mention the stranded pass resends, one row per comment and
+destination topic, which the outbox's fallback pass publishes once that resend fails
+(`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go`), and its partial index of the
+unsettled rows. It names no other table, so a plain `create table` and `create index` in the
+runner's transaction lock only the new table, and the release before it neither reads nor writes
+it, so that release runs over the new schema unchanged and the census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

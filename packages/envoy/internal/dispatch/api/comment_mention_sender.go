@@ -273,13 +273,10 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 // abandoned: it waits on the send instead. An attempt a sender claimed and never settled - a send
 // in flight when its process was killed - is this pass's alone within model.StrandedMentionWindow:
 // its resend repeats the attempt's idempotency key, so a frame the killed process had already
-// handed to the listener is dropped there. A resend that fails is settled failed, which reopens
-// the comment's comment.created when the comment mentions that session and the event has not
-// reached its topic (reopenCommentCreated), so the outbox publishes then whichever copy reaches
-// the session: a mentioned session loses no comment through a kill. When the killed process had
-// handed its frame over and the resend then fails for good (the listener down after the
-// restart), the copy follows the mention under the mention's own dedupe key (attempt.sessionCopy
-// in internal/dispatch/outbox), so the host drops it.
+// handed to the listener is dropped there. The outbox holds the copy that mention's session would
+// otherwise have had as a fallback row, which its fallback pass publishes once this resend fails
+// and settles once it is sent (publishFallbackCopies in internal/dispatch/outbox, the protocol's
+// one description), so a mentioned session loses no comment through a kill.
 func (m *mentionSender) recoverStranded() {
 	m.mu.Lock()
 	if m.stoppedLocked() {
@@ -355,10 +352,11 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 // attempt the outbox settled abandoned is failed, not pending, so no pass reads it
 // (recoverStranded).
 //
-// The read of the attempts goes through comment_deliveries_pending (migration 0135: created_at
+// The read of the attempts goes through comment_deliveries_pending (migration 0136: created_at
 // where state = 'pending'), so a pass with nothing stranded is that one statement and reads no
-// row; otherwise it reads the rows of its window and each comment's comment.created event. It runs on a timer because no event announces a stranded attempt: a killed
-// process sends no signal, and a stopping one refuses its sends after its Lifetime ends.
+// row; otherwise it reads the rows of its window and each comment's comment.created event. It
+// runs on a timer because no event announces a stranded attempt: a killed process sends no
+// signal, and a stopping one refuses its sends after its Lifetime ends.
 func (s *server) strandedCommentMentions(ctx context.Context, limit int, held []mentionKey) ([]mentionSend, error) {
 	ctx = store.WithTransactionTracking(ctx)
 	heldComments := make([]string, len(held))

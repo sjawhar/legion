@@ -1351,13 +1351,15 @@ settles it `failed` (with its `comment.delivery` receipt, under the comment's ow
 it publishes the copy, and a claim after that finds it settled and sends nothing; a claim that
 commits first leaves it claimed just now, and the outbox waits on the send. An attempt a killed
 sender claimed is the stranded pass's to resend, and the outbox publishes the comment without that
-session's copy meanwhile; a send settled `failed` - that resend included - reopens the comment's
-`comment.created` in the settle's own transaction when the comment mentions that session and the
-event has not reached its own topic, or the route is suppressed by the attempt's target alone
-(`reopenCommentCreated`: `published_at` and `next_attempt_at` cleared, the payload as it was), so
-the outbox's next scan publishes whichever route, author, claimant or follower copy now reaches the
-session, and nothing it already sent. So a mentioned session loses no comment through a kill, and
-hears it once unless the killed sender had already handed the frame over. The post-commit sender (`mentionSender`,
+session's copy meanwhile, holding each copy it skipped as a `comment_fallback_copies` row (migration
+`0137`) keyed by the comment and the exact destination topic; its fallback pass publishes the
+comment to that one destination, under the failed mention's dedupe key, once the resend fails, and
+settles the row with nothing sent once it is sent. A failed settle never touches the
+`comment.created` row, so its `published_at`, `published_destinations` and payload stay as its own
+publish left them, and a moved route, a new claimant or new followers get nothing of an old
+comment (`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is the protocol's one
+description). So a mentioned session loses no comment through a kill, and hears it once unless the
+killed sender had already handed the frame over. The post-commit sender (`mentionSender`,
 `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
 session the mention's lookup pinned, else its target as written: `role:X` shares
 `session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X`
@@ -1381,7 +1383,7 @@ process killed with sends in flight leaves their attempts `pending` under a clai
 pass after it lapses resumes, within a minute and 30 s of its taking. Such a resend repeats the
 attempt's idempotency key, so a send the killed process had already handed over is dropped as a
 repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says by whom, and where that fails). Each pass reads the
-partial index `comment_deliveries_pending` (migration 0135, `created_at` where
+partial index `comment_deliveries_pending` (migration 0136, `created_at` where
 `state = 'pending'`): with nothing stranded it is one statement per process every 30 s that reads
 no row, and otherwise it reads its window's rows and each one's `comment.created` event. No event can drive the pass instead: a killed process sends no
 signal, and a stopping one refuses its sends after its lifetime ends, so no live process hears of
@@ -2867,28 +2869,25 @@ the synchronous listener call records the sent or failed attempt instead of blin
   pending attempts only, so the mention and the copy are exclusive per attempt. An attempt a
   sender claimed and never settled (a send in flight when its process was killed, which may have
   reached the listener) is left to the stranded pass, whose resend repeats the attempt's
-  idempotency key so the listener drops a repeat; the outbox counts it with the sent ones
-  (`mentionResumed`) and does not wait on it, and takes it as abandoned only past
-  `model.StrandedMentionWindow` (an hour), when no sender resumes it. The copy still follows a
-  send that fails after the outbox decided, that resend included: the API's settle of a failed
-  send (`completeCommentDelivery`, not `settleAbandonedMentions`) reopens the comment's
-  `comment.created` in the same transaction when its payload leaves the session's copy to the
-  mention - the comment's `mentions` name the attempt's session and the event has not reached
-  that session's topic, or the attempt's target is the `suppressed_route` named alone
-  (`reopenCommentCreated`, `leavesCopyToMention`): it clears `published_at` and
-  `next_attempt_at`, under the owner lock first like the rest of that transaction, and leaves the
-  payload as it was. The next scan republishes the event to the destinations not yet in
-  `published_destinations`, reads the attempt `failed`, and publishes the copy and nothing it
-  already sent; an event not published yet is due at once. A batch publishing the event when the
-  reopen commits cannot mark it published on what it read before: `recordBatch` writes
-  `published_at`, `attempt_count` and `next_attempt_at` only while the row still holds the
-  `next_attempt_at` its claim wrote (`claimPendingEvents` returns it), so a row reopened or
-  claimed again since gets only the destinations that batch reached. The reopen asks only whether
-  the comment mentions the session and the event has not reached its topic, so it covers every
-  copy the outbox holds back for a mention - the route, an author or thread session, a primary
-  document's author, the claimant, a follower - and a
-  mentioned session no copy reaches gets nothing new. So a mentioned session loses no comment
-  through a kill.
+  idempotency key so the listener drops a repeat; the outbox counts it as resent
+  (`mentionResumed`), does not wait on it, and takes it as abandoned only past
+  `model.StrandedMentionWindow` (an hour), when no sender resumes it. For a resent attempt the
+  outbox skips the copy and holds it as a `comment_fallback_copies` row (migration `0137`), one
+  per comment and exact destination topic, naming the session or the suppressed route's target
+  whose attempts decide it, inserted idempotently before the event can be marked published (an
+  insert that fails fails the attempt). A destination with a row is the row's: the event's own
+  publish skips it on every retry (`mentionDeliveries.held`). The fallback pass
+  (`publishFallbackCopies`, at startup and on every retry tick, beside the event scan) claims a
+  bounded batch of unsettled rows (`for update skip locked`, `claimWindow`; a partial index of the
+  unsettled rows, so an idle pass reads nothing) and decides each as `leftTo` would: a `sent`
+  attempt settles the row with nothing sent, a live or resent one leaves it to a later pass, an
+  abandoned one is settled `failed` first (`settleAbandonedMentions`) and decided again, and when
+  every attempt failed it publishes the `comment.created` envelope to that one destination, with
+  the failed attempt's dedupe key, and marks the row published. It never writes the `events` row,
+  so `published_at`, `published_destinations` and the payload stay as the event's own publish left
+  them, and a route, claimant or follower that changed since gets nothing of the old comment. Its
+  doc comment in `internal/dispatch/outbox/mentions.go` is the protocol's one description, races
+  included.
   Every other session - each attempt `failed`, or no row at all - is published to as if it had
   not been mentioned, but for the dedupe key of its copy: a copy on the own topic of a session
   with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries
@@ -2897,8 +2896,10 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `agent.<session>.<comment>:<target>:<mode>` for the mention - in place of `dispatch-<event id>`,
   and keeps the event id `dispatch-<event id>` (`attempt.sessionCopy`,
   `mentionDeliveries.fallbackKeys`). Of several failed targets the lowest target string keys it,
-  and of one target's failed attempts the latest one's mode. Every other destination, a role
-  route included, carries `dispatch-<event id>`. A deferral with a denial
+  and of one target's failed attempts the latest one's mode. Every other destination the event's
+  own publish reaches, a role route included, carries `dispatch-<event id>`; a fallback copy
+  carries its key's failed attempt's key whatever its destination (`targetFallbackKeys` for a row
+  keyed by a target). A deferral with a denial
   (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its
   attempt counted; a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a
   stopping process is released, not backed off, like any event that met them.
@@ -2908,7 +2909,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
   stranded `pending` past the minute may have landed before its sender stopped, and the outbox
   settles it and publishes the copy, and a send the killed process had handed the listener before
   it died, whose stranded-pass resend then fails for good (the listener down after the restart),
-  is followed by the copy the failure reopens. Each way the copy carries the mention's own dedupe
+  is followed by the fallback pass's copy. Each way the copy carries the mention's own dedupe
   key, so the host, which drops a frame whose event id it saw or whose named dedupe key it claimed
   within `DELIVERY_DUPLICATE_WINDOW_MS` (`createDeliveryDedupe` in `packages/envoy-client`), drops
   it; and the stream, whose MsgId is the dedupe key and the subject, stores it no second time

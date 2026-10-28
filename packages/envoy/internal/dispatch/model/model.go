@@ -1141,8 +1141,10 @@ func CommentMentionIdempotencyKey(commentID, target, delivery string) string {
 // session's own-topic copy instead, so the outbox never waits on an attempt no sender started,
 // and a sender that claims it after that finds it settled. An attempt a sender did claim is left
 // to the mention sender's stranded pass, which resends it under its own idempotency key, so a
-// send that had already reached the listener is dropped there as a repeat. Both judge it in
-// Postgres against Postgres's own timestamps, through DeliveryClaimLapseInterval.
+// send that had already reached the listener is dropped there as a repeat; the outbox holds the
+// session's copy as a fallback row meanwhile, published only should that resend fail
+// (publishFallbackCopies, internal/dispatch/outbox). Both judge it in Postgres against Postgres's
+// own timestamps, through DeliveryClaimLapseInterval.
 const DeliveryClaimLapse = time.Minute
 
 // DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
@@ -1348,19 +1350,17 @@ type CommentEventPayload struct {
 	// a sender claimed - a send in flight when its process died, which may have reached the
 	// listener - is left to the stranded pass, which resends it under its own idempotency key, so
 	// the listener drops a repeat; the outbox takes it as abandoned only past
-	// StrandedMentionWindow, when no sender resumes it. A send the API settles failed, that resend
-	// included, reopens the comment's comment.created event when the comment mentions the
-	// attempt's session and the event has not reached that session's topic, or the route
-	// suppression below names the attempt's target alone (published_at and next_attempt_at
-	// cleared, this payload unchanged), so the outbox publishes then whichever route, author,
-	// thread, document, claimant or follower copy reaches the session, to the destinations the
-	// event has not reached: a mentioned session loses no comment through a kill. A copy on the
-	// session's own topic carries the failed attempt's own dedupe key (contracts.AgentSendDedupeKey
-	// of CommentMentionIdempotencyKey) rather than the event's dispatch-<event id>, so a send the
-	// killed process had handed the listener before it died, whose resend then fails for good (the
-	// listener down after the restart), is not shown twice: the host that holds the mention drops
-	// the copy, and the stream stores it no second time within its duplicate window. A session no
-	// mention reached is shown the copy.
+	// StrandedMentionWindow, when no sender resumes it. Within that window the outbox publishes the
+	// event without the session's copy and holds each copy it skipped as a fallback row, which its
+	// fallback pass publishes to that one destination should the resend fail, and settles should
+	// it be sent; this payload and the event's publication are never touched again
+	// (publishFallbackCopies in internal/dispatch/outbox describes it). A copy on the session's own
+	// topic, and every fallback copy, carries the failed attempt's own dedupe key
+	// (contracts.AgentSendDedupeKey of CommentMentionIdempotencyKey) rather than the event's
+	// dispatch-<event id>, so a send the killed process had handed the listener before it died,
+	// whose resend then fails for good (the listener down after the restart), is not shown twice:
+	// the host that holds the mention drops the copy, and the stream stores it no second time
+	// within its duplicate window. A session no mention reached is shown the copy.
 	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
 	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
 	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),

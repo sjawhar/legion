@@ -324,22 +324,25 @@ func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails
 	copies := 0
 	deadline = time.Now().Add(10 * time.Second)
 	for {
-		var unpublished int
-		if err := database.Pool.QueryRow(context.Background(),
-			`select count(*) from events where issue_key = $1 and published_at is null`, issue.Key).Scan(&unpublished); err != nil {
+		var unpublished, unsettled int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select (select count(*) from events where issue_key = $1 and published_at is null),
+			       (select count(*) from comment_fallback_copies where comment_id = $2 and settled_at is null)
+		`, issue.Key, claimed.ID).Scan(&unpublished, &unsettled); err != nil {
 			t.Fatalf("count unpublished events: %v", err)
 		}
-		if unpublished == 0 {
+		if unpublished == 0 && unsettled == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the outbox left %d events of %s unpublished", unpublished, issue.Key)
+			t.Fatalf("the outbox left %d events of %s unpublished and %d held copies unsettled", unpublished, issue.Key, unsettled)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from events
-		where issue_key = $1 and (payload->>'id' = $2 or payload->>'comment_id' = $2) and $3 = any(published_destinations)
+		select (select count(*) from events
+		        where issue_key = $1 and (payload->>'id' = $2 or payload->>'comment_id' = $2) and $3 = any(published_destinations))
+		     + (select count(*) from comment_fallback_copies where comment_id::text = $2 and destination = $3 and published)
 	`, issue.Key, claimed.ID, contracts.AgentSubject("s1")).Scan(&copies); err != nil {
 		t.Fatalf("count s1's copies: %v", err)
 	}
