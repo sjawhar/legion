@@ -228,11 +228,11 @@ included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
 `core.DaemonPermissions()` instead of a host's or an explicit user's grant.
 
-The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same two
+The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same three
 consumers written against another client library ask for different ones. So a grant is proven by
 running the daemon's consumers under exactly that grant, against a real server, and watching for a
-refusal: create both consumers, restart onto them, and have Dispatch and GitHub events
-acknowledged. The daemon logs every refusal at error as
+refusal: create the three consumers, restart onto them, have Dispatch and GitHub events
+acknowledged, and read their lag as `legion state` does. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
 subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that
 proof against the server images the hub runs, and `docs/kubernetes.md` says how the daemon's
