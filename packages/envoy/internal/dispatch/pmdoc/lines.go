@@ -393,16 +393,15 @@ func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Co
 		node.SetAttribute(fenceClosedAttr, true)
 		return state
 	}
+	if !util.IsBlank(line) {
+		return state
+	}
 	indent, _ := node.Attribute(fenceIndentAttr)
-	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); !util.IsBlank(line) || position >= 0 {
+	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); position >= 0 {
 		return state
 	}
 	// Goldmark appended the whole line; the code's line is empty but for its line feed.
-	start := segment.Stop
-	if start > segment.Start && reader.Source()[start-1] == '\n' {
-		start--
-	}
-	empty := gmtext.NewSegment(start, segment.Stop)
+	empty := lineFeedOnly(segment, reader.Source())
 	empty.ForceNewline = true
 	node.Lines().Set(node.Lines().Len()-1, empty)
 	return state
@@ -444,11 +443,7 @@ func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 		_, segment = reader.PeekLine()
 	} else {
 		// Nothing past the code's indentation: the line is empty but for its line feed.
-		start := segment.Stop
-		if start > segment.Start && reader.Source()[start-1] == '\n' {
-			start--
-		}
-		segment = gmtext.NewSegment(start, segment.Stop)
+		segment = lineFeedOnly(segment, reader.Source())
 	}
 	node.Lines().Append(segment)
 	if position >= 0 {
@@ -463,13 +458,8 @@ func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 // editor's parser holds open there.
 func (p codeColumns) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
 	p.BlockParser.Close(node, reader, pc)
-	switch node.PreviousSibling().(type) {
-	case *ast.List:
+	if heldOpenBefore(node) {
 		return
-	case *ast.Blockquote:
-		if !node.HasBlankPreviousLines() {
-			return
-		}
 	}
 	kept, ok := node.Attribute(codeKeptAttr)
 	if !ok {
@@ -482,11 +472,33 @@ func (p codeColumns) Close(node ast.Node, reader gmtext.Reader, pc parser.Contex
 	}
 }
 
+// heldOpenBefore reports whether indented code stands right after a list, or right after a quote
+// with no blank line between them, which the browser editor's parser holds open across the code's
+// first line.
+func heldOpenBefore(code ast.Node) bool {
+	switch code.PreviousSibling().(type) {
+	case *ast.List:
+		return true
+	case *ast.Blockquote:
+		return !code.HasBlankPreviousLines()
+	}
+	return false
+}
+
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
 // SetPadding keeps: a zero advance drops it.
 func setPadding(reader gmtext.Reader, padding int) {
 	reader.SetPadding(padding)
 	reader.Advance(0)
+}
+
+// lineFeedOnly is segment's line emptied but for its line feed.
+func lineFeedOnly(segment gmtext.Segment, source []byte) gmtext.Segment {
+	start := segment.Stop
+	if start > segment.Start && source[start-1] == '\n' {
+		start--
+	}
+	return gmtext.NewSegment(start, segment.Stop)
 }
 
 var (
@@ -589,13 +601,8 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 		last := previous.Lines().At(previous.Lines().Len() - 1)
 		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
 	case *ast.CodeBlock:
-		switch previous.PreviousSibling().(type) {
-		case *ast.List:
+		if heldOpenBefore(previous) {
 			return false
-		case *ast.Blockquote:
-			if !previous.HasBlankPreviousLines() {
-				return false
-			}
 		}
 		if previous.Lines().Len() == 0 {
 			return false
