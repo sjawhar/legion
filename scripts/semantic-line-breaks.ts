@@ -4,18 +4,27 @@
 // packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
 // `--write` fixes it by changing only whitespace.
 //
-// `--write` writes a file only when two guards hold: the text is the same once whitespace is
-// folded, and the file renders the same, parsed before and after with micromark and its GFM
-// extension (CommonMark and GitHub's tables, footnotes, task lists and strikethrough). A construct
-// this script misreads therefore leaves the file as it was and fails loudly, naming the first block
-// whose rendering would change. The comparison ignores only what a re-layout must change: where a
-// line breaks inside text, and whether a list is loose (the blank lines R2 puts between items).
+// `--write` is conservative by rule. It leaves a leading YAML front matter block byte for byte. It
+// never joins a line onto the one before when the line could open or interrupt a block, nor cuts
+// a line where the new line would start so. It never joins or cuts inside a code span or inline
+// HTML: a raw-text element such as `<pre>` keeps its line breaks through its close tag.
+//
+// `--write` then writes a file only when two guards hold: the text is the same once whitespace is
+// folded, and the file renders the same, parsed before and after with micromark and its GFM and
+// front matter extensions (CommonMark, GitHub's tables, footnotes, task lists and strikethrough,
+// and YAML front matter, which must stay exactly the same). A construct this script misreads
+// therefore leaves the file as it was and fails loudly, naming the first block whose rendering
+// would change. The comparison ignores only what a re-layout must change: where a line breaks
+// inside text, and whether a list is loose (the blank lines R2 puts between items). Only
+// `--write` loads the parser, so check mode runs without `bun install`.
 //
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { fromMarkdown } from "mdast-util-from-markdown";
-import { gfmFromMarkdown } from "mdast-util-gfm";
-import { gfm } from "micromark-extension-gfm";
+import { dirname, join } from "node:path";
+
+const PARSER_MISSING =
+  "semantic-line-breaks.ts: --write needs its Markdown parser (mdast-util-from-markdown, mdast-util-gfm, micromark-extension-gfm, mdast-util-frontmatter, micromark-extension-frontmatter); run `bun install` in the repository root";
 
 const USAGE = "usage: bun scripts/semantic-line-breaks.ts [--write] <file.md>...\n";
 
@@ -59,11 +68,20 @@ const HTML_TAG_LINE =
   /^<(?!\/?(?:script|pre|style|textarea)\b)(?:[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?|\/[A-Za-z][A-Za-z0-9-]*[ \t]*)>[ \t]*$/i;
 
 /**
- * Text a continuation line may not start with, because it would open a block or end the
- * paragraph, or a whole line that could be a setext underline, a rule or a table delimiter row.
+ * Text a paragraph line, after its indentation, may not start with when `--write` joins it onto the
+ * line before or cuts a line before it, because under CommonMark or GFM it could open a block or
+ * end the paragraph: a list marker, `#`, `>`, `|`, `<`, a fence, a footnote, a link reference
+ * definition's label, a task box, or a whole line that could be a setext underline, a rule or a
+ * table delimiter row.
  */
 const CONTINUATION_BLOCK_START =
-  /^(?:[-+*](?:[ \t]|$)|#{1,6}(?:[ \t]|$)|[>|<]|\d{1,9}[.)](?:[ \t]|$)|`{3,}|~{3,}|[-=*_|: \t]+$)/;
+  /^(?:[-+*](?:[ \t]|$)|\d+[.)](?:[ \t]|$)|[#>|<]|`{3,}|~{3,}|\[\^|\[(?:[^\\\]]|\\.)+\]:|\[[ xX]\](?:[ \t]|$)|[-=*_|: \t]+$)/;
+/** A list item line whose content is only a task box: the line after it must stay apart. */
+const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
+/** An open tag of a raw-text element, whose content runs as is through its close tag. */
+const RAW_TEXT_OPEN = /^<(pre|textarea|script|style)(?=[ \t\n/>])/i;
+/** A YAML front matter block as micromark's front matter extension reads it: a closed one. */
+const CLOSED_FRONT_MATTER = /^---[ \t]*\r?\n(?:[^\n]*\n)*?---[ \t]*(?:\r?\n|$)/;
 
 const SENTENCE_MARKS = ".!?";
 const SENTENCE_CLOSERS = ")]\"'*_”’";
@@ -271,9 +289,10 @@ function blockStart(
 }
 
 /**
- * Sorts each line into the block it belongs to, CommonMark-style: fences, indented code, tables,
- * HTML blocks, link reference definitions, paragraphs (lazy continuation lines included), list
- * items and the lines that are none of these. Check and write both read the document through this.
+ * Sorts each line into the block it belongs to, CommonMark-style: a leading YAML front matter
+ * block, fences, indented code, tables, HTML blocks, link reference definitions, paragraphs (lazy
+ * continuation lines included), list items and the lines that are none of these. Check and write
+ * both read the document through this.
  */
 function scanBlocks(source: readonly string[]): Blocks {
   const lines: LineInfo[] = [];
@@ -285,6 +304,12 @@ function scanBlocks(source: readonly string[]): Blocks {
   let html: RegExp | undefined;
   let definition: DefinitionTail | undefined;
   let table = false;
+  // Front matter runs from a first line `---` through the next `---` or `...`; without one, the
+  // first line is a thematic break.
+  const frontMatterEnd =
+    source[0] === "---"
+      ? source.findIndex((line, index) => index > 0 && (line === "---" || line === "..."))
+      : -1;
 
   const info = (kind: LineKind, itemStart = false): LineInfo => ({ kind, itemStart });
 
@@ -396,6 +421,10 @@ function scanBlocks(source: readonly string[]): Blocks {
   };
 
   for (const [index, line] of source.entries()) {
+    if (index <= frontMatterEnd) {
+      lines.push(info("other"));
+      continue;
+    }
     // A fence or HTML block inside a list item ends with the item.
     const innermost = open.at(-1);
     if (
@@ -470,25 +499,51 @@ function destinationEnd(line: string, from: number): number {
   return -1;
 }
 
+/** Index just past the inline HTML that opens at `from`, or -1 when no `>` closes it. */
+function htmlEnd(text: string, from: number): number {
+  if (text.startsWith("<!--", from)) {
+    const close = text.indexOf("-->", from + 4);
+    if (close !== -1) return close + 3;
+  }
+  const tagEnd = text.indexOf(">", from);
+  if (tagEnd === -1) return -1;
+  const element = RAW_TEXT_OPEN.exec(text.slice(from, tagEnd + 1))?.[1];
+  if (element === undefined) return tagEnd + 1;
+  const close = new RegExp(`</${element}[ \\t\\n]*>`, "gi");
+  close.lastIndex = tagEnd + 1;
+  const match = close.exec(text);
+  return match ? match.index + match[0].length : text.length;
+}
+
 /**
- * Which characters of the line are prose: outside inline code spans and link destinations. A
- * backtick run with no equal-length run after it on the line is literal text.
+ * Which characters of the text are prose: outside inline code spans, inline HTML (a tag or an
+ * autolink, and a raw-text element such as `<pre>` through its close tag) and link destinations.
+ * A backtick run with no equal-length run after it in the text is literal text, and so is a `<`
+ * no `>` closes. The text may be a whole paragraph, its lines joined with `\n`.
  */
-function proseMask(line: string): boolean[] {
-  const prose = new Array<boolean>(line.length).fill(true);
+function proseMask(text: string): boolean[] {
+  const prose = new Array<boolean>(text.length).fill(true);
   let at = 0;
-  while (at < line.length) {
-    const char = line[at];
+  while (at < text.length) {
+    const char = text[at];
     if (char === "\\") {
       at += 2;
     } else if (char === "`") {
-      const run = backtickRunLength(line, at);
-      const close = findBacktickRun(line, at + run, run);
+      const run = backtickRunLength(text, at);
+      const close = findBacktickRun(text, at + run, run);
       const end = close === -1 ? at + run : close + run;
       if (close !== -1) prose.fill(false, at, end);
       at = end;
-    } else if (char === "]" && line[at + 1] === "(") {
-      const end = destinationEnd(line, at + 2);
+    } else if (char === "<" && /[A-Za-z/!?]/.test(text.charAt(at + 1))) {
+      const end = htmlEnd(text, at);
+      if (end === -1) {
+        at++;
+      } else {
+        prose.fill(false, at, end);
+        at = end;
+      }
+    } else if (char === "]" && text[at + 1] === "(") {
+      const end = destinationEnd(text, at + 2);
       if (end === -1) {
         at++;
       } else {
@@ -502,15 +557,23 @@ function proseMask(line: string): boolean[] {
   return prose;
 }
 
+/** A line of text and which of its characters are prose, as proseMask reads them. */
+interface Masked {
+  text: string;
+  prose: boolean[];
+}
+
 /**
  * The index of each space on the line that separates two sentences (R1): a sentence mark, its
  * closers, then this one space, then a sentence start. A sentence that starts with a lowercase
  * word (`ygo's`, `envoy-dispatch`) follows only a bare `.`, maybe emphasised: after `?`, `!`, a
  * quote, a parenthesis or an ellipsis such a word goes on with the sentence (`asks "why?" and`,
- * `./... in`). Check mode reports these and `--write` turns them into line breaks.
+ * `./... in`). No sentence starts with text `--write` may not cut before. The text may be a
+ * paragraph, its lines joined with `\n`, read as `--write` reads it: a line that opens with a
+ * list marker stays a line of its own, so the sentence before a mark starts no earlier than its
+ * line. Check mode reports these and `--write` turns them into line breaks.
  */
-function sentenceBreaks(line: string): number[] {
-  const prose = proseMask(line);
+function sentenceBreaks(line: string, prose = proseMask(line)): number[] {
   const breaks: number[] = [];
   for (let mark = 0; mark < line.length; mark++) {
     if (!prose[mark] || !SENTENCE_MARKS.includes(line.charAt(mark))) continue;
@@ -518,7 +581,10 @@ function sentenceBreaks(line: string): number[] {
     while (prose[space] && SENTENCE_CLOSERS.includes(line.charAt(space))) space++;
     if (line[space] !== " " || !prose[space]) continue;
     if (!SENTENCE_START.test(line.slice(space + 1, space + 3))) continue;
-    const sentence = line.slice(0, mark + 1);
+    const lineEnd = line.indexOf("\n", space);
+    const rest = line.slice(space + 1, lineEnd === -1 ? line.length : lineEnd);
+    if (CONTINUATION_BLOCK_START.test(rest)) continue;
+    const sentence = line.slice(line.lastIndexOf("\n", mark) + 1, mark + 1);
     const abbreviation = ABBREVIATIONS.find((word) => sentence.endsWith(word));
     const before = sentence.charAt(sentence.length - (abbreviation?.length ?? 0) - 1);
     if (abbreviation !== undefined && !LETTER_OR_DIGIT.test(before)) continue;
@@ -536,13 +602,12 @@ function sentenceBreaks(line: string): number[] {
  * The index of each space a line longer than MAX_LINE may break at: after `; ` or `: `, or before
  * ` —`.
  */
-function longLineBreaks(line: string): number[] {
-  const prose = proseMask(line);
+function longLineBreaks({ text, prose }: Masked): number[] {
   const breaks: number[] = [];
-  for (let space = 1; space < line.length - 1; space++) {
-    if (line[space] !== " " || !prose[space] || !prose[space - 1]) continue;
-    const before = line.charAt(space - 1);
-    const after = line.charAt(space + 1);
+  for (let space = 1; space < text.length - 1; space++) {
+    if (text[space] !== " " || !prose[space] || !prose[space - 1]) continue;
+    const before = text.charAt(space - 1);
+    const after = text.charAt(space + 1);
     const afterClause = (before === ";" || before === ":") && after !== " " && after !== "\t";
     const beforeDash = after === "—" && before !== " " && before !== "\t" && before !== "\\";
     if (afterClause || beforeDash) breaks.push(space);
@@ -554,27 +619,29 @@ function longLineBreaks(line: string): number[] {
  * The line cut at each of the given spaces, the spaces dropped. A cut that would start a line with
  * text that opens a block or ends the paragraph is skipped.
  */
-function cutLine(line: string, cuts: readonly number[]): string[] {
+function cutLine(line: Masked, cuts: readonly number[]): Masked[] {
   let kept = [...cuts];
   for (;;) {
-    const pieces = [0, ...kept.map((cut) => cut + 1)].map((start, n) =>
-      line.slice(start, kept[n] ?? line.length)
-    );
-    const bad = pieces.findIndex((piece, n) => n > 0 && CONTINUATION_BLOCK_START.test(piece));
+    const pieces = [0, ...kept.map((cut) => cut + 1)].map((start, n) => {
+      const end = kept[n] ?? line.text.length;
+      return { text: line.text.slice(start, end), prose: line.prose.slice(start, end) };
+    });
+    const bad = pieces.findIndex((piece, n) => n > 0 && CONTINUATION_BLOCK_START.test(piece.text));
     if (bad === -1) return pieces;
     kept = kept.filter((_, n) => n !== bad - 1);
   }
 }
 
 /** Breaks a line longer than MAX_LINE, left to right, while what is left is still too long. */
-function wrapLongLine(line: string, indent: string): string[] {
-  if (line.length <= MAX_LINE) return [line];
-  const lead = indentLength(line);
+function wrapLongLine(line: Masked, indent: string): string[] {
+  const { text } = line;
+  if (text.length <= MAX_LINE) return [text];
+  const lead = indentLength(text);
   const cuts: number[] = [];
   let start = lead;
   for (const cut of longLineBreaks(line)) {
-    if ((start === lead ? lead : indent.length) + line.length - start <= MAX_LINE) break;
-    const rest = line.slice(cut + 1);
+    if ((start === lead ? lead : indent.length) + text.length - start <= MAX_LINE) break;
+    const rest = text.slice(cut + 1);
     if (
       cut - start >= MIN_PART &&
       rest.length >= MIN_PART &&
@@ -584,24 +651,40 @@ function wrapLongLine(line: string, indent: string): string[] {
       start = cut + 1;
     }
   }
-  return cutLine(line, cuts).map((piece, n) => (n === 0 ? piece : indent + piece));
+  return cutLine(line, cuts).map((piece, n) => (n === 0 ? piece.text : indent + piece.text));
 }
 
 /**
- * The lines of a paragraph joined into logical lines, kept apart at hard breaks. A line that starts
- * with `<` inside a paragraph is text, not an HTML block (the scanner ends the paragraph before
- * one), and is joined like any other: it may continue a code span the line before opened.
+ * The lines of a paragraph joined into logical lines, each with its prose mask, read over the
+ * whole paragraph so a code span or inline HTML a line break cuts in two stays masked. A line
+ * stays apart from the one before at a hard break, where that line break is inside a code span or
+ * inline HTML, where the line starts with text that could open or interrupt a block, and after a
+ * list item that holds only a task box.
  */
-function joinParagraph(source: readonly string[]): string[] {
-  const logical: string[] = [];
-  for (const line of source) {
+function joinParagraph(source: readonly string[]): Masked[] {
+  const mask = proseMask(source.join("\n"));
+  const logical: Masked[] = [];
+  let offset = 0;
+  for (const [n, line] of source.entries()) {
+    const prose = mask.slice(offset, offset + line.length);
+    const lineBreak = offset - 1;
+    offset += line.length + 1;
     const previous = logical.at(-1);
-    if (previous === undefined || HARD_BREAK.test(previous)) {
-      logical.push(line);
-    } else {
-      logical[logical.length - 1] =
-        `${previous.replace(/[ \t]+$/, "")} ${line.replace(INDENT, "")}`;
+    const indent = indentLength(line);
+    if (
+      previous === undefined ||
+      HARD_BREAK.test(previous.text) ||
+      mask[lineBreak] !== true ||
+      CONTINUATION_BLOCK_START.test(line.slice(indent)) ||
+      TASK_BOX_LINE.test(source[n - 1] ?? "")
+    ) {
+      logical.push({ text: line, prose });
+      continue;
     }
+    // The line break is prose, so the trailing whitespace it follows is too.
+    const kept = previous.text.replace(/[ \t]+$/, "");
+    previous.text = `${kept} ${line.slice(indent)}`;
+    previous.prose = [...previous.prose.slice(0, kept.length), true, ...prose.slice(indent)];
   }
   return logical;
 }
@@ -627,9 +710,15 @@ function relayout(text: string): string {
     if (paragraph?.first === index) {
       const source = lines.slice(paragraph.first, paragraph.last + 1);
       const indent = paragraph.continuationIndent;
+      const margin = new Array<boolean>(indent.length).fill(true);
       for (const logical of joinParagraph(source)) {
-        for (const [n, sentence] of cutLine(logical, sentenceBreaks(logical)).entries()) {
-          out.push(...wrapLongLine(n === 0 ? sentence : indent + sentence, indent));
+        const sentences = cutLine(logical, sentenceBreaks(logical.text, logical.prose));
+        for (const [n, sentence] of sentences.entries()) {
+          const line =
+            n === 0
+              ? sentence
+              : { text: indent + sentence.text, prose: [...margin, ...sentence.prose] };
+          out.push(...wrapLongLine(line, indent));
         }
       }
       index = paragraph.last;
@@ -691,10 +780,57 @@ function renderedForm(node: ParsedNode, inText: boolean): unknown {
   return form;
 }
 
+/** Parses markdown into its top-level blocks. */
+type Parse = (text: string) => ParsedNode[];
+
+/**
+ * The parser `--write` compares renderings with: micromark with GFM and, where the file opens
+ * with a closed YAML front matter block, the front matter extension. After an opener with no
+ * closing `---` that extension misreads every block (a list becomes a paragraph), where GitHub
+ * reads the opener as a rule. The parser is imported only once a node_modules directory holding
+ * it is in the script's directory or above: where there is none, Bun would install an unpinned
+ * copy itself. Undefined, after saying why on stderr, when it is not installed.
+ */
+async function loadParser(): Promise<Parse | undefined> {
+  let installed = false;
+  for (let directory = import.meta.dir; !installed; directory = dirname(directory)) {
+    installed = existsSync(join(directory, "node_modules", "mdast-util-from-markdown"));
+    if (dirname(directory) === directory) break;
+  }
+  let failure = "";
+  if (installed) {
+    try {
+      const [markdown, gfmMarkdown, gfmSyntax, matterMarkdown, matterSyntax] = await Promise.all([
+        import("mdast-util-from-markdown"),
+        import("mdast-util-gfm"),
+        import("micromark-extension-gfm"),
+        import("mdast-util-frontmatter"),
+        import("micromark-extension-frontmatter"),
+      ]);
+      const gfmOptions = {
+        extensions: [gfmSyntax.gfm()],
+        mdastExtensions: [gfmMarkdown.gfmFromMarkdown()],
+      };
+      const matterOptions = {
+        extensions: [...gfmOptions.extensions, matterSyntax.frontmatter(["yaml"])],
+        mdastExtensions: [
+          ...gfmOptions.mdastExtensions,
+          matterMarkdown.frontmatterFromMarkdown(["yaml"]),
+        ],
+      };
+      return (text) =>
+        markdown.fromMarkdown(text, CLOSED_FRONT_MATTER.test(text) ? matterOptions : gfmOptions)
+          .children;
+    } catch (error) {
+      failure = `\n${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  process.stderr.write(`${PARSER_MISSING}${failure}\n`);
+  return undefined;
+}
+
 /** The first top-level block whose rendering differs between the two texts, or undefined. */
-function renderDifference(before: string, after: string): string | undefined {
-  const parse = (text: string): ParsedNode[] =>
-    fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }).children;
+function renderDifference(parse: Parse, before: string, after: string): string | undefined {
   const blocksBefore = parse(before);
   const blocksAfter = parse(after);
   for (let n = 0; n < Math.max(blocksBefore.length, blocksAfter.length); n++) {
@@ -800,6 +936,8 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
 }
 
 async function writeFiles(paths: readonly string[]): Promise<number> {
+  const parse = await loadParser();
+  if (parse === undefined) return 2;
   let status = 0;
   for (const path of paths) {
     const text = await readText(path);
@@ -807,7 +945,7 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
     const next = relayout(text);
     const difference = foldedDifference(text, next);
     const rendering =
-      difference === undefined && next !== text ? renderDifference(text, next) : undefined;
+      difference === undefined && next !== text ? renderDifference(parse, text, next) : undefined;
     if (difference !== undefined) {
       process.stderr.write(
         `${path}: refusing to write: the re-layout would change more than whitespace (${difference})\n`

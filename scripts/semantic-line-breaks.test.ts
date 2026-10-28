@@ -140,8 +140,9 @@ test("R1 does not end a sentence at the abbreviation incl.", async () => {
 });
 
 test("--write refuses, writing nothing, a re-layout that would change how the file renders", async () => {
-  // Joining these lines drops the code span's edge spaces: whitespace only, yet another rendering.
-  const text = "x ` \nfoo\n ` y.\n";
+  // R2's blank line before the nested item would make its `-` an empty item, not text: whitespace
+  // only, yet another rendering.
+  const text = "- a\n  - -\n";
   const path = await markdownFile(text);
   const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
   expect(result.stderr.toString()).toContain(`${path}: refusing to write: the block at line 1`);
