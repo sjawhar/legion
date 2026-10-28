@@ -6,8 +6,8 @@
 // keeps responding; a label holding markup draws as text, never as an element; a block in another
 // language stays code. Every drawing row checks both halves: the image with its labels, and the
 // source hidden until the disclosure opens. At the commit before the change each body shows its
-// source as code, so every drawing row and both refusal rows fail on their diagram or status
-// assertion.
+// source as code, so every drawing row and the renderer-refusal row fail on their diagram or
+// status assertion, and the time-limit row fails at its hold assertion (no worker chunk loads).
 //
 // A mermaid block in a document (the issue's spec, open in the editor, or a past version) draws
 // too, and the document rows check what it must not do: its own sheet styles no other `svg` or
@@ -76,17 +76,6 @@ function flowchart(lead: string, from: string, to: string): string {
   return `${lead}\n\n\`\`\`mermaid\ngraph TD\n  ${from} --> ${to}\n\`\`\`\n`;
 }
 
-/** A body of `lead` and then a flowchart of 800 nodes with 2 edges each, which ELK takes over a
- *  minute to lay out; its last source line is `n799 --> n6`. */
-function largeFlowchart(lead: string): string {
-  const nodes = 800;
-  const edges = Array.from(
-    { length: nodes },
-    (_, node) => `  n${node} --> n${(node + 1) % nodes}\n  n${node} --> n${(node + 7) % nodes}`
-  );
-  return `${lead}\n\n\`\`\`mermaid\ngraph TD\n${edges.join("\n")}\n\`\`\`\n`;
-}
-
 /** A document of `lead`, a vertical flowchart of 21 nodes in a chain (drawn taller than any
  *  project's viewport), 30 filler paragraphs and then the paragraph `target`, so `target` sits
  *  below the viewport when the page opens and the drawn diagram pushes it further down. */
@@ -94,20 +83,6 @@ function tallDocument(lead: string, target: string): string {
   const chain = Array.from({ length: 20 }, (_, node) => `  n${node} --> n${node + 1}`);
   const filler = Array.from({ length: 30 }, (_, index) => `Filler paragraph ${index + 1}.`);
   return `${lead}\n\n\`\`\`mermaid\ngraph TD\n${chain.join("\n")}\n\`\`\`\n\n${filler.join("\n\n")}\n\n${target}\n`;
-}
-
-/** Serves the Mermaid worker's script to `context` as a worker that says it is ready and never
- *  answers, so the page's time limit refuses every diagram whatever the machine's speed, and no
- *  diagram is drawn for real (INFRA-713: a CI runner draws 800 nodes inside the limit, and 800
- *  nodes drawn for real in a pod take over a minute and gigabytes). Returns the URLs it served,
- *  which a row checks, so a renamed worker bundle cannot slip the real renderer back in. */
-async function stallMermaidWorker(context: BrowserContext): Promise<string[]> {
-  const served: string[] = [];
-  await context.route(/\/assets\/mermaid-render\.worker-[^/]*\.js(\?.*)?$/, (route) => {
-    served.push(route.request().url());
-    return route.fulfill({ body: "postMessage({ ready: true });", contentType: "text/javascript" });
-  });
-  return served;
 }
 
 function diagramIn(card: Locator): Locator {
@@ -588,51 +563,89 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
   }
 });
 
-// ELK's layout time grows faster than the diagram: a flowchart of 800 nodes with 2 edges each
-// takes over a minute. Drawn on the page's own thread it held every reader of the comment there;
-// in the worker the page keeps answering and the time limit refuses it.
+/** The built Mermaid render worker's chunk, as Vite emits it under `/assets`. */
+const workerChunk = /\/assets\/mermaid-render\.worker-[^/]+\.js$/;
+
+/** The same-origin path the held worker requests once it has taken a diagram's source. */
+const workerHeldPath = "/e2e/mermaid-worker-held";
+
+/** Prepended to the worker chunk, so it registers before the worker's own listener: it stops that
+ *  listener, reports through `workerHeldPath` that it holds the source, and never returns. */
+const holdingListener = [
+  'self.addEventListener("message", async (event) => {',
+  "  event.stopImmediatePropagation();",
+  `  await fetch("${workerHeldPath}");`,
+  "  for (;;) {}",
+  "});",
+].join("\n");
+
+/** Serves the real worker chunk to `page` with `holdingListener` in front of the worker's own, so
+ *  the worker takes a diagram's source and never answers, and the page's shipped time limit
+ *  refuses it whatever the machine's speed. Returns how many times a worker reported that hold. */
+async function holdWorkerSource(page: Page): Promise<() => number> {
+  let holds = 0;
+  await page.route(workerChunk, async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: `${holdingListener}\n${await response.text()}` });
+  });
+  await page.route(
+    (url) => url.pathname === workerHeldPath,
+    async (route) => {
+      holds += 1;
+      await route.fulfill({ status: 204 });
+    }
+  );
+  return () => holds;
+}
+
+/** Waits for a worker to report that it holds the source, then shows that five 100 ms timers on
+ *  the page's thread each fire on time, give or take a scheduling hiccup, while the worker is
+ *  busy: a page that drew on its own thread would never hand the source over. */
+async function expectHeldAndResponsive(page: Page, holds: () => number): Promise<void> {
+  await expect
+    .poll(holds, { message: "the Mermaid worker took the diagram's source and holds it" })
+    .toBeGreaterThanOrEqual(1);
+  for (let sample = 0; sample < 5; sample += 1) {
+    const elapsed = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          const start = performance.now();
+          setTimeout(() => resolve(performance.now() - start), 100);
+        })
+    );
+    expect(elapsed).toBeLessThan(1_000);
+  }
+}
+
+// The worker holds the source (`holdWorkerSource`), so the shipped 5 s limit refuses even this
+// two-node flowchart on every runner, and the row proves what the limit does, not how fast a
+// machine draws: the page hands the source to the worker chunk, the page's thread keeps answering
+// while the worker is busy, and the limit refuses it with the reason and the source shown. A page
+// drawing on its own thread never loads the chunk and fails at the hold assertion.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
-  const nodes = 800;
-  const edges = Array.from(
-    { length: nodes },
-    (_, node) => `  n${node} --> n${(node + 1) % nodes}\n  n${node} --> n${(node + 7) % nodes}`
-  );
-  const body = `Large:\n\n\`\`\`mermaid\ngraph TD\n${edges.join("\n")}\n\`\`\`\n`;
-  // Within Dispatch's 32,000-character body limit.
-  expect(body.length).toBeLessThan(32_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Large diagram" });
-  const comment = await createComment(issue.key, { body });
+  const comment = await createComment(issue.key, { body: flowchart("Large:", "Start", "Finish") });
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    const holds = await holdWorkerSource(page);
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id, "Large:");
     await expect(card).toContainText("Large:");
     const refusal = card
       .getByRole("status")
       .filter({ hasText: "Unable to render Mermaid diagram" });
-    // While it is being drawn, a 100 ms timer on the page's thread fires on time, give or take
-    // a scheduling hiccup; a layout on that thread would hold it for the whole layout.
-    for (let sample = 0; sample < 5; sample += 1) {
-      const elapsed = await page.evaluate(
-        () =>
-          new Promise<number>((resolve) => {
-            const start = performance.now();
-            setTimeout(() => resolve(performance.now() - start), 100);
-          })
-      );
-      expect(elapsed).toBeLessThan(1_000);
-    }
-    // The samples ran while the diagram was still being drawn.
+    await expectHeldAndResponsive(page, holds);
+    // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(refusal).toHaveCount(0);
     await expect(refusal).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
-    await expect(card.locator("pre code").filter({ hasText: "n799 --> n0" })).toBeVisible();
+    await expect(card.locator("pre code").filter({ hasText: "Start --> Finish" })).toBeVisible();
     await expect(diagramIn(card)).toHaveCount(0);
   } finally {
     await alice.close();
@@ -906,50 +919,37 @@ test("an edited document diagram redraws once typing pauses, and its last drawin
   }
 });
 
-// The document twin of the comment row above: drawn on the page's thread the layout holds the
-// page for over a minute; in the worker the page keeps answering and the time limit refuses it.
-// The worker here never answers (`stallMermaidWorker`); the comment row, this row's twin, draws
-// for real and is INFRA-713's.
+// The document twin of the comment row above, on the same hold (`holdWorkerSource`): the editor
+// hands the source to the worker chunk, the page keeps answering, and the shipped limit refuses it
+// with the reason above its source. An editor drawing on the page's thread fails at the hold.
 test("a document diagram too large to draw in time shows the reason and its source, and the page keeps responding @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
-    spec: largeFlowchart("Large document:"),
+    spec: flowchart("Large document:", "Start", "Finish"),
     title: "Large document diagram",
   });
 
   const alice = await asUser(browser, "alice");
   try {
-    const stalled = await stallMermaidWorker(alice);
     const page = await alice.newPage();
+    const holds = await holdWorkerSource(page);
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(documentEditor(page)).toContainText("Large document:");
     const status = documentEditor(page).locator(".proof-mermaid-status");
-    // While it is being drawn, a 100 ms timer on the page's thread fires on time, give or take
-    // a scheduling hiccup; a layout on that thread would hold it for the whole layout.
-    for (let sample = 0; sample < 5; sample += 1) {
-      const elapsed = await page.evaluate(
-        () =>
-          new Promise<number>((resolve) => {
-            const start = performance.now();
-            setTimeout(() => resolve(performance.now() - start), 100);
-          })
-      );
-      expect(elapsed).toBeLessThan(1_000);
-    }
-    // The samples ran while the diagram was still being drawn.
+    await expectHeldAndResponsive(page, holds);
+    // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(status).toBeHidden();
     await expect(status).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
     await expect(status).toBeVisible();
     await expect(
-      documentEditor(page).locator("pre code").filter({ hasText: "n799 --> n0" })
+      documentEditor(page).locator("pre code").filter({ hasText: "Start --> Finish" })
     ).toBeVisible();
     await expect(diagramIn(documentEditor(page))).toHaveCount(0);
-    expect(stalled).toHaveLength(1);
   } finally {
     await alice.close();
   }

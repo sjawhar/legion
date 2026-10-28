@@ -14,6 +14,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -111,6 +112,15 @@ func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, a
 	return true
 }
 
+// changedTree reports whether reconcileAskBlocks changed the tree it reconciled. Every change it
+// makes in place is recorded in repairs - by repair, by repairAsk, and by its own write of a
+// decided ask's wording - and repairAsk records its change in rewrites too. withholdAnswers drops
+// a repair only for an entry of rewrites, which never shrinks, so changedTree is true whenever the
+// tree was touched.
+func (r *settlementReconciliation) changedTree() bool {
+	return len(r.repairs) > 0 || len(r.rewrites) > 0
+}
+
 // repairLive makes the reconciliation's repairs on live, the document as it stands when settlement
 // writes them, which a peer may have edited since settlement read the tree it reconciled, and
 // reports whether any changed it. A repair lands on the first block carrying its id - the holder
@@ -170,9 +180,11 @@ func (r *settlementReconciliation) nameVersion(
 		if err != nil {
 			return fmt.Errorf("retract deleted ask block: %w", err)
 		}
-		r.events = append(r.events, documentAskEvent(
-			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
-		))
+		payload, err := events.AskEventPayload(ctx, tx, retracted, model.ReferenceChanges{})
+		if err != nil {
+			return err
+		}
+		r.events = append(r.events, documentAskEvent(owner, artifactID, "ask.resolved", SettlementActor, payload))
 	}
 	return nil
 }
@@ -297,9 +309,11 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
-			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
-			))
+			payload, err := events.AskEventPayload(ctx, tx, ask, changes)
+			if err != nil {
+				return settlementReconciliation{}, err
+			}
+			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, "ask.opened", blockActor, payload))
 			reconciled.repairAsk(block.node, block.id, ask, "", nil)
 			continue
 		}
@@ -315,7 +329,10 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			payload := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+			payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+			if err != nil {
+				return settlementReconciliation{}, err
+			}
 			payload.Restored = true
 			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, eventType, actor, payload))
 		}
@@ -356,7 +373,7 @@ func (s *Service) reconcileAskBlocks(
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
-			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, s.serverURL)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
@@ -793,7 +810,10 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, copied string, with
 		desired["answered_by"] = ask.Answer.User
 		desired["answered_at"] = ask.Answer.At.UTC().Format(time.RFC3339Nano)
 		if !withholdAnswer {
-			desired["selected"] = append([]string(nil), ask.Answer.Selected...)
+			// Never a nil list, even for an answer that selects nothing: a nil list renders as
+			// null from the tree a settlement repaired and as [] once it has gone through the
+			// room, so a version made from that tree would differ from the room.
+			desired["selected"] = append([]string{}, ask.Answer.Selected...)
 			if ask.Answer.Text != nil {
 				desired["answer"] = *ask.Answer.Text
 			}

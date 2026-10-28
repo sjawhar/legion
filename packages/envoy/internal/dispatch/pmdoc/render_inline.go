@@ -120,6 +120,11 @@ type lineCandidate struct {
 // matching step tried under a test it asks less of and found failing, so it fails here, and the
 // writing main chose passes its own step here. Stored markdown keeps its bytes wherever they read
 // back as the browser editor reads them.
+//
+// A read that is provably the same parse as one already made is not made again (readsBackUnder):
+// storedMarkdown reads markdown holding no `~` as inlineMarkdown does, since the rules differ only
+// beside a `~`, and flankingMarkdown reads markdown as storedMarkdown does where no `*` or `_` run
+// could open or close otherwise under flankingRules (flankingDivergenceKey).
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
@@ -129,11 +134,9 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
 		return
 	}
+	labels, signature := referencedLabels(nodes), inlineSignature(nodes)
 	// firstReads is how many of readBackReaders, from the first, the first writing reads back under.
-	firstReads := 0
-	for firstReads < len(readBackReaders) && r.runReadsBack(from, prefix, nodes, readBackReaders[firstReads]) {
-		firstReads++
-	}
+	firstReads := r.readsBackUnder(from, prefix, labels, signature, len(readBackReaders))
 	if firstReads == len(readBackReaders) {
 		return
 	}
@@ -154,7 +157,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		for _, spelling := range spellings {
 			r.b.Truncate(from)
 			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBackUnder(from, prefix, nodes, readBackReaders[:under]) {
+			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.readsBackUnder(from, prefix, labels, signature, under) == under {
 				return
 			}
 		}
@@ -164,7 +167,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // readBackReaders is the readers inlineWithEscapes reads a run back under, in the order it drops
-// them from the last.
+// them from the last: inlineMarkdown, storedMarkdown and flankingMarkdown (readsBackUnder).
 var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flankingMarkdown}
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
@@ -255,28 +258,53 @@ func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
 		literalLength(previous.Text) == 0
 }
 
-// runReadsBack reports whether the inline markdown written since from reads back as nodes by
-// reader: the run's own lines, with the prefix its later lines are written behind taken off, read
-// after a definition for each footnote label it refers to, since a reference reads as one only
-// then.
-func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader inlineReader) bool {
+// readsBackUnder is how many of the first n of readBackReaders, from the first, the inline markdown
+// written since from reads back under as the nodes whose footnote labels are labels and whose
+// inlineSignature is signature: the run's own lines, with the prefix its later lines are written
+// behind taken off, read after a definition for each label, since a reference reads as one only
+// then. It stops at the first reader the run does not read back under, and makes no read that is
+// the same parse as one it made: storedMarkdown reads a source holding no `~`, its labels included,
+// as inlineMarkdown does, since editorRules and storedRules differ only beside a `~` (a `*` or `_`
+// run's widening by one, tildeParser, tildeDelimiters, and the `~` runs' own group in
+// delimiterList), so that parse's nodes, error and divergence are inlineMarkdown's; and
+// flankingMarkdown reads a source as storedMarkdown does unless the stored parse reported a `*` or
+// `_` run that could open or close otherwise under flankingRules (parseInlineWithDefinitions).
+func (r *renderer) readsBackUnder(from int, prefix string, labels, signature []string, n int) int {
 	source := string(r.b.Bytes()[from:])
 	if prefix != "" {
 		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
 	}
-	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes), reader)
-	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
-}
-
-// runReadsBackUnder reports whether the inline markdown written since from reads back as nodes by
-// every one of readers (runReadsBack).
-func (r *renderer) runReadsBackUnder(from int, prefix string, nodes []*Node, readers []inlineReader) bool {
-	for _, reader := range readers {
-		if !r.runReadsBack(from, prefix, nodes, reader) {
-			return false
+	readsBack := func(reader inlineReader) (bool, bool) {
+		parsed, diverged, err := parseInlineWithDefinitions(source, labels, reader)
+		return err == nil && slices.Equal(inlineSignature(parsed), signature), diverged
+	}
+	reads, diverged := readsBack(readBackReaders[0])
+	if !reads {
+		return 0
+	}
+	if n == 1 {
+		return 1
+	}
+	if holdsTilde(source, labels) {
+		if reads, diverged = readsBack(readBackReaders[1]); !reads {
+			return 1
 		}
 	}
-	return true
+	if n == 2 {
+		return 2
+	}
+	if diverged {
+		if reads, _ = readsBack(readBackReaders[2]); !reads {
+			return 2
+		}
+	}
+	return 3
+}
+
+// holdsTilde reports whether a run's source or any of the footnote labels whose definitions are
+// read after it holds a `~`.
+func holdsTilde(source string, labels []string) bool {
+	return strings.Contains(source, "~") || slices.ContainsFunc(labels, func(label string) bool { return strings.Contains(label, "~") })
 }
 
 // delimiterBesidePunctuation reports whether nodes write a delimiter run (a strong, emphasis or
@@ -483,7 +511,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			src, _ := n.Attrs["src"].(string)
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			r.writeSyntax("![" + imageAlt(alt, context) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
+			r.writeSyntax("![" + imageAlt(alt, context) + "](" + escapeImageSource(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
 			position.atLineStart, position.atTextStart = false, false
 		case "html":
 			r.closeMarks(active, escapePipes)
