@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-547",
-  "completed": "2026-10-28T10:27:03Z",
+  "completed": "2026-10-28T10:41:51Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2370",
   "proof": [
     {
@@ -118,7 +118,8 @@
     "round 7: packages/daemon/internal/notify/{notify.go,notify_test.go}, packages/daemon/internal/daemon/{outbox.go,outbox_test.go}, packages/envoy/CHANGELOG.md (daemon entry)",
     "round 8: packages/daemon/internal/notify/{notify.go,notify_test.go}; comments in packages/envoy/cmd/listener/{request_record.go,role_holder.go,delivery.go,publish_refusal_answers_test.go,role_claim_unreadable_test.go} and internal/store/kv.go; merge f18ca5a7 (18 conflicts; #2228's final text from main; .legion/INFRA-439 removed; claude-envoy dist rebuilt)",
     "round 9: comments in packages/envoy/cmd/listener/{request_record.go,api.go}, packages/daemon/internal/notify/notify.go, packages/daemon/internal/daemon/outbox.go; packages/pi-envoy/CHANGELOG.md",
-    "round 10: merge 407ae6d9 (main aeeee6c0): packages/{envoy,envoy-client,claude-envoy,pi-envoy}/CHANGELOG.md back to main's text, seven fragments under packages/*/.changes/unreleased/pr2370-*.yaml; docs/solutions two lines reworded; packages/envoy/cmd/listener/api.go comment wrapped"
+    "round 10: merge 407ae6d9 (main aeeee6c0): packages/{envoy,envoy-client,claude-envoy,pi-envoy}/CHANGELOG.md back to main's text, seven fragments under packages/*/.changes/unreleased/pr2370-*.yaml; docs/solutions two lines reworded; packages/envoy/cmd/listener/api.go comment wrapped",
+    "round 11: packages/{envoy,claude-envoy,pi-envoy}/.changes/unreleased/pr2370-*.yaml text"
   ],
   "trickyParts": [
     "A forward with a header gets its replies with an empty header block, so RequestCoreTo reads a receipt as a reply with no data and no header field (a stream PubAck and a no-responders answer are not receipts).",
@@ -141,8 +142,8 @@
     "A role send whose first role-claim read fails at once while the hub is down (nats: outbound buffer limit exceeded) is answered 500 at once, today's mapping for a read error that returns before the deadline, as the plan says; only a read the deadline cuts short is a 504.",
     "Merge order: #2228 merged to main (85713740) and main is merged forward at f18ca5a7; #2370 merges after INFRA-546's sjawhar/legion#2362 (architect)."
   ],
-  "round": 10,
+  "round": 11,
   "answersTest": "tester fail at 27782f76 (narrowed by the architect): the daemon treated the listener's 403 publish denial as a retried generic error. Fixed in a16d4af7: notify.ErrPublishDenied for a 403 without reason capability; outbox.notice finishes the row with a log line naming the reason; mergeQueue posts a Dispatch message. Red test TestANoticeTheListenerIsDeniedToForwardFinishesUndelivered (3b759f77) passes unchanged.",
-  "answersReview": "reviewer changes at ae257b97 (CONFLICTING with main after sjawhar/legion#2419): main aeeee6c0 merged forward at 407ae6d9 on the architect's instruction, before #2362. Every CHANGELOG.md of envoy, envoy-client, claude-envoy and pi-envoy is main's text; this change's seven entries are fragments packages/<pkg>/.changes/unreleased/pr2370-*.yaml written with changie new --custom Issue=pr2370 (the architect's correction of the reviewer's INFRA-547-<slug> name), with no Dispatch key. The two docs/solutions mentions of the issue key are reworded, and the 156-character api.go comment line is wrapped (thread PRRT_kwDORFy7ds6xEk3t resolved). GitHub reports MERGEABLE.",
+  "answersReview": "reviewer fragment findings at f2f755e9 (architect's last round, these two items only): 59ea64fc states the daemon's 403 rule in the envoy fragment by the listener's grant-denial prefix (notify.ErrPublishDenied), puts the claude-envoy fragment's full stop on its line and rejoins the pi-envoy sentence after 'The'; changie batch 0.0.0 renders all three as whole sentences. Threads PRRT_kwDORFy7ds6xFMF- and PRRT_kwDORFy7ds6xFMGC resolved. No code changed since 407ae6d9, whose proofs stand.",
   "answersRound": "skill split (the human's rule of 2026-10-27 15:49Z, relayed by the controller): this PR's own skills/envoy edits (SKILL.md, references/roles.md) reverted in #2370 at d1f530ae and moved to https://github.com/sjawhar/legion/pull/2418 (branch skills/infra-547-envoy-publish-answers, based on main, merges after #2370); dispatch ask 2d397d6d-9cbf-46c5-80e8-099a105dac36 on INFRA-547 asks the human to review it. skills/envoy/references/deliveries.md is #2228's, carried by its merge. No code changed; #2370 is CONFLICTING with main again, and the forward merge waits for #2228 as instructed."
 }
