@@ -247,7 +247,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 
 	incoming := graphEdges(t, handler, url.Values{"to": {askRef}})
 	legionKey := legion.Key
-	if want := (model.GraphNode{Kind: "ask", ID: ask.ID, IssueKey: &legionKey, Project: "LEGION", Ref: askRef}); !reflect.DeepEqual(incoming.Node, want) {
+	if want := (model.GraphNode{
+		Kind: "ask", ID: ask.ID, IssueKey: &legionKey, Project: "LEGION", Ref: askRef,
+		MadeBy: []model.Actor{ask.Author}, MadeAt: &ask.CreatedAt, ChangedBy: []model.Actor{ask.Author}, ChangedAt: &ask.CreatedAt,
+		Parent: &model.NodeParent{Kind: "issue", ID: legion.Key, Ref: "dispatch://" + legion.Key},
+	}); !reflect.DeepEqual(incoming.Node, want) {
 		t.Fatalf("queried node = %#v; want %#v", incoming.Node, want)
 	}
 	if len(incoming.Edges) != 1 {
@@ -255,7 +259,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	edge := incoming.Edges[0]
 	acmeKey := acme.Key
-	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID}
+	wantNode := model.GraphNode{
+		Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID,
+		MadeBy: []model.Actor{message.Author}, MadeAt: &message.CreatedAt, ChangedBy: []model.Actor{message.Author}, ChangedAt: &message.CreatedAt,
+		Parent: &model.NodeParent{Kind: "issue", ID: acme.Key, Ref: "dispatch://" + acme.Key},
+	}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}

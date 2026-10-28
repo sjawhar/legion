@@ -57,11 +57,18 @@ func editSpec(t *testing.T, handler http.Handler, key string, ops []map[string]a
 // version it wrote.
 func editIssueDocument(t *testing.T, handler http.Handler, key, slug string, ops []map[string]any) model.Version {
 	t.Helper()
+	return editIssueDocumentAs(t, handler, key, slug, "alice", ops)
+}
+
+// editIssueDocumentAs applies ops to the issue document slug as a named version written by the
+// person login and returns the version it wrote.
+func editIssueDocumentAs(t *testing.T, handler http.Handler, key, slug, login string, ops []map[string]any) model.Version {
+	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/artifacts/"+slug+"/edits", map[string]any{
 		"ops": ops, "summary": "edit",
-	}, "alice")
+	}, login)
 	if response.Code != http.StatusOK {
-		t.Fatalf("edit %s of %s: status=%d body=%s", slug, key, response.Code, response.Body.String())
+		t.Fatalf("edit %s of %s as %s: status=%d body=%s", slug, key, login, response.Code, response.Body.String())
 	}
 	version := decodeBody[struct {
 		Version *model.Version `json:"version"`
@@ -458,14 +465,16 @@ func TestReferencesToABlockListOnlyLinksNamingIt(t *testing.T) {
 	toBlock := graphEdges(t, handler, url.Values{"to": {blockRef}})
 	issueKey := issue.Key
 	changedAt := latestVersion(t, database, issue.PrimaryArtifactID).CreatedAt
+	alice := []model.Actor{{Kind: "user", ID: "alice"}}
 	wantNode := model.GraphNode{
 		Kind: "block", ID: nodeID, BlockID: "ship_it", IssueKey: &issueKey, Project: "CORE", Ref: blockRef,
-		Document: specRef, ChangedVersion: 1, ChangedAt: &changedAt, Text: shipIt("Ship it."),
+		Document: specRef, ChangedVersion: 1, Text: shipIt("Ship it."),
+		MadeBy: alice, MadeAt: &changedAt, ChangedBy: alice, ChangedAt: &changedAt,
+		Parent: &model.NodeParent{Kind: "artifact", ID: issue.PrimaryArtifactID, Ref: specRef}, ParentVersion: new(1),
 	}
-	if toBlock.Node.ChangedAt == nil || !toBlock.Node.ChangedAt.Equal(changedAt) {
-		t.Fatalf("block node changed_at = %v, want version 1's %s", toBlock.Node.ChangedAt, changedAt)
-	}
-	toBlock.Node.ChangedAt = &changedAt
+	// Version 1 made the block and last changed it: both times are its.
+	normalizeAt(t, "block node made_at", &toBlock.Node.MadeAt, &changedAt)
+	normalizeAt(t, "block node changed_at", &toBlock.Node.ChangedAt, &changedAt)
 	if !reflect.DeepEqual(toBlock.Node, wantNode) {
 		t.Fatalf("block node = %#v, want %#v", toBlock.Node, wantNode)
 	}
@@ -816,7 +825,7 @@ func TestAPinnedReferenceWhoseTextReturnedIsUnchanged(t *testing.T) {
 // deleted block; the unpinned reference answers 404. Restored with its id, the block reads as its
 // text compares again.
 func TestAPinnedReferenceToADeletedBlockSaysItWasRemoved(t *testing.T) {
-	handler, _ := blockIndexHandler(t)
+	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
 	specRef := "dispatch://" + issue.Key + "/spec"
@@ -829,11 +838,20 @@ func TestAPinnedReferenceToADeletedBlockSaysItWasRemoved(t *testing.T) {
 		t.Fatalf("pinned read of the deleted block: status=%d body=%s, want 200 with no edges", response.Code, response.Body.String())
 	}
 	issueKey := issue.Key
+	alice := []model.Actor{{Kind: "user", ID: "alice"}}
+	madeAt, removedAt := versionOf(t, database, issue.PrimaryArtifactID, 1).CreatedAt, versionOf(t, database, issue.PrimaryArtifactID, deleted.Number).CreatedAt
+	// Version 1 made the block, the deletion is its last change, and version 2, the latest indexed
+	// before it, is the last that held it.
 	want := model.GraphNode{
 		Kind: "block", ID: issue.Key + "/spec#ship_it", BlockID: "ship_it", IssueKey: &issueKey, Project: "CORE", Ref: blockRef, Document: specRef,
+		MadeBy: alice, MadeAt: &madeAt, ChangedBy: alice, ChangedAt: &removedAt,
+		Parent: &model.NodeParent{Kind: "artifact", ID: issue.PrimaryArtifactID, Ref: specRef}, ParentVersion: new(deleted.Number - 1),
 		Pin: &model.BlockPin{Version: 2, Ref: blockRef + "@v2", Text: shipIt("Ship it now."), State: "removed", RemovedVersion: deleted.Number},
 	}
-	if got := decodeBody[model.GraphReferences](t, response).Node; !reflect.DeepEqual(got, want) {
+	got := decodeBody[model.GraphReferences](t, response).Node
+	normalizeAt(t, "removed block made_at", &got.MadeAt, want.MadeAt)
+	normalizeAt(t, "removed block changed_at", &got.ChangedAt, want.ChangedAt)
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("pinned node of the deleted block = %#v (pin %#v), want %#v (pin %#v)", got, got.Pin, want, want.Pin)
 	}
 	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef}}, `no block "ship_it" in `+specRef)
