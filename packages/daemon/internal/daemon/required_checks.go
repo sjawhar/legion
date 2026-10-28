@@ -31,11 +31,14 @@ import (
 // compares an approved head with the head once for each review round whose approval is set aside
 // below the head (readApprovalCarry), until the approval stands or GitHub answers; for a head GitHub
 // shows moved with no recorded push ending at it, it reads the branch's activity once and compares
-// each push of the move the record lacks (lostPushes); and it lists each served repository's open
-// pull requests (readListings), a read per hundred of them, thirty an hour for a repository with
-// fewer than a hundred open. Two minutes also gives a newly opened pull request its set well before
-// its first CI settles, and bounds how long a review decision, a head, a push, a close or merge, or
-// a pull request whose webhook never arrived stays unread.
+// each push of the move the record lacks (lostPushes); for a head no CI settlement stands for, it
+// reads the head's check runs, a read per hundred runs each pass until one stands (readSettlement); and
+// it lists each served repository's open pull requests (readListings), a read per hundred of them,
+// thirty an hour for a repository with fewer than a hundred open. Two minutes also gives a newly
+// opened pull request its set well before its first CI settles, and bounds how long a review
+// decision, a head, a push, a close or merge, a settlement, or a pull request whose webhook never
+// arrived stays unread. It is also how long a head's newest check run must have completed before
+// the pass settles the head itself, the time Envoy's listener had to settle it first.
 const requiredChecksInterval = 2 * time.Minute
 
 // requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews, then
@@ -78,7 +81,9 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // pull request's reviews and applies a deciding one the daemon has not recorded, whose webhook
 // never arrived (readReviews), whatever phase the issue is in, and, for a review round whose
 // approval is set aside below the head, GitHub's compare of the approved head with the head,
-// applying the handoff-only push it shows (readApprovalCarry). It then reads what the base branch
+// applying the handoff-only push it shows (readApprovalCarry). For a head no CI settlement stands
+// for, it reads the head's check runs, and applies the settlement Envoy's listener would have
+// published once every run completed an interval ago (readSettlement). It then reads what the base branch
 // requires with the implement App's installation token, the credential the daemon reads GitHub
 // with for its own work (requiredchecks.Required, which this pass is the only reader of), and,
 // when that includes a workflow, each required workflow's latest run on the head whose settlement
@@ -146,7 +151,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable}
 			w.applyJudged(ctx, pr, fact, "mergeability", "whether a pull request's head can be merged into its base", pull.Head.SHA, clock(pull.UpdatedAt))
 		}
-		if w.readReviews(ctx, prCtx, github, pr) || w.readApprovalCarry(ctx, prCtx, github, pr) {
+		if w.readReviews(ctx, prCtx, github, pr) || w.readApprovalCarry(ctx, prCtx, github, pr) || w.readSettlement(ctx, prCtx, github, pr) {
 			cancel()
 			return
 		}

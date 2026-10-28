@@ -1,0 +1,179 @@
+{
+  "about": "GitHub's check runs on one head, and the settlement Envoy's listener publishes for them once every run has completed: each check's highest-id run, its name cut as the listener keys it, failed and cancelled grouped by conclusion, and a tester or architect run counted only from the reviewer App. Envoy's listener (packages/envoy/internal/cistore, its webhook handler, CI store and summary loop) and the daemon's pass (packages/daemon/internal/daemon, listenerSettlement) are each tested against it. A name is a string, or {repeat, times, then}: repeat written times over, then then.",
+  "reviewerAppId": "271000",
+  "checkRuns": [
+    {
+      "id": 101,
+      "name": "test",
+      "status": "completed",
+      "conclusion": "failure",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 102,
+      "name": "test",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-28T09:01:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 140,
+      "name": "retry",
+      "status": "completed",
+      "conclusion": "failure",
+      "completed_at": "2026-10-28T09:02:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 99,
+      "name": "retry",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-28T09:03:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 110,
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "failure",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 111,
+      "name": "timeout",
+      "status": "completed",
+      "conclusion": "timed_out",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 112,
+      "name": "approval",
+      "status": "completed",
+      "conclusion": "action_required",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 113,
+      "name": "boot",
+      "status": "completed",
+      "conclusion": "startup_failure",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 114,
+      "name": "old",
+      "status": "completed",
+      "conclusion": "stale",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 115,
+      "name": "future",
+      "status": "completed",
+      "conclusion": "a_conclusion_github_adds_later",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 116,
+      "name": "image",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 117,
+      "name": "docs",
+      "status": "completed",
+      "conclusion": "skipped",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 118,
+      "name": "advice",
+      "status": "completed",
+      "conclusion": "neutral",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 120,
+      "name": "tester",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 271000 }
+    },
+    {
+      "id": 121,
+      "name": "architect",
+      "status": "completed",
+      "conclusion": "failure",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 98765 }
+    },
+    {
+      "id": 122,
+      "name": "tester",
+      "status": "completed",
+      "conclusion": "failure",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 98765 }
+    },
+    {
+      "id": 130,
+      "name": { "repeat": "l", "times": 2050, "then": "-a" },
+      "status": "completed",
+      "conclusion": "failure",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    },
+    {
+      "id": 131,
+      "name": { "repeat": "l", "times": 2050, "then": "-b" },
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-28T09:00:00Z",
+      "app": { "id": 15368 }
+    }
+  ],
+  "settlement": {
+    "check_runs": [
+      { "name": "advice", "id": 118 },
+      { "name": "approval", "id": 112 },
+      { "name": "boot", "id": 113 },
+      { "name": "docs", "id": 117 },
+      { "name": "future", "id": 115 },
+      { "name": "image", "id": 116 },
+      { "name": "lint", "id": 110 },
+      { "name": { "repeat": "l", "times": 2048, "then": "… 2cb82fd4c05ae526" }, "id": 131 },
+      { "name": { "repeat": "l", "times": 2048, "then": "… 6f53cbb6f837dbcc" }, "id": 130 },
+      { "name": "old", "id": 114 },
+      { "name": "retry", "id": 140 },
+      { "name": "test", "id": 102 },
+      { "name": "tester", "id": 120 },
+      { "name": "timeout", "id": 111 }
+    ],
+    "failed": [
+      "approval",
+      "boot",
+      "future",
+      "lint",
+      { "repeat": "l", "times": 2048, "then": "… 6f53cbb6f837dbcc" },
+      "old",
+      "retry",
+      "timeout"
+    ],
+    "cancelled": ["image"]
+  }
+}

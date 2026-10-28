@@ -846,13 +846,15 @@ func seedPassIssue(t *testing.T, pool *pgxpool.Pool, issue record.Issue, pr *rec
 // branches and however many issues wait for one, and per recorded open pull request its own reads
 // (the pull request and its reviews, and its base's rulesets and protection once per base); a
 // compare only for a head that moved, and the branch's activity with one compare per push the
-// record lacks only for a head that moved with no recorded push ending at it. No request reads one
-// issue's branch's pull requests. Two served repositories: acme/widgets with 150 open pull
-// requests, two of them recorded open - #86 moved by a push whose webhook arrived, #87 moved by
-// two pushes whose webhooks were lost - and one an implementing issue's whose opened was lost, on
-// the second page; sjawhar/legion with none, where an issue's implementer completed with none
-// open. A rate-limit answer to a listing ends the pass: no repository after it is listed, and
-// nobody is told a pull request is missing.
+// record lacks only for a head that moved with no recorded push ending at it; and the check runs of
+// a head no settlement stands for, once each pass until one does. No request reads one issue's
+// branch's pull requests. Two served repositories: acme/widgets with 150 open pull requests, two of
+// them recorded open - #86 moved by a push whose webhook arrived, #87 moved by two pushes whose
+// webhooks were lost, neither new head settled - and one an implementing issue's whose opened was
+// lost, on the second page; sjawhar/legion with none, where an issue's implementer completed with
+// none open. #86's head settles from its check runs, and #87's does not yet (a run still going), so
+// a second pass reads #87's runs again and #86's no more. A rate-limit answer to a listing ends the
+// pass: no repository after it is listed, and nobody is told a pull request is missing.
 func TestThePassKeepsItsRequestBudget(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -866,6 +868,7 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 			"/repos/acme/widgets/rules/branches/main": 1, "/repos/acme/widgets/branches/main": 1,
 			"/repos/acme/widgets/compare/code...code-2": 1, "/repos/acme/widgets/activity": 1,
 			"/repos/acme/widgets/compare/second...second-2": 1, "/repos/acme/widgets/compare/second-2...second-3": 1,
+			"/repos/acme/widgets/commits/code-2/check-runs": 1, "/repos/acme/widgets/commits/second-3/check-runs": 1,
 		}},
 		{"the listing's second page rate limited", true, map[string]int{
 			"/repos/acme/widgets/pulls":    2,
@@ -873,6 +876,7 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 			"/repos/acme/widgets/rules/branches/main": 1, "/repos/acme/widgets/branches/main": 1,
 			"/repos/acme/widgets/compare/code...code-2": 1, "/repos/acme/widgets/activity": 1,
 			"/repos/acme/widgets/compare/second...second-2": 1, "/repos/acme/widgets/compare/second-2...second-3": 1,
+			"/repos/acme/widgets/commits/code-2/check-runs": 1, "/repos/acme/widgets/commits/second-3/check-runs": 1,
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -897,7 +901,8 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 				open = append(open, passPull(1000+n, "feature/"+strconv.Itoa(n), "f"+strconv.Itoa(n), "open", at, ""))
 			}
 			open = append(open, passPull(88, "legion/CAPTURE-3", "third", "open", at, ""))
-			pulls := map[int]string{86: open[0], 87: open[1]}
+			// #88 is recorded by the first pass's listing, so only the second pass reads it.
+			pulls := map[int]string{86: open[0], 87: open[1], 88: open[len(open)-1]}
 			var reads pathReads
 			var server *httptest.Server
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -948,6 +953,12 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 					w.Write([]byte(`[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
 				case "/repos/acme/widgets/branches/main":
 					w.Write([]byte(`{"name":"main","protected":false}`))
+				case "/repos/acme/widgets/commits/code-2/check-runs":
+					w.Write([]byte(`{"total_count":1,"check_runs":[` + checkRunJSON(31, "pr-checks-result", "success", time.Now().Add(-time.Hour), "15368") + `]}`))
+				case "/repos/acme/widgets/commits/second-3/check-runs":
+					w.Write([]byte(`{"total_count":1,"check_runs":[` + checkRunJSON(32, "pr-checks-result", "", time.Time{}, "15368") + `]}`))
+				case "/repos/acme/widgets/commits/third/check-runs":
+					w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
 				default:
 					t.Errorf("read %s, which the pass has no need of", r.URL)
 					http.NotFound(w, r)
@@ -980,6 +991,11 @@ func TestThePassKeepsItsRequestBudget(t *testing.T) {
 			}
 			if len(missing) != 1 || !strings.Contains(missing[0], "CAPTURE-4") || !strings.Contains(missing[0], "sjawhar/legion") {
 				t.Fatalf("pull-request-missing notices %q, want one for CAPTURE-4 on sjawhar/legion", missing)
+			}
+			w.readRequiredChecks(context.Background())
+			if counts := reads.counts(); counts["/repos/acme/widgets/commits/code-2/check-runs"] != 1 || counts["/repos/acme/widgets/commits/second-3/check-runs"] != 2 {
+				t.Fatalf("two passes read #86's settled head's check runs %d times and #87's unsettled head's %d, want once and twice",
+					counts["/repos/acme/widgets/commits/code-2/check-runs"], counts["/repos/acme/widgets/commits/second-3/check-runs"])
 			}
 		})
 	}

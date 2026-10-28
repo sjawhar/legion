@@ -69,7 +69,7 @@ const Failed = "failure"
 const Cancelled = "cancelled"
 
 // HeadChecks is each check the pull request's base branch requires (Required), judged by the
-// settlement that stands for its head (settled), its own or one carried back from a head a
+// settlement that stands for its head (Settled), its own or one carried back from a head a
 // .legion/-only push replaced, then each workflow it requires (Workflows), judged by its latest run
 // on the head that settlement is of, as the daemon last read it. A check the settlement names as
 // failed failed, one it reports otherwise passed, one it names as cancelled is Pending, and one it
@@ -95,7 +95,7 @@ func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 // headStandings is HeadChecks in its two halves: each required check's standing, judged by the
 // settlement, and each required workflow's, judged by its latest run.
 func headStandings(pr record.PullRequest) (checks, workflows []Standing, ok bool) {
-	if !settled(pr) || pr.Required == nil {
+	if !Settled(pr) || pr.Required == nil {
 		return nil, nil, false
 	}
 	results := make(map[string]string, len(pr.CheckRuns)+len(pr.Failing)+len(pr.Cancelled))
@@ -130,12 +130,12 @@ func WorkflowStanding(pr record.PullRequest, workflow record.RequiredWorkflow) S
 }
 
 // WorkflowHead is the head whose workflow runs stand for the pull request's head: the head the
-// settlement standing for it is of (settled), which a .legion/-only push that started no CI of its
+// settlement standing for it is of (Settled), which a .legion/-only push that started no CI of its
 // own can have left, else the head itself, whose settlement is still to come. The daemon reads the
 // required workflows' runs there (intake.RequiredChecks), and HeadChecks judges by them only while
 // that is still the settlement's head.
 func WorkflowHead(pr record.PullRequest) string {
-	if settled(pr) {
+	if Settled(pr) {
 		return pr.CheckedHead
 	}
 	return pr.HeadSHA
@@ -173,7 +173,7 @@ func HeadVerdict(pr record.PullRequest) string {
 // it, so a push on top of it leaves the counted attempt as a push onto a green verdict does
 // (AdvancePullRequestHead).
 func nothingRequired(pr record.PullRequest) bool {
-	return settled(pr) && pr.Required != nil && len(pr.Required) == 0 && len(pr.Workflows) == 0
+	return Settled(pr) && pr.Required != nil && len(pr.Required) == 0 && len(pr.Workflows) == 0
 }
 
 // RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its

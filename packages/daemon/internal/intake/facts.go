@@ -498,10 +498,13 @@ func (r PullRequestReview) Order() record.ReviewOrder {
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun
 
-// PullRequestChecks is Envoy's settled checks observation: the latest run of each check, and the
-// checks the settlement names as failed (any failing conclusion) and as cancelled, kept apart since
-// a cancellation is a property of the run - a later push can cancel it - where a failure is of the
-// code. What they come to is the base branch's required set's to say (classify.HeadVerdict).
+// PullRequestChecks is a settled checks observation: the latest run of each check, and the checks
+// the settlement names as failed (any failing conclusion) and as cancelled, kept apart since a
+// cancellation is a property of the run - a later push can cancel it - where a failure is of the
+// code. What they come to is the base branch's required set's to say (classify.HeadVerdict). Envoy's
+// listener publishes one at generation 0 or above; the daemon's two-minute pass applies one it
+// built from GitHub's check runs on a head no settlement stood for at classify.PassGeneration (the
+// daemon's readSettlement), never decoded from an event.
 type PullRequestChecks struct {
 	Repo       string
 	Number     int

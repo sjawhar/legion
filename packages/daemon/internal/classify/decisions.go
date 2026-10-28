@@ -134,12 +134,13 @@ func chainOf(pushes []record.ClassifiedPush, from, to string) []record.Classifie
 	return nil
 }
 
-// settled says whether a CI settlement stands for the pull request's current head: one recorded
+// Settled says whether a CI settlement stands for the pull request's current head: one recorded
 // for the head itself, or for a head the current one replaced through pushes that each changed
 // only .legion/ and said which head they replaced (a handoff push can carry GitHub's skip-checks
 // trailer and start no CI of its own). A checked head is recorded only with a settlement
 // (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
-func settled(pr record.PullRequest) bool {
+// The daemon's pass reads a head's check runs only while none stands (PassGeneration).
+func Settled(pr record.PullRequest) bool {
 	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
 }
 
@@ -159,7 +160,7 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 	if head == pr.CheckedHead {
 		return pr, true
 	}
-	if head != pr.HeadSHA && settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
+	if head != pr.HeadSHA && Settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
 		return pr, false
 	}
 	pr.CheckedHead = head
@@ -410,12 +411,21 @@ func DroppedPushes(before, after record.PullRequest) []record.ClassifiedPush {
 	return dropped
 }
 
-// ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
-// merging its attempt set into the fence. It returns false for stale, duplicate, and conflicting
-// observations.
+// ApplySettlement applies a CI settlement only when ClassifySettlement says it is newer, merging
+// its attempt set into the fence, or, when either settlement is the pass's (PassGeneration),
+// merging it check by check (mergeWithPass). It returns false for stale, duplicate, and conflicting
+// observations; for the listener's duplicate of the pass's settlement it returns pr with the
+// listener's generation and snapshot as its fence (adoptsFence), and every check's run and outcome
+// as they were.
 func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
-	if ClassifySettlement(pr, candidate) != SettlementNewer {
+	switch classification := ClassifySettlement(pr, candidate); {
+	case classification == SettlementDuplicate && adoptsFence(pr, candidate):
+		pr.Generation, pr.Snapshot = candidate.Generation, candidate.Snapshot
 		return pr, false
+	case classification != SettlementNewer:
+		return pr, false
+	case pr.CheckRuns != nil && (pr.Generation == PassGeneration || candidate.Generation == PassGeneration):
+		return mergeWithPass(pr, candidate), true
 	}
 	outcome := EffectiveOutcome(pr, candidate)
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)

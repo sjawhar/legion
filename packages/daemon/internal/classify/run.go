@@ -143,7 +143,9 @@ func Reopen(pr record.PullRequest, head string) record.PullRequest {
 // stands or not: a push the run is waiting for can make it stand. The pull request then changed
 // either way, and the judgement changed when the replay with it differs. A redelivery is no new
 // step (redundantSettlement), so the listener's redeliveries do not use up the run's bound
-// (maxRunSteps).
+// (maxRunSteps). The listener's duplicate of the pass's settlement changes only the fence
+// (adoptsFence): the pull request it returns carries it, and the judgement did not change, so
+// nothing is decided again.
 func ApplyCheckSettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	if pr.Run == nil {
 		return settle(pr, candidate)
@@ -154,7 +156,18 @@ func ApplyCheckSettlement(pr record.PullRequest, candidate SettlementCandidate) 
 		return pr, false
 	}
 	replayed := runStep(pr, record.RunStep{Settlement: &step})
-	return replayed, JudgementChanged(pr, replayed)
+	return replayed, JudgementChanged(pr, replayed) && !fenceAdopted(pr, replayed)
+}
+
+// fenceAdopted says whether after differs from before only in the fence moving from the pass's
+// settlement to the listener's duplicate of it (adoptsFence): the same runs and outcomes, now
+// ordered by the listener's generation and snapshot.
+func fenceAdopted(before, after record.PullRequest) bool {
+	if before.Generation != PassGeneration || after.Generation == PassGeneration {
+		return false
+	}
+	after.Generation, after.Snapshot = before.Generation, before.Snapshot
+	return !JudgementChanged(before, after)
 }
 
 // redundantSettlement is whether settlement, appended to steps, would replay as nothing in every
@@ -198,17 +211,18 @@ func ClearWorkflowsHead(pr record.PullRequest) record.PullRequest {
 }
 
 // settle applies candidate when it stands for the head and is newer than the recorded settlement,
-// and otherwise leaves pr as it was.
+// and otherwise leaves pr as it was, but for the fence the listener's duplicate of the pass's
+// settlement gives it (adoptsFence), which it returns, saying nothing was applied.
 func settle(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	stood, stands := SettlementFor(pr, candidate)
 	if !stands {
 		return pr, false
 	}
 	applied, ok := ApplySettlement(stood, candidate)
-	if !ok {
+	if !ok && !fenceAdopted(pr, applied) {
 		return pr, false
 	}
-	return applied, true
+	return applied, ok
 }
 
 func candidateOf(s record.Settlement) SettlementCandidate {
