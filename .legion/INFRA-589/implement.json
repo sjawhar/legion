@@ -2,32 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T13:45:00Z",
-  "round": 8,
-  "answersTestFailures": "test.json (tester round 7) failure 1: added text outside .legion/ carried Dispatch keys and dispatch:// links. Key cleanup only, no code change, per the architect's cap decision (8530db16).",
+  "completed": "2026-10-28T14:15:00Z",
+  "round": 9,
+  "answersReview": "review.json round 4 at code head 8530db16: two correctness findings, fixed in f93dbc53 per the architect's cap, each with a test that fails on 8530db16; threads PRRT_kwDORFy7ds6xHEDv and PRRT_kwDORFy7ds6xHED0 answered and resolved.",
   "proof": [
     {
-      "criterion": "Text this branch adds outside .legion/ carries no Dispatch key, project key or dispatch:// link, apart from the {key_ref} template lines",
-      "surface": "the branch diff against its fork point with main",
-      "command": "jj diff --git --from 'fork_point(main@origin | 8530db16)' --to 8530db16 -- '~.legion' | grep '^+' | grep -v '^+++' | grep -nE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://'",
-      "observed": "three lines, all the {key_ref} template: README.md '`{key_ref}`: `dispatch://<key>`', routes-2026-10-26-1719Z.txt's placeholder line, and routes.go's url.QueryEscape(\"dispatch://\"+is.Key); quoted in the PR body",
-      "headSha": "8530db16ff548fa0ab01d09e0182eef0f4ee3edb",
-      "negativeControl": "the same grep at 945d9940 found 19 lines (the tester's evidence)"
+      "criterion": "Finding 1: a sampler whose context has ended keeps no sample, so no zero or negative value enters the statistics",
+      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest; and the unit test",
+      "command": "run-step.sh smoke-r13 --events 2 --sessions 50 --requests 10 --duration 60s --grace 2s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; cd packages/envoy && go test -run TestSamplerMarksNoReadThatFailedOnceTheStepEnded ./loadtest",
+      "observed": "exit 0; pg_conns_total min 31 over 13 samples, goroutines min 135, nats_in/out 10.3/22.1 msgs/s, pg/pprof/nats read errors 0, receipts 580/580; the test passes",
+      "headSha": "f93dbc536e5277b00fc1fe3c74c7032e50e15597",
+      "negativeControl": "with 8530db16's sample.go (go test -overlay) the test fails: one sample is kept after the context ended"
     },
     {
-      "criterion": "The changelog fragment names the pull request, not a key",
-      "surface": "packages/envoy/.changes/unreleased/",
-      "command": "cd packages/envoy && go run github.com/miniscruff/changie@v1.26.0 new --kind Added --body <the previous body> --custom Issue=pr2369; compare the bodies",
-      "observed": "pr2369-Added-20261028-133210.yaml with kind Added and Issue: pr2369; its body is byte-identical to the previous fragment's (INFRA-589-load-test-harness.yaml, removed); the round-3 thread PRRT_kwDORFy7ds6xHEEn has a reply citing the architect's decision",
-      "headSha": "8530db16ff548fa0ab01d09e0182eef0f4ee3edb",
-      "negativeControl": "go test -count=1 ./loadtest ok, run-step.test.sh 4 PASS, common.test.sh 7 PASS: nothing but comments, README text and the fragment changed"
+      "criterion": "Finding 2: meta.json and every printed endpoint hold no -nats user and no password, for a single URL and for a comma-separated list",
+      "surface": "same pod and CLI",
+      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign ... -nats 'nats://<token>@127.0.0.1:14222,nats://loadgen:<password>@127.0.0.1:14222' -pg 'postgres://postgres:<password>@127.0.0.1:15432,127.0.0.1:15432/dispatch?sslmode=disable' ...; loadgen tables; grep -cF each secret over every step file, TABLES.md, stdout and stderr",
+      "observed": "exit 0, committed 31/31, receipts 155/155; NATS token matches 0, password matches 0, bearer token matches 0; meta.json '-nats=nats://127.0.0.1:14222,nats://127.0.0.1:14222' and '-pg=postgres://127.0.0.1:15432,127.0.0.1:15432/dispatch?sslmode=disable'",
+      "headSha": "f93dbc536e5277b00fc1fe3c74c7032e50e15597",
+      "negativeControl": "with 8530db16's guard.go (go test -overlay) TestAForeignRunsMetaHoldsNoTokenOrPassword (token-user case, list case) and TestGuardPrintsNoURLPassword fail"
     }
   ],
   "filesChanged": [
-    "packages/envoy/.changes/unreleased/pr2369-Added-20261028-133210.yaml (replaces INFRA-589-load-test-harness.yaml)",
-    "packages/envoy/loadtest/README.md, events.go (comments), common.test.sh (comment), routes-2026-10-26-1719Z.txt (comment)"
+    "packages/envoy/loadtest/sample.go, sample_test.go",
+    "packages/envoy/loadtest/guard.go, guard_test.go, run_test.go",
+    "packages/envoy/loadtest/README.md (meta.json row and the guard's URL rule)"
   ],
-  "trickyParts": [],
+  "trickyParts": [
+    "redactURL drops the whole userinfo (user and password) of every comma-separated element, parsing an element without a scheme (later hosts of a Postgres URL) under a stand-in scheme; the URL check accepts lists whose first element has a scheme and whose others name a host."
+  ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []

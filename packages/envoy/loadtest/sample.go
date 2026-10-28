@@ -311,6 +311,13 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 			sm.NATS = v
 		}
 		s.mu.Lock()
+		// A sample whose reads ran once the step had ended keeps none of them, as poll keeps no
+		// read then: its failed reads would enter the statistics as zeros (a 0 connection count,
+		// 0 goroutines, a NATS rate below zero).
+		if ctx.Err() != nil {
+			s.mu.Unlock()
+			return
+		}
 		s.samples = append(s.samples, sm)
 		s.mu.Unlock()
 		select {

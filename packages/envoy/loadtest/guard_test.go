@@ -108,7 +108,7 @@ func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
 }
 
 // TestGuardPrintsNoURLPassword: a foreign URL that does not parse is refused naming its flag
-// alone, and a failed guard check names the endpoint without its password.
+// alone, and a failed guard check names the endpoint without its userinfo, user or password.
 func TestGuardPrintsNoURLPassword(t *testing.T) {
 	const password = "url-password-51d2"
 	flags := foreignFlags()
@@ -116,19 +116,25 @@ func TestGuardPrintsNoURLPassword(t *testing.T) {
 	if _, err := resolveEndpoints(flags, testStack()); err == nil || !strings.Contains(err.Error(), "-pg") || strings.Contains(err.Error(), password) {
 		t.Fatalf("a -pg that is not a URL: refusal %v, want one naming -pg without its password", err)
 	}
+	flags = foreignFlags()
+	flags.nats = "nats://tok@127.0.0.1:3,nats://u:" + password + "@127.0.0.1:4"
+	if _, err := resolveEndpoints(flags, testStack()); err != nil {
+		t.Fatalf("a -nats server list: refused %v, want it accepted", err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 	withPassword := strings.Replace(srv.URL, "://", "://loadgen:"+password+"@", 1)
+	host := strings.TrimPrefix(srv.URL, "http://")
 	for _, e := range []endpoints{
 		{natsMon: withPassword, natsServerName: "loadtest-abc"},
 		{dispatch: withPassword},
 	} {
 		err := checkStack(context.Background(), e)
-		if err == nil || strings.Contains(err.Error(), password) || !strings.Contains(err.Error(), "loadgen@") {
-			t.Errorf("guard check against %+v: error %v, want one naming the endpoint's user without its password", e, err)
+		if err == nil || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "loadgen") || !strings.Contains(err.Error(), host) {
+			t.Errorf("guard check against %+v: error %v, want one naming the endpoint's host without its userinfo", e, err)
 		}
 	}
 }
