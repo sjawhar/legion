@@ -574,7 +574,7 @@ func refuseAskContentEdit(block askBlock, rowOptions []model.AskOption, edit Ask
 		return &ErrAskBlockUnrepresentable{
 			Field: "block",
 			Reason: broken.Error() + "; an option the decision holds but its ask does not holds more than its text, which rebuilding the options as text would delete: delete " +
-				quoted + ", with a document edit (dispatch doc-edit --ops-json " + ops + "), then edit the ask sending every option; the quoted words below an option can come back in its description",
+				quoted + ", with a document edit on this document (dispatch doc-edit, ops " + ops + "), then edit the ask sending every option; the quoted words below an option can come back in its description",
 		}
 	}
 	if edit.Options == nil {
