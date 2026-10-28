@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-651",
-  "completed": "2026-10-28T16:20:00Z",
+  "completed": "2026-10-28T17:32:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
-  "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz (sha256 438af536f36c64cdebf5c04555a6b40787ed5ee5d24eeb65f7eeb408119e9633): scripts (identity.sh, negative.sh, cli.sh, runs.sh, verdict.sh, i651tool.go), every tsv, CLI output, run summary, cpu and heap profile",
+  "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz version 3 (sha256 fd2b4e80a30e10aaff2de14c8d32d4e8b14ccd353b653687796b29da74a0f758); round2/ holds this round's runs",
   "proof": [
     {
       "criterion": "A1: without the parameter (or with versions=all) the answer is byte-identical (status, headers but Date, ETag, body) at real size and on hard data",
@@ -69,6 +69,22 @@
       "observed": "build.ts --check: 'dist/ and legion/ match a fresh build'; dist-fresh 14 pass 0 fail; claude-envoy suite 216 pass 0 fail; the rebuild changes only getIssueReferences in dispatch.js, envoy-channel.js and session-hook.js (each now passes { versions: \"latest\" }); outputs old vs new diff -r exit 0; access log 68,478,298 bytes for the old bundle's 25 requests vs 8,893,398 for the new (LGA-202 7,145,304 -> 943,392)",
       "headSha": "3304e7fe12272d2d11fdf41704a4d07efcd59e7e",
       "negativeControl": "the bundle committed before the rebuild (3d0225b60a08) still fetches the full answer (68,478,298 bytes for the same 25 reads), and the tester ran dist-fresh.test.ts on it: 'dispatch.js: fresh build differs from committed dist/'"
+    },
+    {
+      "criterion": "Review round 1, finding 4 and the census (A3): a repeated versions, or any value but all/latest, answers 400 INVALID_QUERY; auth still first",
+      "surface": "the load-test stack's Dispatch built from the head (binary sha256 5c9cfc66...), refseed seed, agent bearer",
+      "command": "curl -H 'Authorization: Bearer <stack token>' http://127.0.0.1:18777/api/v1/issues/LGA-293/references?<q> for q in '', versions=all, versions=latest, versions=, versions=last, versions=latest&versions=bogus, versions=all&versions=latest, versions=latest&versions=latest; and with no bearer ?versions=bogus (round2/params-r2.txt); go test ./internal/dispatch/api/ -run 'Reference|Route'",
+      "observed": "none, all, latest, empty: 200; last: 400 INVALID_QUERY 'versions must be all or latest'; the three repeated forms: 400 INVALID_QUERY 'versions must be given once, as all or latest'; no identity: 401 NO_IDENTITY; Go suite ok",
+      "headSha": "a3cd6ffc58f617b2577fb5bb7ae27dc2d9e12feb",
+      "negativeControl": "the round-1 head (43b4de3d) answered ?versions=latest&versions=bogus with 200 (the tester's observation that raised the finding)"
+    },
+    {
+      "criterion": "Review round 1, finding 2 (A1, A2, A7): the latest-versions lateral projects the whole row so versionColumns stays the one column list, with answers and plan unchanged and the merge rule still passing",
+      "surface": "load-test stack (#2369 at 99a733790beb), refseed seed; Postgres explain on the seeded database",
+      "command": "identity.sh head <src at a3cd6ffc58f6> latest; diff {plain,adv,err}-full-base.tsv ...-head.tsv; i651tool compare plain/adv; psql -f explain-r2.sql; runs-r2.sh (cal-4, then base-1, head-1, base-2, head-2, base-3, head-3 with --events 1 --sessions 100 --requests 15 --rng-seed 1 --route-mix routes-...-versions-latest.txt, sha256 73804994...); verdict.sh",
+      "observed": "full answers diff exit 0 on plain, adversarial and errors data; versions=all == none; trimmed tsvs byte-identical to round 1's; compare 1,000 of 1,000 equal, 0 shared ETags; explain: Index Scan Backward using artifact_versions_artifact_id_number_key, one row per document, 996 buffer hits as before; Dispatch cores base 0.3498/0.3453/0.3644, head 0.3069/0.3188/0.3176: every head run below every base run; getIssueReferences 11.66 s of 185.15 s (6.30%) -> 2.08 s of 164.62 s (1.26%); allocation under the route base 1,119-1,184 MB, head 116-118 MB; 2,758/2,758 2xx, 210/210 references 2xx every run",
+      "headSha": "a3cd6ffc58f617b2577fb5bb7ae27dc2d9e12feb",
+      "negativeControl": "the round-1 negative controls stand for this SQL shape: order by v.number asc fails the trimmed compare on 305 of 310 issues; cal at 0.5x is refused by the calibration test"
     }
   ],
   "filesChanged": [
@@ -87,7 +103,8 @@
     "packages/claude-envoy/dist/dispatch.js",
     "packages/claude-envoy/dist/envoy-channel.js",
     "packages/claude-envoy/dist/session-hook.js",
-    "packages/claude-envoy/.changes/unreleased/pr2469-Changed-20261028-161424.yaml"
+    "packages/claude-envoy/.changes/unreleased/pr2469-Changed-20261028-161424.yaml",
+    "packages/envoy/internal/dispatch/api/references_real_size_test.go"
   ],
   "trickyParts": [
     "The full answer's SQL text is byte for byte main's: the loader varies only the version join string, so its plan, row order and which decode error a request hits are unchanged (errors.sql check).",
@@ -101,7 +118,8 @@
     "The simplify pass ran before the proofs (on 1cc83c8b), so every proof ran at its applied head 5ec22814.",
     "The CLI's 'unavailable' line for a references request that fails names the URL it requested, which now ends in ?versions=latest (dispatch-execute.test.ts updated); every successful read prints the same.",
     "Full go test ./internal/dispatch/... on this 2-vCPU pod: api package ok but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a database already in byte-order collation (the load test's pgserver Postgres); other packages timed out or need Docker (files) under the concurrent seed. CI's envoy Go job is the record.",
-    "Round 2 (tester failure): the first round missed that packages/claude-envoy commits its own bundles of the dispatch CLI; rebuilt on Bun 1.4.4 and added its changelog fragment."
+    "Round 2 (tester failure): the first round missed that packages/claude-envoy commits its own bundles of the dispatch CLI; rebuilt on Bun 1.4.4 and added its changelog fragment.",
+    "Review round 1: the merge-rule runs were repeated at the fixed head on #2369's newest head 99a733790beb (base rebuilt from the same loadtest); round 1's runs are in runs-r1-3d988c68/."
   ],
   "openQuestions": [
     "Who restarts implementing for Task 8 once #2369 merges: the architect's send-back, or a task to this session?"
