@@ -2,16 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T10:32:39Z",
+  "completed": "2026-10-28T10:48:06Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
     {
-      "criterion": "Filter drift: a package appended to a go command the table claims is held to the job's filter (tester's round-3 failure)",
+      "criterion": "Filter drift: any package added to a go command the table claims, by relative path, import path or on a continued line, is held to the job's filter (tester's round-3 and round-4 failures)",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the check ci.yaml's ci-filters job runs",
-      "command": "PATH=<python with PyYAML>:$PATH bash .github/scripts/check-ci-filters.test.sh; then ci.yaml's broker-multiprocess line changed to `go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker ./internal/routing/` and .github/scripts/check-ci-filters.sh (reverted after)",
-      "observed": "tests 'Results: 38 passed, 0 failed', the tester's case 'a package added to a go command the table claims, outside the job's filter' (commit 5b6fb964, unchanged) included. The probe exits 1: '::error file=.github/workflows/ci.yaml::job broker-multiprocess step \"Two-process tests of the secrets broker\" runs `go test \u2026 ./cmd/broker ./internal/routing/`, whose packages are not the Run's (./cmd/broker): it also names ./internal/routing/ \u2026'. On the unmodified tree the check passes all 21 gates",
-      "headSha": "b2c8d83c8fb53146c3691d9929f556bc6de7050d",
-      "negativeControl": "At 8f85e3ef (substring match) the same probe exited 0 ('broker-multiprocess: 278 files, 0 uncovered') and the tester's case printed 'Results: 36 passed, 2 failed'"
+      "command": "PATH=<python with PyYAML>:$PATH bash .github/scripts/check-ci-filters.test.sh; then ci.yaml's broker-multiprocess step changed to (a) `go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker github.com/sjawhar/envoy/internal/routing` and (b) a `run: |` block with `... ./cmd/broker \\` and `./internal/routing/` on the next line, each followed by .github/scripts/check-ci-filters.sh and reverted",
+      "observed": "tests 'Results: 42 passed, 0 failed', including the tester's four cases from 5b6fb964 and 0c15655f (unchanged). (a) exits 1: '\u2026runs `go test \u2026 ./cmd/broker github.com/sjawhar/envoy/internal/routing`, whose packages are not the Run's (./cmd/broker): it also names github.com/sjawhar/envoy/internal/routing'; (b) exits 1: '\u2026it also names ./internal/routing/'. On the unmodified tree all 21 gates pass with 0 uncovered",
+      "headSha": "6a43ed31312a45a599d1caf02be007590df0075a",
+      "negativeControl": "At 84618fbf both probes exited 0 ('broker-multiprocess: 278 files, 0 uncovered') and the tests printed 'Results: 38 passed, 4 failed'"
     },
     {
       "criterion": "The pull request can be tested and merged at its head, with every change main merged into a deleted workflow carried into ci.yaml",
@@ -42,7 +42,7 @@
       "surface": "ci.yaml's changes filters, read with .github/scripts/workflow_paths.py, and scratch pull requests on GitHub Actions",
       "command": "PYTHONPATH=.github/scripts coverage.py .github/workflows/ci.yaml (dispatch://INFRA-520/artifact/infra-520-coverage-tar-gz: live `go list -deps -test [-tags]` closures of every job's go commands, the closures of the go commands its tests start, repository-root reads, embeds, module files, and every non-Go step input); then 16 scratch pull requests stacked on legion/INFRA-520 (#2332, #2334-#2349), each changing one file, run up to `changes` and cancelled",
       "observed": "At 0ae68a17 (merged with main 719aae24) every one of the 21 filters prints `0 uncovered` (e.g. test 2981 files, docs 2885, envoy-go-race 1741, dispatch-memory 1034). Each scratch run selected exactly the jobs whose filter names its file: #2343 (a guide memory_profile_test.go reads) only dispatch-memory, at the filter of 6467a0a7 (at 6b0588e3 that guide left the filter: the test reads it only when DISPATCH_EDIT_PROFILE_OUT is set), #2348 (install-pulumi) only envoy-smoke, #2335 envoy-plugin only, #2341 claude-envoy only, #2339 (AGENTS.md) pi-legion only, #2346 (infra seed.go) envoy-infra-go, envoy-go, envoy-go-race and changes' log `Filter go_notices = true`, #2349 (a docs/solutions page) no job but lint (`Filter go_notices = false`, run 40449412482). The scratch runs used ci.yaml as of 6467a0a7 (the scratch pull requests' base when they were pushed)",
-      "headSha": "b2c8d83c8fb53146c3691d9929f556bc6de7050d",
+      "headSha": "6a43ed31312a45a599d1caf02be007590df0075a",
       "negativeControl": "coverage.py --drop 'dispatch=packages/envoy/internal/routing/*' prints routing/match.go and match_test.go uncovered and exits 1; the docs/solutions-only scratch #2349 selected no test job"
     },
     {
@@ -74,7 +74,7 @@
       "surface": ".github/scripts tests and the checks on the tree",
       "command": "PATH=<pyyaml venv>:$PATH bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-bun-version.test.sh; .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-bun-version.sh",
       "observed": "image-trigger tests 'Results: 896 passed, 0 failed'; bun-version tests 'Results: 110 passed, 0 failed'; on the tree: 'every image trigger covers every input its build reads (4 image build(s))', the worker-image gate 'matches only files its image builds read', envoy-smoke's left alone as it does more than build",
-      "headSha": "b2c8d83c8fb53146c3691d9929f556bc6de7050d",
+      "headSha": "6a43ed31312a45a599d1caf02be007590df0075a",
       "negativeControl": "The new tests against the unmodified checkers: 'Results: 829 passed, 17 failed' (event/draft/cache), 'Results: 863 passed, 33 failed' (reverse check, some-with-excludes), bun-version '108 passed, 2 failed'; the tree with one worker_image `!` line removed fails naming a .dockerignore-dropped file"
     },
     {
@@ -317,7 +317,8 @@
     "Round 3: the worker image's cache returns to the Actions cache, cache-from type=gha,scope=worker-image, cache-to on main only with mode=min and ignore-error=true (INFRA-490 architect: a branch could write the ghcr :buildcache tag main's attested build reads; mode=min after main alone held 10.44 GB). This replaces the tester's registry-write probe.",
     "Round 3: check-ci-filters.sh (spec 'Filter drift') and ci-ok's rule that every selected job must succeed (spec 'Re-run safety') are added; ci-ok's verdict lives in .github/scripts/ci-ok.sh with tests.",
     "Round 3: two forward merges of main (#2356, #2325, #2229, #2328, #2159, 582cb2a2, #2419); #2356's draft handling in check-image-trigger-paths.sh is kept as the one draft implementation; restore-keys are set only off main (#2328's rule).",
-    "Round 4 (architect's narrowing at the round cap): only the tester's finding is fixed; a claimed go line's relative package arguments must equal its Run's packages."
+    "Round 4 (architect's narrowing at the round cap): only the tester's finding is fixed; a claimed go line's relative package arguments must equal its Run's packages.",
+    "Round 5: continuations joined before a go line is read, and every positional argument of a claimed go command must be one of the Run's packages (fail closed), per the architect's 'fix the class'."
   ],
   "openQuestions": [],
   "productionCheck": [
