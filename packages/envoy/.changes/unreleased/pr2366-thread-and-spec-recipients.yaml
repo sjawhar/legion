@@ -12,10 +12,11 @@ body: |-
   too, so a session that wrote the spec without a claim still hears comments on the issue. The
   outbox reads these sessions for a whole batch in one query too. The claimant's copy is the
   claimant route of #2225, which these copies join: a session reached more than one way gets one
-  copy. A comment's `suppressed_authors` now names every session a mention resolved to, on a reply
-  and in an ask's thread too, so a thread session or a spec session a mention delivered the comment
-  to hears it once, from the mention; one whose mention failed still gets the outbox's copy. A
-  resolve or a reopen still reaches the thread root's author only, so the reopen that a reply makes
-  in the same transaction tells no new session twice. When a batch's recipient query fails, the
+  copy. A thread session or a spec session the comment's mentions resolved to (its `mentions`, as
+  the claimant and follower routes read them) hears it once, from the mention, once the mention was
+  delivered; one whose mention failed still gets the outbox's copy. A
+  resolve or a reopen reaches none of the thread, document or spec sessions this change adds; it
+  reaches the route, the claimant and the thread root's author as before, so the reopen that a
+  reply makes in the same transaction tells no new session twice. When a batch's recipient query fails, the
   comment's owner topic, route and claimant are still sent, and the event is retried for the rest,
   or released when the process is stopping.

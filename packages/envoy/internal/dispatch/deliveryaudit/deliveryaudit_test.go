@@ -361,11 +361,11 @@ func agent(session string) string { return "session:" + session }
 func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testing.T) {
 	r := newRig(t)
 	from := time.Now().Add(-time.Minute)
-	r.call(t, http.MethodPost, "/api/v1/projects", "alice", "", map[string]any{"key": "BET", "name": "Bets"}, http.StatusCreated)
+	r.call(t, http.MethodPost, "/api/v1/projects", "alice", "", map[string]any{"key": "ACME", "name": "Acme"}, http.StatusCreated)
 
 	// (a) The reported case's shape: a session claims an unrouted issue; a person comments on a passage of its
 	// spec; the session replies and resolves the thread; the person replies, which reopens it.
-	threadIssue, spec := createIssue(t, r, "BET", "Spec thread", "We ship the design on Friday.\n")
+	threadIssue, spec := createIssue(t, r, "ACME", "Spec thread", "We ship the design on Friday.\n")
 	claim(t, r, threadIssue, "s-claimant")
 	root := r.comment(t, "/api/v1/issues/"+threadIssue+"/comments", "alice", "", map[string]any{
 		"body": "Why Friday?", "anchor": map[string]any{"artifact": spec, "quote": "on Friday"},
@@ -379,14 +379,14 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 	})
 
 	// (b) A mention of a live session whose delivery the listener refuses.
-	mentionIssue, _ := createIssue(t, r, "BET", "Mention", "A mention.\n")
+	mentionIssue, _ := createIssue(t, r, "ACME", "Mention", "A mention.\n")
 	mention := r.comment(t, "/api/v1/issues/"+mentionIssue+"/comments", "alice", "", map[string]any{
 		"body": "Can you look?", "mentions": []map[string]any{{"target": "session:s-mention"}},
 	})
 
 	// (c) A person's reply on an ask's thread: the asker, a session that followed and stayed, and a
 	// session that followed and left before the reply.
-	askIssue, _ := createIssue(t, r, "BET", "Ask", "An ask.\n")
+	askIssue, _ := createIssue(t, r, "ACME", "Ask", "An ask.\n")
 	ask := r.call(t, http.MethodPost, "/api/v1/issues/"+askIssue+"/asks", "", "s-asker", map[string]any{
 		"question": "Which region?",
 	}, http.StatusCreated)["id"].(string)
@@ -398,19 +398,19 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 	})
 
 	// (d) A routed issue whose claimant is another session.
-	routedIssue, _ := createIssue(t, r, "BET", "Routed", "A routed issue.\n")
+	routedIssue, _ := createIssue(t, r, "ACME", "Routed", "A routed issue.\n")
 	claim(t, r, routedIssue, "s-worker")
 	r.call(t, http.MethodPatch, "/api/v1/issues/"+routedIssue, "alice", "", map[string]any{"route": "role:reviewer"}, http.StatusOK)
 	routed := r.comment(t, "/api/v1/issues/"+routedIssue+"/comments", "alice", "", map[string]any{"body": "Ready for review?"})
 
 	// (e) An unrouted issue whose claim was released before the comment; it is closed later.
-	releasedIssue, _ := createIssue(t, r, "BET", "Released", "A released issue.\n")
+	releasedIssue, _ := createIssue(t, r, "ACME", "Released", "A released issue.\n")
 	claim(t, r, releasedIssue, "s-old")
 	r.call(t, http.MethodDelete, "/api/v1/issues/"+releasedIssue+"/claim", "alice", "", nil, http.StatusOK)
 	released := r.comment(t, "/api/v1/issues/"+releasedIssue+"/comments", "alice", "", map[string]any{"body": "Anyone?"})
 
 	// (f) A comment on a project document a session wrote.
-	document := r.call(t, http.MethodPost, "/api/v1/projects/BET/artifacts", "", "s-writer", map[string]any{
+	document := r.call(t, http.MethodPost, "/api/v1/projects/ACME/artifacts", "", "s-writer", map[string]any{
 		"name": "plan.md", "content": "The plan ships on Friday.\n",
 	}, http.StatusCreated)["artifact"].(map[string]any)["id"].(string)
 	documentComment := r.comment(t, "/api/v1/artifacts/"+document+"/comments", "alice", "", map[string]any{
@@ -419,7 +419,7 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 
 	// (h) A person's reply on an ask's thread that mentions a live session by BTW, which the
 	// listener accepts.
-	heardIssue, _ := createIssue(t, r, "BET", "Heard", "A heard mention.\n")
+	heardIssue, _ := createIssue(t, r, "ACME", "Heard", "A heard mention.\n")
 	heardAsk := r.call(t, http.MethodPost, "/api/v1/issues/"+heardIssue+"/asks", "", "s-heard-asker", map[string]any{
 		"question": "Which zone?",
 	}, http.StatusCreated)["id"].(string)
@@ -429,13 +429,13 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 	})
 
 	// (i) A mention of a role, which resolves to its holder s-heard, and the listener accepts.
-	roleIssue, _ := createIssue(t, r, "BET", "Lead", "A note for the lead.\n")
+	roleIssue, _ := createIssue(t, r, "ACME", "Lead", "A note for the lead.\n")
 	roleMention := r.comment(t, "/api/v1/issues/"+roleIssue+"/comments", "alice", "", map[string]any{
 		"body": "Lead, take a look.", "mentions": []map[string]any{{"target": "role:lead"}},
 	})
 
 	// (j) A comment that mentions the issue's claimant: one session, owed twice.
-	claimedIssue, _ := createIssue(t, r, "BET", "Claimed", "A claimed issue.\n")
+	claimedIssue, _ := createIssue(t, r, "ACME", "Claimed", "A claimed issue.\n")
 	claim(t, r, claimedIssue, "s-heard")
 	claimantMention := r.comment(t, "/api/v1/issues/"+claimedIssue+"/comments", "alice", "", map[string]any{
 		"body": "You again.", "mentions": []map[string]any{{"target": "session:s-heard"}},
@@ -611,7 +611,7 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		}
 		row := targetRow(t, rows, documentComment, agent("s-writer"))
 		expect(t, row, map[string]string{
-			"owner": "BET/" + slug, "shape": "anchored", "owed_reasons": "addressed-only", "addressed": "true",
+			"owner": "ACME/" + slug, "shape": "anchored", "owed_reasons": "addressed-only", "addressed": "true",
 			"route_used": "", "claim_used": "", "route_source": "",
 		})
 		r.expectAddressedAsRecorded(t, row)

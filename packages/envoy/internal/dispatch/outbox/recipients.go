@@ -172,7 +172,7 @@ func loadKeyedSessions(ctx context.Context, deps Deps, what, query string, args 
 
 // recipientList is the sessions a batch query read for one event (resolveCommentRecipients), or
 // err, the query's failure. The failure is not the row's (pendingEvent.failure): the event's
-// attempt sends its owner topic and its route first and ends with err at the step that needed the
+// attempt sends its owner topic, its route and its claimant first and ends with err at the step that needed the
 // sessions, as a lookup made per event would, so settle backs the event off, or releases it when
 // the process is stopping or NATS is unreachable, as it does any attempt that failed.
 type recipientList struct {
@@ -182,7 +182,7 @@ type recipientList struct {
 
 // recipientFilter keeps, of the sessions one step of a notifying event's attempt reaches on their
 // own topics, each one once, and none that is the event's actor. A session the comment's mentions
-// resolved to (suppressed_authors) is left to the mention by the rule every session route of a new
+// resolved to (payloadMentionedSessions, as main's claimant and follower routes read them) is left to the mention by the rule every session route of a new
 // comment applies (attempt.leftToMention): skipped once its mention delivered, held back while the
 // send is undecided, and kept when it failed. publishAuthorRoutes and
 // publishPrimaryDocumentAuthors both filter through it.
@@ -196,7 +196,7 @@ type recipientFilter struct {
 func newRecipientFilter(event model.Event, a *attempt) *recipientFilter {
 	return &recipientFilter{
 		actor:      event.Actor,
-		suppressed: payloadStringSet(event.Payload, "suppressed_authors"),
+		suppressed: payloadMentionedSessions(event.Payload),
 		seen:       map[string]bool{},
 		attempt:    a,
 	}

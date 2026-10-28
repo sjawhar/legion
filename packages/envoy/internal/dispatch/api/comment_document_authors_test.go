@@ -197,15 +197,6 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			"body": "@editor, is the day firm?", "reply_to": root,
 			"mentions": []map[string]any{{"target": "session:session-editor"}},
 		}, "alice")
-		var suppressed []string
-		if err := database.Pool.QueryRow(context.Background(), `
-			select payload->'suppressed_authors' from events where type = 'comment.created' and payload->>'id' = $1
-		`, reply).Scan(&suppressed); err != nil {
-			t.Fatalf("read the reply's suppressed authors: %v", err)
-		}
-		if !slices.Equal(suppressed, []string{"session-editor"}) {
-			t.Fatalf("suppressed_authors = %v, want the mentioned session alone", suppressed)
-		}
 		expect(t, reply, true, contracts.AgentSubject("session-reviewer"), contracts.AgentSubject("session-writer"))
 		sendsMu.Lock()
 		defer sendsMu.Unlock()

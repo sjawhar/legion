@@ -2698,8 +2698,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
   topic is sent once. The primary-document and author routes are skipped for a human, who has no
   topic, for the event's own actor, so a session commenting on a document it wrote is never told
   of its own comment, and for a session the comment's mentions resolved to once the mention
-  delivered it (`recipientFilter`; `suppressed_authors`: every session a mention resolved to, on
-  a new comment, a reply and an ask's thread; the mention rule below). An agent's comment
+  delivered it (`recipientFilter`, which reads the comment's `mentions` as the claimant and
+  follower routes do; the mention rule below). An agent's comment
   notifies nobody (`notify` is false), so it takes no primary-document or author route at all.
   When a batch's recipient query fails, the error is carried on each event that needed it
   (`recipientList.err`), not as the row's failure: the attempt sends the owner topic, the route

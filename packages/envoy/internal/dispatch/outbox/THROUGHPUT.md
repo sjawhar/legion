@@ -59,9 +59,10 @@ every kind of event in its load.
 
 The trees and the runs:
 
-- Main: `origin/main` at 1b8d5c13e. Its outbox package is the same as at the merge base
-  c3d09eec9; its `internal/bus` package has changes that head does not have. Head: c2a223fcb.
-  Main ran head's `throughput_test.go` in an exported copy of its tree.
+- Main before #2225: `origin/main` at 1b8d5c13e, whose outbox package was the same as at this
+  branch's merge base then (c3d09eec9); its `internal/bus` package had changes that head did not
+  have. Head: c2a223fcb, before the merge with #2225. Main ran head's `throughput_test.go` in an
+  exported copy of its tree. The rows marked "main" are that tree, not main as it is now.
 - Postgres 17, 2 CPUs. Three runs of each tree, main and head in turn, back to back. Each run
   ran all three loads.
 - Each cell is the range of the three runs, in events per second.
@@ -75,18 +76,22 @@ The trees and the runs:
 | `unclaimed comments` | main | 620-630 | 302-559 | 381-391 | 291-363 | 1 (comment 1, reply 1) |
 | `unclaimed comments` | head | 676-856 | 604-682 | 438-447 | 305-383 | 2.5 (comment 2, reply 3) |
 
-On main, a person's comment on an issue with no route reaches only its issue topic. It does not
-reach the claimant, the primary document's writer or the thread's sessions. So main fails the
-test's count of stream messages: 250 of 450 for `comment replies` and 200 of 500 for
-`unclaimed comments`. Main passes the 25 ev/s requirement in every case.
+On main before #2225, a person's comment on an issue with no route reached only its issue topic.
+It did not reach the claimant, the primary document's writer or the thread's sessions, so that
+tree failed the test's count of stream messages: 250 of 450 for `comment replies` and 200 of 500
+for `unclaimed comments`. It passed the 25 ev/s requirement in every case. Main now has #2225's
+claimant route, so in the `comment replies` load today's main reaches the claimant too; the
+claimant copy is main's, and what this change adds is the thread's sessions and the documents'
+writers.
 
-The `messages` load at 150 ms is lower on head in these three runs. Five more runs of that case
+The `messages` load at 150 ms was lower on head in these three runs. Five more runs of that case
 alone, main and head in turn, read 395-431 (idle) and 286-387 (busy) ev/s on main and 306-430
 (idle) and 297-371 (busy) on head, so the difference is in the spread of the runs.
 
-Judgement: the change costs no measurable throughput: both comment loads are as fast or faster
-on head, although each comment reaches two or three destinations in place of one, and the
-`messages` load is the same within the spread of the runs.
+Judgement: against main before #2225, the change cost no measurable throughput: both comment loads
+were as fast or faster on head, although each comment reached two or three destinations in place
+of one, and the `messages` load was the same within the spread of the runs. Not re-measured
+against main with #2225.
 
 ## Order and crash safety
 

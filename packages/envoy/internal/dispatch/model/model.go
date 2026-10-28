@@ -1275,10 +1275,10 @@ type CommentEventPayload struct {
 	// once comment_deliveries shows its mention was sent to it, holds the copy back while that send
 	// is still pending, and publishes it when the send failed or was abandoned.
 	// SuppressedRoute is the route that resolved to SuppressedRouteSessionID, the candidate whose
-	// mention suppresses the route. SuppressedAuthors names the candidates the author routes and
-	// the primary document's sessions skip: every session a mention resolved to, on a new comment,
-	// a reply and a comment in an ask's thread alike, since the outbox reads the thread's sessions
-	// and the documents' authors only when it publishes.
+	// mention suppresses the route. SuppressedAuthors names the candidates the author routes skip:
+	// on a reply, its thread's root author when mentioned; on a new comment not in an ask's thread,
+	// every session a mention resolved to, since the outbox reads the document's authors only when
+	// it publishes.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

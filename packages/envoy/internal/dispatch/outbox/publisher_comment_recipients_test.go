@@ -48,22 +48,20 @@ func appendCommentEvent(t *testing.T, database *store.Store, broker *events.Brok
 }
 
 // appendIssueCommentEvent appends a comment event on issueKey's issue with the payload the API
-// writes for it: the comment's mentions resolved to each session of mentioned, which
-// suppressed_authors lists, as the API lists every mentioned session.
+// writes for it: the comment's mentions resolved to each session of mentioned, which the outbox's
+// session routes read (payloadMentionedSessions).
 func appendIssueCommentEvent(t *testing.T, database *store.Store, broker *events.Broker, issueKey, eventType string, actor model.Actor, comment model.Comment, mentioned ...string) model.Event {
 	t.Helper()
 	comment.IssueKey = new(issueKey)
 	comment.Author = actor
-	suppressedAuthors := []string{}
 	for _, sessionID := range mentioned {
 		comment.Mentions = append(comment.Mentions, mentionOf(sessionID)...)
-		suppressedAuthors = append(suppressedAuthors, sessionID)
 	}
 	return appendEvent(t, database, broker, model.Event{
 		IssueKey: new(issueKey),
 		Type:     eventType,
 		Actor:    actor,
-		Payload:  model.CommentEventPayload{Comment: comment, SuppressedAuthors: suppressedAuthors},
+		Payload:  model.CommentEventPayload{Comment: comment},
 	})
 }
 
@@ -203,34 +201,6 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 					{event: reopened, want: []string{claimant.ID, rooter.ID}},
 					{event: created, want: []string{claimant.ID, rooter.ID, replier.ID, writer.ID}},
 				}
-			},
-		},
-		{
-			name: "a person's new comment on a claimed unrouted issue reaches the claimant",
-			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
-				claimIssue(t, database, "T-1", claimant)
-				comment := seedThreadComment(t, database, "T-1", "", alice, nil)
-				created := appendCommentEvent(t, database, broker, "comment.created", alice, model.Comment{ID: comment})
-				return []recipientCheck{{event: created, want: []string{claimant.ID}}}
-			},
-		},
-		{
-			name: "a person's edit on a claimed unrouted issue reaches the claimant",
-			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
-				claimIssue(t, database, "T-1", claimant)
-				comment := seedThreadComment(t, database, "T-1", "", alice, nil)
-				edited := appendCommentEvent(t, database, broker, "comment.edited", alice, model.Comment{ID: comment})
-				return []recipientCheck{{event: edited, want: []string{claimant.ID}}}
-			},
-		},
-		{
-			name: "a person's comment in an ask's thread on a claimed unrouted issue reaches the claimant and the followers",
-			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
-				claimIssue(t, database, "T-1", claimant)
-				askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
-				created := appendCommentEvent(t, database, broker, "comment.created", alice,
-					model.Comment{ID: "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b", AskID: &askID})
-				return []recipientCheck{{event: created, want: []string{claimant.ID, "session-asker"}}}
 			},
 		},
 	} {

@@ -656,7 +656,7 @@ func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEven
 // primary document's sessions and the author routes are for an event that notifies
 // (events.Broker.Notify) and is no targeted message. A topic is sent once, in its first place
 // (publishDestination). A recipient query that failed for the batch ends the attempt at the step
-// that needed it, once the owner topic and the route are sent.
+// that needed it, once the owner topic, the route and the claimant are sent.
 func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, item contracts.Envelope, a *attempt) error {
 	event := pending.event
 	if err := publishDestination(deps, event.ID, item, a, "publish owner topic", item.Topic); err != nil {
@@ -692,8 +692,8 @@ func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, i
 // comment's own thread does not matter: a comment in an ask's thread, or a reply, reaches those
 // sessions too. resolveCommentRecipients chose the events and read the sessions (primaryAuthors);
 // when that query failed, its error ends the attempt here. The actor is skipped, and so is a
-// session the comment's mentions resolved to (suppressed_authors) once its mention delivered the
-// comment (recipientFilter).
+// session the comment's mentions resolved to (payloadMentionedSessions) once its mention delivered
+// the comment (recipientFilter).
 func publishPrimaryDocumentAuthors(deps Deps, item contracts.Envelope, event model.Event, authors recipientList, a *attempt) error {
 	if authors.err != nil {
 		return authors.err
@@ -1026,7 +1026,7 @@ func publishClaimantRoute(deps Deps, eventID int64, item contracts.Envelope, eve
 // ends (docs.sendEditNotice), reaches every session the document its payload's artifact_id names
 // credits. Ask threads are not walked here: their asker and repliers are the ask's followers
 // (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
-// mentions resolved to (suppressed_authors) once its mention delivered the comment
+// mentions resolved to (payloadMentionedSessions) once its mention delivered the comment
 // (recipientFilter); an author whose mention failed is published to instead.
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, threadSessions recipientList, a *attempt) error {
 	filter := newRecipientFilter(event, a)
