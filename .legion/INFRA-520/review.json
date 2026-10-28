@@ -2,32 +2,47 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T11:29:33Z",
-  "round": 1,
-  "reviewedHead": "ff92bbdfcf5bc79a3fd726dc2aebac915e8bd894 (code head 6a43ed31312a45a599d1caf02be007590df0075a)",
+  "completed": "2026-10-28T17:16:54Z",
+  "round": 2,
+  "reviewedHead": "a87f1fec0c225d0eb6cf39880d72ea0afab56c7e (code head df1f30f5568f)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
+  "important": 4,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".github/workflows/ci.yaml:56-58,1486-1505",
-      "description": "Regression: GitHub Pages can be left at an older main commit's site. docs.yaml grouped main pushes as docs-refs/heads/main with cancel-in-progress false (main 184897ac docs.yaml:39-41), so docs builds ran in push order and a newer pending run replaced an older one. ci.yaml groups each main push by github.sha, so two docs-selecting merges build in parallel and their docs-deploy jobs enter the `pages` group in build-finish order: an older build that finishes later deploys over the newer site, or arrives while the newer deploy is pending and cancels it. docs-deploy is not in ci-ok's needs, so nothing turns red. Required: the site ends at the newest docs-selecting main commit's build, as before, proven on GitHub or by a stated mechanism."
+      "file": ".github/scripts/ci_filter_coverage.py:266-270 (every_go_file)",
+      "description": "Architect's decision dispatch://INFRA-520/comment/d0b774fa-14ba-4fe2-bbbb-5efedfee37d6: the fallback for an unreduced command must count every file under every Go module's directory (each go.mod's directory) plus the root go.work files, since a package includes its testdata and embeds; one red case where a testdata change in another module selects the job. Fix the two comments that still say 'module' (ci_job_reads.py:11, ci_filter_coverage.py:488)."
     },
     {
       "severity": "important",
-      "file": ".github/scripts/ci_filter_coverage.py:388-397,466-479",
-      "description": "Filter-drift check ignores a claimed go command's -tags and subcommand. The Run is pinned by substring and only its packages are compared; -tags is a VALUE_FLAG whose value is skipped, and Run.tags / Run.mode are never compared with the line. Reproduced in a scratch copy of ff92bbdf: probe file packages/envoy/cmd/broker/probe_test.go (//go:build probe, imports internal/routing) plus ci.yaml:2246 changed to `go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker -tags multiprocess,probe` (go test honours the trailing -tags: verified, the probe file compiled) -> check-ci-filters.sh exit 0, 'broker-multiprocess: 279 files, 0 uncovered'. Control: the Run's tags set to multiprocess,probe -> exit 1 naming internal/routing/match.go and match_test.go uncovered. Same class the round-5 fix closed for packages; fix by deriving or comparing -tags (both spellings, last wins) and the subcommand (mode) from the claimed line and failing closed on a mismatch, with a test case."
+      "file": ".github/workflows/ci.yaml (envoy_go, envoy_smoke filters); .github/scripts/ci_job_reads.py",
+      "description": "Architect's decision (16:48Z, INFRA controller agrees): the widening costs about 1,460 min a day; put envoy_go's and envoy_smoke's unreduced lines into the table of exact script lines (full-text equality, nothing parsed, closure by the same go list with the same GOOS/GOARCH and tags; any edit falls to everything), return their filters to narrow, and restate the cost in the PR body."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/ci_filter_coverage.py:353-430,508-517",
+      "description": "A simple go line is reduced even when the rest of its step changes what it compiles. Reproduced in a copy of a87f1fec: daemon-go-postgres-16's step changed to `run: |` with `cd ../envoy` on its own line, then the unchanged go line -> check exit 0 ('daemon-go-postgres-16: 3003 files, 0 uncovered'); the job now tests packages/envoy, which its filter does not cover. The deep reviewer showed the same for `export GOFLAGS=-tags=e2e` on its own line, a step `shell:` override, and BASH_ENV in env. Under the conservative rule such a line falls to everything: reduce only a go line that is its step's whole run script, with no shell override (step, job or workflow defaults), no job container, and no BASH_ENV/ENV in any env block; one test case each for the cd and export on their own line."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/ci_filter_coverage.py:369 (FLAG accepts -race), :140 (go list gets only -tags)",
+      "description": "-race is accepted as simple but the closure is computed without it, and -race sets the race build constraint. Reproduced: packages/envoy/racehelper/h.go plus packages/daemon/internal/record/zz_race_test.go (//go:build race, importing racehelper): `go list -deps -test -race ./internal/record/` lists racehelper, without -race it does not; check-ci-filters.sh exit 0 ('test: 3435 files, 0 uncovered'), though the test job's `go test -count=1 -race ./internal/daemon/ ./internal/record/ ...` compiles it. Fix: compute the closure of a -race line with go list -race (part of the already-accepted form), or let -race lines fall to everything (the architect chooses; asked)."
     },
     {
       "severity": "minor",
-      "file": "docs/solutions/github/join-a-job-to-the-ci-router.md:165-168",
-      "description": "The router guide tells a new job to set restore-keys to the family prefix unconditionally; ci.yaml (header lines 25-27, e.g. line 1161) sets it only off main, so the guide's recipe brings back the main prefix fallback this pull request removes. Docs-only; fix with the push."
+      "file": "README.md:165-167",
+      "description": "Still says the `docs-deploy` job of ci.yaml deploys the site; docs-pages.yaml does now (spec's Docs line)."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/docs-pages.yaml:190-195; docs/site/README.md:10-12",
+      "description": "'every docs-selecting push builds and deploys, none is skipped' overstates GitHub's guarantee: a push path filter skips a run whose diff exceeds 3,000 files with no match in the first 3,000, and queue: max holds at most 100 pending runs. State the bounds (or add workflow_dispatch to redeploy)."
     }
   ],
-  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection: none. Newest pull_request CI run 40674943570 at 6a43ed31 was still queued at 11:19Z (changes and pr-title queued); no CI run of any #2316 head has completed. A request for changes does not wait on it.",
-  "thermonuclear": "deep review: CHANGES at ff92bbdf (Medium: Pages deploy order; Minor: go-daemon family shared by three jobs; Minor hardening: release builds restore CI-written Go caches). Code quality: CHANGES at ff92bbdf (tags/mode not compared, ci-ok needs unchecked, SELECTED_BY duplication, guide recipe drift, others cleanup). Adjudicated: the Pages order and the -tags hole stand; the guide recipe is fixed with the push; the rest are risk notes or the Fast-follow.",
-  "threads": "0 review threads on GitHub (graphql at 11:2xZ); nothing to answer or accept.",
-  "architectChecks": "dispatch://INFRA-520/comment/50abb813-9787-4988-999e-2f4e5b897670: sjawhar/legion#2358 is still open, so the three check-image-trigger-paths.sh tidy-ups are not requested in this round."
+  "roundOneThreads": "All three round-1 threads verified fixed at this head and accepted (already resolved by the implementer): Pages order -> docs-pages.yaml with workflow-level `pages` group, queue: max, ci.yaml docs not on push; -tags -> my probe now falls to every Go file and fails (1750 uncovered); guide recipe -> conditional restore-keys (join-a-job-to-the-ci-router.md:190-191).",
+  "ci": "Required set: lint, typecheck, test, pr-title. Newest pull_request CI run 40723377210 at df1f30f5 still queued at 16:45Z; no CI run of a #2316 head has completed. A request for changes does not wait on it. The three reds on main (recipients-claim, mermaid.e2e.ts:194, TestDispatchConnectionsPerPodIsTheServers) are main's per the controller.",
+  "thermonuclear": "deep review CHANGES at a87f1fec (multi-line step / shell / BASH_ENV; -race; README; 'none skipped'), code quality CHANGES at a87f1fec (docs build steps duplicated with no equality check; NOT_ON_PUSH; extra flag forms; module wording). Adjudicated: the two deep Mediums stand (reproduced); the step duplication is recorded as a risk; NOT_ON_PUSH is the Fast-follow.",
+  "architectChecks": "sjawhar/legion#2358 merged at 11:52Z and is in the branch; the PR body lists the three check-image-trigger-paths.sh tidy-ups done, and check-image-trigger-paths.test.sh passes (991, deep reviewer's run)."
 }
