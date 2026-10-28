@@ -2,57 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T20:12:00Z",
-  "round": 5,
-  "testedHead": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+  "completed": "2026-10-28T20:28:00Z",
+  "round": 6,
+  "testedHead": "746077c027a18f4b19949c3f0ab265dfeda6d291",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its claims at bb0690b9: the two Envoy guides are byte-identical to sjawhar/legion#2422's merge 1f92d90f; this pull request's six files (the three guides, the checker and its two tests) are byte-identical to 7cf8f4e4; fingerprints 529eb132… (7cf8f4e4) and 3e74ab78… (bb0690b9) reproduced; GitHub reports MERGEABLE."
+    "how": "Re-ran its claims at 746077c0: the two Envoy guides are byte-identical to sjawhar/legion#2422's merge cd9ecf51; this pull request's six files are byte-identical to bb0690b9; fd2a2c44's tree equals 746077c0's (git diff empty); fingerprints 3e74ab78… (bb0690b9) and dbfd73b8… (746077c0) reproduced; GitHub reports MERGEABLE."
   },
   "failed": 0,
   "failures": [],
   "rebaseCheck": {
-    "from": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
-    "to": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-    "fingerprint": "529eb132a2efe438ff7b70f13c01886296f853ece035a19fa13b927d2f2574b7 → 3e74ab78084e8628550e53105809a3e774f00f34037c2a4a21ac96dd5bdca703: changed, so a full round",
-    "whatChanged": "Of the twelve files in the branch's diff from main, only packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md differ between the two heads, each equal to #2422's 1f92d90f. Main a409c128..8b6ea377 changes none of the three guides or the checker files, so regenerating on main 8b6ea377 must give the same guides. Against #2422's newest head 1b2ea974, outside the three guides and .legion, only the checker and its two test files differ."
+    "from": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+    "to": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+    "fingerprint": "3e74ab78084e8628550e53105809a3e774f00f34037c2a4a21ac96dd5bdca703 → dbfd73b844a18cf00049188f53649916a72dbeded119cb8391893268a3c68266: changed, so a full round",
+    "whatChanged": "Among the branch's files, packages/envoy/AGENTS.md is the only one whose branch delta changed (equal to #2422's cd9ecf51). bun.lock, package.json and packages/pi-envoy/AGENTS.md changed only by main's own edits: their diff against main is the same at both heads. Main 8b6ea377..af1ff09c touches packages/envoy/AGENTS.md alone among the guides and the checker files. Against #2422's newest head bed3ec1d, outside the three guides and .legion, only the checker and its two test files differ."
   },
   "proof": [
     {
       "criterion": "Acceptance 1: outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, no item or table row is longer than one screen; no fence left under ## Commands",
       "surface": "the checker as a contributor runs it, an independent sentence scan of every non-fence line, and the on-demand guides test",
       "command": "bun scripts/semantic-line-breaks.ts AGENTS.md scripts/e2e/README.md docs/kubernetes.md packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; awk Commands-fence check; bun $TMPDIR/infra632/scan.ts <three guides>; bun test scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0, 0 B stdout, 0 B stderr on all five guides, the two newly merged Envoy guides included; awk exit 0; scan hits=0; guides test 3 pass, 0 fail",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-      "negativeControl": "the checker on main 8b6ea377's three guides exits 1 with 2,411 R1, 295 R2 and 7 R3 findings"
+      "observed": "checker exit 0, 0 B stdout, 0 B stderr on all five guides; awk exit 0; scan hits=0; guides test 3 pass, 0 fail",
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+      "negativeControl": "the checker on main af1ff09c's three guides exits 1 with 2,411 R1, 295 R2 and 7 R3 findings"
     },
     {
       "criterion": "Acceptance 2: nothing lost; the head regenerates byte for byte from main; headings and anchors unchanged",
-      "surface": "restructure.ts and the difference and rendered-text checks on main 8b6ea377's files",
-      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main 8b6ea377 files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; heading and in-file link diffs",
+      "surface": "restructure.ts and the difference and rendered-text checks on main af1ff09c's files",
+      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main af1ff09c files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; heading and in-file link diffs",
       "observed": "restructure exit 0 and all three outputs identical to head; 78/265/40 entries applied, 0 unexplained hunks; rendered 0 missing words, 109 Commands placeholders present; headings and in-file links identical per file",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-      "negativeControl": "round 1: the reclaim Go tests with the 'Delete list' line indented fail; this round they pass (go test ./internal/runtime/sandbox -run 'TestTheReclaimParagraph|TestTheBootCensus…' ok; config ok; skills-guard 13 pass)"
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+      "negativeControl": "round 1: the reclaim Go tests with the 'Delete list' line indented fail; this round they pass (sandbox ok, config ok, skills-guard 13 pass)"
     },
     {
       "criterion": "Acceptance 3: edits to different sentences or different items merge clean; two items added at different places of one list merge clean",
       "surface": "git merge-tree --write-tree on throwaway repositories seeded with the head's guides",
       "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE",
       "observed": "run.sh exit 0, 36 PASS; my 8 pairs pass (6 clean, 2 controls conflict)",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-      "negativeControl": "the same 8 pairs on main 8b6ea377's guides: the first pair (two sentences of the Production check paragraph) conflicts"
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+      "negativeControl": "the same 8 pairs on main af1ff09c's guides: the first pair (two sentences of the Production check paragraph) conflicts"
     },
     {
-      "criterion": "The checker's three changes still hold after the merge (R3 own lines, `(` as a sentence start, the verbatim warning)",
+      "criterion": "The checker's three changes still hold after the merge",
       "surface": "bun scripts/semantic-line-breaks.ts on scratch files",
       "command": "the reviewer's round-2 repro (a one-line parent with 50 one-line children); 'The proof fails, loudly. (A call is a helper.)'",
-      "observed": "the repro exits 0; the parenthesised second sentence gives 'R1' at line 1, exit 1; the checker is byte-identical to round 4's, whose 15 R3 cases and 12 warning cases passed",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "observed": "the repro exits 0; the parenthesised second sentence exits 1 with R1; the checker is byte-identical to rounds 4 and 5",
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
       "negativeControl": "the repro on the checker of 362ba0e9 gives 'R3: 51 screen rows: - Parent item.' (round 4)"
     }
   ],
   "notes": [
-    "CI at bb0690b9 was queued at 20:10Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at 7cf8f4e4 never completed: 29 runs cancelled.",
-    "The branch merges clean with main 8b6ea377 (git merge-tree)."
+    "CI at 746077c0 was queued at 20:26Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at bb0690b9 never completed (30 runs cancelled), nor at 7cf8f4e4, 362ba0e9 or c3539293: no head of this pull request has a completed CI run yet.",
+    "The branch merges clean with main af1ff09c (git merge-tree)."
   ]
 }
