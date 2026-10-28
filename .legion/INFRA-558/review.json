@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-558",
+  "completed": "2026-10-28T19:15:00Z",
+  "round": 1,
+  "reviewedHead": "48a07c54774e416e6d00d33fec7ebcd4fa713770",
+  "codeHead": "9605d1c0ce50b018dcc0e7c63a645fc1312df227",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 7,
+  "minor": 4,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title, all completed success at CI head 9605d1c0; compare 9605d1c0...48a07c54 handoffsOnly true (2 files). Non-required Legion Envoy and Contracts lanes (dispatch-two-builds, envoy-go, envoy-go-race, dispatch-multiprocess, dispatch-browser-multiprocess and others) still queued since 18:12Z.",
+  "thermo": "thermonuclear-deep-review: APPROVE at 48a07c54 (4 Minor). thermonuclear-code-quality: CHANGES at 48a07c54, all cleanup-only (file growth past 1000 lines, duplicated no-route retry and publish-denied predicate, pmdoc alias globals, dead subscribeDurable branch). Plus three focused reviewer passes (bus/intake, documents, requests/settings).",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/dispatch/main.go:506", "description": "cc73bbec removed the defer that stopped the intakes; a stop during joinRegistry's admission wait returns at :579-583 without stopIntakes, so buffered messages are not Nak'ed and the hold (whose token names this process's subject) stays for its 15 s TTL."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/delivery/intake.go:664", "description": "takeOver deletes the durable, then AddConsumer fails (timeout, cancelled ctx at stop, permission) or the process dies: the next attempt sees ErrConsumerNotFound and creates the wanted config, DeliverAll for the events durable, replaying up to 72 h of GitHub messages; the ack floor is lost."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go:447", "description": "admits never bounds a page's R by the fleet's max R: after a rollback (N+1 pages open, no N+1 process live) an N+1 page (3,2) and an N-1 page (1,1) are both writable; the N-1 page's y-prosemirror deletes the since-2 element the other writes."},
+    {"severity": "important", "file": "packages/proof-editor/src/block-schema.ts:148", "description": "directiveAttrs, typedBlockRefusal and parsedDomAttrs (markdown and HTML paste) accept a type, attribute or enum choice whose creatable_since is above the editor's version; socket updates get no server-side refuseUncreatable, so a paste creates an element older writable pages delete."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/rebuild.go:90", "description": "Rebuild from the latest saved version: an element this build does not know answers 400 INVALID_MARKDOWN (uploadedInput's %v drops ErrUnknownElement), and a stored element this build reads but may not create yet fails encodeDocumentTree's refuseUncreatable (empty fragment as held) as 500 INTERNAL."},
+    {"severity": "important", "file": "packages/envoy/cmd/dispatch/README.md:655", "description": "Spec item 5 and its acceptance: the rule covers message bus messages; the README covers stream/consumer settings, subjects and transport but says nothing about envelope/payload members or new event kinds."},
+    {"severity": "important", "file": "PR body", "description": "No Contract change census, though the change adds refusals and error codes at process boundaries (409 DOC_NEWER_CONTENT and close 4425 where DOC_SCHEMA/4409 answered before, the write-path refusal of not-yet-creatable elements, backfill-files' refusal while a live process has no bucket)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md:678", "description": "Says a build before the rule counts as having no bucket and no identity; a build with no server_processes row at all (legion-envoy-v19.0.0 stops at migration 0134) is invisible to Bucketless and to the active-identity rule. The closing paragraph omits the file store and embedder."},
+    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml:376", "description": "dispatch_two_builds filter omits scripts/e2e/lib/held-port.py, which the job's browser step runs through e2e/run-server.sh:69."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/api/client.ts:342", "description": "The no-route retry wait ignores the request's AbortSignal here and in envoy-client dispatch-http.ts:1068; an aborted request stays pending up to about 7 s."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/tree.go:40", "description": "Agent-facing texts (ASD-STE100, plan requiredSkills): DOC_NEWER_CONTENT describes a replacement this build refuses; DOCUMENT_LOADS and DOCUMENT_LIVE offer 'either' where one option is refused; pmdoc/manifest.go:376 gives no action."}
+  ],
+  "fastFollow": "INFRA-558 code-quality cleanup: move the held-durable machinery out of delivery/intake.go and schema admission out of docs/websocket.go, split twobuild_test.go, one shared no-route retry in contracts, one publishDenied predicate, drop pmdoc's manifest alias globals and subscribeDurable's dead branch, unexport StopDelivering, fix hold.go:98-100 and build-dispatch-build.sh:5-8 comments.",
+  "threads": "No review threads and no bot findings on the PR at this head."
+}
