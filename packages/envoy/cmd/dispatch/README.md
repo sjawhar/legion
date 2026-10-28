@@ -17,7 +17,7 @@ below add only what a setting's one line cannot say.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
+| `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. Every pool's size is fixed in code, at most 84 connections a process in all (the request pool's 48 is `store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. Each connection names its pool in `application_name`, which replaces the connection string's own: `dispatch-requests`, `dispatch-background`, `dispatch-live`, `dispatch-settlements`, `dispatch-rooms`, `dispatch-health`, `dispatch-listen`, `dispatch-leases` or `dispatch-outbox`, so `select application_name, count(*) from pg_stat_activity group by 1` shows what each pool holds. |
 | `DISPATCH_AGENT_TOKEN` | One value, or several separated by whitespace, so the shared token can rotate with an overlap: write the new value followed by the old one, move every consumer to the new one, then write the new value alone. The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time. Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value. A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token. Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request. Callers that share an address and User-Agent share a line, so the log says whether a value on its way out is still in use, not who uses it. |
 | `DISPATCH_SIGNING_KEY` | The HMAC key every session cookie is signed and verified with, and the key the stored refresh tokens' seal is derived from (Identity, below). Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), so a deployment of more than one process sets one value every process is given: with a key apiece, a session minted on one process is refused by the other — every person is signed out by whichever process answers next — and every stored refresh token reads as absent. No process can see another's key, so nothing refuses the boot and `/healthz` cannot report it; it is a precondition of running more than one process, never a check (Running more than one process, below). Rotating it signs everyone out and leaves every stored refresh token unopenable. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
@@ -1362,8 +1362,9 @@ route runs and write none: the `403` a cookie request from another origin gets, 
 request for another host gets on a server with local sign-in, and the `307` redirect Go's router
 gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash
 (`/api/github/rest`). Match the line as `msg="dispatch: request"`: the previous-shared-token
-warning's message starts with the same words. The line is one synchronous write to stderr per
-request, so a log pipe that blocks stalls requests.
+warning's message starts with the same words. The line goes through the process's logger, which
+never makes a request wait on stderr: a line that finds its buffer of 4,096 full is dropped and
+counted (`dispatch_log_dropped_total`, and one WARN `dropped N log records` once there is room).
 
 ## Routes
 
@@ -1549,6 +1550,31 @@ node type weighs:
 | `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |
 | `html` | a piece of inline HTML | 2 | the HTML |
 | `footnote_reference` | a footnote reference | 2 | label |
+
+## Load errors
+
+Past what it can serve, Dispatch refuses a request at once rather than queueing it without end,
+and tells the client when to ask again. Every `/api/v1` route but the two event streams and the
+test hooks is admitted before it runs: reads (GET, HEAD) and writes (every other method) each have
+a limit, 28 and 8 of the request pool's 48 connections, and the delivery timeline, measures and
+pipeline count twice, since each runs two reads side by side. A request that finds no room waits,
+in arrival order, at most 75 ms in a queue as long as its class's limit. An admitted read has 20
+seconds to answer, and the four file version downloads 5 minutes; a write has no deadline and,
+once admitted, runs to completion. Every wait for a database connection is bounded too, at 3
+seconds for a request's. The document and delivery websockets are neither admitted nor bounded.
+
+Each answer below carries `Retry-After` in seconds, and all but `EDIT_QUEUE_FULL` carry
+`Cache-Control: no-store`; none is logged above DEBUG, and a request whose client went away is
+answered nothing. The `dispatch` command waits out `Retry-After` and asks again, at most twice and
+within its 60-second deadline: any method on a 429, a read only on a 503.
+
+| Status / code | Meaning |
+| --- | --- |
+| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or 75 ms passed with no room. Nothing ran, so any method may be sent again after `Retry-After: 1`. A refused request's body is read and discarded first, up to the route's body limit and for at most 60 seconds, so a browser reads the 429 rather than a reset connection. A write that waited for a document's writer gate and then found no room is refused this way too. `dispatch_http_refused_total` counts them. |
+| `429 EDIT_QUEUE_FULL` | 32 writes were already waiting for a document this write changes. Every write to a live document waits for that document's writer gate, one write at a time, before its transaction opens: an edit, an upload, a rebuild, an anchored comment or ask, a reply that writes into its document, a comment edited, resolved, reopened, accepted or rejected, an ask answered, resolved or edited. Nothing ran; send it again after `Retry-After: 1`. |
+| `503 DATABASE_BUSY` | No database connection came free within its pool's bound (`store.ErrPoolBusy`). A read may be sent again after `Retry-After: 1`; a write may have committed part of its work before the wait that failed it, so read what it wrote before sending it again. `dispatch_db_pool_acquire_timeouts_total` counts the waits. |
+| `503 REQUEST_TIMEOUT` | A read ran past its deadline: 20 seconds, 5 minutes for a file version download. Send it again after `Retry-After: 1`. |
+
 ## Input errors
 
 | Status / code | Meaning |

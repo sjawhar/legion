@@ -6,14 +6,17 @@ GitHub reads go through as the GitHub App.
 
 ## Startup and persistence
 
-`DATABASE_URL` and `DISPATCH_AGENT_TOKEN` are required. Startup opens the shared
-`pgxpool.Pool` at `store.sharedPoolSize` connections — the size is a property of
-Dispatch rather than of the URL or the task's CPU allotment, and a `DATABASE_URL`
-carrying `pool_max_conns` is refused at open rather than silently overridden —
-applies embedded migrations from `internal/dispatch/store/migrations` (refusing
+`DATABASE_URL` and `DISPATCH_AGENT_TOKEN` are required. Startup opens the request
+pool at `store.sharedPoolSize` (48) connections — every pool's size is a property
+of Dispatch, set in `store/pool.go`, rather than of the URL or the task's CPU
+allotment (`packages/envoy/AGENTS.md`, "Every pool's size is set in code"), and
+a `DATABASE_URL` carrying `pool_max_conns` is refused at open rather than
+silently overridden — applies embedded migrations from `internal/dispatch/store/migrations` (refusing
 the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
-migrations"), then starts HTTP serving. The Postgres store contains people,
+migrations"), opens the lease pool its leased loops take their leases on and the
+background pool its background loops read and write through, then starts HTTP
+serving. The other pools open on first use. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
 A migration must leave the release before it able to read and write the
 schema, since two processes serve one database through a rolling update: a
@@ -50,7 +53,7 @@ generated from it. A variable a release stopped reading leaves the table for
 mux, above the dashboard router, and the probe reads the database through
 `store.Pool.Healthy` — a one-connection pool nothing else uses, under
 `store.healthProbeTimeout`, two seconds covering dial and query. It never waits
-on the shared pool: a busy period legitimately leaves that pool with no free
+on the request pool: a busy period legitimately leaves that pool with no free
 connection, and a probe queued behind a writer reads as a dead process, so the
 ALB fails it at five seconds and ECS replaces the task, cancelling every
 in-flight request of every other client. The compose healthcheck and the deploy
@@ -431,7 +434,12 @@ The `/api/v1` routes are one table, `api/routes_table.go` (`routes()`): `Registe
 `GET /api/v1` (public) serves it as `{routes: [{method, path, auth, description}], docs}` sorted by
 path then method. Add a route by adding a row — never a `mux.HandleFunc` line — and bump the pinned
 count in `api/routes_table_test.go`. `auth` is `public`, `any` (user or bearer), `human`, or
-`bearer`; it describes the check the handler makes, the handler still enforces it. An unknown path
+`bearer`; it describes the check the handler makes, the handler still enforces it. `Register`
+serves every row admitted and a read under a deadline, answering what it could not serve with a
+retryable `429` or `503` (README "Load errors"); a row served otherwise — the two event streams,
+neither admitted nor bounded like the test hooks, the uploads' body limit, the file downloads'
+deadline, the weight of a route that reads side by side — is an entry of `routeServings` beside
+the table. An unknown path
 under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
 `routes/router.go` with `404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET
 /api/v1 lists every route"}` before any dashboard lookup; only paths outside those roots fall back

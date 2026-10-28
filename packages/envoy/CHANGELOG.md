@@ -4,6 +4,19 @@
 
 ### Added
 
+- `DISPATCH_METRICS_ADDR` (`host:port`) serves Prometheus's `GET /metrics` on a listener of its
+  own, with no authentication, since every series carries counts and durations only: each
+  database pool's size, open, in-use and idle connections, its waiters, its acquire waits and the
+  acquires that ran out its bound; admission's requests in flight, queued and refused; the
+  writers waiting for a document's writer gate; the settlements running and waiting; the outbox's
+  lag and published events; the events committed; garbage-collector pauses, the heap and the
+  goroutines; and the log lines dropped (`cmd/dispatch/README.md`, "Metrics"). Unset, nothing
+  listens; a value that is not `host:port`, or an address already taken, refuses startup
+  (INFRA-592).
+- With `DISPATCH_PPROF_PORT` set, Dispatch's mutex and block profiles record from boot, at rates
+  low enough to leave on (one contended unlock in a hundred, every block of a millisecond or
+  more), so `/debug/pprof/mutex` and `/debug/pprof/block` show which lock or channel the
+  goroutines queue on. Unset, neither records (INFRA-592).
 - A person's browser edit of a document reaches the agent sessions that wrote it. Once the
   document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
   one `artifact.human_edited` event: the person who edited last is its actor, and its payload
@@ -903,6 +916,59 @@
 
 ### Changed
 
+- Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
+  Every `/api/v1` route but the two event streams and the test hooks is admitted first: reads
+  (GET, HEAD) up to 28 at once and writes up to 8, of the request pool's 48 connections, the
+  delivery timeline, measures and pipeline counting two each (they now run at most two reads at
+  once, where the timeline ran up to seven). A request that finds no room waits at most 75 ms in a
+  queue as long as its class's limit, and is otherwise answered `429 OVERLOADED` with
+  `Retry-After: 1` and `Cache-Control: no-store`, after its body is drained: nothing of it ran, so
+  any method may be sent again. A read has a deadline of 20 seconds, 5 minutes for the four file
+  version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion
+  once admitted, and every transaction commits apart from its caller's cancellation, within 10
+  seconds. A request whose handler waited its pool's bound for a database connection is `503
+  DATABASE_BUSY`; both 503s carry `Retry-After: 1` and `Cache-Control: no-store`. A request whose
+  client went away is answered nothing and logged at DEBUG, where it was a `500` and an ERROR line,
+  and none of these answers is logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
+  admitted read of weight one runs on one connection for its whole length, where an issue read
+  took twelve one after another (INFRA-592).
+- Dispatch's database connections are one budget of 84 a process, partitioned so that neither
+  requests nor background work can starve the other: the request pool holds 48, from 64, and the
+  background loops (6), the live event stream relay and delivery hub (4) and document settlements
+  (4) each draw from a pool of their own. The lease pool holds a connection for each of its 10
+  lease names and 2 spare, 12 where it held 10 with none spare; `duty.Exclusive` refuses a name
+  that is not on its list, and skips
+  a pass that finds no lease connection free within 2 seconds until its next tick. Every
+  connection names its pool in `application_name` (`dispatch-requests`, `dispatch-background`,
+  `dispatch-live`, `dispatch-settlements`, `dispatch-rooms`, `dispatch-health`, `dispatch-listen`,
+  `dispatch-leases`, `dispatch-outbox`), in place of the connection string's own, and every wait
+  for a connection is bounded: 3 seconds for a request's, a document load's or a live reader's, 30
+  for background work and settlements. A database's connection limit must allow 84 a process
+  (INFRA-592).
+- Every write to a live document waits for that document's writer gate before its transaction
+  opens, one write per document at a time, holding no database connection and giving its
+  admission back while it waits: an edit, conditional or not, an upload, a rebuild, an anchored
+  comment or ask, a reply that writes into its document, a comment edited, resolved, reopened,
+  accepted or rejected, an ask answered, resolved or edited. `429 EDIT_QUEUE_FULL`, which only a
+  conditional edit could get, now answers any such write that finds 32 already waiting for its
+  document, and carries `Retry-After: 1` (INFRA-592).
+- Document settlements run at most four at once, however they start, each on the settlements
+  pool, and one a timer or the last browser's leaving starts has 60 seconds; one that runs out of
+  time or finds no connection free rolls back, keeps its document owed and is resumed later
+  without counting as a failure. A settlement renders the document before it locks the
+  document's owner row, so it no longer holds that row, and every writer of the issue queued
+  behind it, across a render. A document whose ask blocks need repairs gets them in one commit and
+  its version in the next (INFRA-592).
+- Logging never makes a request wait: each line is handed to one writer goroutine through a
+  buffer of 4,096 lines, a line that finds it full is dropped and counted, and one WARN `dropped N
+  log records` follows once there is room. Every exit, a refused boot's included, writes the lines
+  still buffered first (INFRA-592).
+- Shutdown runs every stage within one deadline, 27 seconds after the signal (`stopGrace` less 3
+  seconds kept for closing the pools, the last log lines and the exit): the document service
+  starts settling at most 6 seconds after the signal with requests still in flight, where it
+  waited 11, and a process with a write still running at the deadline exits without it,
+  `dispatch: exit at the shutdown deadline with requests or database connections still in use`
+  (INFRA-592).
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the

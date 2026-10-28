@@ -54,10 +54,21 @@ and `EnsureBlockIDs` repairs missing and duplicate IDs (an id holding a NUL, whi
 client can set and no ask row or anchor can store, counts as missing; `storedBlockID`) before agent
 updates are written. Any other id a browser sets stays, such as `q:1` from a pasted `:::ask{#q:1}`,
 which the browser editor keeps. Document
-settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
-server-owned attributes of each ask block it reconciled) and persists the updates they captured in
-the same Postgres transaction as any resulting version and event, then renders and compares
-canonical markdown. Each repair is read and written in one Yjs transaction, which holds the
+settlement runs in passes (`settlePass`), and no pass renders the document while it holds the
+document's owner row, which serialises every writer of the issue. Before it opens its transaction
+a pass copies the live tree (`liveTree`) and renders it, both the markdown and the block offsets
+its version stores; under the locks it checks that the room's instance still holds the durable
+version it held when it copied the tree, and otherwise rolls back and reads the document again (at
+most `maxSettleRereads` times; then the document stays owed for its next update or the
+resumption). A tree that lacks block ids has them stamped in the room (`EnsureBlockIDs`) and the
+stamp committed alone. A tree whose ask blocks need repairs (the server-owned attributes of each
+ask block it reconciled) is rolled back and the repairs planned with no lock held - their answers
+weighed and the repaired tree rendered (`repairPlan`); the next pass, when it reconciles the same
+tree, writes them into the room and commits them with the ask rows and events their
+reconciliation wrote, in a transaction of their own that writes no version. The pass after that
+versions the repaired document, rendered outside the lock as every version is. Only a pass with
+nothing to stamp or repair writes the version, from the output it rendered before its
+transaction. Each repair is read and written in one Yjs transaction, which holds the
 document's lock, so it is computed against the document as it stands: the tree settlement
 reconciled was read before its database work, and writing that tree would revert an edit a peer
 made since (LEGION-479). Each repair's update is held from the room's own persistence by a
@@ -65,10 +76,10 @@ suppression slot of its own (`applySuppressed`; ygo's persistence worker is hand
 its own), and every path releases it: a slot nothing finishes holds the worker at the room's next
 update. A repair reports whether its transaction wrote anything; one that wrote nothing still
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
-set), so its slot is finished with that update and the worker takes it rather than storing it. A
-settlement that wrote into the room renders its version from the document as it stands after the
-repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version
-too. A document's pending authors are in one of two places: F, the room's local in-flight credits
+set), so its slot is finished with that update and the worker takes it rather than storing it. The
+repaired document's version comes from the next pass's own copy of the live tree, so a peer's edit
+made since the repairs' read is in that version too. A document's pending authors are in one of
+two places: F, the room's local in-flight credits
 (`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F. Its append takes the document's
 advisory lock, writes an unconsumed credit to R in that update's transaction, then removes it from
@@ -151,7 +162,16 @@ and `cmd/dispatch` runs `docs.Service.RunSettlementResumption`, which at start a
 arms the settlement of each document whose row is a minute old and whose issue is open
 (`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
-until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
+until it reopens. However a settlement starts - a timer, the last browser leaving
+(`settleLastPeer`), a retry, the resumption or the shutdown drain - it first waits, holding no
+connection, for one of `settlementWorkers` (4) slots, before it loads a cold room, and its
+transaction runs on the settlements pool (`store.Pool.Settlements`, one connection per slot); the
+resumption's query runs on the background pool. A timer's settlement, and the last browser's,
+runs under `settlementTimeout` (60 s). One that passes that deadline, or finds no connection free
+within its pool's acquire bound, rolls back, keeps the row and counts no failure toward
+`maxSettleFailures`, so overload fails no room: the resumption settles it. A cold room's load is
+the one part the deadline cannot stop, since ygo loads a room with no context of its own.
+`docs.Service.Shutdown` runs the settlement of each loaded room whose document has
 that row, and no other, inside its 9 s drain budget (`docs.ShutdownDrainBudget`, within the
 caller's deadline); a settled document's repeat would spend the budget for nothing. Each loaded
 room has a worker of its own that waits for the room's durable appends to land, then reads whether
@@ -401,11 +421,28 @@ every version and the durable document as they were.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
-holds off the room's settlement, which runs once the write is published or discarded. The docs
-layer takes a document's locks in one order, wherever a handler starts: the owner row
-(`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner
-row before it waits for the slot. The slot is in memory, where Postgres cannot see a wait for it, so
-no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
+holds off the room's settlement, which runs once the write is published or discarded. Outermost,
+before its transaction opens, every live write takes its documents' writer gates
+(`docs.Service.AcquireDocumentWriter`, `docs/writergate.go`): one writer at a time per document,
+in this process, in arrival order, so the writers queued for a busy document wait in memory
+holding no connection, rather than in Postgres and at the writer slot each holding one. The
+handlers name the documents a write changes with no transaction open and take every gate in one
+sorted call (`api/document_writers.go`, `gatedWrite`, which names them again under the write's
+locks and takes the gates once more when they moved); `joinLiveWrite` refuses a write whose
+context does not carry its document's gate (`docs.ErrWriterGateNotHeld`), so an entry point added
+later cannot skip it. The gate is refused at once to a caller holding a pooled connection, a read's
+pinned one included (`docs.ErrGateWhileHoldingConnection`, checked by `store.ConnectionHeld`), so
+nothing that holds a connection or lock ever waits for it. At most 32 writers queue behind a
+document's holder (`maxQueuedDocumentWriters`); the next is `429 EDIT_QUEUE_FULL` with
+`Retry-After: 1`, before anything ran. A writer that has to wait parks its request's admission
+units while it waits (`admission.Ticket.Park`) and takes them back once it holds its gates, so
+writes queued on one document do not hold every write unit from writes to others; a take-back
+admission refuses is `429 OVERLOADED`. Inside the transaction the docs layer takes a document's
+locks in one order, wherever a handler starts: the owner row (`lockArtifactOwner`), then the
+writer slot, then the advisory lock; a joined read takes the owner row before it waits for the
+slot. With the gate held, a writer's wait for the slot is only for the previous writer's publish.
+The gate and the slot are in memory, where Postgres cannot see a wait for them, so no transaction
+may wait for the slot while holding a lock its holder still needs. A failed room's eviction
 flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
 fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the
@@ -1113,16 +1150,17 @@ document token or one-or-more `{id, token}` block tokens. A document token prote
 operation; a block guard must name every content block the resolved batch changes, while unrelated
 sections can change concurrently. Insert and move require the document token because their meaning
 depends on document order. Tokens include inline marks, so a fresh anchor makes the relevant
-document or block guard stale. After resolving the artifact, the conditional path takes a bounded
-in-memory gate keyed by its artifact id before starting the write transaction or warming its room,
+document or block guard stale. After resolving the artifact, an edit, conditional or not, takes
+the document's writer gate (above) before starting the write transaction or warming its room,
 then takes the document's owner row and writer slot, then
 `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction; it
-reads, checks, resolves, and applies the batch inside that transaction. Admission waiters hold no
-database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while
-`PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
-authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting
-the shared pool. The advisory → Yjs order matches durable writer and persistence
-ordering and prevents both live-writer check-to-apply races and a lock inversion. `AppendUpdateTx`
+reads, checks, resolves, and applies the batch inside that transaction. Writers waiting for the
+gate hold no database connection; `EDIT_QUEUE_FULL` is a `429` with `Retry-After` that means wait
+and send the same write again, while `PRECONDITION_FAILED` means re-read. This protects unrelated
+document reads, websocket authorisation, room loading, settlement, and browser persistence from a
+stale-edit flood exhausting the request pool. The advisory → Yjs order matches durable writer and
+persistence ordering and prevents both live-writer check-to-apply races and a lock inversion.
+`AppendUpdateTx`
 holds the same transaction-scoped room lock for every durable `doc_updates` append. A failure
 returns `409 PRECONDITION_FAILED` with each mismatched block or document token and current tokens,
 and commits no update, version, or event. An uncovered block guard returns `400 INVALID_PRECONDITION`
@@ -1169,11 +1207,15 @@ row; on the live path the loser is `failRoom`, which evicts the room and drops t
 weaker level with the order broken, a project-document upload that takes the room lock before its
 event's owner lock deadlocks against a settlement holding that row.
 
-**One caller, one connection.** Nothing holding a connection of the shared pool (`store.Pool`)
-- a transaction, an open cursor, which holds its connection until it closes, or a connection
-taken with `Acquire` - acquires a second one from it, and nothing a connection-holder waits for
-needs one either. A transaction holds its connection until it commits, and a caller that asks
-for another one while holding a row or advisory lock waits for a connection only the callers
+**One caller, one connection.** Nothing holding a connection of a pool `store.Pool` guards - the
+request pool `store.Open` opens, and the background, live, settlements and outbox pools it wraps
+(`store.Pool.Background`, `Live`, `Settlements`, `Outbox`) - a transaction, an open cursor, which
+holds its connection until it closes, or a connection taken with `Acquire` - acquires a second one
+from any of them, and nothing a connection-holder waits for needs one either: neither a
+connection nor a document's writer gate, the outermost wait of every live write, which refuses a
+connection holder at once (above). A transaction holds its connection until it commits, and a
+caller that asks for another one while holding a row or advisory lock waits for a connection
+only the callers
 queued behind that lock can release. Two anchored writes and two settlements of one issue's
 other documents closed that cycle on a four-connection pool, and only `pg_terminate_backend`
 recovered it. Rationing connections does not fix it and neither does a bigger pool: the queue
@@ -1184,7 +1226,7 @@ The rule enforces itself. `store.Pool` keeps the pgx pool private and every way 
 connection - `Query`, `QueryRow`, `Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
 `CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds
 one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging
-production. Every entry point that opens one of this pool's transactions marks its context with
+production. Every entry point that opens one of these pools' transactions marks its context with
 `store.WithTransactionTracking`: `api.Register` marks every route and the document websocket,
 and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`,
 `MaterializeAt`, the three CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`,
@@ -1198,7 +1240,8 @@ refusal logs its stack once per call site, so a caller that trips it in a loop c
 log; the error itself is returned every time. A caller that runs independent reads side by side
 gives each its own mark with `store.ForConcurrentRead`, which refuses a caller already holding a
 connection: on one shared mark, one read's open cursor would refuse the others, and each read
-still takes one connection only (the delivery timeline's four reads do this). `store/pool_test.go`
+still takes one connection only (the delivery timeline's reads do this, at most two at once, the
+weight admission counts the route at). `store/pool_test.go`
 and `api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
 concurrent reads each holding one connection, concurrent anchored writes, and two settlements
 queued behind one held write on a four-connection pool.
@@ -1219,29 +1262,99 @@ any other pool takes its own connection as before. `store/pin_test.go` and
 connection, a one-connection request pool answering an issue read, and the writer gate admitting
 a write and refusing a pinned read.
 
-**Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
-(64, from 16 since 2026-10-27), so neither the task's CPU allotment nor the DSN another
-repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns`
-is **refused at open** rather
+**Every pool's size is set in code.** `store.Open` fixes the request pool's `MaxConns` at
+`store.sharedPoolSize` (48; 16 until 2026-10-27, then 64 until the pools were partitioned), so
+neither the task's CPU allotment nor the DSN another repository's URL builder writes decides it,
+and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather
 than silently overridden — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`,
 because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so
 pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
-The other pool parameters are not refused, because the shared pool keeps whatever minimums the
+The other pool parameters are not refused, because the request pool keeps whatever minimums the
 connection string sets. pgx's default, `max(4, NumCPU)`, is four on production's one Fargate
 task at `cpu="512"`, and four is a connection per blocked writer: with four writers parked on
 one issue's row lock, a read of an unrelated issue waits for as long as the lock is held. Sixteen
 ran out too: under heavy agent load the API held all sixteen and every other caller, the events
-outbox included, waited behind them. The database has hundreds of connections spare, so 64 is
-deliberate headroom.
+outbox included, waited behind them. Sixty-four did not hold either, because the background
+loops, the live-update readers and the settlements waited for the same connections as the
+requests, and past capacity each side starved the other.
+
+So a process's connections are one budget, partitioned rather than grown, 84 in all (the comment
+on `store.sharedPoolSize` is its record): each pool below is sized in `store/pool.go`, and every
+connection carries `dispatch-<pool>` in `application_name`, so `pg_stat_activity` groups a
+process's connections by pool (`configurePool`; a connection string's own `application_name` is
+replaced), and the metrics' `pool` label is the part after `dispatch-`.
+
+| Pool | Connections | Acquire bound | What takes them |
+| --- | --- | --- | --- |
+| `requests` (`store.Open`) | 48 | 3 s | every API request; outside admission, the event streams' catch-up, the websockets' identity checks, the browsers' durable document appends, `/auth/*` and the GitHub proxy |
+| `background` (`Background`) | 6 | 30 s | the embedding queue and its coverage pass, the suggestion sweep, the delivery reconcile and intakes, the architecture importer's ticker, the settlement resumption's query, task progress, reference-excerpt and block-index reconciliation, the edit-notice sweep, the outbox lag sample |
+| `live` (`Live`) | 4 | 3 s | the event stream relay's and the delivery hub's reads |
+| `settlements` (`Settlements`) | 4 | 30 s | document settlements, one connection per settlement slot |
+| `rooms` (`Rooms`) | 4 | 3 s | cold document loads |
+| `health` (`Healthy`) | 1 | the probe's own 2 s | `/healthz` |
+| `listen` (`Listener`) | 1, and the 3 it hands over | 10 s | the LISTEN connections of the delivery hub, the event stream relay and the stale-room evictor |
+| `leases` (`Leases`) | 12 | 2 s | `duty.Exclusive`: one per lease name (10) and 2 spare |
+| `outbox` (`Outbox`) | 1 | none: its one caller | the events outbox |
+
+**Every connection wait is bounded.** Each pool's `ConnConfig.Tracer` is `store`'s acquire tracer
+(`store/acquire.go`, pgx's `AcquireTracer`), which every pool method goes through, wrapped or raw:
+it bounds each acquire at its pool's bound, unless the caller's own deadline is sooner, and records
+the wait for the metrics. An acquire that runs out the bound while the caller is still live is
+`store.ErrPoolBusy` from a guarded pool (`store.IsPoolBusy`; it wraps `context.DeadlineExceeded`
+too), and `context.DeadlineExceeded` with the caller's context still live from a raw one (rooms,
+leases); nothing ran, and a request answers it `503 DATABASE_BUSY` (`admission.WriteUnserved`).
+The bound is per acquire: a write makes an acquire per statement and transaction, one after
+another, each bounded on its own, and an admitted read of weight one pins one connection for its
+whole length (above), whose own deadline bounds the sum of its waits. A transaction commits apart
+from its caller's cancellation (`store.CommitContext`, bounded at 10 s): a commit a client's
+leaving cut short has an unknown outcome, and the document service fails every room such a
+transaction wrote.
+
+**Past capacity a request is refused, not queued.** Every table route but the two event streams
+and the test hooks is admitted before its handler runs (`api.serveRoute`,
+`internal/dispatch/admission`). Reads (GET, HEAD) and writes (every other method) each have a
+limit, 28 read units and 8 write units of the request pool's 48 connections, the other 12 being
+for the request-pool users admission does not count (the table above); a request takes its
+route's weight in units (`apiRoute.Weight`: two for the delivery timeline, measures and pipeline,
+which read side by side, one otherwise). A request that finds no room waits, first come first
+served, in a queue as long as its class's limit, for at most 75 ms (`admission.DefaultWait`); one
+that finds the queue full or waits that out is answered at once `429 OVERLOADED` with
+`Retry-After: 1` and `Cache-Control: no-store`. Nothing of it ran, so any method may send it
+again, and its body is drained first, up to the route's body limit and for at most 60 s
+(`drainRequestBody`), so a browser reads the 429 rather than a reset connection. An admitted read
+runs under a deadline: 20 s (`defaultReadDeadline`, below the 30 s a page and the load generator
+wait and the CLI's 60 s), 5 min for the four file version downloads (`apiRoute.Deadline`). A write
+has no deadline: once admitted it runs to completion, its acquires still bounded, since an upload
+takes a minute or more and a write cancelled partway rolls back for its page to retry it. A
+handler's error is classified first by `admission.WriteUnserved` (`writeHandlerError`,
+`identity.WriteError`, the routes package's error writers): the read's deadline passed is `503
+REQUEST_TIMEOUT`; a client that went away is answered nothing; an acquire bound
+(`store.ErrPoolBusy`), or another deadline with the request still live, is `503 DATABASE_BUSY`,
+after which a write may have committed part of its work. Both 503s carry `Retry-After: 1` and
+`Cache-Control: no-store`, and none of the three is logged above DEBUG: under load every request
+may meet one. The websockets are mounted outside the table and are neither admitted nor bounded.
+`api/request_bounds_test.go` holds it.
+
+**The lease pool counts its leases.** `duty.LeaseNames` is every lease `duty.Exclusive` takes,
+each a constant in `duty/exclusive.go` (a delivery durable's consumer lease spelled out, though
+`consumerLease` builds it at run time); Exclusive refuses any other name (ERROR `dispatch duty:
+lease refused`), and `store.leaseNameCount` is held to the list's length by
+`TestTheLeasePoolCountsEveryLeaseName`. Every listed name can be inside Exclusive at once, each on
+a connection of its own, and the two spare cover pgxpool's own health check and lifetime expiry
+and a pass whose unlock failed holding its connection until it closes, so a wait for a lease
+connection is a fault: a pass that waits the lease pool's bound is skipped (WARN `dispatch duty:
+leased pass skipped`) and its next tick tries again. A loop that leases a new name, or holds a
+lease-pool connection for any other reason, adds its constant to the list and one connection to
+the pool, rather than taking one another loop counted on.
 
 Work that genuinely needs its own connection while a transaction is open does not take it from
-the shared one; it takes it from a pool of its own, opened on demand from a copy of the shared
+the request pool; it takes it from a pool of its own, opened on demand from a copy of the request
 pool's configuration and closed with it (`store.Pool.separate`). A cold document room loads on
 the rooms pool (`store.Pool.Rooms`, four connections): that load is deliberately outside the
 writer's transaction, because the room outlives the request and its updates must not roll back
 with it. Everything the load needs comes from that pool, `onLoadDocument`'s issue read included
 - a writer holding a connection and the issue's row lock waits for the load, so a load that
-waited for the shared pool would close the same cycle without a transaction of its own. The
+waited for the request pool would close the same cycle without a transaction of its own. The
 pool belongs to the store rather than to each `PgVersioned`, so a caller that constructs one to
 read a document borrows those connections instead of opening more. The load balancer's probe
 takes the other one: `store.Pool.Healthy` reads the highest applied schema version from the
@@ -1252,17 +1365,18 @@ doc owns the argument for the bound: every prober reads silence as a dead proces
 tightest of them allows three seconds (`deploy/compose/dispatch.compose.yml`,
 `deploy/scripts/autodeploy.sh`) against the ALB's five, and nothing else bounds the wait
 usefully — a cold dial is floored at two minutes by `pgxpool`, forty times that tightest
-deadline, and once the connection is up nothing bounds the query at all, because a request
-context carries no deadline. Warm is production's normal state, so the unbounded case is the
-one it runs. Both separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the
-shared pool cannot become a target a one- or four-connection pool can never reach, and both
-are deliberately unguarded — a load or a probe taken under an open transaction must be served,
-not refused, and a separate pool cannot close the cycle the guard prevents. The events outbox
-claims, reads and records its batches on a pool of its own too (`store.Pool.Outbox`, one
-connection): it runs one statement at a time, and a full shared pool must not hold back
-publishing.
+deadline, and once the connection is up nothing bounds the query at all, because `/healthz`'s
+request context carries no deadline. Warm is production's normal state, so the unbounded case is
+the one it runs. Every separate pool zeroes `MinConns` and `MinIdleConns`, so a floor meant for
+the request pool cannot become a target a one- or four-connection pool can never reach. The
+rooms, health, listen and lease pools are deliberately unguarded — a load or a probe taken under
+an open transaction must be served, not refused, and a separate pool cannot close the cycle the
+guard prevents; the background, live, settlements and outbox pools are wrapped in `store.Pool`
+(`store.NewPool`), so the guard and the `ErrPoolBusy` mapping apply to them as to the request
+pool. The events outbox claims, reads and records its batches on its one connection: it runs one
+statement at a time, and a full request pool must not hold back publishing.
 
-The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
+The migration runner takes one more connection outside every pool. `pgmigrate.Exec`, which
 applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`
 (five seconds), after the runner's advisory lock, so a migration queued behind a long transaction
 fails the boot rather than holding every read and write of its table behind its request. While
@@ -1282,7 +1396,7 @@ suggestion kind and browser-mark verification the comment routes ask for while t
 transaction is open. Settlement marks its injections owner-verified (`withOwnerVerified`)
 because it has already read and locked the owner row in its own transaction, so `allowInject`
 does not read it again. An injection that is not owner-verified does read the issue through the
-shared pool, and that read is outside the cycle only because ygo runs `OnInject` before
+request pool, and that read is outside the cycle only because ygo runs `OnInject` before
 `getOrCreateRoom` (`provider/websocket/inject.go:321-330`): an injection refused there has
 published no room placeholder for a connection-holder to park on. A handler that must read
 outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
@@ -2200,7 +2314,7 @@ from and that ask's document.
 - A human's snooze on one inbox row is its own table and route pair, like per-user agent state. `PUT /api/v1/me/asks/{id}/snooze` (human-only, because the inbox is) takes `{snoozed_until: <RFC3339>}` and upserts `user_ask_snooze(login, ask_id, snoozed_until)`, keyed on `model.CanonicalLogin(actor.ID)` rather than the actor id — both identity implementations name a person by lowercase email now, but a row written before they did can carry another casing of the same name, so keying on the raw id could give one person two snooze sets. That makes the `me/*` family inconsistent, deliberately and visibly: `user_ask_snooze` and `user_agent_read` (`0051`) key on the canonical login, while `user_issue_state` (migration `0001`) and `user_agent_state` (`0033`) key on the raw `actor.ID`, and `inbox.go` now binds one form twice — `model.CanonicalLogin` for the assignee filter's `$3` and for the snooze join's `$4` — while those two tables are read elsewhere under the raw id. The two older tables carry the same latent split; it is not introduced here and is not fixed here, because normalising them needs a backfill of rows that already exist. `user_ask_snooze` has none to back-fill: the table is created by `0048` and its only writers ship in the same change, so no deployed schema ever carried a version of it written under a raw login — (`store/migrations/0048_user_ask_snooze.up.sql`); a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`; the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency). `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there. Neither write touches the ask, appends an event, or reaches any other login: a snooze is one viewer's view state. Keyed on the ask, not its issue, so a document ask snoozes exactly like an issue ask. `GET /api/v1/inbox` carries the caller's own `snoozed_until` (null when they have not snoozed the row) through a left join on that table and **never filters on it** — the row is listed either way and nothing sweeps the table, so a snooze whose moment has passed reads back as the ordinary row it is. The SPA folds a row whose moment is still ahead into a collapsed `Later` band, ahead of whose turn it is: an agent replying to a deferred ask hands the turn back without bringing the row back (`sectionOf` and `waitingOnYou`, `packages/dispatch/web/src/features/inbox/`).
 - A person's Replies page is its own table and route pair, like per-user agent state. `user_threads(login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at, last_reply_id, unread)` (migrations `0095`-`0099`) holds one row per person per thread they wrote in: an ask's thread (they asked it, answered it or replied in it), a comment thread by its root, or an issue message thread by its root (`in_reply_to` walked up, at most 64 deep, by the trigger, the seed and the catch-up alike). An issue-less direct message makes no row, since its replies are the Agents badge's. Triggers keep the rows, so no read scans `comments`: `after insert on comments`, `after insert or update of answer on asks` and `after insert on messages` each call `user_threads_record`, which moves every other participant's `replied_at` and `last_reply_id` on a comment, a message or an answer (an answer names its ask, so the asker's row goes unread when someone else answers), and the writer's own `read_through` on any write of theirs; asking moves only the asker's own mark. Only an insert or an answer counts: an edit, an anchor refresh or a resolution moves nothing, so a resolved comment thread stays listed until it is read. Authorship is the author's `kind` and `id`, so a session writing under a person's own token is someone else to that person. A person is keyed on `user_threads_login` (`0095`: the author id lowercased and trimmed of ASCII white space, as `model.CanonicalLogin` lowercases and trims), so a row's login always matches the one the routes read. A write whose owner has no project (an agent conversation's file, which no route comments on) makes no row. `0098` seeds every row read through the newest write stored at the migration's own time, and `0099` moves a row forward to any write by someone else newer than its `replied_at` - a write that committed while `0098` ran, on a thread whose participant `0098` was still inserting, which the trigger could not see - so a write before the deploy stays read and one during it is not lost. `unread` is a stored generated column (`replied_at > read_through`) under the partial index `user_threads_unread` on `(login, replied_at desc, thread_id desc) where unread`, so the page and the count read only the person's unread rows. Rows are keyed on `model.CanonicalLogin`. The table has no foreign key to the thread it names: nothing deletes a comment, ask, message, issue or document, so a row's thread exists, and a harness that empties those tables empties `user_threads` with them (`packages/dispatch/e2e/seed.ts`). `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (human-only, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply; an open ask on a closed issue stays, since the Inbox hides it. A row's `reply` is the thread's newest write by someone else: `kind: "reply"` for a comment or a message, `kind: "answer"` for an answer, whose `id` is the ask's, whose `author` is the answerer and whose `first_line` is the chosen options and the answer's text (`<selected> - <text>`, as the outbox's `payload_summary` renders it). `issue` and `artifact` together are `400 INVALID_QUERY`, and `limit` is 1-200 (default 50), as `GET /api/v1/me/answers` reads it. A row's `ref` names the thread's root, never the reply, so an anchored root still redirects to its document. `PUT /api/v1/me/threads/{id}/read` `{read_through}` stores `least(value, now())`, Postgres casting the caller's text so an answer's nanosecond time rounds as the trigger rounded it, and only moves forward, with `agentStateCutoffSkew`'s minute of allowance (`400 INVALID_STATE` past it); a non-uuid id is `400 THREAD_ID_INPUT`, a thread the caller has no row for writes nothing, and both answer `204`. It locks the thread's owner row `for share` before it touches the caller's row, since every writer holds that owner `for no key update` before its trigger fires, and appends `user_thread_state.updated` (`{login, thread_id}`, owned by the row's project, never notifying) only when the mark moved, so a revisit announces nothing. A person's own reply or answer needs no call: the trigger moves their mark in the write's own transaction. How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
 - `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (human-only) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title. `DELETE .../subscribers/{session_id}` removes matching topics with `POST /v1/interests/unsubscribe`; it first commits `subscription.remove_requested` with `pending: true`, which the outbox does not publish. After idempotent listener removal succeeds, Dispatch appends `subscription.removed` with the `request_event_id` it settles and routes that notice directly to the unsubscribed session's `notifications.agent.<session_id>` topic in addition to the owner topic.
-- The Dispatch API describes itself. `internal/dispatch/api/routes_table.go` is the one list of `/api/v1` routes (`apiRoute{Method, Pattern, Auth, Description, Handler}`, `Auth` one of `public`, `any`, `human`, `bearer`); `Register` mounts that table and public `GET /api/v1` serves it as `{routes: [{method, path, auth, description}], docs: "skills/dispatch/SKILL.md"}` sorted by path then method. A new route is a new row (and a bumped pin in `routes_table_test.go`), never a `mux.HandleFunc` line. An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is `404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}` from `routes/router.go`, decided before any dashboard lookup, so an API caller never receives the SPA shell. `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises); the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
+- The Dispatch API describes itself. `internal/dispatch/api/routes_table.go` is the one list of `/api/v1` routes (`routeRow{Method, Pattern, Auth, Description, Handler}`, `Auth` one of `public`, `any`, `human`, `bearer`); `Register` mounts that table and public `GET /api/v1` serves it as `{routes: [{method, path, auth, description}], docs: "skills/dispatch/SKILL.md"}` sorted by path then method. A new route is a new row (and a bumped pin in `routes_table_test.go`), never a `mux.HandleFunc` line. How `Register` serves a row other than as an ordinary admitted request is an entry of `routeServings`, keyed by method and pattern (`apiRoute`'s `Stream`, `Deadline`, `Weight` and `BodyLimit`), and the table refuses an entry that names no row, so a renamed route cannot silently lose its serving. An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is `404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}` from `routes/router.go`, decided before any dashboard lookup, so an API caller never receives the SPA shell. `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises); the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
 - Every session that writes to an ask follows it: `asks.FollowAuthor` runs at all three ask insert sites (`POST .../asks`, approval requests, ask blocks indexed from documents) and on every ask reply, whether it arrives through `POST .../comments` or through the delivery callback `POST /api/v1/comments/{id}/reply`, so no insert path can miss it; `store/migrations/0029_ask_followers.up.sql` backfills existing asks and replies. `GET /api/v1/asks/{id}` returns `followers` (`{session_id, since}`, oldest first); `GET /api/v1/asks/{id}/followers` (any authenticated actor) returns the same list. `PUT` / `DELETE /api/v1/asks/{id}/followers/{session_id}` add or remove one follower and append `ask.follower_added` / `ask.follower_removed` (`{ask_id, session_id, by}`): a bearer sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`); a human (cookie identity) sends no body and may add or remove any session. A non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
 - A reply joins its thread the same way on both write paths. `threadHeadOf` (`api/comment_create.go`) climbs `reply_to` from an already-locked comment to the head of its thread and, when that head is an ask, the reply stores the ask's `ask_id` with `reply_to` null and the reply's `turn`; `POST .../comments` reaches it through `normalizeCommentThreadTarget`, which validates the request's `reply_to` first, and `POST /api/v1/comments/{id}/reply` calls it directly with the comment it already holds locked, so a session answering a mention inside an ask's thread lands in that thread instead of in a `reply_to` chain no ask read selects (`store/migrations/0043_comment_reply_ask_id.up.sql` moves the rows written before that, and gives each the turn 0028 gave every other ask reply). `comment.delivery` payloads carry the `ask_id` of the comment they report on, so a receipt names the thread it changed. Neither event is published to the ask's followers: `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.

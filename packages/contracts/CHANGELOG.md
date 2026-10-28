@@ -207,6 +207,11 @@
 
 ### Changed
 
+- The `dispatch_ask`, `dispatch_comment` and `dispatch_doc_edit` descriptions say that
+  `OVERLOADED` (the server had no room for the request) and `EDIT_QUEUE_FULL` (too many writes
+  already waiting for the same document) are refusals sent before anything ran, so the caller
+  waits the `Retry-After` they name and sends the same call again, and that any write to a
+  document can get `EDIT_QUEUE_FULL`, where `dispatch_doc_edit` said only to back off (INFRA-592).
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

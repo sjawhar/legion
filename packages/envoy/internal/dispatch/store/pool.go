@@ -17,8 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNestedAcquire is the shared pool refusing a second connection to a caller that already
-// holds one of its connections.
+// ErrNestedAcquire is a pool this package guards (Pool: the request pool and the pools it wraps)
+// refusing a connection to a caller that already holds a connection of one of them.
 //
 // One caller, one connection, is the rule the pool cannot survive without. A transaction
 // holds its connection until it commits; a caller that asks for a second one while it holds a

@@ -42,8 +42,8 @@
 - `DispatchClient` waits out Dispatch's `Retry-After` and asks again, at most twice and only when
   the wait (`Retry-After` seconds, 1 s when it is missing or not whole seconds, plus up to 250 ms
   of jitter) ends before its 60 s deadline: any method answered `429 OVERLOADED` or `429
-  EDIT_QUEUE_FULL`, which Dispatch sends before the request runs, and a GET answered `503
-  DATABASE_BUSY` or `503 REQUEST_TIMEOUT`. A write answered with either 503 is not sent again,
+  EDIT_QUEUE_FULL`, which Dispatch sends before the request runs, and a read (GET, HEAD) answered
+  `503 DATABASE_BUSY` or `503 REQUEST_TIMEOUT`. A write answered with either 503 is not sent again,
   since it may have committed (idempotency-keyed retries are INFRA-258's). When it gives up, the
   refusal's message adds how many attempts Dispatch refused and the wait it asks for, e.g. `busy;
   Dispatch refused 3 attempts with 429 OVERLOADED, waiting out its Retry-After between them, so
