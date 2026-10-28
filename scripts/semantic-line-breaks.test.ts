@@ -172,3 +172,10 @@ test("--write keeps the line break inside inline <pre> HTML", async () => {
   const result = await written(text);
   expect(result.text).toBe(text);
 });
+
+test("--write keeps the line break inside inline <code> HTML, which GitHub shows", async () => {
+  // github-markdown-css sets `code { white-space: break-spaces }`, so the break is visible.
+  const text = "Type <code>a\nb</code> now.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
