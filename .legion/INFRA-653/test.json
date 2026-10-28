@@ -2,45 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-653",
-  "completed": "2026-10-28T11:13:00Z",
-  "testedHead": "d5d043738693191634a365275d2202501cf47016",
-  "branchHead": "b8898f1f38e7924b7bfee8bc6ca717671a01d991",
+  "completed": "2026-10-28T15:36:00Z",
+  "round": 2,
+  "testedHead": "7edefc8982b849034440d792699efd33eb239313",
+  "branchHead": "8845c2b521cbff6e177c087dd929a8dc9c56bfa5",
+  "testedBase": "aeeee6c029f6766d3e4b7900dd1c7ef4e6edcc3f",
+  "fingerprint": "4b7e79f9908fa62729a1ea87d23d8badd854dd425a88e2775fa974235b681efd at 7edefc89 (the skill's unchanged-diff command; equals the implementer's). After the conflict merge below, compare at the new head: equal means bare gates only.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command: differential.sh --base 59f6647d --head d5d04373 over a fresh fetch of every LINUX issue's current spec (1203 now, `dispatch issues --project LINUX --all` + `dispatch doc-read`, $TMPDIR/t653/linux/linux.jsonl sha256 9aa1b490...): all 7 gates 0 over 1287 documents, base.jsonl and head.jsonl cmp identical. Drove the same surface independently with a base-vs-head harness (below). Recomputed the write-leg shares from the implementer's raw profiles ($TMPDIR/infra653-replay/runs/{base,head}-[123]/cpu.pprof: 153.16s 12.28% of 1246.81s, 93.28s 7.86% of 1186.41s) and the read-leg CPU-s from each summary.json (158.86/151.18/152.11 vs 136.51/137.31/133.98): both match the PR body. The six replay and six load-test runs were not re-run: they are at base 59f6647d, and the head that merges must be re-measured anyway (failure 1)."
+    "how": "Re-ran the implementer's command, differential.sh --base aeeee6c0 --head 7edefc89, over my own fresh fetch of every LINUX issue's current spec (1204 at 14:40Z, linux.jsonl sha256 a3d4a2b8...): all 7 gates 0 over 1289 documents, base.jsonl and head.jsonl cmp identical. Drove both CPU legs myself on the read side: two interleaved load-test pairs (below), every head step below every base step. Recomputed the write leg from the implementer's raw files: window_cpu_s in runs/v2-{base,head}-[123]/run.txt (474.28/483.63/472.15 vs 440.89/424.61/433.90) and the merged-profile shares (180.07s 13.73% of 1311.19s; 94.03s 7.96% of 1181.60s), build sha256 per commit consistent across runs; and the read leg's six summary.json CPU-s (155.84/153.27/155.80 vs 139.37/144.05/141.62). All match the PR body."
   },
   "failures": [
     {
-      "criterion": "The pull request merges at the head that was proven (every acceptance criterion is base-vs-head at the merge base)",
-      "evidence": "`gh pr view 2427 --repo sjawhar/legion --json mergeable` → CONFLICTING at b8898f1f. `git merge-tree --write-tree --name-only b8898f1f aeeee6c0` (main@origin) → CONFLICT (content) in packages/envoy/internal/dispatch/pmdoc/emphasis.go and render_inline.go. Cause: #2360 (a4960862d, 'fix(pmdoc): a document strikes tilde runs as a comment does'), merged to main after this branch's base 59f6647d, replaced the two readers (emphasisParser{flankingOnly}) with three delimiterRules (editorRules, storedRules, flankingRules) and pmdoc's own pairing (delimiters.go, delimiterList); the renderer now reads a run back under up to three readers (readBackReaders, render_inline.go:134 and :157 on main). Part C's invariant — a parse that never sets flankingDivergenceKey pairs exactly as the flanking-only parse — rests on both readers sharing goldmark's one pairing loop; on main, editorRules pair `~` runs in a pass of their own while storedRules and flankingRules pair every run in one loop (emphasis.go doc comment on main), so equal canOpen/canClose no longer implies an equal parse where `*`/`_` runs and `~` runs interleave without touching (e.g. the shape `**a~~b**c~~`) [INFERENCE from main's doc comment; not run]. The conflict is therefore a redesign of part C against three readers, not a mechanical merge, and every proof (LINUX byte identity, r, write and read legs, heap) is at base 59f6647d, not at the base the pull request merges into. Needed: forward-merge main, redo C so the skipped read-backs are provably the same parse under main's rules (FuzzFlankingDivergence extended to `~` runs and storedRules), and re-run the byte-identity proof and both measurement legs against the new merge base."
+      "criterion": "The pull request merges at the head that was proven",
+      "evidence": "While this round ran, main moved to 690c0136 (#2361, 'fix(pmdoc): read escapes and character references as CommonMark does', merged 15:06Z). `gh pr view 2427 --repo sjawhar/legion --json mergeable` → CONFLICTING at 8845c2b5 (15:28Z). `git merge-tree --write-tree 8845c2b5 690c0136` → CONFLICT (content) in packages/envoy/internal/dispatch/pmdoc/render.go only, and only in its import block: this branch adds \"slices\" beside \"regexp\", main removes \"regexp\" (its characterReference regex became characterReferenceLength). Resolution: keep \"slices\", drop \"regexp\". parse.go and render_inline.go auto-merge; #2361 touches text decoding, image and title escaping, none of asWritten, visibleMarks, emphasisParser or readsBackUnder. No defect in the change was found; this is the GitHub-reported conflict only. Needed: forward-merge main (skill: conflicts-and-rewrites), push, and post the fingerprint comment; then the tester compares fingerprints at the new head."
     }
   ],
   "failed": 1,
   "proof": [
     {
       "criterion": "Rendered markdown and offsets byte-identical on every LINUX spec",
-      "surface": "pmdoc renderer, read-back and misread checks over every LINUX issue's current spec (1203 fetched 2026-10-28 10:34Z with `dispatch doc-read`, not committed), base build 59f6647d against head build d5d04373",
-      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 59f6647db9d72d25feac2edaedd9e0d4e5005f12 --head d5d043738693191634a365275d2202501cf47016 --corpus $TMPDIR/t653/linux/linux.jsonl --out $TMPDIR/t653/diff; cmp diff/base.jsonl diff/head.jsonl; then a throwaway in-process harness (base pmdoc copied as package pmdocbase beside head pmdoc in a git-archive tree, not committed): ZZ_CORPUS=linux.jsonl pmdoc.test -test.run TestZZCorpusBaseHead, comparing per spec RenderWithBlockOffsets (markdown, offsets, error), Render, RefuseMisreadDocument, ReadBack (block ids masked) and NewMisread(parsed, variant) for the parsed tree and two perturbed variants (comment anchors splitting runs mid-word, line feeds, isInline hard breaks, empty texts, empty Marks slices, U+0000 in text and in a link href), and that head leaves its input tree unchanged",
-      "observed": "differential.sh: all 7 gates 0 over 1287 documents (1203 LINUX + 84 in-repo), base.jsonl and head.jsonl cmp identical. Harness: docs 1203, parsed 1203, variants 2406 (2400 render without error), failures 0 (937 s).",
-      "headSha": "d5d043738693191634a365275d2202501cf47016",
-      "negativeControl": "Same harness with head's parseInlineWithDefinitions made to report diverged=false always → fails on `## ***~~___***b~~[a](u)` (head writes `&#98;` where base writes `b`); with childrenAsWritten's writtenLineBreaks call removed → fails on the first perturbed table document. Both edits reverted (diff against d5d04373 empty)."
+      "surface": "pmdoc renderer, read-back and misread checks over every LINUX issue's current spec (1204, `dispatch issues --project LINUX --all` + `dispatch doc-read` at 2026-10-28T14:40Z, not committed), base build aeeee6c0 against head build 7edefc89",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base aeeee6c029f6766d3e4b7900dd1c7ef4e6edcc3f --head 7edefc8982b849034440d792699efd33eb239313 --corpus $TMPDIR/t653/linux/linux.jsonl --out $TMPDIR/t653/diff; cmp diff/base.jsonl diff/head.jsonl; then the throwaway in-process harness (aeeee6c0's pmdoc copied as package pmdocbase beside 7edefc89's pmdoc in a git-archive tree, not committed): ZZ_CORPUS=linux.jsonl pmdoc.test -test.run TestZZCorpusBaseHead, comparing per spec RenderWithBlockOffsets (markdown, offsets, error), Render, RefuseMisreadDocument, ReadBack (block ids masked) and NewMisread(parsed, variant) for the parsed tree and two perturbed variants (comment anchors splitting runs mid-word, line feeds, isInline hard breaks, empty texts, empty Marks slices, U+0000 in text and a link href), and that head leaves its input unchanged",
+      "observed": "differential.sh: all 7 gates 0 over 1289 documents, dumps cmp identical. Harness: docs 1204, parsed 1204, variants 2408 (2402 render without error), failures 0 (982 s).",
+      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "negativeControl": "Harness with holdsTilde forced false (stored read skipped beside a `~`) → fails on `> _~~_<http://x.y>` (head drops the autolink's angle brackets: `*~~*http://x.y` vs `*~~*<http://x.y>`); with the divergence flag forced false → fails on `- _***<http://x.y>****`. Both edits reverted (diff against 7edefc89 empty)."
     },
     {
-      "criterion": "Behaviour: what people and agents see is unchanged, beyond the corpus",
-      "surface": "Same base-vs-head harness over generated markdown (tables, code blocks, quotes, lists, task items, footnotes, every delimiter run of `*`, `_`, `~`, backticks, links, autolinks, entities, escapes, NBSP, tabs, line feeds)",
-      "command": "ZZ_SEED=<1..5> ZZ_ITER=<20000|50000> pmdoc.test -test.run TestZZBaseHeadRandomMarkdown; go test -fuzz '^FuzzFlankingDivergence$' -fuzztime 4m",
-      "observed": "Seeds 1-5: 19698 + 49339 + 49286 + 49281 + 49277 = 216,881 parsed documents and as many perturbed variants, base and head equal on every output and on NewMisread; FuzzFlankingDivergence 768,758 execs in 4 min, PASS.",
-      "headSha": "d5d043738693191634a365275d2202501cf47016",
-      "negativeControl": "As above: the divergence flag forced false fails seed 1 within 1.4 s."
+      "criterion": "Behaviour: what people and agents see is unchanged, beyond the corpus (part C's skips under main's three readers)",
+      "surface": "Same base-vs-head harness over generated markdown: tables, code blocks, quotes, lists, task items, footnotes including a `~` in a footnote label ([^a~b] with its definition), every `*`, `_`, `~`, `~~`, `~~~`, `\\~` run and `*~`/`~*`/`_~`/`~_` adjacency, links, autolinks, entities, escapes",
+      "command": "ZZ_SEED=1..5 pmdoc.test -test.run TestZZBaseHeadRandomMarkdown (20000 + 4 x 50000 iterations); go test -fuzz '^FuzzReadBackSkips$' -fuzztime 4m",
+      "observed": "19595 + 48999 + 49040 + 49004 + 48988 = 215,626 parsed documents and as many perturbed variants, base and head equal on every output and on NewMisread; FuzzReadBackSkips 1,183,779 execs, PASS.",
+      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "negativeControl": "As above: each forced skip fails seed 1 within 0.6 s."
     },
     {
       "criterion": "asWritten shares the input tree: concurrent renders of one tree do not race and do not write it",
-      "surface": "RenderWithBlockOffsets, RefuseMisreadDocument and NewMisread called from 6 goroutines on one shared tree (as the docs read cache shares a tree between requests), Go race detector",
-      "command": "CGO_ENABLED=1 GOWORK=off go test -race ./internal/dispatch/pmdoc/ -run 'TestZZConcurrentRenderOfOneTree|TestRenderAndReadBackLeaveTheirInputUntouched' (300 generated documents with perturbations)",
-      "observed": "ok (46 s), no race reported; the corpus and generated runs also checked head's input JSON unchanged after every render.",
-      "headSha": "d5d043738693191634a365275d2202501cf47016",
-      "negativeControl": "Without CGO the race run is refused (`-race requires cgo`), so the pass above is the race-instrumented build."
+      "surface": "RenderWithBlockOffsets, RefuseMisreadDocument and NewMisread from 6 goroutines on one shared tree, race detector",
+      "command": "CGO_ENABLED=1 GOWORK=off go test -race ./internal/dispatch/pmdoc/ -run 'TestZZConcurrentRenderOfOneTree|TestRenderAndReadBackLeaveTheirInputUntouched'",
+      "observed": "ok (53.7 s), no race.",
+      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "negativeControl": "Without CGO the race build is refused (`-race requires cgo`); the pass is the instrumented build."
+    },
+    {
+      "criterion": "Merge rule of the shared context on INFRA-589's route mix for reads (independent run)",
+      "surface": "Dispatch server built from base aeeee6c0 and head 7edefc89 by packages/envoy/loadtest at legion/INFRA-639 688cab741c70, default route mix, the base-made seed at migration 134",
+      "command": "$TMPDIR/t653/trun.sh: LOADTEST_DISPATCH_COMMIT=<commit> run-step.sh t-<side>-<n> --events 4 --sessions 400 --requests 60, interleaved t-base-1 t-head-1 t-base-2 t-head-2 (15:11-15:28Z, nothing else running on the box); CPU-s = resources.cpu_cores_mean.dispatch x resources.window_s",
+      "observed": "base 161.74 / 156.14 CPU-s, head 141.01 / 140.30: every head step below every base step (median -11.1%); 719 events committed and 10,752/10,752 requests 2xx per step; step logs say `building ... from aeeee6c0...` / `from 7edefc89...`, binary sha256 33e7f4b6... (base) and 409372f3... (head), as in the implementer's build record.",
+      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "negativeControl": "The load test refuses a seed newer than its checkout's migrations (`highest migration is 129 … older than the seed's 134`); seed.meta.json was set to 129 for the four steps and restored to 134 afterwards (checked)."
     }
   ],
-  "ci": "Read on GitHub at d5d04373 (b8898f1f is a skip-checks handoff head): lint, typecheck, test, pr-title, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go-race, envoy-e2e-local green; envoy-go (not required) failed on `internal/dispatch/api` 10 m timeout (run 40552154543), pmdoc and docs ok in that job. No checks can run while the PR is CONFLICTING."
+  "ci": "Read on GitHub at 7edefc89: lint, typecheck, test, pr-title, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go green; one pr-title run queued."
 }
