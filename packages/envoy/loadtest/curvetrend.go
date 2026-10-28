@@ -146,12 +146,11 @@ type trendSeries struct {
 }
 
 // hourSeries are the hour step's three series over minutes trendFrom to trendTo: Dispatch's cores
-// and working set from cgroup.json's minutes (a null minute is left out), and its Go heap in use
-// from samples.json.
+// and working set from cgroup.json's minutes (a null minute is left out), and its Go heap from
+// samples.json (hourHeap).
 func hourSeries(s *curveStep) []trendSeries {
 	cores := trendSeries{name: "Dispatch cores", d: 3}
 	wset := trendSeries{name: "Dispatch working set MiB", d: 1}
-	heap := trendSeries{name: "Go heap in use MiB", d: 1}
 	r := s.role("dispatch")
 	switch {
 	case s.cgroup == nil:
@@ -169,45 +168,65 @@ func hourSeries(s *curveStep) []trendSeries {
 		}
 	}
 	wset.why = cores.why
-	heap.points, heap.why = hourHeap(s)
-	return []trendSeries{cores, wset, heap}
+	return []trendSeries{cores, wset, hourHeap(s)}
 }
 
-// hourHeap is the hour step's 1-minute means of Go heap in use, MiB, over the heap reads of
-// samples.json that worked and ended in the window, each in the minute it ended (sample.HeapAt);
-// why says why there are none.
-func hourHeap(s *curveStep) ([]trendPoint, string) {
+// The names of the hour's heap series: the heap profile's in-use bytes, or an older run's
+// runtime.MemStats HeapInuse, a different metric.
+const (
+	trendHeapLive     = "Go heap live MiB (heap profile)"
+	trendHeapMemStats = "MemStats HeapInuse MiB (older run)"
+)
+
+// hourHeap is the hour step's 1-minute means of its Go heap, MiB, over the heap reads of
+// samples.json that worked and ended in the window, each in the minute it ended (sample.HeapAt):
+// the heap profile's in-use bytes, or, in an older run's samples.json (one with `heap_inuse`),
+// runtime.MemStats HeapInuse under its own name. Its why says why there are none.
+func hourHeap(s *curveStep) trendSeries {
+	heap := trendSeries{name: trendHeapLive, d: 1}
 	if s.meta == nil || s.meta.WindowStart.IsZero() {
-		return nil, "no window_start in meta.json"
+		heap.why = "no window_start in meta.json"
+		return heap
 	}
 	b, err := os.ReadFile(filepath.Join(s.dir, "samples.json"))
 	if err != nil {
-		return nil, "samples.json: " + err.Error()
+		heap.why = "samples.json: " + err.Error()
+		return heap
 	}
 	var ss []sample
 	if err := json.Unmarshal(b, &ss); err != nil {
-		return nil, "samples.json: " + err.Error()
+		heap.why = "samples.json: " + err.Error()
+		return heap
+	}
+	value := func(x sample) float64 { return x.HeapLiveBytes }
+	if slices.ContainsFunc(ss, func(x sample) bool { return x.MemStatsHeapInuse > 0 }) {
+		heap.name = trendHeapMemStats
+		value = func(x sample) float64 { return x.MemStatsHeapInuse }
 	}
 	var sum [trendTo]float64
 	var n [trendTo]int
 	for _, x := range ss {
-		if !x.HeapInWindow || x.HeapInuse <= 0 || slices.Contains(x.FailedReads, readHeap) {
+		// An older samples.json read the heap in the sample itself: it has no heap_at.
+		at, in := x.HeapAt, x.HeapInWindow
+		if at.IsZero() {
+			at, in = x.At, x.InWindow
+		}
+		if !in || value(x) <= 0 || slices.Contains(x.FailedReads, readHeap) {
 			continue
 		}
-		m := int(x.HeapAt.Sub(s.meta.WindowStart) / time.Minute)
-		if x.HeapAt.Before(s.meta.WindowStart) || m < trendFrom || m >= trendTo {
+		m := int(at.Sub(s.meta.WindowStart) / time.Minute)
+		if at.Before(s.meta.WindowStart) || m < trendFrom || m >= trendTo {
 			continue
 		}
-		sum[m] += x.HeapInuse
+		sum[m] += value(x)
 		n[m]++
 	}
-	var out []trendPoint
 	for m := trendFrom; m < trendTo; m++ {
 		if n[m] > 0 {
-			out = append(out, trendPoint{m, mib(sum[m] / float64(n[m]))})
+			heap.points = append(heap.points, trendPoint{m, mib(sum[m] / float64(n[m]))})
 		}
 	}
-	return out, ""
+	return heap
 }
 
 // renderTrend is TREND.md over the hour steps, "" when there is none.
@@ -223,8 +242,8 @@ func renderTrend(steps []*curveStep) string {
 	}
 	var md markdown
 	md.line("# Trend over the hour\n")
-	md.line("Each row is a series of 1-minute means over minutes %d to %d of the hour step's window (minute %d inclusive to %d exclusive, past the warm-up): Dispatch's cores and working set from cgroup.json's `minutes` (a minute with a gap over %s in the cgroup samples is left out), and its Go heap in use from samples.json's in-window heap reads. The slope is the ordinary least-squares slope per hour with its 95%% interval (Student t, n − 2 degrees of freedom), and as a share of the series' mean per hour.\n",
-		trendFrom, trendTo, trendFrom, trendTo, seconds(cgroupMaxGap))
+	md.line("Each row is a series of 1-minute means over minutes %d to %d of the hour step's window (minute %d inclusive to %d exclusive, past the warm-up): Dispatch's cores and working set from cgroup.json's `minutes` (a minute with a gap over %s in the cgroup samples is left out), and its Go heap from samples.json's in-window heap reads: `%s` is the heap profile's in-use bytes, a sampled estimate of the live heap; `%s` is an older run's runtime.MemStats HeapInuse, a different metric. The slope is the ordinary least-squares slope per hour with its 95%% interval (Student t, n − 2 degrees of freedom), and as a share of the series' mean per hour.\n",
+		trendFrom, trendTo, trendFrom, trendTo, seconds(cgroupMaxGap), trendHeapLive, trendHeapMemStats)
 	md.line("Rule: a series is upward when the interval's lower bound is above 0 and the slope is above 5%% of the mean per hour. This is reported as measured; nothing here judges a step pass or fail.")
 	for _, s := range hours {
 		md.line("\n## %s\n", s.label())

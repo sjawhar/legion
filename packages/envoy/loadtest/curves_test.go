@@ -68,7 +68,7 @@ func goodSummary(f float64) summary {
 		Requests: requestsSummary{TargetPerS: req, Sent: sent, SentPerS: req, OK2xx: sent, LatencyMs: stat{N: sent, P50: 12, P99: 80, Max: 300}},
 		Resources: &resourcesSummary{
 			PoolAcquireGoroutines: stat{N: 120},
-			HeapInuseMiB:          stat{N: 40, P50: 300, Max: 420},
+			HeapLiveMiB:           stat{N: 40, P50: 300, Max: 420},
 			PGConnsTotal:          stat{N: 120, P50: 20, Max: 34},
 			PGConnsByState: map[string]stat{
 				"active|":      {N: 120, P50: 3, Max: 9},
@@ -391,14 +391,14 @@ func TestCurvesWriteTheHoursTrend(t *testing.T) {
 		smp := sample{At: at, InWindow: true}
 		if s%3 == 0 {
 			smp.HeapAt, smp.HeapInWindow = at, true
-			smp.HeapInuse = float64(300<<20) + at.Sub(curveWinStart).Hours()*float64(200<<20)
+			smp.HeapLiveBytes = float64(300<<20) + at.Sub(curveWinStart).Hours()*float64(200<<20)
 		}
 		ss = append(ss, smp)
 	}
 	writeFixtureJSON(t, filepath.Join(dir, "samples.json"), ss)
 	out := curves(t, dir)
 	trend := readText(t, filepath.Join(out, "TREND.md"))
-	for _, row := range []string{"| Dispatch cores | 54 |", "| Dispatch working set MiB | 54 |", "| Go heap in use MiB | 55 |"} {
+	for _, row := range []string{"| Dispatch cores | 54 |", "| Dispatch working set MiB | 54 |", "| " + trendHeapLive + " | 55 |"} {
 		i := strings.Index(trend, row)
 		if i < 0 {
 			t.Errorf("TREND.md lacks %q:\n%s", row, trend)
@@ -416,6 +416,101 @@ func TestCurvesWriteTheHoursTrend(t *testing.T) {
 	grid := curves(t, curveFixture(t, t.TempDir(), "1x", goodSummary(1), fixtureCgroup(2)))
 	if _, err := os.Stat(filepath.Join(grid, "TREND.md")); err == nil {
 		t.Errorf("a run with no hour step wrote TREND.md")
+	}
+}
+
+// olderRunStep rewrites dir's summary.json and samples.json as a run did before the sampler read
+// the heap profile: resources.heap_inuse_mib (runtime.MemStats HeapInuse) and no heap_live_mib,
+// and samples whose heap_inuse (with heap_alloc and heap_sys) each sample read itself, with no
+// heap_at. ss gives each sample's time and its heap_inuse in MiB.
+func olderRunStep(t *testing.T, dir string, heap stat, ss map[time.Time]float64) {
+	t.Helper()
+	var sum map[string]any
+	if err := json.Unmarshal([]byte(readText(t, filepath.Join(dir, "summary.json"))), &sum); err != nil {
+		t.Fatal(err)
+	}
+	res := sum["resources"].(map[string]any)
+	delete(res, "heap_live_mib")
+	res["heap_inuse_mib"] = heap
+	writeFixtureJSON(t, filepath.Join(dir, "summary.json"), sum)
+	var samples []map[string]any
+	for at, mibs := range ss {
+		samples = append(samples, map[string]any{"at": at, "in_window": true, "heap_inuse": mibs * (1 << 20), "heap_alloc": mibs * (1 << 19), "heap_sys": mibs * (1 << 21)})
+	}
+	writeFixtureJSON(t, filepath.Join(dir, "samples.json"), samples)
+}
+
+// TestHeapOfAnOlderRunRendersUnderItsOwnLabel: a step directory from before the sampler read the
+// heap profile (MemStats HeapInuse) and one from after (the profile's in-use bytes) render side by
+// side, each under its own label: their own curves.csv and CURVES.md columns, the Resources cell
+// marked as MemStats with its note, and the hour's TREND.md series named for its metric.
+func TestHeapOfAnOlderRunRendersUnderItsOwnLabel(t *testing.T) {
+	root := t.TempDir()
+	newDir := curveFixture(t, root, "1x", goodSummary(1), fixtureCgroup(2))
+	oldDir := curveFixture(t, root, "2x", goodSummary(2), fixtureCgroup(2))
+	olderRunStep(t, oldDir, stat{N: 9, P50: 1165.4, P90: 1381.2, P99: 1381.2, Max: 1464.6}, map[time.Time]float64{curveWinStart: 1165.4})
+
+	out := curves(t, newDir, oldDir)
+	_, rows := curvesCSV(t, out)
+	for step, want := range map[string][4]string{
+		"1x": {"300", "420", "", ""},
+		"2x": {"", "", "1165.4", "1464.6"},
+	} {
+		for i, col := range []string{"heap_live_mib_p50", "heap_live_mib_max", "memstats_heap_inuse_mib_p50", "memstats_heap_inuse_mib_max"} {
+			if got := rows[step][col]; got != want[i] {
+				t.Errorf("curves.csv %s %s = %q, want %q", step, col, got, want[i])
+			}
+		}
+	}
+	memory := section(readText(t, filepath.Join(out, "CURVES.md")), "Memory")
+	if !strings.Contains(memory, "| Go heap live p50 MiB (heap profile) | Go heap live max MiB (heap profile) | MemStats HeapInuse p50 MiB (older run) | MemStats HeapInuse max MiB (older run) |") {
+		t.Errorf("CURVES.md's Memory table does not keep the two heap metrics in their own labelled columns:\n%s", memory)
+	}
+	if c := rowCells(memory, "1x"); len(c) != 8 || c[4] != "300" || c[5] != "420" || c[6] != "-" || c[7] != "-" {
+		t.Errorf("CURVES.md's new-run row %q, want the heap live columns only", c)
+	}
+	if c := rowCells(memory, "2x"); len(c) != 8 || c[4] != "-" || c[5] != "-" || c[6] != "1,165" || c[7] != "1,465" {
+		t.Errorf("CURVES.md's older-run row %q, want the MemStats columns only", c)
+	}
+
+	var steps []stepData
+	for _, dir := range []string{newDir, oldDir} {
+		st, err := readStep(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps = append(steps, st)
+	}
+	md := renderTables(steps)
+	resources := section(md, "Resources")
+	const heap = 11 // after the working-set column
+	if c := rowCells(resources, "1x"); c == nil || c[heap] != "300 / 420" {
+		t.Errorf("TABLES.md's new-run heap cell %q, want the heap profile's 300 / 420 unmarked:\n%s", c, resources)
+	}
+	if c := rowCells(resources, "2x"); c == nil || c[heap] != "1,165 / 1,465 "+memStatsHeapMark {
+		t.Errorf("TABLES.md's older-run heap cell %q, want MemStats HeapInuse marked %s:\n%s", c, memStatsHeapMark, resources)
+	}
+	if note := noteLine(resources, memStatsHeapMark+":"); !strings.Contains(note, "runtime.MemStats HeapInuse") || !strings.Contains(note, "`resources.heap_inuse_mib`") {
+		t.Errorf("no note defines %s:\n%s", memStatsHeapMark, resources)
+	}
+	if strings.Contains(renderTables(steps[:1]), memStatsHeapMark) {
+		t.Errorf("a new run alone carries the MemStats mark or its note")
+	}
+	checkRowWidths(t, md)
+
+	// The hour: an older run's samples.json, with heap_inuse in the samples themselves.
+	hour := goodSummary(10)
+	hour.Config.DurationS = 3600
+	hourDir := curveFixture(t, t.TempDir(), "10x-hour", hour, fixtureCgroup(2))
+	ss := map[time.Time]float64{}
+	for s := range 3600 / 15 {
+		at := curveWinStart.Add(time.Duration(s) * 15 * time.Second)
+		ss[at] = 300 + at.Sub(curveWinStart).Hours()*200
+	}
+	olderRunStep(t, hourDir, stat{N: 240, P50: 400, Max: 500}, ss)
+	trend := readText(t, filepath.Join(curves(t, hourDir), "TREND.md"))
+	if !strings.Contains(trend, "| "+trendHeapMemStats+" | 55 |") || strings.Contains(trend, "| "+trendHeapLive+" |") {
+		t.Errorf("TREND.md does not name the older run's heap series %q over its 55 minutes:\n%s", trendHeapMemStats, trend)
 	}
 }
 

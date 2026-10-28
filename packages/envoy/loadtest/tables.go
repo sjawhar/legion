@@ -326,10 +326,10 @@ func resourcesTable(md *markdown, steps []stepData) {
 	if withCgroup {
 		columns = append(columns, cgroupWorkingSetH)
 	}
-	md.header(append(columns, "heap in use MiB p50 / max", "goroutines p50 / max",
+	md.header(append(columns, "heap live MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
 		"Dispatch CPU-s per operation")...)
-	marked, unread, cgFailed, cgUnmeasured := false, false, false, false
+	marked, unread, cgFailed, cgUnmeasured, memStats := false, false, false, false, false
 	for _, s := range steps {
 		unread = unread || s.sum.Events.commitsUnread()
 		busyBefore := "-"
@@ -360,7 +360,10 @@ func resourcesTable(md *markdown, steps []stepData) {
 			if v, ok := r.RSSMiBMax["dispatch"]; ok {
 				rss = num(v, 0)
 			}
-			heap, goroutines, pool = pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0), pair(r.PoolAcquireGoroutines, p50, smax, 0)
+			goroutines, pool = pair(r.Goroutines, p50, smax, 0), pair(r.PoolAcquireGoroutines, p50, smax, 0)
+			var old bool
+			heap, old = heapCell(r)
+			memStats = memStats || old
 			if r.DispatchCPUSPerOp != nil {
 				perOp = num(*r.DispatchCPUSPerOp, 4)
 			}
@@ -397,8 +400,29 @@ func resourcesTable(md *markdown, steps []stepData) {
 	}
 	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity (a failed connect included) and of Dispatch's goroutine and heap profiles",
 		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
+	md.line("\nheap live: the in-use bytes of Dispatch's heap profile (`/debug/pprof/heap`), every 15 s: a sampled estimate of the live heap, not runtime.MemStats HeapInuse.")
+	if memStats {
+		md.line("\n%s: the step ran before the sampler read the heap profile, so its heap cell is runtime.MemStats HeapInuse from `/debug/pprof/heap?debug=1` (summary.json `resources.heap_inuse_mib`), a different metric that is not comparable with a heap live cell.", memStatsHeapMark)
+	}
 	commitsUnreadNote(md, unread, "the Dispatch CPU-s per operation (its operations count the committed writes)", "shows")
 	cgroupNotes(md, withCgroup, cgFailed, cgUnmeasured)
+}
+
+// memStatsHeapMark follows the heap cell of an older run's step, whose summary.json holds
+// runtime.MemStats HeapInuse in place of the heap profile's in-use bytes.
+const memStatsHeapMark = "(MemStats HeapInuse, older run)"
+
+// heapCell is the Resources table's heap cell, p50 / max: the heap profile's in-use MiB, or, for
+// an older run's summary (old), its MemStats HeapInuse followed by memStatsHeapMark.
+func heapCell(r *resourcesSummary) (cell string, old bool) {
+	if r.MemStatsHeapInuseMiB == nil {
+		return pair(r.HeapLiveMiB, p50, smax, 0), false
+	}
+	cell = pair(*r.MemStatsHeapInuseMiB, p50, smax, 0)
+	if cell == "-" {
+		return cell, false
+	}
+	return cell + " " + memStatsHeapMark, true
 }
 
 // failedReadsNote defines the failed-reads mark under a table, when a row has it: what names the

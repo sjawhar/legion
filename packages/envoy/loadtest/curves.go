@@ -401,6 +401,15 @@ func resStat(get func(*resourcesSummary) stat, f func(stat) float64) func(*curve
 	}
 }
 
+// memStatsHeap is an older run's MemStats HeapInuse stat, empty for a run that read the heap
+// profile.
+func memStatsHeap(r *resourcesSummary) stat {
+	if r.MemStatsHeapInuseMiB == nil {
+		return stat{}
+	}
+	return *r.MemStatsHeapInuseMiB
+}
+
 // Columns that several tables and KNEES.md share.
 var (
 	colCommitted = curveCol{"events_committed_per_s", "events/s committed", 2, false,
@@ -504,7 +513,7 @@ var curveTables = []curveTable{
 	},
 	{
 		title:   "Memory",
-		about:   "Dispatch's working set (memory.current less inactive_file) over the window's cgroup samples, and its Go heap in use over the 5 s sampler's heap reads.",
+		about:   "Dispatch's working set (memory.current less inactive_file) over the window's cgroup samples, and its Go heap over the 5 s sampler's heap reads (every 15 s). Heap live is the in-use bytes of the heap profile (`/debug/pprof/heap`), a sampled estimate of the live heap. MemStats HeapInuse is an older run's heap read, runtime.MemStats HeapInuse from `/debug/pprof/heap?debug=1`: a different metric, in its own columns, so a step shows one pair or the other and the two are never one series.",
 		cgroup:  true,
 		sampler: true,
 		cols: []curveCol{
@@ -520,8 +529,10 @@ var curveTables = []curveTable{
 				}
 				return 0, false
 			}},
-			{"heap_inuse_mib_p50", "Go heap in use p50 MiB", 0, false, resStat(func(r *resourcesSummary) stat { return r.HeapInuseMiB }, p50)},
-			{"heap_inuse_mib_max", "Go heap in use max MiB", 0, false, resStat(func(r *resourcesSummary) stat { return r.HeapInuseMiB }, smax)},
+			{"heap_live_mib_p50", "Go heap live p50 MiB (heap profile)", 0, false, resStat(func(r *resourcesSummary) stat { return r.HeapLiveMiB }, p50)},
+			{"heap_live_mib_max", "Go heap live max MiB (heap profile)", 0, false, resStat(func(r *resourcesSummary) stat { return r.HeapLiveMiB }, smax)},
+			{"memstats_heap_inuse_mib_p50", "MemStats HeapInuse p50 MiB (older run)", 0, false, resStat(memStatsHeap, p50)},
+			{"memstats_heap_inuse_mib_max", "MemStats HeapInuse max MiB (older run)", 0, false, resStat(memStatsHeap, smax)},
 		},
 	},
 	{

@@ -84,7 +84,7 @@ func fakeSample(at, pgTotal, goroutines int, heapMiB float64, failed ...string) 
 		At: t0.Add(time.Duration(at) * time.Second), InWindow: true,
 		CPUTicks: map[string]float64{"dispatch": float64(at) * 50}, RSSKiB: map[string]float64{"dispatch": 1024},
 		PGConns: map[string]int{"idle|": pgTotal}, PGTotal: pgTotal, Goroutines: goroutines, PoolWait: goroutines / 10,
-		HeapInuse: heapMiB * 1048576, FailedReads: failed,
+		HeapLiveBytes: heapMiB * 1048576, FailedReads: failed,
 	}
 	if heapMiB > 0 || slices.Contains(failed, readHeap) {
 		s.HeapAt, s.HeapInWindow = s.At, true
@@ -99,7 +99,7 @@ func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
 		fakeSample(5, 0, 0, 0, readPostgres, readGoroutines),
 		fakeSample(10, 0, 0, 0, readPostgres, readGoroutines),
 	}, 0, 10)
-	if none.PGConnsTotal.N != 0 || len(none.PGConnsByState) != 0 || none.Goroutines.N != 0 || none.PoolAcquireGoroutines.N != 0 || none.HeapInuseMiB.N != 0 {
+	if none.PGConnsTotal.N != 0 || len(none.PGConnsByState) != 0 || none.Goroutines.N != 0 || none.PoolAcquireGoroutines.N != 0 || none.HeapLiveMiB.N != 0 {
 		t.Fatalf("failed reads entered the stats: %+v", none)
 	}
 	if none.PGReadErrors != 3 || none.PprofReadErrors != 4 {
@@ -119,8 +119,8 @@ func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
 	if some.Goroutines.N != 3 || some.Goroutines.P50 != 120 || some.PoolAcquireGoroutines.N != 3 {
 		t.Fatalf("goroutines %+v, pool waiters %+v: want the 3 reads that succeeded, p50 120", some.Goroutines, some.PoolAcquireGoroutines)
 	}
-	if some.HeapInuseMiB.N != 1 || some.HeapInuseMiB.Max != 30 {
-		t.Fatalf("heap %+v, want the one read that succeeded", some.HeapInuseMiB)
+	if some.HeapLiveMiB.N != 1 || some.HeapLiveMiB.Max != 30 {
+		t.Fatalf("heap %+v, want the one read that succeeded", some.HeapLiveMiB)
 	}
 	if some.PGReadErrors != 2 || some.PprofReadErrors != 2 {
 		t.Fatalf("pg_read_errors %d, pprof_read_errors %d; want 2 and 2", some.PGReadErrors, some.PprofReadErrors)
@@ -133,16 +133,16 @@ func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
 // past it, counts.
 func TestSummarizeResourcesTakesHeapReadsByWhenTheyEnded(t *testing.T) {
 	early := fakeSample(0, 1, 1, 0)
-	early.HeapInuse, early.HeapAt, early.HeapInWindow = 50*1048576, early.At.Add(-time.Second), false
+	early.HeapLiveBytes, early.HeapAt, early.HeapInWindow = 50*1048576, early.At.Add(-time.Second), false
 	late := fakeSample(15, 1, 1, 0)
 	late.InWindow = false
-	late.HeapInuse, late.HeapAt, late.HeapInWindow = 70*1048576, late.At.Add(-2*time.Second), true
+	late.HeapLiveBytes, late.HeapAt, late.HeapInWindow = 70*1048576, late.At.Add(-2*time.Second), true
 	failedLate := fakeSample(20, 1, 1, 0, readHeap)
 	failedLate.InWindow = false
 	res := summarizeResources([]sample{early, fakeSample(5, 1, 1, 0), fakeSample(10, 1, 1, 0), late, failedLate}, 0, 10)
-	if res.HeapInuseMiB.N != 1 || res.HeapInuseMiB.Max != 70 || res.PprofReadErrors != 1 {
+	if res.HeapLiveMiB.N != 1 || res.HeapLiveMiB.Max != 70 || res.PprofReadErrors != 1 {
 		t.Fatalf("heap %+v, pprof_read_errors %d; want the one read that worked and ended in the window (70 MiB), and the failed one counted",
-			res.HeapInuseMiB, res.PprofReadErrors)
+			res.HeapLiveMiB, res.PprofReadErrors)
 	}
 }
 
@@ -167,8 +167,64 @@ func TestGoroutineCountsFailsWithoutAProfile(t *testing.T) {
 		if _, _, err := goroutineCounts(base); err == nil {
 			t.Errorf("goroutineCounts(%s) read no profile and no error", base)
 		}
-		if _, _, _, err := heapStats(context.Background(), base); err == nil {
-			t.Errorf("heapStats(%s) read no profile and no error", base)
+		if _, _, err := heapLive(context.Background(), base); err == nil {
+			t.Errorf("heapLive(%s) read no profile and no error", base)
+		}
+	}
+}
+
+// heapProfileBody is a gzipped binary heap profile, as /debug/pprof/heap serves it, of two stacks:
+// in use, 3 MiB in 5 objects and 1 MiB in 2 objects, so 4 MiB in 7 objects; allocated, far more.
+func heapProfileBody(t *testing.T) []byte {
+	t.Helper()
+	p := cpProfile(heapTypes,
+		cpStack{frames: []string{"main.main", "main.a"}, values: []int64{50, 300 * mib1, 5, 3 * mib1}},
+		cpStack{frames: []string{"main.main", "main.b"}, values: []int64{20, 100 * mib1, 2, 1 * mib1}})
+	var b bytes.Buffer
+	if err := p.Write(&b); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// TestHeapLiveSumsTheBinaryProfilesInuse: the heap read takes /debug/pprof/heap, the binary
+// profile, never its ?debug=1 text, and records the sums of its inuse_space and inuse_objects; a
+// profile with no inuse_space is a failed read, not 0.
+func TestHeapLiveSumsTheBinaryProfilesInuse(t *testing.T) {
+	body := heapProfileBody(t)
+	noInuse := cpProfile(cpuTypes, cpuStack(10, "main.main"))
+	var cpu bytes.Buffer
+	if err := noInuse.Write(&cpu); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		queries = append(queries, r.URL.RawQuery)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/ok/debug/pprof/heap":
+			w.Write(body)
+		case "/cpu/debug/pprof/heap":
+			w.Write(cpu.Bytes())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	b, o, err := heapLive(context.Background(), srv.URL+"/ok")
+	if err != nil || b != 4*mib1 || o != 7 {
+		t.Fatalf("heapLive = %v bytes, %v objects, %v; want the profile's 4 MiB in 7 objects in use", b, o, err)
+	}
+	if _, _, err := heapLive(context.Background(), srv.URL+"/cpu"); err == nil || !strings.Contains(err.Error(), "inuse_space") {
+		t.Errorf("a profile with no inuse_space read as %v, want an error naming inuse_space", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, q := range queries {
+		if q != "" {
+			t.Errorf("the heap read asked with query %q, want the binary profile, no ?debug", q)
 		}
 	}
 }
@@ -263,6 +319,7 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 // before the next 15 s slot.
 func TestSamplerHeapReadDelaysNoSample(t *testing.T) {
 	const heapDelay = 7 * time.Second
+	heapBody := heapProfileBody(t)
 	var mu sync.Mutex
 	var heapAsked []time.Time
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -273,9 +330,13 @@ func TestSamplerHeapReadDelaysNoSample(t *testing.T) {
 			mu.Lock()
 			heapAsked = append(heapAsked, time.Now())
 			mu.Unlock()
+			if r.URL.RawQuery != "" {
+				http.Error(w, "the sampler reads the binary profile only", http.StatusBadRequest)
+				return
+			}
 			select {
 			case <-time.After(heapDelay):
-				fmt.Fprint(w, "heap profile: 1: 2 [3: 4] @ heap/1048576\n\n# runtime.MemStats\n# HeapAlloc = 2097152\n# HeapSys = 8388608\n# HeapInuse = 4194304\n")
+				w.Write(heapBody)
 			case <-r.Context().Done():
 			}
 		case "/varz":
@@ -305,14 +366,14 @@ func TestSamplerHeapReadDelaysNoSample(t *testing.T) {
 		}
 	}
 	for i, x := range ss[:2] {
-		if !x.HeapAt.IsZero() || x.HeapInuse != 0 {
-			t.Errorf("sample %d carries a heap read (ended %s, %v bytes) before the read could end", i, x.HeapAt, x.HeapInuse)
+		if !x.HeapAt.IsZero() || x.HeapLiveBytes != 0 {
+			t.Errorf("sample %d carries a heap read (ended %s, %v bytes) before the read could end", i, x.HeapAt, x.HeapLiveBytes)
 		}
 	}
 	got := ss[2]
-	if got.HeapInuse != 4194304 || got.HeapAlloc != 2097152 || got.HeapSys != 8388608 || !got.HeapInWindow {
-		t.Errorf("sample 2 heap in use %v, alloc %v, sys %v, in window %v; want the read's 4 MiB, 2 MiB, 8 MiB, in the window",
-			got.HeapInuse, got.HeapAlloc, got.HeapSys, got.HeapInWindow)
+	if got.HeapLiveBytes != 4*mib1 || got.HeapLiveObjects != 7 || !got.HeapInWindow {
+		t.Errorf("sample 2 heap live %v bytes, %v objects, in window %v; want the profile's 4 MiB in 7 objects, in the window",
+			got.HeapLiveBytes, got.HeapLiveObjects, got.HeapInWindow)
 	}
 	if ended := got.HeapAt.Sub(start); ended < heapDelay || got.HeapAt.After(got.At.Add(time.Second)) || !got.HeapAt.After(ss[1].At) {
 		t.Errorf("sample 2 (at %s) carries a heap read that ended %s past the start, want its own end, after %s and after sample 1",

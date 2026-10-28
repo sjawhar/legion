@@ -66,7 +66,7 @@ func TestTablesTakeTheResourcesCellsFromCgroupJSON(t *testing.T) {
 	}
 	md := renderTables(steps)
 	text := section(md, "Resources")
-	if !strings.Contains(text, "| Dispatch RSS max MiB | "+cgroupWorkingSetH+" | heap in use MiB p50 / max |") {
+	if !strings.Contains(text, "| Dispatch RSS max MiB | "+cgroupWorkingSetH+" | heap live MiB p50 / max |") {
 		t.Fatalf("the Resources header lacks the working-set column after the RSS one:\n%s", text)
 	}
 	// The columns: Dispatch cores, Postgres, listener, NATS, loadgen, proxy, ..., working set (10),

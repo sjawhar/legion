@@ -647,9 +647,10 @@ func (p *probes) waitSampler() { <-p.smpDone }
 
 // profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
 // dump and the heap profile are taken once it has finished, outside it, and under -source replay
-// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read). heap.txt has
-// 10 minutes: with a heap of tens of GiB it is over 500 MB, and 60 s cut it before its
-// runtime.MemStats block.
+// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read). heap.txt is the
+// run's one read of /debug/pprof/heap?debug=1 (the sampler reads the binary profile), for
+// codepaths' runtime.MemStats; it has 10 minutes: with a heap of tens of GiB it is over 500 MB,
+// and 60 s cut it before its runtime.MemStats block.
 func (st *step) profile(ctx context.Context) {
 	if !sleepUntil(ctx, st.winStart) {
 		return
