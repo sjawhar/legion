@@ -80,8 +80,8 @@ func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (ma
 // listAgents is readable by any authenticated caller: a session picks a target by the
 // capabilities it advertises. Sending to a session without an issue stays human-only. The list is
 // the process's copy of the listener's live sessions (readRouteRoster), at most routeRosterTTL
-// (5 s) old plus the fetch that answered it, so one listener call serves agents lists and issue
-// reads alike; a listener that did not answer answers 503 for as long as that copy is a silence.
+// (5 s) old, so one listener call serves agents lists and issue reads alike; a listener that did
+// not answer answers 503 for as long as that copy is a silence.
 func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -92,6 +92,13 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	roster := s.readRouteRoster(r.Context())
+	if !roster.answered && s.lifetime().Err() != nil {
+		// The process is shutting down: the shared fetch runs on its lifetime, so it has ended or
+		// failed at once, and its silence says nothing about the listener. A request the drain
+		// still serves asks the listener on its own context instead, as every agents list did
+		// before the copy existed.
+		roster = s.listRouteRoster(r.Context())
+	}
 	if !roster.answered {
 		s.writeEnvoyError(w, roster.err)
 		return

@@ -213,23 +213,21 @@ func agentIDs(t *testing.T, handler http.Handler) []string {
 	return ids
 }
 
-// sessionsListener is a listener whose GET /v1/sessions answers the JSON list answer, until the
-// test passes set a new one. calls counts the requests that reached it.
-func sessionsListener(t *testing.T, answer string) (url string, set func(string), calls *atomic.Int32) {
+// sessionsListener is a listener whose GET /v1/sessions answers the JSON list answer. calls counts
+// the requests that reached it.
+func sessionsListener(t *testing.T, answer string) (url string, calls *atomic.Int32) {
 	t.Helper()
 	calls = &atomic.Int32{}
-	var current atomic.Pointer[string]
-	current.Store(&answer)
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/sessions" {
 			http.NotFound(w, r)
 			return
 		}
 		calls.Add(1)
-		_, _ = w.Write([]byte(*current.Load()))
+		_, _ = w.Write([]byte(answer))
 	}))
 	t.Cleanup(listener.Close)
-	return listener.URL, func(next string) { current.Store(&next) }, calls
+	return listener.URL, calls
 }
 
 // The agents list and issue reads share the process's one copy of the listener's sessions: an
@@ -257,28 +255,6 @@ func TestAgentsListsAndIssueReadsWithinTheTTLShareOneListenerCall(t *testing.T) 
 	}
 	if calls := roster.lookups.Load() - before; calls != 1 {
 		t.Fatalf("two agents lists and an issue read inside the TTL made %d listener calls, want 1", calls)
-	}
-}
-
-// An agents list after the TTL asks the listener again and lists its new answer.
-func TestAnAgentsListAfterTheTTLListsTheListenersNewAnswer(t *testing.T) {
-	roster := &fakeRoster{}
-	roster.set("ses-sre", "sre")
-	handler, _, served := cachedRouteStatusServer(t, roster)
-	served.rosters.ttl = 50 * time.Millisecond
-	before := roster.lookups.Load()
-
-	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-sre"}) {
-		t.Fatalf("first agents list = %v, want [ses-sre]", got)
-	}
-	roster.end("ses-sre")
-	roster.set("ses-new", "sre")
-	time.Sleep(100 * time.Millisecond)
-	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-new"}) {
-		t.Fatalf("agents list after the TTL = %v, want [ses-new]", got)
-	}
-	if calls := roster.lookups.Load() - before; calls != 2 {
-		t.Fatalf("two agents lists a TTL apart made %d listener calls, want 2", calls)
 	}
 }
 
@@ -327,7 +303,7 @@ func TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers(t 
 // machine_id standing in for a missing host. The listener sends the sessions oldest first, so the
 // sorted order is the reverse of the cached one.
 func TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt(t *testing.T) {
-	listenerURL, _, calls := sessionsListener(t, `[
+	listenerURL, calls := sessionsListener(t, `[
 		{"session_id":"a","title":"oldest","machine_id":"box-a","roles":["sre"],"last_seen":100},
 		{"session_id":"b","title":"middle","machine_id":"box-b","host":"host-b","last_seen":200},
 		{"session_id":"c","title":"newest","machine_id":"box-c","last_seen":300}
@@ -434,29 +410,23 @@ func TestAnAgentsListWhoseRequestEndsWhileItWaitsOnTheFetchAnswers503(t *testing
 	}
 }
 
-// A server built with Deps.ListenerRosterUncached asks the listener on every agents list, so an
-// end-to-end test sees the listener's change at its next read however long the TTL.
-func TestAnUncachedListenerRosterAsksTheListenerOnEveryAgentsList(t *testing.T) {
-	listenerURL, set, calls := sessionsListener(t, `[{"session_id":"first","title":"worker","last_seen":100}]`)
+// While the process drains after a shutdown, the shared fetch, which runs on the process's
+// lifetime, cannot answer; an agents list the drain still serves asks a healthy listener on its
+// own request and lists its sessions, whether the cache was cold or already holds the shutdown's
+// failure.
+func TestAnAgentsListDuringAShutdownDrainListsAHealthyListenersSessions(t *testing.T) {
+	listenerURL, _ := sessionsListener(t, `[{"session_id":"ses-live","title":"worker","last_seen":100}]`)
 	database := storetest.Open(t)
 	mux := http.NewServeMux()
-	served := register(mux, Deps{
-		Store:                  database,
-		Identity:               headerIdentity(database),
-		Envoy:                  envoy.New(listenerURL),
-		ListenerRosterUncached: true,
-	})
-	// A minute each, so only the uncached flag, never an expiry, explains a second call.
-	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, time.Minute
+	served := register(mux, Deps{Store: database, Identity: headerIdentity(database), Envoy: envoy.New(listenerURL)})
+	lifetime, shutdown := context.WithCancel(context.Background())
+	shutdown()
+	// Set after register, which with a Lifetime would also start the delivery hub.
+	served.deps.Lifetime = lifetime
 
-	if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"first"}) {
-		t.Fatalf("first agents list = %v, want [first]", got)
-	}
-	set(`[{"session_id":"second","title":"worker","last_seen":200}]`)
-	if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"second"}) {
-		t.Fatalf("second agents list = %v, want the listener's new [second]", got)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("two agents lists made %d listener calls, want 2", got)
+	for read := 1; read <= 2; read++ {
+		if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"ses-live"}) {
+			t.Fatalf("agents list %d during the drain = %v, want the listener's [ses-live]", read, got)
+		}
 	}
 }
