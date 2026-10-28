@@ -2,35 +2,66 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T16:40:45Z",
-  "testedHead": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
-  "codeHead": "969be5239a3ab322727b3900f09fe0f40c77efe4",
+  "completed": "2026-10-28T09:02:00Z",
+  "testedHead": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
+  "codeHead": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
   "rebaseRecheck": {
-    "from": "ed4c190ebf29e073b66a47499ba319a5182d4d06",
-    "to": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
+    "from": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
+    "to": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
     "fingerprintBefore": "825a73c990e69117e47fac08aa3e4c6beb0f2a294fa90871fbabb198a95e3745",
-    "fingerprintAfter": "825a73c990e69117e47fac08aa3e4c6beb0f2a294fa90871fbabb198a95e3745",
-    "result": "unchanged: bare gates only",
-    "command": "base=$(gh pr view 2366 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for each head"
+    "fingerprintAfter": "8f3c6a5e64ee3bf16c1e25e3188b44f9e8ecc0f90fe7bf4d548c76b9f9bc5f59",
+    "result": "changed: full round. With packages/claude-envoy/dist also excluded both heads give f8bf00ea24aefa5b673d3298c7fc73ac36d4c617ca16e438a1a9c0bb0755b4cd, so only the regenerated bundles differ; doc-read was driven through the regenerated dist/dispatch.js too."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Recomputed the implementer's fingerprint comment (825a73c9… at 23a02918 and 969be523; the same at ed4c190e and 3fb442ce) and drove its delivery and report claims at the merge head with the smoke below. The real-surface verification of rounds 3 and 4 (tester-evidence-txt version 3) stands, the diff being unchanged."
+    "how": "Drove each claimed surface independently at fe26987c on a rebuilt local stack (the workspace and the earlier rig were recreated): delivery (tester-rig-edge.sh), the failed recipient query (tester-rig-fail.sh), the spec-edit notice (tester-rig-he.sh), doc-read from the head's CLI and from the regenerated claude-envoy dist, and report.ts on the INFRA-596 run files against the INFRA-514 uploads. Recomputed the implementer's fingerprint comment (825a73c9… → 8f3c6a5e…) and its dist-excluded fingerprint (f8bf00ea… at both heads)."
   },
   "failures": [],
   "failed": 0,
-  "bareGates": {
-    "ci": "GitHub at 16:39Z: pull request mergeable true (mergeable_state blocked: required checks pending) against base 2df3353c523c; check runs at the merge head 969be5239a3a: build, changes, lint, test, typecheck queued. Not waited on. Round 4's failure (a conflicting head, so no checks at all) is resolved.",
-    "smoke": "tester-rig-edge.sh head at 3fb442ce (server built from the merged tree): 12/12 delivery cases OK, no subject received twice, 30-issue burst each to its claimant once; report.ts on the INFRA-596 run files cmp-equal to the INFRA-514 document and pairs TSV."
-  },
   "proof": [
     {
-      "criterion": "Rebase re-check after the conflict-forced forward merge of main 2df3353c: the pull request's diff is unchanged, it can merge, and the changed path still works at the merge head.",
-      "surface": "GitHub's pull request API and the local Dispatch stack: the Dispatch server built from the merged tree on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy listener.",
-      "command": "the unchanged-diff check at ed4c190e and 3fb442ce; gh api repos/sjawhar/legion/pulls/2366; $TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh); bun scripts/dispatch/comment-delivery/report.ts on the INFRA-596 run files",
-      "observed": "Fingerprint 825a73c990e6… at both heads. mergeable true against 2df3353c523c; checks queued at 969be523. Edge: 12/12 OK, burst 30/30, no duplicates. Report output cmp-equal to the INFRA-514 uploads (sha256 0631201835fd…, bd067fb66dac…).",
-      "headSha": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
-      "negativeControl": "Round 4 at ed4c190e: mergeable false, mergeable_state dirty, zero check runs at 577d1dc1 (the conflict this merge resolved); round 2's edge.sh at main 448a41003a17 fails the 8 changed cases and all 30 burst comments."
+      "criterion": "Each cause found in Dispatch or Envoy is fixed with a test: a person's reply reaches the claimant (no route), every session in its thread and the thread document's authors; a person's comment on an issue with no route and no session claim reaches the primary document's session authors.",
+      "surface": "Local Dispatch stack: the Dispatch server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy listener; driven over the HTTP API.",
+      "command": "$TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh)",
+      "observed": "12/12 cases OK, no subject received twice; 30 claimed issues commented 15 at a time each reached their claimant once; the mentioned claimant got one Envoy send and no NATS frame.",
+      "headSha": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
+      "negativeControl": "edge.sh main (448a41003a17), re-run this round: the 8 cases the change adds recipients to and all 30 burst comments fail; the 4 unchanged cases pass."
+    },
+    {
+      "criterion": "A failed recipient query still publishes the comment's owner topic and route, backs off only the events that needed it, and a retry sends only the rest.",
+      "surface": "The same local Dispatch stack, with one data fault injected by psql.",
+      "command": "$TMPDIR/infra596-tester/fail.sh head (dispatch://INFRA-596/artifact/tester-rig-fail-sh)",
+      "observed": "First attempt: FC [issue topic, S-claim], FR [issue topic, S-route], FU [issue topic], each unpublished, attempt_count 1, retry scheduled; HC published at once. After the repair: FC and FR added S-other and S-writer, FU added S-writer; every subject received once.",
+      "headSha": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
+      "negativeControl": "HC, a healthy comment in the same batch, is untouched by the fault (published at attempt 0 to its issue topic and claimant)."
+    },
+    {
+      "criterion": "A person's spec edit still reaches the spec's agents (artifact.human_edited, from #2137) after the merges.",
+      "surface": "The same local Dispatch stack.",
+      "command": "$TMPDIR/infra596-tester/he.sh head (dispatch://INFRA-596/artifact/tester-rig-he-sh)",
+      "observed": "Event 6 artifact.human_edited published to notifications.dispatch.issue.RIG-1.artifact.human_edited and notifications.agent.S-writer, each received once.",
+      "headSha": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
+      "negativeControl": "The person's own artifact.version (event 5) reaches only the issue topic."
+    },
+    {
+      "criterion": "dispatch doc-read shows open comments with their text, not only their id, including from the regenerated claude-envoy bundle.",
+      "surface": "The dispatch CLI bundled from the head, and packages/claude-envoy/dist/dispatch.js as committed at the head (what a Claude Code pane runs), against the same local Dispatch.",
+      "command": "$TMPDIR/infra596-tester/docread.sh head and docdist.sh head (dispatch://INFRA-596/artifact/tester-rig-docread-sh, tester-rig-docdist-sh)",
+      "observed": "Both: 'Open anchored threads:' with the open anchored ask and its reply, T1 with both replies, the reopened T8; absent: resolved T2, retracted ask T7, unanchored ask T6, conversation comment T4, the plan's T3; plan-md shows T3 with its reply; the project document shows its root and S-proj's reply.",
+      "headSha": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
+      "negativeControl": "doc-read --artifact nosuch, through both: exit 1, 'document \"nosuch\" not found by slug; this issue's documents: spec (spec.md), plan-md (plan.md)'."
+    },
+    {
+      "criterion": "A committed query or command produces the October table; the document's counts add up: total, delivered, not delivered by cause, unknown.",
+      "surface": "scripts/dispatch/comment-delivery/report.ts at the head over the six run files attached to INFRA-596 (input sha256s equal to the run manifest); dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and -pairs-tsv.",
+      "command": "R=$TMPDIR/infra596-tester/report; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md; cmp against the uploads",
+      "observed": "Exit 0; document sha256 0631201835fd…, pairs bd067fb66dac…, both cmp-equal to the INFRA-514 uploads.",
+      "headSha": "fe26987ca3e437fd899278c81c6e454d6c2ad321",
+      "negativeControl": "14 of 14 mutations of the real inputs exit 1 naming the line (duplicated, dropped, cut or reordered rows, wrong counts, unknown or flipped status, unknown comment, missing --counts, owed_reasons \"author\")."
     }
+  ],
+  "observations": [
+    "CI at code head fb909998478e: pr-title success; build, changes, lint, test, typecheck queued when read; not waited on. The previous red test (packages/daemon check_wake under -race, which this pull request does not touch) has no result at this head yet.",
+    "The claude-envoy dist was exercised by running it, not by comparing it with a fresh build: the box has Bun 1.3.14 and the repository pins 1.4.4, so a local rebuild would not be the comparison CI makes."
   ]
 }
