@@ -122,6 +122,13 @@ type Options struct {
 	ControllerSlackChannels []string
 	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
 	Pod Pod
+	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
+	// overlays a role alone names in PI_CONFIG_FILES, by role, after the operator's own (Pod.Env's
+	// PI_CONFIG_FILES), so each outranks those (mainEnvironment, roleOperatorEnv); the shim then
+	// names the turn-scoping overlay ahead of all of them (podsafety.Apply). The files are the
+	// operator's mounts', which every pod and the image probe's carry, and the image probe reads
+	// every role's (probeManifest). Nil is none.
+	RoleConfigFiles map[claim.Role][]string
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
 	// (ProvidersSecretName) that holds its value. With any, every pod mounts exactly those keys at
 	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,

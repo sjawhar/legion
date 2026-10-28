@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -19,7 +20,7 @@ import (
 )
 
 const (
-	maxAskQuestion16 = 800
+	maxAskQuestion16 = contracts.AskQuestionMax
 	maxAskOptions    = 8
 )
 
